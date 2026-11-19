@@ -99,7 +99,7 @@ pub fn from_pdf(bytes: &[u8], password: Option<&str>) -> Result<Comments> {
     let mut annots = Vec::new();
     for (i, page) in src.pages().iter().enumerate() {
         for entry in page.annots.iter() {
-            let Ok(id) = entry.as_reference() else {
+            let Some(id) = entry.as_reference() else {
                 continue;
             };
             let Ok(d) = src.pdf().get_dictionary(id) else {
@@ -241,7 +241,7 @@ pub fn import(snap: &Snapshot, store: &Store, comments: &Comments) -> Imported {
         }
     }
     for (page, ids) in by_page {
-        let entries: Vec<Object> = ids.iter().map(|&id| Object::Reference(id)).collect();
+        let entries: Vec<Object> = ids.iter().map(|&id| Object::from(id)).collect();
         let dicts: Vec<&Dictionary> = ids
             .iter()
             .filter_map(|&id| pdf.get_dictionary(id).ok())
@@ -490,7 +490,7 @@ fn bring_held(
             Some(found) => interned.hold(found.blob().clone()),
             None => {
                 let bytes = crate::file::attached_file(pdf, dict)
-                    .and_then(|id| pdf.get_object(id).ok()?.as_stream().ok())
+                    .and_then(|id| pdf.get_object(id).ok()?.as_stream())
                     .map(|s| crate::attachments::mark_file_bytes(s, *size));
                 match bytes {
                     Some(Ok(bytes)) => {
@@ -538,7 +538,7 @@ pub fn gather(snap: &Snapshot, ours: &[AnnotId], theirs: &[AnnotId]) -> Result<C
         let ap = cx.form(appearance, built.pdf());
         main.set("AP", dictionary! { "N" => ap });
         main.set("Page", index as i64);
-        let main_id = built.pdf().add_object(Object::Dictionary(main));
+        let main_id = built.pdf().add_object(Object::from(main));
         annots.push((index as u32, main_id));
         names.insert(a.name(), main_id);
         if let Some(p) = a.thread_parent() {
@@ -548,9 +548,9 @@ pub fn gather(snap: &Snapshot, ours: &[AnnotId], theirs: &[AnnotId]) -> Result<C
             let ap = cx.form(appearance, built.pdf());
             part.set("AP", dictionary! { "N" => ap });
             part.set("IRT", main_id);
-            part.set("RT", Object::Name(b"Group".to_vec()));
+            part.set("RT", Object::name("Group"));
             part.set("Page", index as i64);
-            let part_id = built.pdf().add_object(Object::Dictionary(part));
+            let part_id = built.pdf().add_object(Object::from(part));
             annots.push((index as u32, part_id));
         }
     }
@@ -586,16 +586,19 @@ pub fn gather(snap: &Snapshot, ours: &[AnnotId], theirs: &[AnnotId]) -> Result<C
             dict.remove(key);
         }
         let map = maps.entry(src.id()).or_default();
-        let Ok(Object::Dictionary(mut copied)) =
-            crate::materialize::copy::remap(src.pdf(), &Object::Dictionary(dict), built.pdf(), map)
+        let Ok(remapped) =
+            crate::materialize::copy::remap(src.pdf(), &Object::from(dict), built.pdf(), map)
         else {
+            continue;
+        };
+        let Some(mut copied) = remapped.as_dict().cloned() else {
             continue;
         };
         copied.set("Page", index as i64);
         if !copied.has(b"NM") {
             copied.set("NM", crate::save::text_string(&f.name));
         }
-        let id = built.pdf().add_object(Object::Dictionary(copied));
+        let id = built.pdf().add_object(Object::from(copied));
         annots.push((index as u32, id));
         names.insert(f.name.clone(), id);
         if let Some(p) = &f.parent {
@@ -604,7 +607,7 @@ pub fn gather(snap: &Snapshot, ours: &[AnnotId], theirs: &[AnnotId]) -> Result<C
     }
     for (child, parent) in parents {
         let to = match names.get(&parent) {
-            Some(&p) => Object::Reference(p),
+            Some(&p) => Object::from(p),
             // Not written: by name, as XFDF says it.
             None => crate::save::text_string(&parent),
         };
@@ -626,7 +629,7 @@ pub fn gather(snap: &Snapshot, ours: &[AnnotId], theirs: &[AnnotId]) -> Result<C
 /// Page `page`'s annotation in `/Annots` slot `slot`.
 fn annot_in(src: &Src, page: u32, slot: usize) -> Option<&Dictionary> {
     let entry = src.page(page)?.annots.get(slot)?;
-    src.pdf().dereference(entry).ok()?.1.as_dict().ok()
+    src.pdf().dereference(entry).ok()?.1.as_dict()
 }
 
 #[cfg(test)]

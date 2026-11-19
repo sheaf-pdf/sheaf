@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use sheaf_doc::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
+use sheaf_doc::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary, literal};
 
 /// A new, empty folder for test `name`.
 pub fn scratch(name: &str) -> PathBuf {
@@ -44,19 +44,21 @@ pub fn binder(dir: &Path) -> PathBuf {
     let mut pdf = Pdf::with_version("1.7");
     let pages_id = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     });
     let page_ids: Vec<ObjectId> = (1..=4)
         .map(|n| page(&mut pdf, pages_id, font, &format!("Page {n}")))
         .collect();
     let comment = |pdf: &mut Pdf, subtype: &str, who: &str, name: &str, text: &str| {
         pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => subtype,
+            "Type" => Object::name("Annot"), "Subtype" => Object::name(subtype),
             "Rect" => vec![72.into(), 600.into(), 200.into(), 620.into()],
-            "Contents" => Object::string_literal(text),
-            "T" => Object::string_literal(who),
-            "NM" => Object::string_literal(name),
-            "M" => Object::string_literal("D:20261001120000"),
+            "Contents" => literal(text),
+            "T" => literal(who),
+            "NM" => literal(name),
+            "M" => literal("D:20261001120000"),
         })
     };
     let note = comment(&mut pdf, "Text", "Ann", "n1", "Tie to the ledger, please");
@@ -69,16 +71,16 @@ pub fn binder(dir: &Path) -> PathBuf {
     let kids: Vec<Object> = page_ids.iter().map(|&id| id.into()).collect();
     pdf.objects.insert(
         pages_id,
-        dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => 4 }.into(),
+        dictionary! { "Type" => Object::name("Pages"), "Kids" => kids, "Count" => 4 }.into(),
     );
     let outlines = pdf.new_object_id();
     let dest = |page: ObjectId| -> Object {
         vec![
             page.into(),
-            "XYZ".into(),
-            Object::Null,
-            Object::Null,
-            Object::Null,
+            Object::name("XYZ"),
+            Object::null(),
+            Object::null(),
+            Object::null(),
         ]
         .into()
     };
@@ -89,7 +91,7 @@ pub fn binder(dir: &Path) -> PathBuf {
     );
     let item = |title: &str, parent: ObjectId, page: ObjectId| -> Dictionary {
         dictionary! {
-            "Title" => Object::string_literal(title), "Parent" => parent, "Dest" => dest(page),
+            "Title" => literal(title), "Parent" => parent, "Dest" => dest(page),
         }
     };
     let mut p1 = item("Part I", outlines, page_ids[0]);
@@ -105,17 +107,22 @@ pub fn binder(dir: &Path) -> PathBuf {
     pdf.objects.insert(part2, p2.into());
     pdf.objects.insert(
         outlines,
-        dictionary! { "Type" => "Outlines", "First" => part1, "Last" => part2, "Count" => 3 }
-            .into(),
+        dictionary! {
+            "Type" => Object::name("Outlines"), "First" => part1, "Last" => part2, "Count" => 3,
+        }
+        .into(),
     );
     let labels = dictionary! {
         "Nums" => vec![
-            0.into(), dictionary! { "S" => "r" }.into(),
-            2.into(), dictionary! { "S" => "D" }.into(),
+            0.into(), dictionary! { "S" => Object::name("r") }.into(),
+            2.into(), dictionary! { "S" => Object::name("D") }.into(),
         ],
     };
     let catalog = pdf.add_object(dictionary! {
-        "Type" => "Catalog", "Pages" => pages_id, "Outlines" => outlines, "PageLabels" => labels,
+        "Type" => Object::name("Catalog"),
+        "Pages" => pages_id,
+        "Outlines" => outlines,
+        "PageLabels" => labels,
     });
     pdf.trailer.set("Root", catalog);
     let path = dir.join("in.pdf");
@@ -132,14 +139,20 @@ fn appendix(path: &Path) {
     let mut pdf = Pdf::with_version("1.7");
     let pages_id = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     });
     let only = page(&mut pdf, pages_id, font, "Appendix");
     pdf.objects.insert(
         pages_id,
-        dictionary! { "Type" => "Pages", "Kids" => vec![only.into()], "Count" => 1 }.into(),
+        dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![only.into()], "Count" => 1,
+        }
+        .into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
     pdf.save(path).unwrap();
 }
@@ -149,7 +162,7 @@ fn page(pdf: &mut Pdf, pages_id: ObjectId, font: ObjectId, text: &str) -> Object
     let content = format!("BT /F1 24 Tf 72 700 Td ({text}) Tj ET");
     let content = pdf.add_object(Stream::new(dictionary! {}, content.into_bytes()));
     pdf.add_object(dictionary! {
-        "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+        "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
     })

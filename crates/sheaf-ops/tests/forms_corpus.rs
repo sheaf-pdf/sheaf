@@ -184,7 +184,7 @@ fn every_form_opens_and_is_checked() {
         "PDFium's form type differs:\n{}",
         xfa_differs.join("\n")
     );
-    // lopdf can't read some of the SafeDocs sample, which is the web's
+    // The PDF reader can't read some of the SafeDocs sample, which is the web's
     // damaged files too; it reads every curated form.
     let curated: Vec<&String> = unchecked
         .iter()
@@ -228,8 +228,8 @@ type Counts = BTreeMap<String, u32>;
 /// Every file's form, read as sheaf reads it when it opens (M10 slice 2),
 /// has the manifest's kind, field count, fields by type and fields with
 /// scripts. The manifest was made with pypdf, which counts a field listed
-/// twice twice, and lopdf misreads a few of the SafeDocs sample (a lost
-/// catalog, a dropped object); so every curated form must read,
+/// twice twice, and a few of the SafeDocs sample have damaged cross-reference
+/// or object structures; so every curated form must read,
 /// undamaged, as its row, and 99% of the sample. What differs is listed,
 /// and so are damaged trees, which sheaf doesn't read.
 #[test]

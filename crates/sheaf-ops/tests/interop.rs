@@ -64,7 +64,7 @@ use std::sync::Arc;
 use sheaf_doc::export::{Export, ExportFrom, Out};
 use sheaf_doc::forms::fixture::{Form, hybrid_reference, outline_tree};
 use sheaf_doc::materialize::{How, StrategyKind};
-use sheaf_doc::pdf::{Dictionary, LazyPdf, Object, ReadLimits, XrefKind, dictionary};
+use sheaf_doc::pdf::{Dictionary, LazyPdf, Object, ReadLimits, XrefKind, dictionary, literal};
 use sheaf_doc::serialize::fixture::{
     PREFIX, USER, attachment_only, edited, encrypted, form, object_streams_encrypted,
     object_streams_of, rc4_40, rc4_aes_128_and_aes_256, written,
@@ -358,7 +358,7 @@ fn pdfjs_read(
 }
 
 /// Every base of [`form`]'s ([`bases`]) and of a hybrid-reference file's
-/// ([`hybrid_reference`], and lopdf's table of it), turned and noted,
+/// ([`hybrid_reference`], and its table writing), turned and noted,
 /// then rewritten and exported ([`ways_out`]): each output of a base whose
 /// cross-references are a stream, or a hybrid's, holds object streams,
 /// and of a table's none. Each packed one passes `qpdf --check` with its
@@ -513,7 +513,7 @@ fn pages_deleted_saved_and_undone_pass_qpdf_check() {
     let mut f = Form::new(3);
     let field = f.text("t", 1, sheaf_doc::forms::fixture::row(0));
     f.fill(field, "value");
-    let id = Object::string_literal("0123456789abcdef");
+    let id = literal("0123456789abcdef");
     f.pdf.trailer.set("ID", vec![id.clone(), id]);
     let plain = f.pdf;
     let mut failed = Vec::new();
@@ -613,34 +613,40 @@ fn a_linearized_file_appended_to_is_linearized_no_more() {
 /// bookmark that opens a URI, a structure element its `/SE`, and one to
 /// the third page.
 fn records_base() -> Vec<u8> {
-    fn text(s: &str) -> Object {
-        Object::string_literal(s)
-    }
     let mut f = Form::new(3);
     let rect = |y: i64| Object::from(vec![72.into(), y.into(), 144.into(), (y + 24).into()]);
     let mut uri = |url: &str| {
         f.pdf
-            .add_object(dictionary! { "S" => "URI", "URI" => text(url) })
+            .add_object(dictionary! { "S" => Object::name("URI"), "URI" => literal(url) })
     };
     let (site_url, link_url) = (uri("https://example.com/"), uri("https://example.org/"));
-    let section = f
-        .pdf
-        .add_object(dictionary! { "Type" => "StructElem", "S" => "Sect" });
-    let site = dictionary! { "Title" => text("Site"), "A" => site_url, "SE" => section };
+    let section = f.pdf.add_object(
+        dictionary! { "Type" => Object::name("StructElem"), "S" => Object::name("Sect") },
+    );
+    let site = dictionary! { "Title" => literal("Site"), "A" => site_url, "SE" => section };
     let third = dictionary! {
-        "Title" => text("Third"),
-        "Dest" => vec![f.pages[2].into(), "Fit".into()],
+        "Title" => literal("Third"),
+        "Dest" => vec![f.pages[2].into(), Object::name("Fit")],
     };
     outline_tree(&mut f, vec![(0, site), (0, third)]);
     let annot = |subtype: &str, y, more: Dictionary| {
-        let mut d = dictionary! { "Type" => "Annot", "Subtype" => subtype, "Rect" => rect(y) };
-        d.extend(&more);
+        let mut d = dictionary! {
+            "Type" => Object::name("Annot"),
+            "Subtype" => Object::name(subtype),
+            "Rect" => rect(y),
+        };
+        for (k, v) in more.iter() {
+            d.set(k.to_vec(), v.clone());
+        }
         d
     };
     let link = annot("Link", 72, dictionary! { "A" => link_url });
     let comment = |name: &str, said: &str, y| {
-        let about =
-            dictionary! { "NM" => text(name), "Contents" => text(said), "T" => text("Ann") };
+        let about = dictionary! {
+            "NM" => literal(name),
+            "Contents" => literal(said),
+            "T" => literal("Ann"),
+        };
         annot("Text", y, about)
     };
     let annots = [
@@ -920,7 +926,7 @@ fn rects_in(bytes: &[u8]) -> Vec<(String, [f32; 4])> {
         .map(|a| {
             let subtype = a.get(b"Subtype").unwrap().as_name().unwrap();
             let rect = a.get(b"Rect").unwrap().as_array().unwrap();
-            let n = |i: usize| rect[i].as_float().unwrap() as f32;
+            let n = |i: usize| rect[i].as_number().unwrap() as f32;
             let r = [n(0), n(1), n(2), n(3)];
             // As pdf.js normalizes it.
             let r = [
@@ -1041,11 +1047,11 @@ sheaf_doc::both_ways!(
 fn with_acrobat_s_watermark() -> Form {
     let mut f = Form::new(1);
     let piece = dictionary! { "ADBE_CompoundType" => dictionary! {
-        "DocSettings" => dictionary! {}, "Private" => "Watermark",
+        "DocSettings" => dictionary! {}, "Private" => Object::name("Watermark"),
     } };
     let form = f.pdf.add_object(sheaf_doc::pdf::Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Form", "PieceInfo" => piece,
+            "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"), "PieceInfo" => piece,
             "BBox" => vec![0.into(), 0.into(), 300.into(), 60.into()],
             "Resources" => dictionary! { "Font" => dictionary! { "F1" => f.helv } },
         },
@@ -1483,7 +1489,7 @@ fn a_clean_copy_reads_in_pdfjs() {
         q\nBT\n0 0 0 rg\n/F1 10 Tf\n1 0 0 1 72 748.8 Tm\n(Draft) Tj\nET\nQ\nEMC\n";
     let header = pdf.add_object(sheaf_doc::pdf::Stream::new(dictionary! {}, header.to_vec()));
     let dict = pdf.get_dictionary_mut(page).unwrap();
-    let mut contents = dict.get(b"Contents").unwrap().as_array().unwrap().clone();
+    let mut contents = dict.get(b"Contents").unwrap().as_array().unwrap().to_vec();
     // After the page's own content, inside the streams that isolate it.
     contents.insert(2, header.into());
     dict.set("Contents", contents);

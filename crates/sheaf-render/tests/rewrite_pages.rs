@@ -43,27 +43,30 @@ fn file(media: [i64; 4], crop: [i64; 4], marks: &[[i64; 2]]) -> Vec<u8> {
             crop[1] + 10
         );
         let content = pdf.add_object(Stream::new(dictionary! {}, content.into_bytes()));
-        let page = dictionary! { "Type" => "Page", "Parent" => parent, "Contents" => content };
-        Object::Reference(pdf.add_object(page))
+        let page = dictionary! {
+            "Type" => Object::name("Page"), "Parent" => parent, "Contents" => content,
+        };
+        Object::from(pdf.add_object(page))
     };
     let under: Vec<Object> = marks.iter().map(|&m| page(&mut pdf, node, m)).collect();
     let count = under.len() as i64;
     pdf.objects.insert(
         node,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Parent" => root, "Kids" => under, "Count" => count,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Parent" => root, "Kids" => under, "Count" => count,
             "Rotate" => 90, "CropBox" => rect(crop),
         }),
     );
     let own = page(&mut pdf, root, [300, 300]);
     pdf.objects.insert(
         root,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => vec![node.into(), own], "Count" => count + 1,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![node.into(), own], "Count" => count + 1,
             "MediaBox" => rect(media), "Resources" => Dictionary::new(),
         }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => root });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();

@@ -3,7 +3,7 @@
 //! See `docs/document-model.md`.
 //!
 //! The files are blobs in a [`Store`], each PDF read lazily as a
-//! [`Source`] with lopdf (vendored, `vendor/lopdf`). Saves are written by
+//! [`Source`] through [`pdf`]. Saves are written by
 //! sheaf's own [`serialize`], encrypted as their source was and replacing
 //! a file durably. Nothing in here knows about PDFium: rendering lives in
 //! other crates.

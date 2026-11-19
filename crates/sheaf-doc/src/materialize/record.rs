@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, XrefFacts};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, Value, XrefFacts};
 use sheaf_util::Checksum;
 
 use super::emit::PdfVersion;
@@ -152,13 +152,9 @@ impl SaveRecord {
             xref: src.xref().clone(),
             crypt: src.crypt().cloned(),
             map: Arc::new(ObjMap::opened(pdf, src.id(), &tree)),
-            present: Arc::new(pdf.ids().map(|(n, _)| n).collect()),
+            present: Arc::new(pdf.ids().map(|id| id.number).collect()),
             roots: Arc::new(RootValues {
-                info: pdf
-                    .trailer()
-                    .get(b"Info")
-                    .and_then(Object::as_reference)
-                    .ok(),
+                info: pdf.trailer().get(b"Info").and_then(Object::as_reference),
                 ..RootValues::of(pdf)
             }),
             tree: Arc::new(tree),
@@ -331,12 +327,12 @@ impl ObjMap {
     /// tree's (`tree`) among them, at theirs.
     pub fn opened(pdf: &LazyPdf, blob: BlobId, tree: &TreeShape) -> ObjMap {
         let catalog = pdf.catalog().ok();
-        let reference = |o: Option<&Object>| o.and_then(|o| o.as_reference().ok());
+        let reference = |o: Option<&Object>| o.and_then(Object::as_reference);
         let mut keys = BTreeMap::new();
         let trailer = pdf.trailer();
         let roots = [
-            (ObjKey::Catalog, reference(trailer.get(b"Root").ok())),
-            (ObjKey::Info, reference(trailer.get(b"Info").ok())),
+            (ObjKey::Catalog, reference(trailer.get(b"Root"))),
+            (ObjKey::Info, reference(trailer.get(b"Info"))),
         ];
         let in_catalog = [
             (ObjKey::AcroForm, b"AcroForm".as_slice()),
@@ -344,7 +340,7 @@ impl ObjMap {
             (ObjKey::Labels, b"PageLabels"),
             (ObjKey::Generators, b"SHEF_Generators"),
         ]
-        .map(|(key, name)| (key, reference(catalog.and_then(|c| c.get(name).ok()))));
+        .map(|(key, name)| (key, reference(catalog.and_then(|c| c.get(name)))));
         for (key, id) in roots.into_iter().chain(in_catalog) {
             if let Some(id) = id {
                 keys.insert(key, id);
@@ -493,8 +489,11 @@ impl RootValues {
     pub fn of<P: Objects + ?Sized>(pdf: &P) -> RootValues {
         let catalog = pdf.catalog().ok();
         let dict = |key: &[u8]| {
-            let at = catalog?.get(key).ok()?;
-            pdf.dereference(at).ok()?.1.as_dict().ok()
+            let at = catalog?.get(key)?;
+            match pdf.dereference(at).ok()?.1.value() {
+                Value::Dict(d) => Some(d),
+                _ => None,
+            }
         };
         RootValues {
             catalog: catalog.map_or_else(Dictionary::new, |c| unowned(c, CATALOG_OWNED)),
@@ -509,8 +508,8 @@ impl RootValues {
 /// `d`'s keys but `owned`.
 pub(crate) fn unowned(d: &Dictionary, owned: &[&[u8]]) -> Dictionary {
     (d.iter())
-        .filter(|(k, _)| !owned.contains(&k.as_slice()))
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .filter(|(k, _)| !owned.contains(k))
+        .map(|(k, v)| (k, v.clone()))
         .collect()
 }
 
@@ -545,8 +544,8 @@ impl TreeShape {
         let root = pdf
             .catalog()
             .ok()
-            .and_then(|c| c.get(b"Pages").ok())
-            .and_then(|p| p.as_reference().ok());
+            .and_then(|c| c.get(b"Pages"))
+            .and_then(Object::as_reference);
         let mut nodes = Vec::new();
         let mut seen = HashSet::new();
         let mut stack: Vec<ObjectId> = root.into_iter().collect();
@@ -557,12 +556,12 @@ impl TreeShape {
             let Ok(dict) = pdf.get_dictionary(id) else {
                 continue;
             };
-            let kids: Vec<ObjectId> = (dict.get(b"Kids").ok())
+            let kids: Vec<ObjectId> = (dict.get(b"Kids"))
                 .and_then(|k| pdf.dereference(k).ok())
-                .and_then(|(_, k)| k.as_array().ok())
+                .and_then(|(_, k)| k.as_array())
                 .into_iter()
                 .flatten()
-                .filter_map(|k| k.as_reference().ok())
+                .filter_map(Object::as_reference)
                 .collect();
             let under = kids
                 .iter()
@@ -662,15 +661,24 @@ mod tests {
         let base = |obj, copy| ObjKey::Base { blob, obj, copy };
         let map = ObjMap {
             identity: Some(blob),
-            keys: BTreeMap::from([(ObjKey::Catalog, (9, 0)), (base((5, 0), 0), (12, 0))]),
+            keys: BTreeMap::from([
+                (ObjKey::Catalog, ObjectId::new(9, 0)),
+                (base(ObjectId::new(5, 0), 0), ObjectId::new(12, 0)),
+            ]),
         };
-        assert_eq!(map.get(&ObjKey::Catalog), Some((9, 0)));
-        assert_eq!(map.get(&base((5, 0), 0)), Some((12, 0)));
-        assert_eq!(map.get(&base((4, 1), 0)), Some((4, 1)));
-        assert_eq!(map.get(&base((4, 1), 1)), None);
+        assert_eq!(map.get(&ObjKey::Catalog), Some(ObjectId::new(9, 0)));
+        assert_eq!(
+            map.get(&base(ObjectId::new(5, 0), 0)),
+            Some(ObjectId::new(12, 0))
+        );
+        assert_eq!(
+            map.get(&base(ObjectId::new(4, 1), 0)),
+            Some(ObjectId::new(4, 1))
+        );
+        assert_eq!(map.get(&base(ObjectId::new(4, 1), 1)), None);
         let other = ObjKey::Base {
             blob: BlobId { hash: 3, len: 2 },
-            obj: (4, 1),
+            obj: ObjectId::new(4, 1),
             copy: 0,
         };
         assert_eq!(map.get(&other), None);
@@ -683,8 +691,8 @@ mod tests {
     #[test]
     fn a_tree_lists_its_pages_in_order() {
         let node = |id: u32, kids: &[u32]| TreeNode {
-            id: (id, 0),
-            kids: kids.iter().map(|&k| (k, 0)).collect(),
+            id: ObjectId::new(id, 0),
+            kids: kids.iter().map(|&k| ObjectId::new(k, 0)).collect(),
             size: kids.len(),
             from: None,
         };
@@ -695,7 +703,7 @@ mod tests {
                 node(3, &[14, 3]),
             ],
         };
-        let pages: Vec<u32> = tree.pages().iter().map(|id| id.0).collect();
+        let pages: Vec<u32> = tree.pages().iter().map(|id| id.number).collect();
         assert_eq!(pages, [10, 11, 12, 13, 14]);
         assert_eq!(TreeShape::default().pages(), []);
     }

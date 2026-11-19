@@ -225,14 +225,14 @@ fn turned_doc() -> Document {
 /// One page, with another tool's comment on it: a square by Pat Reviewer
 /// saying "From review".
 fn commented() -> Document {
-    use sheaf_doc::pdf::{Object, dictionary};
+    use sheaf_doc::pdf::{Object, dictionary, literal};
     let mut f = sheaf_doc::forms::fixture::Form::new(1);
     let rect: Vec<Object> = vec![40.into(), 40.into(), 80.into(), 80.into()];
     let square = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Square", "Rect" => rect,
-        "NM" => Object::string_literal("review-1"),
-        "T" => Object::string_literal("Pat Reviewer"),
-        "Contents" => Object::string_literal("From review"),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Square"), "Rect" => rect,
+        "NM" => literal("review-1"),
+        "T" => literal("Pat Reviewer"),
+        "Contents" => literal("From review"),
     });
     f.set_annots(0, &[square]);
     opened(&f.bytes(), "commented.pdf")
@@ -2502,6 +2502,7 @@ fn an_uploaded_image_becomes_a_page_stamp() {
         sheaf_doc::save::rewrite(d).unwrap()
     });
     // Each stamp's appearance draws the stamp's page.
+    use sheaf_doc::pdf::StreamExt;
     let pdf = sheaf_doc::pdf::Document::load_mem(&saved).unwrap();
     let page = *pdf.get_pages().values().next().unwrap();
     let annots = pdf.get_dictionary(page).unwrap().get(b"Annots").unwrap();
@@ -2512,7 +2513,7 @@ fn an_uploaded_image_becomes_a_page_stamp() {
         let ap = a.get(b"AP").unwrap().as_dict().unwrap();
         let ap = pdf.get_object(ap.get(b"N").unwrap().as_reference().unwrap());
         let ap = ap.unwrap().as_stream().unwrap();
-        let content = (ap.decompressed_content()).unwrap_or_else(|_| ap.content.clone());
+        let content = (ap.decompressed_content()).unwrap_or_else(|_| ap.raw_bytes().to_vec());
         assert!(String::from_utf8_lossy(&content).contains(" Do"));
     }
 }

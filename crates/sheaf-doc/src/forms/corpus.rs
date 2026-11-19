@@ -174,11 +174,20 @@ impl Corpus {
 }
 
 /// `read` of each of `entries`, in their order, on a thread per core (16
-/// at most).
+/// at most). Concurrent sweeps in the same test binary take turns so six
+/// 16-thread sweeps don't oversubscribe the machine by 6x at once.
 pub fn each_entry<T: Send>(entries: &[Entry], read: impl Fn(&Entry) -> T + Sync) -> Vec<T> {
+    static SWEEP: Mutex<()> = Mutex::new(());
+    let _turn = SWEEP.lock().unwrap_or_else(|e| e.into_inner());
     let outcomes = Mutex::new(BTreeMap::new());
     let queue = Mutex::new(entries.iter().enumerate());
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(16));
+    let threads = std::thread::available_parallelism().map_or(4, |n| {
+        if cfg!(test) {
+            (n.get() / 8).clamp(2, 4)
+        } else {
+            n.get().min(16)
+        }
+    });
     std::thread::scope(|s| {
         for _ in 0..threads {
             s.spawn(|| {

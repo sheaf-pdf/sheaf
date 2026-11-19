@@ -1,166 +1,170 @@
-//! Encryption as a save writes it: each object encrypted on its own with
-//! the source's [`Crypt`], an object stream whole, so an encrypted file
-//! saves encrypted, its `/Encrypt` dictionary as stored and its `/ID[0]`
-//! kept. An AES IV is a keyed hash of what the object is ([`ObjKey`]) and
-//! the plaintext, so output is deterministic and no IV serves two
-//! plaintexts of an object, across saves too (M10.5 §11.7).
-//!
-//! lopdf's walk decides what an object's encryption covers: every string,
-//! a stream dictionary's included, and every stream, an embedded file's
-//! with `/EFF`'s filter and a stream that names its own `/Crypt` with
-//! that; but not an encryption dictionary, a cross-reference stream, the
-//! metadata when `/EncryptMetadata` is false, or a signature's
-//! `/Contents`.
+//! Encryption as a save writes it (M18 slice 12): wraps
+//! [`crate::pdf::write::Encryptor`] (`pdf-structure` + `pdf-crypt`) so saves
+//! keep the source's `/Encrypt` dictionary and `/ID[0]`, drawing fresh
+//! 16-byte OS CSPRNG AES IVs in production (`pdf_crypt::Ivs::new()`) per
+//! ISO 32000-2 §7.6.3.2 & §7.6.3.3.
 
-use std::sync::Arc;
-
-use crate::pdf::encryption::crypt_filters::CryptFilter;
-use crate::pdf::encryption::{self, EncryptionState};
-use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId};
-use hmac::{Hmac, KeyInit as _, Mac as _};
-use sha2::Sha256;
-
-use crate::materialize::ObjKey;
+use crate::pdf::write::{Encrypting, Encryptor, StructureError};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, Resolve};
 
 /// How a source is encrypted: what a save needs to write it encrypted
 /// the same way, whose password opens it.
 #[derive(Clone)]
 pub struct Crypt {
-    state: EncryptionState,
-    /// The `/Encrypt` dictionary, as stored.
-    dict: Dictionary,
-    /// Its number.
+    encryptor: Encryptor,
+    /// Where the source (or saved file) keeps the `/Encrypt` dictionary.
     at: ObjectId,
-    /// The catalog's `/Metadata` stream id when `/EncryptMetadata` is false
-    /// (ISO 32000-2 §7.6.4.2: only the document-level metadata stream is left
-    /// unencrypted, not component `/Type /Metadata` streams).
-    unencrypted_metadata: Option<ObjectId>,
-    /// The trailer's `/ID[0]`, which RC4's and AES-128's keys are made
-    /// from.
+    /// Trailer `/ID[0]` when present in the source trailer (`None` if absent).
     first_id: Option<Vec<u8>>,
-    /// HMAC-SHA256 under the file key, for AES IVs.
-    ivs: Hmac<Sha256>,
+    /// Source catalog dictionary kept as a fallback resolver for
+    /// `/EncryptMetadata false` when an incremental update or raw-copied
+    /// rewrite doesn't hold a parsed catalog object in memory.
+    fallback_root: Option<(ObjectId, Object)>,
+    /// Source document `/Metadata` stream kept alongside `fallback_root` so
+    /// `Encryptor::laid_out` resolves `Root -> /Metadata` to a stream even
+    /// when the metadata object itself is not rewritten in an update.
+    fallback_metadata: Option<(ObjectId, Object)>,
 }
 
 impl Crypt {
-    /// How `pdf` is encrypted, or None when it isn't. The `/Encrypt`
-    /// dictionary is read as `pdf` stores it.
+    /// How `pdf` is encrypted, or `None` when it isn't.
     pub fn of(pdf: &LazyPdf) -> crate::pdf::Result<Option<Crypt>> {
-        let Some((state, at)) = pdf.encryption() else {
+        let Some((encryptor, at)) = pdf.encryption() else {
             return Ok(None);
         };
-        let unencrypted_metadata = (!state.encrypt_metadata())
-            .then(|| {
+        let fallback_root = pdf
+            .trailer()
+            .get(b"Root")
+            .and_then(Object::as_reference)
+            .and_then(|root_id| {
                 pdf.catalog()
-                    .ok()?
-                    .get(b"Metadata")
-                    .and_then(Object::as_reference)
                     .ok()
-            })
-            .flatten();
-        let ivs = Hmac::new_from_slice(state.file_encryption_key())
-            .expect("HMAC takes a key of any length");
+                    .cloned()
+                    .map(|cat| (root_id, Object::from(cat)))
+            });
+        let fallback_metadata = fallback_root
+            .as_ref()
+            .and_then(|(_, cat)| cat.as_dict()?.get(b"Metadata")?.as_reference())
+            .and_then(|meta_id| pdf.get(meta_id).ok().map(|o| (meta_id, o.clone())));
         Ok(Some(Crypt {
-            state: state.clone(),
-            dict: pdf.get_dictionary(at)?.clone(),
+            encryptor: encryptor.clone().reusing_rc4_keystreams(),
             at,
-            unencrypted_metadata,
             first_id: super::first_id(pdf.trailer()),
-            ivs,
+            fallback_root,
+            fallback_metadata,
         }))
     }
 
-    pub fn state(&self) -> &EncryptionState {
-        &self.state
+    /// Underlying `pdf_structure::write::Encryptor`.
+    #[must_use]
+    pub fn encryptor(&self) -> &Encryptor {
+        &self.encryptor
     }
 
     /// The `/Encrypt` dictionary, as the source stores it: its `/P`, its
     /// filters and its keys.
+    #[must_use]
     pub fn dict(&self) -> &Dictionary {
-        &self.dict
+        self.encryptor.dictionary()
     }
 
-    /// Where the source keeps the dictionary: its number. lopdf opens an
-    /// encrypted file only through a reference to it.
+    /// Where the source keeps the `/Encrypt` dictionary.
+    #[must_use]
     pub fn at(&self) -> ObjectId {
         self.at
     }
 
-    /// The source's `/ID[0]`, read as the key is made from it: the array's
-    /// first string, however many it has. None only in an AES-256 file,
-    /// whose key isn't made from it; no other opens without one.
+    /// The source's `/ID[0]`, when its trailer had an `/ID` array whose first
+    /// item is a string.
+    #[must_use]
     pub fn first_id(&self) -> Option<&[u8]> {
         self.first_id.as_deref()
     }
 
-    /// Whether objects may go in object streams under it. A container is
-    /// encrypted as a stream, its members' strings with it, so not when
-    /// streams are left in the clear (`/StmF /Identity`) and strings
-    /// aren't: those strings would be in the clear.
-    pub fn packs(&self) -> bool {
-        let identity = |filter: Arc<dyn CryptFilter>| filter.method() == b"Identity";
-        match (
-            self.state.get_stream_filter(),
-            self.state.get_string_filter(),
-        ) {
-            (Ok(streams), Ok(strings)) => !identity(streams) || identity(strings),
-            _ => false,
-        }
-    }
-
-    /// `obj`, which is `key`, encrypted as object `id`, its strings in
-    /// their formats. The same object under the same key and number
-    /// encrypts to the same bytes.
-    pub fn encrypt_as(
-        &self,
-        id: ObjectId,
-        key: &ObjKey,
-        obj: &Object,
-    ) -> crate::pdf::Result<Object> {
-        let iv_key = key.bytes();
-        let mut obj = obj.clone();
-        let saved_type = if !self.state.encrypt_metadata()
-            && Some(id) != self.unencrypted_metadata
-            && obj.type_name().ok() == Some(b"Metadata")
-        {
-            match &mut obj {
-                Object::Stream(s) => s.dict.remove(b"Type"),
-                Object::Dictionary(d) => d.remove(b"Type"),
-                _ => None,
-            }
-        } else {
-            None
+    /// Whether this encryption uses AES (`AESV2` or `AESV3` in `/CF`).
+    #[must_use]
+    pub fn is_aes(&self) -> bool {
+        let Some(cf) = self.dict().get(b"CF").and_then(Object::as_dict) else {
+            return false;
         };
-        encryption::encrypt_object_with(&self.state, id, &mut obj, &mut |payload| {
-            self.iv(&iv_key, payload)
+        cf.iter().any(|(_, filter)| {
+            filter
+                .as_dict()
+                .and_then(|f| f.get(b"CFM"))
+                .and_then(Object::as_name)
+                .is_some_and(|m| m == b"AESV2" || m == b"AESV3")
         })
-        .map_err(crate::pdf::Error::Decryption)?;
-        if let Some(t) = saved_type {
-            match &mut obj {
-                Object::Stream(s) => s.dict.set("Type", t),
-                Object::Dictionary(d) => d.set("Type", t),
-                _ => {}
-            }
+    }
+
+    /// Whether objects may go in object streams under it (`!Identity /StmF`
+    /// or `Identity /StrF`).
+    #[must_use]
+    pub fn packs(&self) -> bool {
+        self.encryptor.packs()
+    }
+
+    /// Resolves the source's `/Root` catalog or document `/Metadata` stream
+    /// when a save doesn't hold a parsed copy of them in memory.
+    pub(super) fn fallback_resolve(&self, id: ObjectId) -> Option<&Object> {
+        if let Some((rid, root)) = &self.fallback_root
+            && *rid == id
+        {
+            return Some(root);
         }
-        Ok(obj)
+        if let Some((mid, meta)) = &self.fallback_metadata
+            && *mid == id
+        {
+            return Some(meta);
+        }
+        None
     }
 
-    /// The AES IV for `payload` in the object `iv_key` names: the first 16
-    /// bytes of HMAC-SHA256, under the file key, of `iv_key` and the
-    /// payload. A key's bytes never start another's, so the two can't run
-    /// together into another's.
-    fn iv(&self, iv_key: &[u8], payload: &[u8]) -> [u8; 16] {
-        let mut mac = self.ivs.clone();
-        mac.update(iv_key);
-        mac.update(payload);
-        let mut iv = [0; 16];
-        iv.copy_from_slice(&mac.finalize().into_bytes()[..16]);
-        iv
+    /// Prepares a per-file [`Encrypting`] context for writing objects with
+    /// `/Encrypt` placed at `at`.
+    pub fn laid_out<'a>(
+        &'a self,
+        at: ObjectId,
+        trailer: &Dictionary,
+        resolve: &'a (dyn Resolve<'a> + Sync),
+    ) -> Result<Encrypting<'a>, StructureError> {
+        self.encryptor.laid_out(None, Some(at), trailer, resolve)
     }
 
-    /// The same encryption with its dictionary at `at`: what a file that
-    /// writes it elsewhere holds.
+    /// The same encryption with its `/Encrypt` dictionary moved to `at`.
+    #[must_use]
     pub fn moved(&self, at: ObjectId) -> Crypt {
         Crypt { at, ..self.clone() }
+    }
+
+    /// Switches AES IV generation to deterministic `pdf_crypt::Ivs::derived`
+    /// (`insecure-test-writer`), exclusively for tests that pin exact bytes
+    /// across threads or runs.
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_test_ivs(mut self) -> Crypt {
+        self.encryptor = self.encryptor.with_test_ivs(crate::pdf::Ivs::derived);
+        self
+    }
+
+    /// Serializes `obj` as encrypted indirect object `id` and parses the
+    /// written object back, for unit tests inspecting individual encrypted
+    /// objects.
+    #[cfg(test)]
+    pub fn encrypt_object_for_test(&self, id: ObjectId, obj: &Object) -> anyhow::Result<Object> {
+        let mut trailer = Dictionary::new();
+        if let Some((root_id, _)) = &self.fallback_root {
+            trailer.set("Root", *root_id);
+        }
+        let resolve = crate::pdf::resolve_fn(|oid| {
+            if oid == id {
+                Some(obj)
+            } else {
+                self.fallback_resolve(oid)
+            }
+        });
+        let enc = self.laid_out(self.at, &trailer, &resolve)?;
+        let mut buf = Vec::new();
+        crate::pdf::write::indirect_with(&mut buf, id, obj, &enc)?;
+        Ok(crate::pdf::write::parse_indirect_object(&buf)?)
     }
 }

@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use serde::Deserialize;
-use sheaf_doc::pdf::{LazyPdf, ObjectId, XrefKind};
+use sheaf_doc::pdf::{LazyPdf, Object, ObjectId, XrefKind};
 use sheaf_doc::source::Limits;
 
 /// Minimum `pdf-lint` version the tests accept (`0.2.0`+, including `0.2.0-rc.N`).
@@ -217,14 +217,14 @@ impl fmt::Display for Finding {
             "{}: {}/{} at {}",
             self.rule, self.table, self.key, self.path
         )?;
-        if let Some((n, g)) = self.object {
-            write!(f, ", in {n} {g} R")?;
+        if let Some(id) = self.object {
+            write!(f, ", in {id} R")?;
         }
         write!(f, " ({}): {}", self.made.word(), self.value)?;
         if let Some(at) = self.at {
             match at.stream {
                 None => write!(f, " [bytes {}..{}]", at.start, at.end)?,
-                Some((n, g)) => write!(f, " [bytes {}..{} of {n} {g} R's data]", at.start, at.end)?,
+                Some(id) => write!(f, " [bytes {}..{} of {id} R's data]", at.start, at.end)?,
             }
         }
         Ok(())
@@ -445,8 +445,8 @@ fn inspect_pdf(bytes: &[u8], password: Option<&str>) -> (Version, Option<ObjectI
     let cat_ver = pdf
         .catalog()
         .ok()
-        .and_then(|c| c.get(b"Version").ok())
-        .and_then(|v| v.as_name().ok())
+        .and_then(|c| c.get(b"Version"))
+        .and_then(Object::as_name)
         .and_then(|n| std::str::from_utf8(n).ok())
         .and_then(Version::parse);
     let version = header.max(cat_ver.unwrap_or(header));
@@ -464,7 +464,10 @@ fn header_id(bytes: &[u8]) -> Option<ObjectId> {
     let mut words = head.split_ascii_whitespace();
     let n = words.next()?.parse().ok()?;
     let g = words.next()?.parse().ok()?;
-    words.next()?.starts_with("obj").then_some((n, g))
+    words
+        .next()?
+        .starts_with("obj")
+        .then_some(ObjectId::new(n, g))
 }
 
 /// Default `pdf-lint` options for sheaf's Arlington tests.
@@ -510,8 +513,8 @@ pub fn check(file: &InputFile<'_>, hold: &Hold, options: &Options) -> Report {
         Hold::All(Made::Merged) => {}
         Hold::Only(map) => {
             let mut text = String::new();
-            for (&(n, g), &made) in map {
-                let _ = writeln!(text, "{n} {g} {}", made.word());
+            for (&id, &made) in map {
+                let _ = writeln!(text, "{id} {}", made.word());
             }
             let hp = base.join(format!("{id}.hold"));
             std::fs::write(&hp, text).unwrap();
@@ -738,7 +741,7 @@ impl JsonLine {
             .findings
             .into_iter()
             .map(|f| Finding {
-                object: f.object,
+                object: f.object.map(ObjectId::from),
                 made: Made::parse(&f.made),
                 path: f.path,
                 table: f.table,
@@ -746,7 +749,7 @@ impl JsonLine {
                 rule: Rule::parse(&f.rule),
                 value: f.value,
                 at: f.at.map(|a| Span {
-                    stream: a.stream,
+                    stream: a.stream.map(ObjectId::from),
                     start: a.start,
                     end: a.end,
                 }),
@@ -917,12 +920,12 @@ mod tests {
     fn what_the_version_deprecates_is_a_finding() {
         let mut pdf = Pdf::with_version("2.0");
         let pages = pdf.add_object(dictionary! {
-            "Type" => "Pages",
+            "Type" => Object::name("Pages"),
             "Kids" => Vec::<Object>::new(),
             "Count" => 0,
         });
         let catalog = pdf.add_object(dictionary! {
-            "Type" => "Catalog",
+            "Type" => Object::name("Catalog"),
             "Pages" => pages,
             "NeedsRendering" => false,
         });

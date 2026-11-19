@@ -1,5 +1,5 @@
 //! The files a document's pages come from, read lazily (M10.5 §3.1). A
-//! [`Source`] is a PDF blob parsed: lopdf's [`LazyPdf`] reads the file's
+//! [`Source`] is a PDF blob parsed: [`LazyPdf`] reads the file's
 //! cross-reference sections and trailer when it opens, and each object
 //! when it's first asked for, under one set of caps, [`Limits`]: a hostile
 //! file is a typed error, never a panic, a hang or memory without bound.
@@ -212,7 +212,7 @@ impl Source {
         &self.limits
     }
 
-    /// False when lopdf rebuilt the cross-reference table: such a file is
+    /// False when the reader rebuilt the cross-reference table: such a file is
     /// never appended to.
     pub fn base_sound(&self) -> bool {
         self.pdf.base_sound()
@@ -363,7 +363,7 @@ impl Source {
         slot.get_or_init(|| {
             let read = |id: ObjectId| {
                 let obj = self.pdf.object_unkept(id).ok()?;
-                Marker::of(&obj.as_stream().ok()?.dict)
+                Marker::of(&obj.as_stream()?.dict)
             };
             let mut known = (self.stream_marks.lock()).unwrap_or_else(PoisonError::into_inner);
             (page.contents.iter())

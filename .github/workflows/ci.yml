@@ -124,15 +124,20 @@ jobs:
           if [ -n "$bad" ]; then echo "sheaf-edit depends on: $bad"; exit 1; fi
           cargo build -p sheaf-edit --target wasm32-wasip2
 
-      - name: Only sheaf-doc reaches the PDF layer crates
+      - name: Only sheaf-doc reaches the PDF layer crates, and no lopdf or test crypto in shipped builds
         shell: bash
-        # M18 slice 1: every other crate reaches the PDF layer through sheaf_doc::pdf.
+        # M18 slices 1 and 13: only sheaf-doc reaches pdf-*, lopdf is gone, and
+        # insecure-test-writer never enters normal (shipped) dependencies.
         run: |
-          for pkg in lopdf pdf-objects pdf-filters pdf-crypt pdf-structure pdf-content-streams; do
+          for pkg in pdf-objects pdf-filters pdf-crypt pdf-structure pdf-content-streams; do
             bad=$(cargo tree --workspace -e all -i "$pkg" --prefix depth 2>/dev/null | awk '/^1sheaf-/ {print $1}' | sed 's/^1//' | sort -u \
               | grep -vx 'sheaf-doc' || true)
             if [ -n "$bad" ]; then echo "crates outside sheaf-doc depend on $pkg directly: $bad"; exit 1; fi
           done
+          lopdf_present=$(cargo tree --workspace -e all --prefix none | awk '{print $1}' | grep -x 'lopdf' || true)
+          if [ -n "$lopdf_present" ]; then echo "lopdf is still in the dependency tree"; exit 1; fi
+          insecure=$(cargo tree --workspace -e normal -f '{p} {f}' | grep -F 'insecure-test-writer' || true)
+          if [ -n "$insecure" ]; then echo "insecure-test-writer enabled in normal dependencies: $insecure"; exit 1; fi
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings

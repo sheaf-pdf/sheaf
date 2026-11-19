@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use crate::pdf::{Dictionary, Object, ObjectId};
+use crate::pdf::{Dictionary, Object, ObjectId, Value};
 
 use crate::attachments::{Objects, once, resolve};
 use crate::file::pdf_text;
@@ -28,7 +28,10 @@ impl LayerId {
 
     /// What a digest of the layers a view turns off takes of it.
     pub(crate) fn to_le_bytes(self) -> [u8; 6] {
-        let (n, g) = self.0;
+        let ObjectId {
+            number: n,
+            generation: g,
+        } = self.0;
         let mut out = [0; 6];
         out[..4].copy_from_slice(&n.to_le_bytes());
         out[4..].copy_from_slice(&g.to_le_bytes());
@@ -58,26 +61,24 @@ pub fn layers_in<P: Objects + ?Sized>(pdf: &P) -> Vec<Layer> {
     };
     let groups: Vec<ObjectId> = props
         .get(b"OCGs")
-        .ok()
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_array().ok())
-        .map(|a| a.iter().filter_map(|o| o.as_reference().ok()).collect())
+        .and_then(Object::as_array)
+        .map(|a| a.iter().filter_map(Object::as_reference).collect())
         .unwrap_or_default();
     let d = props
         .get(b"D")
-        .ok()
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_dict().ok());
+        .and_then(Object::as_dict);
     let ids = |key: &[u8]| -> HashSet<ObjectId> {
-        d.and_then(|d| d.get(key).ok())
+        d.and_then(|d| d.get(key))
             .and_then(|o| resolve(pdf, o))
-            .and_then(|o| o.as_array().ok())
-            .map(|a| a.iter().filter_map(|o| o.as_reference().ok()).collect())
+            .and_then(Object::as_array)
+            .map(|a| a.iter().filter_map(Object::as_reference).collect())
             .unwrap_or_default()
     };
     let base_off = d
-        .and_then(|d| d.get(b"BaseState").ok())
-        .and_then(|o| o.as_name().ok())
+        .and_then(|d| d.get(b"BaseState"))
+        .and_then(Object::as_name)
         == Some(b"OFF");
     let (on, off, locked) = (ids(b"ON"), ids(b"OFF"), ids(b"Locked"));
     let visible = |id: &ObjectId| {
@@ -90,7 +91,7 @@ pub fn layers_in<P: Objects + ?Sized>(pdf: &P) -> Vec<Layer> {
     let name = |id: ObjectId| {
         pdf.get_dictionary(id)
             .ok()
-            .and_then(|g| g.get(b"Name").ok())
+            .and_then(|g| g.get(b"Name"))
             .and_then(|o| resolve(pdf, o))
             .map(pdf_text)
             .unwrap_or_default()
@@ -100,9 +101,9 @@ pub fn layers_in<P: Objects + ?Sized>(pdf: &P) -> Vec<Layer> {
     let mut listed = HashSet::new();
     let mut seen = HashSet::new();
     if let Some(order) = d
-        .and_then(|d| d.get(b"Order").ok())
+        .and_then(|d| d.get(b"Order"))
         .and_then(|o| once(pdf, &mut seen, o))
-        .and_then(|o| o.as_array().ok())
+        .and_then(Object::as_array)
     {
         walk_order(pdf, order, 0, &mut seen, &mut |id, label, depth| match id {
             Some(id) if groups.contains(&id) || pdf.get_dictionary(id).is_ok() => {
@@ -156,22 +157,22 @@ fn walk_order<P: Objects + ?Sized>(
     // A label first in a nested array heads it.
     if depth > 0
         && let Some(o) = it.peek()
-        && let Some(s) = resolve(pdf, o).filter(|o| o.as_str().is_ok())
+        && let Some(s) = resolve(pdf, o).filter(|o| o.as_bytes().is_some())
     {
         f(None, pdf_text(s), depth - 1);
         it.next();
     }
     for o in it {
-        match o {
-            Object::Reference(id) => match pdf.get_object(*id) {
-                Ok(Object::Array(a)) => {
+        match o.value() {
+            Value::Ref(id) => match pdf.get_object(*id).map(Object::value) {
+                Ok(Value::Array(a)) => {
                     if seen.insert(*id) {
                         walk_order(pdf, a, depth + 1, seen, f);
                     }
                 }
                 _ => f(Some(*id), String::new(), depth),
             },
-            Object::Array(a) => walk_order(pdf, a, depth + 1, seen, f),
+            Value::Array(a) => walk_order(pdf, a, depth + 1, seen, f),
             _ => {}
         }
     }
@@ -181,10 +182,8 @@ fn oc_properties<P: Objects + ?Sized>(pdf: &P) -> Option<&Dictionary> {
     pdf.catalog()
         .ok()?
         .get(b"OCProperties")
-        .ok()
         .and_then(|o| resolve(pdf, o))?
         .as_dict()
-        .ok()
 }
 
 /// `src`'s `/OCProperties` with its default configuration showing every
@@ -196,56 +195,57 @@ fn oc_properties<P: Objects + ?Sized>(pdf: &P) -> Option<&Dictionary> {
 pub fn ocg_patch(src: &Source, off: &BTreeSet<LayerId>) -> Option<Object> {
     let pdf = src.pdf();
     let props = oc_properties(pdf)?;
-    let groups: Vec<ObjectId> = (props.get(b"OCGs").ok())
+    let groups: Vec<ObjectId> = props
+        .get(b"OCGs")
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_array().ok())
-        .map(|a| a.iter().filter_map(|o| o.as_reference().ok()).collect())
+        .and_then(Object::as_array)
+        .map(|a| a.iter().filter_map(Object::as_reference).collect())
         .unwrap_or_default();
-    let mut d = (props.get(b"D").ok())
+    let mut d = props
+        .get(b"D")
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_dict().ok())
+        .and_then(Object::as_dict)
         .cloned()
         .unwrap_or_default();
     let refs = |hidden: bool| -> Object {
         let listed = groups
             .iter()
             .filter(|&&g| off.contains(&LayerId(g)) == hidden);
-        Object::Array(listed.map(|&g| Object::Reference(g)).collect())
+        Object::from(listed.map(|&g| Object::from(g)).collect::<Vec<_>>())
     };
-    d.set("BaseState", Object::Name(b"ON".to_vec()));
+    d.set("BaseState", Object::name("ON"));
     d.set("ON", refs(false));
     d.set("OFF", refs(true));
     // Usage-based auto states (/AS) would override the lists.
     d.remove(b"AS");
     let mut props = props.clone();
     props.set("D", d);
-    Some(Object::Dictionary(props))
+    Some(Object::from(props))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pdf::{Document as Pdf, dictionary};
+    use crate::pdf::{Document as Pdf, dictionary, literal};
 
     fn sample() -> (Pdf, ObjectId, ObjectId, ObjectId) {
         let mut pdf = Pdf::with_version("1.7");
         let a = pdf
-            .add_object(dictionary! { "Type" => "OCG", "Name" => Object::string_literal("Grid") });
+            .add_object(dictionary! { "Type" => Object::name("OCG"), "Name" => literal("Grid") });
         let b = pdf
-            .add_object(dictionary! { "Type" => "OCG", "Name" => Object::string_literal("Notes") });
-        let c = pdf.add_object(
-            dictionary! { "Type" => "OCG", "Name" => Object::string_literal("Orphan") },
-        );
+            .add_object(dictionary! { "Type" => Object::name("OCG"), "Name" => literal("Notes") });
+        let c = pdf
+            .add_object(dictionary! { "Type" => Object::name("OCG"), "Name" => literal("Orphan") });
         let d = pdf.add_object(dictionary! {
             "OFF" => vec![b.into()],
             "Locked" => vec![a.into()],
             "Order" => vec![
                 a.into(),
-                vec![Object::string_literal("Review"), b.into()].into(),
+                vec![literal("Review"), b.into()].into(),
             ],
         });
         let catalog = pdf.add_object(dictionary! {
-            "Type" => "Catalog",
+            "Type" => Object::name("Catalog"),
             "OCProperties" => dictionary! { "OCGs" => vec![a.into(), b.into(), c.into()], "D" => d },
         });
         pdf.trailer.set("Root", catalog);

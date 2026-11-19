@@ -1085,25 +1085,24 @@ mod tests {
                 let Some(res) = pdf.resources_of_page(page) else {
                     return Vec::new();
                 };
-                let Ok((_, sheaf_doc::pdf::Object::Dictionary(xobjects))) =
-                    res.get(b"XObject").and_then(|o| pdf.dereference(o))
+                let Some(sheaf_doc::pdf::Value::Dict(xobjects)) = res
+                    .get(b"XObject")
+                    .and_then(|o| pdf.dereference(o).ok())
+                    .map(|(_, o)| o.value())
                 else {
                     return Vec::new();
                 };
                 xobjects
                     .iter()
                     .filter_map(|(_, obj)| {
-                        let (_, sheaf_doc::pdf::Object::Stream(stream)) =
-                            pdf.dereference(obj).ok()?
-                        else {
-                            return None;
-                        };
+                        let (_, obj) = pdf.dereference(obj).ok()?;
+                        let stream = obj.as_stream()?;
                         let subtype = stream
                             .dict
                             .get(b"Subtype")
-                            .and_then(sheaf_doc::pdf::Object::as_name)
-                            .ok()?;
-                        (subtype == b"Image").then(|| stream.content.clone())
+                            .and_then(sheaf_doc::pdf::Object::as_name)?;
+                        (subtype == b"Image")
+                            .then(|| sheaf_doc::pdf::StreamExt::raw_bytes(stream).to_vec())
                     })
                     .collect()
             })

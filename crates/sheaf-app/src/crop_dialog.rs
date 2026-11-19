@@ -673,17 +673,19 @@ mod tests {
         let kids: Vec<Object> = (drawn.into_iter())
             .map(|content| {
                 let content = pdf.add_object(Stream::new(dictionary! {}, content.to_vec()));
-                let page =
-                    dictionary! { "Type" => "Page", "Parent" => root, "Contents" => content };
+                let page = dictionary! {
+                    "Type" => Object::name("Page"), "Parent" => root, "Contents" => content,
+                };
                 pdf.add_object(page).into()
             })
             .collect();
         let pages = dictionary! {
-            "Type" => "Pages", "Kids" => kids, "Count" => 2,
+            "Type" => Object::name("Pages"), "Kids" => kids, "Count" => 2,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         };
-        pdf.objects.insert(root, Object::Dictionary(pages));
-        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
+        pdf.objects.insert(root, Object::from(pages));
+        let catalog =
+            pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => root });
         pdf.trailer.set("Root", catalog);
         let path = dir.join("blocks.pdf");
         pdf.save(&path).unwrap();

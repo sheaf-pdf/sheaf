@@ -5,7 +5,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
+use crate::pdf::{
+    Dictionary, Document as Pdf, Object, ObjectId, Stream, Value, dictionary, literal,
+};
 use sheaf_edit::Rotation;
 
 use super::*;
@@ -28,12 +30,12 @@ pub(crate) fn lazily(pdf: &mut Pdf) -> Src {
     if pdf.get_pages().is_empty() {
         let pages = pdf.new_object_id();
         let page = pdf.add_object(dictionary! {
-            "Type" => "Page", "Parent" => pages,
+            "Type" => Object::name("Page"), "Parent" => pages,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         });
         pdf.objects.insert(
             pages,
-            dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+            dictionary! { "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1 }.into(),
         );
         pdf.catalog_mut().unwrap().set("Pages", pages);
     }
@@ -147,16 +149,16 @@ fn finish_never_lexes_content() {
     let mut contents = Vec::new();
     for page in f.pages.clone() {
         let garbage = f.pdf.add_object(Stream::new(
-            dictionary! { "Filter" => "FlateDecode" },
+            dictionary! { "Filter" => Object::name("FlateDecode") },
             b"\x00\xff not deflate: BT ( ] >> q Tj".to_vec(),
         ));
         // sheaf's blocks stay: an open reads their dictionaries alone.
         let blocks = (crate::content::contents(f.dict(page)).into_iter()).filter(|&id| {
-            let stream = f.pdf.get_object(id).and_then(Object::as_stream);
-            stream.is_ok_and(|s| s.dict.has(b"SHEF_Block"))
+            let stream = f.pdf.get_object(id).ok().and_then(Object::as_stream);
+            stream.is_some_and(|s| s.dict.has(b"SHEF_Block"))
         });
-        let mut entries = vec![garbage.into(), Object::Reference(garbage)];
-        entries.extend(blocks.map(Object::Reference).collect::<Vec<_>>());
+        let mut entries = vec![garbage.into(), Object::from(garbage)];
+        entries.extend(blocks.map(Object::from).collect::<Vec<_>>());
         f.dict(page).set("Contents", entries);
         contents.push(garbage);
     }
@@ -280,7 +282,7 @@ fn every_mark_kind_round_trips_on_every_rotate() {
             .map(|id| {
                 let d = f.pdf.get_dictionary(id).unwrap();
                 let r = d.get(b"Rect").unwrap().as_array().unwrap();
-                let r = r.iter().map(|v| v.as_float().unwrap() as f32).collect();
+                let r = r.iter().map(|v| v.as_number().unwrap() as f32).collect();
                 (crate::file::thread_name(d), r)
             })
             .collect();
@@ -328,8 +330,7 @@ fn stale_mark_is_theirs(how: How) {
     let case = "edited";
     let edited = crate::save::text_string("Edited in Acrobat");
     f.dict(square).set("Contents", edited.clone());
-    f.dict(square)
-        .set("M", Object::string_literal("D:20261017090000Z"));
+    f.dict(square).set("M", literal("D:20261017090000Z"));
     let bytes = f.bytes();
     let as_left = Pdf::load_mem(&bytes)
         .unwrap()
@@ -378,13 +379,26 @@ fn stale_mark_is_theirs(how: How) {
     assert_eq!(theirs.name, "sheaf:4", "{case}");
     let list = pdf.get_dictionary(page).unwrap().get(b"Annots").unwrap();
     let kept = list.as_array().unwrap().iter().find_map(|e| {
-        let d = pdf.get_dictionary(e.as_reference().ok()?).ok()?;
+        let d = pdf.get_dictionary(e.as_reference()?).ok()?;
         (crate::file::thread_name(d) == "sheaf:4").then_some(d)
     });
+    fn unplaced(obj: &Object) -> Object {
+        match obj.value() {
+            Value::Array(items) => Object::from(items.iter().map(unplaced).collect::<Vec<_>>()),
+            Value::Dict(d) => {
+                let mut out = Dictionary::new();
+                for (k, v) in d.iter() {
+                    out.set(k.to_vec(), unplaced(v));
+                }
+                Object::from(out)
+            }
+            _ => Object::new(obj.value().clone()),
+        }
+    }
     let keys = |d: &Dictionary| -> Vec<(Vec<u8>, Object)> {
         d.iter()
-            .filter(|(k, _)| k.as_slice() != b"AP")
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .filter(|(k, _)| *k != b"AP")
+            .map(|(k, v)| (k.to_vec(), unplaced(v)))
             .collect()
     };
     assert_eq!(kept.map(keys), Some(keys(&as_left)), "{case}");
@@ -444,12 +458,18 @@ fn a_mark_holding_nothing(how: How) {
 fn a_reserialized_mark_stays_a_mark() {
     use unicode_normalization::UnicodeNormalization;
     fn reformat(o: &mut Object) {
-        match o {
-            Object::Real(r) if r.fract() == 0.0 => *o = Object::Integer(*r as i64),
-            Object::Real(r) => *r = (*r * 1000.0).round() / 1000.0,
-            Object::Integer(i) => *o = Object::Real(*i as f64),
-            Object::Array(items) => items.iter_mut().for_each(reformat),
-            Object::Dictionary(d) => d.iter_mut().for_each(|(_, v)| reformat(v)),
+        match o.value_mut() {
+            Value::Real(r) if r.fract() == 0.0 => {
+                let i = *r as i64;
+                *o = Object::from(i);
+            }
+            Value::Real(r) => *r = (*r * 1000.0).round() / 1000.0,
+            Value::Integer(i) => {
+                let r = *i as f64;
+                *o = Object::from(r);
+            }
+            Value::Array(items) => items.iter_mut().for_each(reformat),
+            Value::Dict(d) => d.iter_mut().for_each(|(_, v)| reformat(v)),
             _ => {}
         }
     }
@@ -468,10 +488,10 @@ fn a_reserialized_mark_stays_a_mark() {
         for (_, v) in d.iter_mut() {
             reformat(v);
         }
-        if let Ok(Object::Array(r)) = d.get_mut(b"Rect") {
+        if let Some(r) = d.get_mut(b"Rect").and_then(Object::as_array_mut) {
             r.rotate_left(2);
         }
-        if let Ok(contents) = d.get(b"Contents").and_then(Object::as_str) {
+        if let Some(contents) = d.get(b"Contents").and_then(Object::as_bytes) {
             let mut utf16 = vec![0xFE, 0xFF];
             for u in crate::file::text_string(contents)
                 .nfd()
@@ -480,14 +500,11 @@ fn a_reserialized_mark_stays_a_mark() {
             {
                 utf16.extend_from_slice(&u.to_be_bytes());
             }
-            d.set(
-                "Contents",
-                Object::String(utf16, crate::pdf::StringFormat::Hexadecimal),
-            );
+            d.set("Contents", Object::hex(utf16));
         }
         if d.has(b"T") {
             // ’ is 0x90 in PDFDocEncoding.
-            d.set("T", Object::string_literal(b"Ann\x90s".to_vec()));
+            d.set("T", literal(b"Ann\x90s"));
         }
     }
     let facts = finish(&f.source(), &NoProgress);
@@ -510,7 +527,7 @@ fn a_mark_s_text_reads_back_as_written() {
     let mut f = marked(0, std::slice::from_ref(&n));
     let dict = f.dict(f.annots(0)[0]).clone();
     for (key, want) in [(&b"Contents"[..], &n.contents), (b"T", &n.author)] {
-        let text = dict.get(key).and_then(Object::as_str).unwrap();
+        let text = dict.get(key).and_then(Object::as_bytes).unwrap();
         assert_eq!(crate::file::text_string(text), *want);
     }
     let facts = finish(&f.source(), &NoProgress);
@@ -550,17 +567,17 @@ fn a_copied_page_gets_fresh_ids(how: How) {
         })
         .collect();
     for &copy in &copies {
-        if let Ok(irt) = f.dict(copy).get(b"IRT").and_then(Object::as_reference) {
+        if let Some(irt) = f.dict(copy).get(b"IRT").and_then(Object::as_reference) {
             let at = originals.iter().position(|&o| o == irt).unwrap();
             f.dict(copy).set("IRT", copies[at]);
         }
     }
     let theirs = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Text",
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"),
         "Rect" => vec![0.into(), 0.into(), 20.into(), 20.into()],
-        "IRT" => copies[0], "NM" => Object::string_literal("acro-reply"),
-        "T" => Object::string_literal("Acrobat"),
-        "Contents" => Object::string_literal("their reply"),
+        "IRT" => copies[0], "NM" => literal("acro-reply"),
+        "T" => literal("Acrobat"),
+        "Contents" => literal("their reply"),
     });
     copies.push(theirs);
     f.set_annots(1, &copies);
@@ -638,21 +655,21 @@ fn with_their_annots(f: &mut Form, page: usize, tag: &str) {
     crate::forms::fixture::write_marks(&mut f.pdf, &mut dict, &ours);
     *f.dict(f.pages[page]) = dict;
     let theirs = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(),
-        "NM" => Object::string_literal(format!("{tag}-note")),
-        "Contents" => Object::string_literal("theirs"),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "Rect" => rect(),
+        "NM" => literal(format!("{tag}-note")),
+        "Contents" => literal("theirs"),
     });
     let reply = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(), "IRT" => theirs,
-        "Contents" => Object::string_literal("a reply"),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "Rect" => rect(), "IRT" => theirs,
+        "Contents" => literal("a reply"),
     });
     let link = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Link", "Rect" => rect(),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"), "Rect" => rect(),
     });
-    let mut list: Vec<Object> = (f.annots(page).into_iter().map(Object::Reference)).collect();
-    list.extend([theirs, reply, link].map(Object::Reference));
-    list.push(Object::Dictionary(dictionary! {
-        "Type" => "Annot", "Subtype" => "Link", "Rect" => vec![40.into(), 40.into(), 50.into(), 50.into()],
+    let mut list: Vec<Object> = (f.annots(page).into_iter().map(Object::from)).collect();
+    list.extend([theirs, reply, link].map(Object::from));
+    list.push(Object::from(dictionary! {
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"), "Rect" => vec![40.into(), 40.into(), 50.into(), 50.into()],
     }));
     f.dict(f.pages[page]).set("Annots", list);
 }
@@ -700,7 +717,7 @@ fn reopening_gives_their_comments_the_same_ids() {
     // Their records are the objects they were read as.
     let src = &st.def(st.order()[0]).unwrap().base.src;
     for (_, f) in st.foreign_on(st.order()[0]) {
-        let at = f.src.as_ref().map(|o| (o.src.id(), o.id.0));
+        let at = f.src.as_ref().map(|o| (o.src.id(), o.id.number));
         assert!(at.is_none_or(|(blob, n)| blob == src.id() && n > 0));
         assert_eq!(f.copy, 0);
     }
@@ -725,27 +742,26 @@ fn a_tree_that_lists_itself_is_read_once() {
         f.pdf.objects.insert(id, node.into());
         id
     };
-    let there = vec![page.into(), "Fit".into()];
-    let dests =
-        looped(dictionary! { "Names" => vec![Object::string_literal("there"), there.into()] });
-    let spec = dictionary! { "Type" => "Filespec", "F" => Object::string_literal("a.txt") };
-    let files =
-        looped(dictionary! { "Names" => vec![Object::string_literal("a.txt"), spec.into()] });
-    let labels =
-        looped(dictionary! { "Nums" => vec![0.into(), dictionary! { "S" => "r" }.into()] });
+    let there = vec![page.into(), Object::name("Fit")];
+    let dests = looped(dictionary! { "Names" => vec![literal("there"), there.into()] });
+    let spec = dictionary! { "Type" => Object::name("Filespec"), "F" => literal("a.txt") };
+    let files = looped(dictionary! { "Names" => vec![literal("a.txt"), spec.into()] });
+    let labels = looped(
+        dictionary! { "Nums" => vec![0.into(), dictionary! { "S" => Object::name("r") }.into()] },
+    );
     // A folder that's its own first child and its own next sibling.
     let folder = f.pdf.new_object_id();
     f.pdf.objects.insert(
         folder,
         dictionary! {
-            "Name" => Object::string_literal("Tax"), "ID" => 1,
+            "Name" => literal("Tax"), "ID" => 1,
             "Child" => folder, "Next" => folder,
         }
         .into(),
     );
     let ocg = f
         .pdf
-        .add_object(dictionary! { "Type" => "OCG", "Name" => "Ink" });
+        .add_object(dictionary! { "Type" => Object::name("OCG"), "Name" => Object::name("Ink") });
     let order = f.pdf.new_object_id();
     f.pdf
         .objects
@@ -768,8 +784,8 @@ fn a_tree_that_lists_itself_is_read_once() {
         dictionary! { "Folders" => dictionary! { "ID" => 0, "Child" => folder } },
     );
     let named = dictionary! {
-        "Title" => Object::string_literal("There"),
-        "Dest" => Object::string_literal("there"),
+        "Title" => literal("There"),
+        "Dest" => literal("there"),
     };
     outline_tree(&mut f, vec![(0, named)]);
     let src = f.source();
@@ -813,8 +829,8 @@ enum Fact {
 /// How a corpus file read.
 #[derive(Default)]
 struct Outcome {
-    /// The source didn't open (no facts), or lopdf didn't load the file
-    /// eagerly (none to compare but the manifest's).
+    /// The source didn't open (no facts), or `Document` didn't load the
+    /// file eagerly (none to compare but the manifest's).
     unopened: bool,
     unloaded: bool,
     /// The page table numbers the pages otherwise than `get_pages`.
@@ -838,7 +854,7 @@ struct Outcome {
 #[derive(Debug, Clone, Copy)]
 enum Explained {
     /// Fewer fields than the row: pypdf counts a field listed twice
-    /// twice, and lopdf loses an object of a few damaged files.
+    /// twice, and damaged files may drop an unreadable object.
     Fewer,
     /// A damaged field tree, which sheaf doesn't read.
     Damaged,
@@ -902,7 +918,7 @@ fn compare(corpus: &Corpus, entry: &Entry) -> Outcome {
     assert_eq!(rec.version, doc.current_version(), "{}", entry.path);
     for key in [ObjKey::Catalog, ObjKey::PagesNode(0)] {
         let at = rec.map.get(&key);
-        let present = at.is_some_and(|(n, _)| rec.present.contains(n));
+        let present = at.is_some_and(|id| rec.present.contains(id.number));
         assert!(present, "{}: {key:?} at {at:?}", entry.path);
     }
     let mut out = Outcome {
@@ -972,7 +988,7 @@ fn compare(corpus: &Corpus, entry: &Entry) -> Outcome {
 
 /// Every manifest file's facts, read from its source as it opens, are
 /// what the old loaders read: its pages and fields are its manifest
-/// row's, and every other fact is what the same readers read from lopdf's
+/// row's, and every other fact is what the same readers read from an
 /// eager load of the same bytes, numbering pages by `get_pages`. What
 /// differs is [`EXPLAINED`]'s, and only that. (The outline is PDFium's,
 /// as sheaf-render's `the_source_outline_is_pdfium_s` finds.) And every

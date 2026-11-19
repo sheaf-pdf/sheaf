@@ -2,7 +2,7 @@
 //! ([`forms::corpus`](crate::forms::corpus)): every page's content, and
 //! every form XObject it draws, reads, lexes into tokens that tile it and
 //! splices back to each stream's own bytes, read apart; its marked content
-//! balances; its `q`/`Q` balance is what lopdf's `Content::decode` counts;
+//! balances; its `q`/`Q` balance is what `Content::decode` counts;
 //! its words decode through its fonts; its pagination artifacts are
 //! classified as the tools that made the files drew them; each of them
 //! splices out, as a strip cuts it, or is refused, Acrobat's never; and
@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 use std::time::Instant;
 
-use crate::pdf::{Object, ObjectId};
+use crate::pdf::{Object, ObjectId, StreamExt};
 
 use super::tests::blank;
 use super::*;
@@ -37,7 +37,7 @@ struct Outcome {
     /// Streams the concatenation, or a splice of nothing, changed from
     /// their own bytes.
     changed: Vec<String>,
-    /// Pages lopdf counts `q` and `Q` on (no inline images, and decoded),
+    /// Pages `Content::decode` counts `q` and `Q` on (no inline images, and decoded),
     /// and those whose count differs.
     counted: usize,
     miscounted: Vec<String>,
@@ -115,21 +115,19 @@ fn office(src: &crate::store::Src) -> bool {
     let info = pdf
         .trailer()
         .get(b"Info")
-        .ok()
         .and_then(|i| pdf.dereference(i).ok())
-        .and_then(|(_, i)| i.as_dict().ok());
+        .and_then(|(_, i)| i.as_dict());
     let in_info = info.is_some_and(|info| {
         [b"Producer".as_slice(), b"Creator"].iter().any(|key| {
             info.get(key)
-                .ok()
-                .and_then(|v| v.as_str().ok())
+                .and_then(Object::as_bytes)
                 .is_some_and(|v| made_by(&crate::file::text_string(v).into_bytes()))
         })
     });
     let in_xmp = || {
         let catalog = pdf.catalog().ok()?;
-        let (_, xmp) = pdf.dereference(catalog.get(b"Metadata").ok()?).ok()?;
-        let xmp = xmp.as_stream().ok()?;
+        let (_, xmp) = pdf.dereference(catalog.get(b"Metadata")?).ok()?;
+        let xmp = xmp.as_stream()?;
         Some(made_by(&xmp.decompressed_content().ok()?))
     };
     in_info || in_xmp() == Some(true)
@@ -140,9 +138,9 @@ fn xobject(src: &crate::store::Src, resources: Option<&Object>, name: &[u8]) -> 
     let pdf = src.pdf();
     let (_, resources) = pdf.dereference(resources?).ok()?;
     let (_, xobjects) = pdf
-        .dereference(resources.as_dict().ok()?.get(b"XObject").ok()?)
+        .dereference(resources.as_dict()?.get(b"XObject")?)
         .ok()?;
-    xobjects.as_dict().ok()?.get(name).ok()?.as_reference().ok()
+    xobjects.as_dict()?.get(name)?.as_reference()
 }
 
 /// Where `s`'s tokens, lexed with `res`, don't tile it: an error, a
@@ -163,7 +161,7 @@ fn untiled(s: &[u8], res: &ResCx) -> Option<String> {
     (!blank(&s[at..])).then(|| format!("bytes after {at}"))
 }
 
-/// lopdf's count of `bytes`' `q`s and `Q`s, the reference.
+/// `Content::decode`'s count of `bytes`' `q`s and `Q`s, the reference.
 fn decoded_balance(bytes: &[u8]) -> Option<Balance> {
     let content = crate::pdf::content::Content::decode(bytes).ok()?;
     let mut balance = Balance::default();
@@ -236,7 +234,7 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
             out.counted += 1;
             if ours != reference {
                 out.miscounted
-                    .push(format!("{at}: {ours:?}, lopdf {reference:?}"));
+                    .push(format!("{at}: {ours:?}, decoded {reference:?}"));
             }
         }
         out.words += text_bag(src.pdf(), concat, resources, LIM, &fonts)
@@ -251,23 +249,19 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
             if !forms_seen.insert(id) {
                 continue;
             }
-            let form = src
-                .pdf()
-                .get_object(id)
-                .ok()
-                .and_then(|o| o.as_stream().ok());
-            let Some(form) = form
-                .filter(|f| f.dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Form"))
+            let form = src.pdf().get_object(id).ok().and_then(Object::as_stream);
+            let Some(form) =
+                form.filter(|f| f.dict.get(b"Subtype").and_then(Object::as_name) == Some(b"Form"))
             else {
                 continue;
             };
             out.forms += 1;
-            let at = format!("{at}, form {} {} R", id.0, id.1);
+            let at = format!("{at}, form {} {} R", id.number, id.generation);
             let Ok(data) = form.decompressed_content_with_limit(LIM.content.decompressed) else {
                 out.unread.push(format!("{at}: won't decode"));
                 continue;
             };
-            let own = form.dict.get(b"Resources").ok();
+            let own = form.dict.get(b"Resources");
             let res = ResCx::read(src.pdf(), own.or(resources));
             if let Some(wrong) = untiled(&data, &res) {
                 out.unread.push(format!("{at}: tokens don't tile {wrong}"));
@@ -372,7 +366,7 @@ fn corpus_content_lexes_splices_and_classifies() {
     }
     eprintln!(
         "{} pages ({} MB of content) and {} forms in {} files, in {took:?}: \
-         {} unread, {} with marked content unbalanced, {} lopdf counted, {} nested in forms",
+         {} unread, {} with marked content unbalanced, {} decoded counted, {} nested in forms",
         sum(|o| o.pages),
         sum(|o| o.bytes) >> 20,
         sum(|o| o.forms),

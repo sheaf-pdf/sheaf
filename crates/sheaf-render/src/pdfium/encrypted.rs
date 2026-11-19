@@ -104,7 +104,7 @@ fn source(bytes: &[u8]) -> Src {
 fn kept(bytes: &[u8]) -> (Object, Vec<u8>) {
     let src = source(bytes);
     let crypt = src.crypt().expect("encrypted");
-    let p = crypt.dict().get(b"P").unwrap().clone();
+    let p = Object::new(crypt.dict().get(b"P").unwrap().value().clone());
     (p, crypt.first_id().expect("an /ID").to_vec())
 }
 

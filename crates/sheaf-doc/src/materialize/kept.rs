@@ -11,7 +11,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
-use crate::pdf::{Document as Pdf, Object, ObjectId};
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Value};
 
 use super::copy::is_page_node;
 
@@ -37,29 +37,24 @@ type Changed = RefCell<BTreeSet<ObjectId>>;
 /// `materialize::copy::remap`) count as gone too. Gives what a reader
 /// should be told, and the objects it changed.
 pub(crate) fn keep_only(pdf: &mut Pdf, kept: &HashSet<ObjectId>, removed: &[ObjectId]) -> Kept {
-    let Some(catalog_id) = pdf
-        .trailer
-        .get(b"Root")
-        .ok()
-        .and_then(|r| r.as_reference().ok())
-    else {
+    let Some(catalog_id) = pdf.trailer.get(b"Root").and_then(Object::as_reference) else {
         return Kept::default();
     };
     let tree = pdf
         .get_dictionary(catalog_id)
         .ok()
-        .and_then(|c| c.get(b"Pages").ok())
-        .and_then(|p| p.as_reference().ok());
+        .and_then(|c| c.get(b"Pages"))
+        .and_then(Object::as_reference);
     // A form's page templates (`/Names /Templates`) are pages outside the
     // tree that scripts spawn pages from: they stay, widgets and all.
     let mut templates = Vec::new();
     if let Some(t) = pdf
         .get_dictionary(catalog_id)
         .ok()
-        .and_then(|c| c.get(b"Names").ok())
+        .and_then(|c| c.get(b"Names"))
         .and_then(|n| deref(pdf, n))
-        .and_then(|n| n.as_dict().ok())
-        .and_then(|n| n.get(b"Templates").ok())
+        .and_then(plain_dict)
+        .and_then(|n| n.get(b"Templates"))
         .cloned()
     {
         tree_refs(pdf, &t, b"Names", &mut templates, 0);
@@ -126,9 +121,9 @@ impl Gone<'_> {
     /// Whether `o` points at a page that isn't kept: a reference to one,
     /// or null where a copy dropped one.
     fn target(&self, pdf: &Pdf, o: &Object) -> bool {
-        match o {
-            Object::Reference(id) => self.page(pdf, *id),
-            Object::Null => true,
+        match o.value() {
+            Value::Ref(id) => self.page(pdf, *id),
+            Value::Null => true,
             _ => false,
         }
     }
@@ -136,7 +131,9 @@ impl Gone<'_> {
     /// Whether an object reference's `/Obj` is gone: a page that isn't
     /// kept, or an annotation of one.
     fn object(&self, pdf: &Pdf, o: &Object) -> bool {
-        self.target(pdf, o) || o.as_reference().is_ok_and(|id| self.dropped.contains(&id))
+        self.target(pdf, o)
+            || o.as_reference()
+                .is_some_and(|id| self.dropped.contains(&id))
     }
 
     /// Whether a reference to `id` goes: it's a page that isn't kept, or
@@ -148,20 +145,23 @@ impl Gone<'_> {
     /// Whether a destination (an array, a dictionary with `/D`, or a
     /// name in `names`) lands on a page that isn't kept, or nowhere.
     fn dest(&self, pdf: &Pdf, d: &Object, names: &HashMap<Vec<u8>, Object>) -> bool {
-        let d = match d {
-            Object::Reference(id) => match pdf.get_object(*id) {
+        let d = match d.value() {
+            Value::Ref(id) => match pdf.get_object(*id) {
                 Ok(o) => o,
                 Err(_) => return true,
             },
-            o => o,
+            _ => d,
         };
-        match d {
-            Object::Array(a) => a.first().is_none_or(|p| self.target(pdf, p)),
-            Object::Dictionary(dict) => dict
+        match d.value() {
+            Value::Array(a) => a.first().is_none_or(|p| self.target(pdf, p)),
+            Value::Dict(dict) => dict
                 .get(b"D")
-                .ok()
                 .is_some_and(|inner| self.dest(pdf, inner, names)),
-            Object::String(n, _) | Object::Name(n) => match names.get(n) {
+            Value::String(s, _) => match s.as_bytes().and_then(|b| names.get(b)) {
+                Some(v) => self.dest(pdf, v, &HashMap::new()),
+                None => true,
+            },
+            Value::Name(n) => match names.get(n.as_bytes()) {
                 Some(v) => self.dest(pdf, v, &HashMap::new()),
                 None => true,
             },
@@ -170,25 +170,42 @@ impl Gone<'_> {
     }
 }
 
+fn plain_dict(o: &Object) -> Option<&Dictionary> {
+    match o.value() {
+        Value::Dict(d) => Some(d),
+        _ => None,
+    }
+}
+
+fn same_slice(a: &[Object], b: &[Object]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.eq_value(y))
+}
+
+fn same_dict(a: &Dictionary, b: &Dictionary) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .all(|(k, va)| b.get(k).is_some_and(|vb| va.eq_value(vb)))
+}
+
 /// `holder`'s `key`, moved into an object of its own when it's a direct
 /// dictionary, so the walks that change a tree in place (`clean_tree`,
 /// `null_removed_in_tree`) reach its root.
 fn indirect(pdf: &mut Pdf, holder: ObjectId, key: &[u8], changed: &Changed) -> Option<Object> {
-    let value = pdf.get_dictionary(holder).ok()?.get(key).ok()?.clone();
-    if !matches!(value, Object::Dictionary(_)) {
+    let value = pdf.get_dictionary(holder).ok()?.get(key)?.clone();
+    if !matches!(value.value(), Value::Dict(_)) {
         return Some(value);
     }
     let id = pdf.add_object(value);
-    pdf.get_dictionary_mut(holder).ok()?.set(key.to_vec(), id);
+    pdf.get_dictionary_mut(holder).ok()?.set(key, id);
     changed.borrow_mut().extend([holder, id]);
-    Some(Object::Reference(id))
+    Some(Object::from(id))
 }
 
 /// An object, through a reference.
 fn deref<'a>(pdf: &'a Pdf, o: &'a Object) -> Option<&'a Object> {
-    match o {
-        Object::Reference(id) => pdf.get_object(*id).ok(),
-        o => Some(o),
+    match o.value() {
+        Value::Ref(id) => pdf.get_object(*id).ok(),
+        _ => Some(o),
     }
 }
 
@@ -197,37 +214,38 @@ fn deref<'a>(pdf: &'a Pdf, o: &'a Object) -> Option<&'a Object> {
 fn clean_named_dests(pdf: &mut Pdf, catalog_id: ObjectId, gone: &Gone) -> HashMap<Vec<u8>, Object> {
     let catalog = pdf.get_dictionary(catalog_id).cloned().unwrap_or_default();
     // The old way: a dictionary in the catalog.
-    if let Ok(dests) = catalog.get(b"Dests") {
-        let (id, dict) = match dests {
-            Object::Reference(id) => (Some(*id), pdf.get_dictionary(*id).ok().cloned()),
-            Object::Dictionary(d) => (None, Some(d.clone())),
+    if let Some(dests) = catalog.get(b"Dests") {
+        let (id, dict) = match dests.value() {
+            Value::Ref(id) => (Some(*id), pdf.get_dictionary(*id).ok().cloned()),
+            Value::Dict(d) => (None, Some(d.clone())),
             _ => (None, None),
         };
         if let Some(mut dict) = dict {
             let dead: Vec<Vec<u8>> = dict
                 .iter()
                 .filter(|(_, v)| gone.dest(pdf, v, &HashMap::new()))
-                .map(|(k, _)| k.clone())
+                .map(|(k, _)| k.to_vec())
                 .collect();
             if !dead.is_empty() {
                 gone.changed.borrow_mut().insert(id.unwrap_or(catalog_id));
-            }
-            for k in dead {
-                dict.remove(&k);
-            }
-            match id {
-                Some(id) => {
-                    pdf.objects.insert(id, Object::Dictionary(dict));
+                for k in dead {
+                    dict.remove(&k);
                 }
-                None => {
-                    if let Ok(c) = pdf.get_dictionary_mut(catalog_id) {
-                        c.set("Dests", dict);
+                match id {
+                    Some(id) => {
+                        pdf.objects.insert(id, Object::from(dict));
+                    }
+                    None => {
+                        if let Ok(c) = pdf.get_dictionary_mut(catalog_id) {
+                            c.set("Dests", dict);
+                        }
                     }
                 }
             }
         }
     }
-    if let Some(Object::Reference(names)) = indirect(pdf, catalog_id, b"Names", &gone.changed)
+    if let Some(names) =
+        indirect(pdf, catalog_id, b"Names", &gone.changed).and_then(|o| o.as_reference())
         && let Some(tree) = indirect(pdf, names, b"Dests", &gone.changed)
     {
         clean_tree(
@@ -244,20 +262,18 @@ fn clean_named_dests(pdf: &mut Pdf, catalog_id: ObjectId, gone: &Gone) -> HashMa
     let catalog = pdf.get_dictionary(catalog_id).cloned().unwrap_or_default();
     if let Some(d) = catalog
         .get(b"Dests")
-        .ok()
         .and_then(|d| deref(pdf, d))
-        .and_then(|d| d.as_dict().ok())
+        .and_then(plain_dict)
     {
         for (k, v) in d.iter() {
-            out.insert(k.clone(), v.clone());
+            out.insert(k.to_vec(), v.clone());
         }
     }
     if let Some(tree) = catalog
         .get(b"Names")
-        .ok()
         .and_then(|n| deref(pdf, n))
-        .and_then(|n| n.as_dict().ok())
-        .and_then(|n| n.get(b"Dests").ok())
+        .and_then(plain_dict)
+        .and_then(|n| n.get(b"Dests"))
     {
         collect_tree(pdf, tree, &mut out, 0);
     }
@@ -274,21 +290,20 @@ fn clean_tree(
     changed: &Changed,
     depth: u32,
 ) {
-    let Object::Reference(id) = node else {
+    let Some(id) = node.as_reference() else {
         return;
     };
     if depth > 32 {
         return;
     }
-    let Ok(mut dict) = pdf.get_dictionary(*id).cloned() else {
+    let Ok(mut dict) = pdf.get_dictionary(id).cloned() else {
         return;
     };
     if let Some(pairs) = dict
         .get(key)
-        .ok()
         .and_then(|p| deref(pdf, p))
-        .and_then(|p| p.as_array().ok())
-        .cloned()
+        .and_then(Object::as_array)
+        .map(<[Object]>::to_vec)
     {
         let kept: Vec<Object> = pairs
             .chunks(2)
@@ -296,17 +311,16 @@ fn clean_tree(
             .flat_map(|c| c.to_vec())
             .collect();
         if kept.len() != pairs.len() {
-            dict.set(key.to_vec(), Object::Array(kept));
-            pdf.objects.insert(*id, Object::Dictionary(dict.clone()));
-            changed.borrow_mut().insert(*id);
+            dict.set(key, Object::from(kept));
+            pdf.objects.insert(id, Object::from(dict.clone()));
+            changed.borrow_mut().insert(id);
         }
     }
     if let Some(kids) = dict
         .get(b"Kids")
-        .ok()
         .and_then(|k| deref(pdf, k))
-        .and_then(|k| k.as_array().ok())
-        .cloned()
+        .and_then(Object::as_array)
+        .map(<[Object]>::to_vec)
     {
         for kid in &kids {
             clean_tree(pdf, kid, key, dead, changed, depth + 1);
@@ -315,7 +329,7 @@ fn clean_tree(
 }
 
 fn collect_tree(pdf: &Pdf, node: &Object, out: &mut HashMap<Vec<u8>, Object>, depth: u32) {
-    let Some(dict) = deref(pdf, node).and_then(|n| n.as_dict().ok()) else {
+    let Some(dict) = deref(pdf, node).and_then(plain_dict) else {
         return;
     };
     if depth > 32 {
@@ -323,21 +337,21 @@ fn collect_tree(pdf: &Pdf, node: &Object, out: &mut HashMap<Vec<u8>, Object>, de
     }
     if let Some(pairs) = dict
         .get(b"Names")
-        .ok()
         .and_then(|p| deref(pdf, p))
-        .and_then(|p| p.as_array().ok())
+        .and_then(Object::as_array)
     {
         for c in pairs.chunks(2) {
-            if let [Object::String(k, _), v] = c {
-                out.insert(k.clone(), v.clone());
+            if let [k, v] = c
+                && let Some(kb) = k.as_bytes()
+            {
+                out.insert(kb.to_vec(), v.clone());
             }
         }
     }
     if let Some(kids) = dict
         .get(b"Kids")
-        .ok()
         .and_then(|k| deref(pdf, k))
-        .and_then(|k| k.as_array().ok())
+        .and_then(Object::as_array)
     {
         for kid in kids {
             collect_tree(pdf, kid, out, depth + 1);
@@ -356,10 +370,10 @@ fn kept_pages(pdf: &Pdf, gone: &Gone) -> Vec<ObjectId> {
 fn annots_of(pdf: &Pdf, page: ObjectId) -> Vec<Object> {
     pdf.get_dictionary(page)
         .ok()
-        .and_then(|d| d.get(b"Annots").ok())
+        .and_then(|d| d.get(b"Annots"))
         .and_then(|a| deref(pdf, a))
-        .and_then(|a| a.as_array().ok())
-        .cloned()
+        .and_then(Object::as_array)
+        .map(<[Object]>::to_vec)
         .unwrap_or_default()
 }
 
@@ -372,22 +386,18 @@ fn dropped_annots(pdf: &Pdf, gone: &Gone) -> HashSet<ObjectId> {
         .kept
         .iter()
         .flat_map(|&p| annots_of(pdf, p))
-        .filter_map(|a| a.as_reference().ok())
+        .filter_map(|a| a.as_reference())
         .collect();
     let mut out = HashSet::new();
     for (&id, o) in &pdf.objects {
-        let Object::Dictionary(d) = o else {
+        let Value::Dict(d) = o.value() else {
             continue;
         };
         if gone.page(pdf, id) {
-            out.extend(
-                annots_of(pdf, id)
-                    .iter()
-                    .filter_map(|a| a.as_reference().ok()),
-            );
+            out.extend(annots_of(pdf, id).iter().filter_map(Object::as_reference));
         } else if d.has(b"Subtype")
             && d.has(b"Rect")
-            && d.get(b"P").is_ok_and(|p| gone.target(pdf, p))
+            && d.get(b"P").is_some_and(|p| gone.target(pdf, p))
         {
             out.insert(id);
         }
@@ -403,25 +413,23 @@ fn clean_links(pdf: &mut Pdf, gone: &Gone, names: &HashMap<Vec<u8>, Object>) {
         let kept: Vec<Object> = annots
             .iter()
             .filter(|a| {
-                let Some(d) = deref(pdf, a).and_then(|d| d.as_dict().ok()) else {
+                let Some(d) = deref(pdf, a).and_then(plain_dict) else {
                     return true;
                 };
                 let link = d
                     .get(b"Subtype")
-                    .ok()
-                    .and_then(|s| s.as_name().ok())
+                    .and_then(Object::as_name)
                     .is_some_and(|s| s == b"Link");
                 if !link {
                     return true;
                 }
-                let dest = d.get(b"Dest").ok().cloned().or_else(|| {
-                    let action = deref(pdf, d.get(b"A").ok()?)?.as_dict().ok()?;
+                let dest = d.get(b"Dest").cloned().or_else(|| {
+                    let action = plain_dict(deref(pdf, d.get(b"A")?)?)?;
                     let goto = action
                         .get(b"S")
-                        .ok()
-                        .and_then(|s| s.as_name().ok())
+                        .and_then(Object::as_name)
                         .is_some_and(|s| s == b"GoTo");
-                    goto.then(|| action.get(b"D").ok().cloned()).flatten()
+                    goto.then(|| action.get(b"D").cloned()).flatten()
                 });
                 !dest.is_some_and(|d| gone.dest(pdf, &d, names))
             })
@@ -433,7 +441,7 @@ fn clean_links(pdf: &mut Pdf, gone: &Gone, names: &HashMap<Vec<u8>, Object>) {
             if kept.is_empty() {
                 d.remove(b"Annots");
             } else {
-                d.set("Annots", Object::Array(kept));
+                d.set("Annots", Object::from(kept));
             }
             gone.changed.borrow_mut().insert(page);
         }
@@ -450,20 +458,19 @@ fn clean_open_action(
     let Some(action) = pdf
         .get_dictionary(catalog_id)
         .ok()
-        .and_then(|c| c.get(b"OpenAction").ok())
+        .and_then(|c| c.get(b"OpenAction"))
         .cloned()
     else {
         return;
     };
-    let dead = match deref(pdf, &action) {
-        Some(Object::Array(_)) => gone.dest(pdf, &action, names),
-        Some(Object::Dictionary(a)) => {
+    let dead = match deref(pdf, &action).map(Object::value) {
+        Some(Value::Array(_)) => gone.dest(pdf, &action, names),
+        Some(Value::Dict(a)) => {
             let goto = a
                 .get(b"S")
-                .ok()
-                .and_then(|s| s.as_name().ok())
+                .and_then(Object::as_name)
                 .is_some_and(|s| s == b"GoTo");
-            goto && a.get(b"D").ok().is_some_and(|d| gone.dest(pdf, d, names))
+            goto && a.get(b"D").is_some_and(|d| gone.dest(pdf, d, names))
         }
         _ => false,
     };
@@ -480,7 +487,7 @@ fn clean_fields(pdf: &mut Pdf, catalog_id: ObjectId, kept: &HashSet<ObjectId>, c
     let Some(form) = pdf
         .get_dictionary(catalog_id)
         .ok()
-        .and_then(|c| c.get(b"AcroForm").ok())
+        .and_then(|c| c.get(b"AcroForm"))
         .cloned()
     else {
         return;
@@ -488,22 +495,21 @@ fn clean_fields(pdf: &mut Pdf, catalog_id: ObjectId, kept: &HashSet<ObjectId>, c
     let on_kept: HashSet<ObjectId> = kept
         .iter()
         .flat_map(|&p| annots_of(pdf, p))
-        .filter_map(|a| a.as_reference().ok())
+        .filter_map(|a| a.as_reference())
         .collect();
-    let (form_id, mut form_dict) = match &form {
-        Object::Reference(id) => match pdf.get_dictionary(*id) {
+    let (form_id, mut form_dict) = match form.value() {
+        Value::Ref(id) => match pdf.get_dictionary(*id) {
             Ok(d) => (Some(*id), d.clone()),
             Err(_) => return,
         },
-        Object::Dictionary(d) => (None, d.clone()),
+        Value::Dict(d) => (None, d.clone()),
         _ => return,
     };
     let Some(fields) = form_dict
         .get(b"Fields")
-        .ok()
         .and_then(|f| deref(pdf, f))
-        .and_then(|f| f.as_array().ok())
-        .cloned()
+        .and_then(Object::as_array)
+        .map(<[Object]>::to_vec)
     else {
         return;
     };
@@ -518,7 +524,7 @@ fn clean_fields(pdf: &mut Pdf, catalog_id: ObjectId, kept: &HashSet<ObjectId>, c
         .filter_map(|f| cleaning.keep(pdf, f, 0))
         .collect();
     changed.borrow_mut().append(&mut cleaning.changed);
-    if cleaning.removed.is_empty() && left == fields {
+    if cleaning.removed.is_empty() && same_slice(&left, &fields) {
         return;
     }
     // A form with no fields left: Acrobat would offer to fill nothing, and
@@ -530,39 +536,41 @@ fn clean_fields(pdf: &mut Pdf, catalog_id: ObjectId, kept: &HashSet<ObjectId>, c
         }
         return;
     }
-    form_dict.set("Fields", Object::Array(left));
+    form_dict.set("Fields", Object::from(left));
     // The calculation order names fields too.
     if let Some(co) = form_dict
         .get(b"CO")
-        .ok()
         .and_then(|c| deref(pdf, c))
-        .and_then(|c| c.as_array().ok())
-        .cloned()
+        .and_then(Object::as_array)
+        .map(<[Object]>::to_vec)
     {
         let co: Vec<Object> = co
             .into_iter()
             .filter(|f| {
                 !f.as_reference()
-                    .is_ok_and(|id| cleaning.removed.contains(&id))
+                    .is_some_and(|id| cleaning.removed.contains(&id))
             })
             .collect();
-        form_dict.set("CO", Object::Array(co));
+        form_dict.set("CO", Object::from(co));
     }
     let holder = form_id.unwrap_or(catalog_id);
     let was = match form_id {
         Some(id) => pdf.get_object(id).ok(),
-        None => (pdf.get_dictionary(catalog_id).ok()).and_then(|c| c.get(b"AcroForm").ok()),
+        None => (pdf.get_dictionary(catalog_id).ok()).and_then(|c| c.get(b"AcroForm")),
     };
-    if was.and_then(|w| w.as_dict().ok()) != Some(&form_dict) {
+    if !was
+        .and_then(plain_dict)
+        .is_some_and(|w| same_dict(w, &form_dict))
+    {
         changed.borrow_mut().insert(holder);
-    }
-    match form_id {
-        Some(id) => {
-            pdf.objects.insert(id, Object::Dictionary(form_dict));
-        }
-        None => {
-            if let Ok(c) = pdf.get_dictionary_mut(catalog_id) {
-                c.set("AcroForm", form_dict);
+        match form_id {
+            Some(id) => {
+                pdf.objects.insert(id, Object::from(form_dict));
+            }
+            None => {
+                if let Ok(c) = pdf.get_dictionary_mut(catalog_id) {
+                    c.set("AcroForm", form_dict);
+                }
             }
         }
     }
@@ -587,14 +595,14 @@ impl Cleaning {
     /// be), a field if any of its widgets stay (or it never had any), with
     /// its `/Kids` pruned. None when it goes.
     fn keep(&mut self, pdf: &mut Pdf, node: &Object, depth: u32) -> Option<Object> {
-        let (id, mut dict) = match node {
-            Object::Reference(id) => {
+        let (id, mut dict) = match node.value() {
+            Value::Ref(id) => {
                 if let Some(&keep) = self.seen.get(id) {
                     return keep.then(|| node.clone());
                 }
                 (Some(*id), pdf.get_dictionary(*id).ok()?.clone())
             }
-            Object::Dictionary(d) => (None, d.clone()),
+            Value::Dict(d) => (None, d.clone()),
             // Not a field: left as it is.
             _ => return Some(node.clone()),
         };
@@ -607,15 +615,13 @@ impl Cleaning {
         }
         let widget = dict
             .get(b"Subtype")
-            .ok()
-            .and_then(|s| s.as_name().ok())
+            .and_then(Object::as_name)
             .is_some_and(|s| s == b"Widget");
         let kids = dict
             .get(b"Kids")
-            .ok()
             .and_then(|k| deref(pdf, k))
-            .and_then(|k| k.as_array().ok())
-            .cloned();
+            .and_then(Object::as_array)
+            .map(<[Object]>::to_vec);
         let keep = match kids {
             Some(kids) if !kids.is_empty() => {
                 let left: Vec<Object> = kids
@@ -623,7 +629,7 @@ impl Cleaning {
                     .filter_map(|k| self.keep(pdf, k, depth + 1))
                     .collect();
                 let any = !left.is_empty();
-                dict.set("Kids", Object::Array(left));
+                dict.set("Kids", Object::from(left));
                 any
             }
             _ if widget => id.is_some_and(|id| self.on_kept.contains(&id)),
@@ -631,17 +637,21 @@ impl Cleaning {
         };
         match id {
             Some(id) => {
-                if pdf.get_dictionary(id).ok() != Some(&dict) {
+                if !pdf
+                    .get_dictionary(id)
+                    .ok()
+                    .is_some_and(|w| same_dict(w, &dict))
+                {
                     self.changed.insert(id);
+                    pdf.objects.insert(id, Object::from(dict));
                 }
-                pdf.objects.insert(id, Object::Dictionary(dict));
                 self.seen.insert(id, keep);
                 if !keep {
                     self.removed.insert(id);
                 }
                 keep.then(|| node.clone())
             }
-            None => keep.then_some(Object::Dictionary(dict)),
+            None => keep.then_some(Object::from(dict)),
         }
     }
 }
@@ -652,8 +662,8 @@ fn prune_structure(pdf: &mut Pdf, catalog_id: ObjectId, gone: &Gone) -> bool {
     let Some(root) = pdf
         .get_dictionary(catalog_id)
         .ok()
-        .and_then(|c| c.get(b"StructTreeRoot").ok())
-        .and_then(|r| r.as_reference().ok())
+        .and_then(|c| c.get(b"StructTreeRoot"))
+        .and_then(Object::as_reference)
     else {
         return true;
     };
@@ -662,7 +672,7 @@ fn prune_structure(pdf: &mut Pdf, catalog_id: ObjectId, gone: &Gone) -> bool {
     let Some(k) = pdf
         .get_dictionary(root)
         .ok()
-        .and_then(|r| r.get(b"K").ok())
+        .and_then(|r| r.get(b"K"))
         .cloned()
     else {
         return true;
@@ -682,7 +692,7 @@ fn prune_structure(pdf: &mut Pdf, catalog_id: ObjectId, gone: &Gone) -> bool {
         (b"ParentTree".as_slice(), b"Nums".as_slice()),
         (b"IDTree", b"Names"),
     ] {
-        if let Ok(t) = pdf.get_dictionary(root).and_then(|r| r.get(tree)) {
+        if let Some(t) = pdf.get_dictionary(root).ok().and_then(|r| r.get(tree)) {
             tree_refs(pdf, t, key, &mut orphans, 0);
         }
     }
@@ -693,7 +703,7 @@ fn prune_structure(pdf: &mut Pdf, catalog_id: ObjectId, gone: &Gone) -> bool {
         let top = topmost(pdf, id, &seen);
         if prune_kids(
             pdf,
-            &Object::Reference(top),
+            &Object::from(top),
             None,
             gone,
             &mut removed,
@@ -708,10 +718,10 @@ fn prune_structure(pdf: &mut Pdf, catalog_id: ObjectId, gone: &Gone) -> bool {
     if removed.is_empty() {
         return true;
     }
-    if let Ok(r) = pdf.get_dictionary_mut(root) {
-        if r.get(b"K").ok() != Some(&pruned) {
-            gone.changed.borrow_mut().insert(root);
-        }
+    if let Ok(r) = pdf.get_dictionary_mut(root)
+        && !r.get(b"K").is_some_and(|w| w.eq_value(&pruned))
+    {
+        gone.changed.borrow_mut().insert(root);
         r.set("K", pruned);
     }
     // The parent tree: each page's marked content (an array of elements)
@@ -720,15 +730,15 @@ fn prune_structure(pdf: &mut Pdf, catalog_id: ObjectId, gone: &Gone) -> bool {
         // An entry for an object's element, or a page's whose elements
         // are all gone.
         let dead = |pdf: &Pdf, v: &Object| {
-            let gone_elem = |o: &Object| match o {
-                Object::Reference(id) => removed.contains(id),
-                Object::Null => true,
+            let gone_elem = |o: &Object| match o.value() {
+                Value::Ref(id) => removed.contains(id),
+                Value::Null => true,
                 _ => false,
             };
-            match v {
-                Object::Reference(id) if removed.contains(id) => true,
-                v => deref(pdf, v)
-                    .and_then(|a| a.as_array().ok())
+            match v.value() {
+                Value::Ref(id) if removed.contains(id) => true,
+                _ => deref(pdf, v)
+                    .and_then(Object::as_array)
                     .is_some_and(|a| !a.is_empty() && a.iter().all(gone_elem)),
             }
         };
@@ -742,7 +752,7 @@ fn prune_structure(pdf: &mut Pdf, catalog_id: ObjectId, gone: &Gone) -> bool {
             pdf,
             &ids,
             b"Names",
-            &|_, v| v.as_reference().is_ok_and(|id| removed.contains(&id)),
+            &|_, v| v.as_reference().is_some_and(|id| removed.contains(&id)),
             &gone.changed,
             0,
         );
@@ -769,57 +779,53 @@ fn prune_kids(
         Some(o) => gone.target(pdf, o),
         None => inherited.is_some_and(|id| gone.page(pdf, id)),
     };
-    match k {
-        Object::Array(items) => {
+    match k.value() {
+        Value::Array(items) => {
             let mut left = Vec::new();
             for item in items {
                 let kept = prune_kids(pdf, item, page, gone, removed, seen, depth + 1)?;
-                if !matches!(kept, Object::Null) {
+                if !kept.is_null() {
                     left.push(kept);
                 }
             }
-            Some(Object::Array(left))
+            Some(Object::from(left))
         }
         // Marked content on the element's page.
-        Object::Integer(_) => Some(if on_gone(pdf, None, page) {
-            Object::Null
+        Value::Integer(_) => Some(if on_gone(pdf, None, page) {
+            Object::null()
         } else {
             k.clone()
         }),
         // Marked content (MCR) or an object (OBJR) on a page of its own.
-        Object::Dictionary(d) => {
-            let dead = on_gone(pdf, d.get(b"Pg").ok(), page)
-                || d.get(b"Obj").ok().is_some_and(|o| gone.object(pdf, o));
-            Some(if dead { Object::Null } else { k.clone() })
+        Value::Dict(d) => {
+            let dead = on_gone(pdf, d.get(b"Pg"), page)
+                || d.get(b"Obj").is_some_and(|o| gone.object(pdf, o));
+            Some(if dead { Object::null() } else { k.clone() })
         }
-        Object::Reference(id) => {
-            let Ok(Object::Dictionary(d)) = pdf.get_object(*id).cloned() else {
+        Value::Ref(id) => {
+            let Ok(d) = pdf.get_dictionary(*id).cloned() else {
                 return Some(k.clone());
             };
-            let is_ref = d
-                .get(b"Type")
-                .ok()
-                .and_then(|t| t.as_name().ok())
-                .is_some_and(|t| t == b"MCR" || t == b"OBJR");
+            let is_ref = d.type_name().is_some_and(|t| t == b"MCR" || t == b"OBJR");
             if is_ref {
-                let dead = on_gone(pdf, d.get(b"Pg").ok(), page)
-                    || d.get(b"Obj").ok().is_some_and(|o| gone.object(pdf, o));
-                return Some(if dead { Object::Null } else { k.clone() });
+                let dead = on_gone(pdf, d.get(b"Pg"), page)
+                    || d.get(b"Obj").is_some_and(|o| gone.object(pdf, o));
+                return Some(if dead { Object::null() } else { k.clone() });
             }
             if !seen.insert(*id) {
                 return Some(k.clone());
             }
             // A structure element: its page, then its kids.
-            let own = d.get(b"Pg").ok().cloned();
+            let own = d.get(b"Pg").cloned();
             let own_gone = own.as_ref().is_some_and(|p| gone.target(pdf, p));
-            let Ok(kids) = d.get(b"K").cloned() else {
+            let Some(kids) = d.get(b"K").cloned() else {
                 if own_gone {
                     removed.insert(*id);
-                    return Some(Object::Null);
+                    return Some(Object::null());
                 }
                 return Some(k.clone());
             };
-            let page = own.as_ref().and_then(|p| p.as_reference().ok()).or(page);
+            let page = own.as_ref().and_then(Object::as_reference).or(page);
             let had = !is_empty(&kids);
             let left = prune_kids(pdf, &kids, page, gone, removed, seen, depth + 1)?;
             if had && is_empty(&left) {
@@ -830,13 +836,16 @@ fn prune_kids(
                     e.remove(b"K");
                     gone.changed.borrow_mut().insert(*id);
                 }
-                return Some(Object::Null);
+                return Some(Object::null());
             }
-            if let Ok(e) = pdf.get_dictionary_mut(*id) {
-                if left != kids || own_gone {
-                    gone.changed.borrow_mut().insert(*id);
+            let kids_changed = !left.eq_value(&kids);
+            if (kids_changed || own_gone)
+                && let Ok(e) = pdf.get_dictionary_mut(*id)
+            {
+                gone.changed.borrow_mut().insert(*id);
+                if kids_changed {
+                    e.set("K", left);
                 }
-                e.set("K", left);
                 // Its page is gone, but it has content on others, each
                 // naming its own (an MCID on its page went with it).
                 if own_gone {
@@ -850,9 +859,9 @@ fn prune_kids(
 }
 
 fn is_empty(o: &Object) -> bool {
-    match o {
-        Object::Array(a) => a.iter().all(is_empty),
-        Object::Null => true,
+    match o.value() {
+        Value::Array(a) => a.iter().all(is_empty),
+        Value::Null => true,
         _ => false,
     }
 }
@@ -866,8 +875,8 @@ fn topmost(pdf: &Pdf, id: ObjectId, seen: &HashSet<ObjectId>) -> ObjectId {
         let Some(up) = pdf
             .get_dictionary(at)
             .ok()
-            .and_then(|d| d.get(b"P").ok())
-            .and_then(|p| p.as_reference().ok())
+            .and_then(|d| d.get(b"P"))
+            .and_then(Object::as_reference)
         else {
             break;
         };
@@ -884,7 +893,7 @@ fn topmost(pdf: &Pdf, id: ObjectId, seen: &HashSet<ObjectId>) -> ObjectId {
 /// The references among a number tree's values (`key` `Nums`) or a name
 /// tree's (`Names`), and in the arrays among them.
 fn tree_refs(pdf: &Pdf, node: &Object, key: &[u8], out: &mut Vec<ObjectId>, depth: u32) {
-    let Some(dict) = deref(pdf, node).and_then(|n| n.as_dict().ok()) else {
+    let Some(dict) = deref(pdf, node).and_then(plain_dict) else {
         return;
     };
     if depth > 32 {
@@ -892,24 +901,20 @@ fn tree_refs(pdf: &Pdf, node: &Object, key: &[u8], out: &mut Vec<ObjectId>, dept
     }
     if let Some(pairs) = dict
         .get(key)
-        .ok()
         .and_then(|n| deref(pdf, n))
-        .and_then(|n| n.as_array().ok())
+        .and_then(Object::as_array)
     {
         for v in pairs.iter().skip(1).step_by(2) {
-            match deref(pdf, v) {
-                Some(Object::Array(a)) => {
-                    out.extend(a.iter().filter_map(|o| o.as_reference().ok()))
-                }
-                _ => out.extend(v.as_reference().ok()),
+            match deref(pdf, v).and_then(Object::as_array) {
+                Some(a) => out.extend(a.iter().filter_map(Object::as_reference)),
+                None => out.extend(v.as_reference()),
             }
         }
     }
     if let Some(kids) = dict
         .get(b"Kids")
-        .ok()
         .and_then(|k| deref(pdf, k))
-        .and_then(|k| k.as_array().ok())
+        .and_then(Object::as_array)
     {
         for kid in kids {
             tree_refs(pdf, kid, key, out, depth + 1);
@@ -925,50 +930,59 @@ fn null_removed_in_tree(
     changed: &Changed,
     depth: u32,
 ) {
-    let Object::Reference(id) = node else {
+    let Some(id) = node.as_reference() else {
         return;
     };
     if depth > 32 {
         return;
     }
-    let Ok(mut dict) = pdf.get_dictionary(*id).cloned() else {
+    let Ok(mut dict) = pdf.get_dictionary(id).cloned() else {
         return;
     };
-    let null = |o: &Object| match o {
-        Object::Reference(r) if removed.contains(r) => Object::Null,
-        o => o.clone(),
+    let null = |o: &Object| match o.value() {
+        Value::Ref(r) if removed.contains(r) => Object::null(),
+        _ => o.clone(),
     };
-    if let Ok(Object::Array(nums)) = dict.get(b"Nums").cloned() {
+    if let Some(nums) = dict
+        .get(b"Nums")
+        .and_then(Object::as_array)
+        .map(<[Object]>::to_vec)
+    {
         let mut nulled = false;
-        let mut out = nums.clone();
+        let mut out = nums;
         for v in out.iter_mut().skip(1).step_by(2) {
-            match v {
-                Object::Array(a) => {
+            if let Some(r) = v.as_reference() {
+                if let Some(a) = pdf
+                    .get_object(r)
+                    .ok()
+                    .and_then(Object::as_array)
+                    .map(<[Object]>::to_vec)
+                {
                     let n: Vec<Object> = a.iter().map(null).collect();
-                    if n != *a {
-                        *a = n;
-                        nulled = true;
+                    if !same_slice(&n, &a) {
+                        pdf.objects.insert(r, Object::from(n));
+                        changed.borrow_mut().insert(r);
                     }
                 }
-                Object::Reference(r) => {
-                    if let Ok(Object::Array(a)) = pdf.get_object(*r).cloned() {
-                        let n: Vec<Object> = a.iter().map(null).collect();
-                        if n != a {
-                            pdf.objects.insert(*r, Object::Array(n));
-                            changed.borrow_mut().insert(*r);
-                        }
-                    }
+            } else if let Some(a) = v.as_array() {
+                let n: Vec<Object> = a.iter().map(null).collect();
+                if !same_slice(&n, a) {
+                    *v = Object::from(n);
+                    nulled = true;
                 }
-                _ => {}
             }
         }
         if nulled {
-            dict.set("Nums", Object::Array(out));
-            pdf.objects.insert(*id, Object::Dictionary(dict.clone()));
-            changed.borrow_mut().insert(*id);
+            dict.set("Nums", Object::from(out));
+            pdf.objects.insert(id, Object::from(dict.clone()));
+            changed.borrow_mut().insert(id);
         }
     }
-    if let Ok(Object::Array(kids)) = dict.get(b"Kids").cloned() {
+    if let Some(kids) = dict
+        .get(b"Kids")
+        .and_then(Object::as_array)
+        .map(<[Object]>::to_vec)
+    {
         for kid in &kids {
             null_removed_in_tree(pdf, kid, removed, changed, depth + 1);
         }
@@ -981,17 +995,17 @@ fn drop_threads(pdf: &mut Pdf, catalog_id: ObjectId, gone: &Gone) -> bool {
     let Some(threads) = pdf
         .get_dictionary(catalog_id)
         .ok()
-        .and_then(|c| c.get(b"Threads").ok())
+        .and_then(|c| c.get(b"Threads"))
         .and_then(|t| deref(pdf, t))
-        .and_then(|t| t.as_array().ok())
-        .cloned()
+        .and_then(Object::as_array)
+        .map(<[Object]>::to_vec)
     else {
         return false;
     };
     let mut dropped = HashSet::new();
     let mut left = Vec::new();
     for t in threads {
-        let Ok(tid) = t.as_reference() else {
+        let Some(tid) = t.as_reference() else {
             left.push(t);
             continue;
         };
@@ -999,18 +1013,18 @@ fn drop_threads(pdf: &mut Pdf, catalog_id: ObjectId, gone: &Gone) -> bool {
         let first = pdf
             .get_dictionary(tid)
             .ok()
-            .and_then(|d| d.get(b"F").ok())
-            .and_then(|f| f.as_reference().ok());
+            .and_then(|d| d.get(b"F"))
+            .and_then(Object::as_reference);
         let mut bead = first;
         let mut through_gone = false;
         let mut steps = 0;
         while let Some(b) = bead {
             let Ok(d) = pdf.get_dictionary(b) else { break };
-            if d.get(b"P").ok().is_some_and(|p| gone.target(pdf, p)) {
+            if d.get(b"P").is_some_and(|p| gone.target(pdf, p)) {
                 through_gone = true;
                 break;
             }
-            bead = d.get(b"N").ok().and_then(|n| n.as_reference().ok());
+            bead = d.get(b"N").and_then(Object::as_reference);
             steps += 1;
             if bead == first || steps > 10_000 {
                 break;
@@ -1029,30 +1043,45 @@ fn drop_threads(pdf: &mut Pdf, catalog_id: ObjectId, gone: &Gone) -> bool {
         let beads = pdf
             .get_dictionary(page)
             .ok()
-            .and_then(|d| d.get(b"B").ok())
+            .and_then(|d| d.get(b"B"))
             .and_then(|b| deref(pdf, b))
-            .and_then(|b| b.as_array().ok())
-            .cloned();
+            .and_then(Object::as_array)
+            .map(<[Object]>::to_vec);
         let Some(beads) = beads else { continue };
+        let had_len = beads.len();
         let kept: Vec<Object> = beads
             .into_iter()
             .filter(|b| {
                 !b.as_reference()
-                    .ok()
                     .and_then(|b| pdf.get_dictionary(b).ok())
-                    .and_then(|d| d.get(b"T").ok())
-                    .and_then(|t| t.as_reference().ok())
+                    .and_then(|d| d.get(b"T"))
+                    .and_then(Object::as_reference)
                     .is_some_and(|t| dropped.contains(&t))
             })
             .collect();
-        if let Ok(d) = pdf.get_dictionary_mut(page) {
-            let was = d.get(b"B").ok().cloned();
+        if (kept.len() != had_len
+            || pdf
+                .get_dictionary(page)
+                .ok()
+                .and_then(|d| d.get(b"B"))
+                .is_some_and(|b| b.as_reference().is_some()))
+            && let Ok(d) = pdf.get_dictionary_mut(page)
+        {
+            let was = d.get(b"B").cloned();
             if kept.is_empty() {
                 d.remove(b"B");
-            } else {
-                d.set("B", Object::Array(kept));
+            } else if !was
+                .as_ref()
+                .is_some_and(|w| w.eq_value(&Object::from(kept.clone())))
+            {
+                d.set("B", Object::from(kept));
             }
-            if d.get(b"B").ok() != was.as_ref() {
+            let same = match (d.get(b"B"), was.as_ref()) {
+                (Some(a), Some(b)) => a.eq_value(b),
+                (None, None) => true,
+                _ => false,
+            };
+            if !same {
                 gone.changed.borrow_mut().insert(page);
             }
         }
@@ -1061,7 +1090,7 @@ fn drop_threads(pdf: &mut Pdf, catalog_id: ObjectId, gone: &Gone) -> bool {
         if left.is_empty() {
             c.remove(b"Threads");
         } else {
-            c.set("Threads", Object::Array(left));
+            c.set("Threads", Object::from(left));
         }
         gone.changed.borrow_mut().insert(catalog_id);
     }
@@ -1073,7 +1102,7 @@ fn drop_threads(pdf: &mut Pdf, catalog_id: ObjectId, gone: &Gone) -> bool {
 /// instead.
 fn sweep(pdf: &mut Pdf, gone: &Gone) {
     let mut queue: VecDeque<ObjectId> = VecDeque::new();
-    refs(&Object::Dictionary(pdf.trailer.clone()), &mut |id| {
+    refs(&Object::from(pdf.trailer.clone()), &mut |id| {
         queue.push_back(id)
     });
     let mut seen = HashSet::new();
@@ -1100,31 +1129,21 @@ fn sweep(pdf: &mut Pdf, gone: &Gone) {
 
 /// Each reference in `o`.
 fn refs(o: &Object, f: &mut dyn FnMut(ObjectId)) {
-    match o {
-        Object::Reference(id) => f(*id),
-        Object::Array(a) => a.iter().for_each(|o| refs(o, f)),
-        Object::Dictionary(d) => d.iter().for_each(|(_, o)| refs(o, f)),
-        Object::Stream(s) => s.dict.iter().for_each(|(_, o)| refs(o, f)),
-        _ => {}
+    for r in o.references() {
+        f(r);
     }
 }
 
 /// Null each reference in `o` that `dead` says to.
 fn cut(o: &mut Object, dead: &dyn Fn(ObjectId) -> bool) {
-    match o {
-        Object::Reference(id) if dead(*id) => *o = Object::Null,
-        Object::Array(a) => a.iter_mut().for_each(|o| cut(o, dead)),
-        Object::Dictionary(d) => d.iter_mut().for_each(|(_, o)| cut(o, dead)),
-        Object::Stream(s) => s.dict.iter_mut().for_each(|(_, o)| cut(o, dead)),
-        _ => {}
-    }
+    o.renumber(|id| (!dead(id)).then_some(id));
 }
 
 /// The pages a page-tree rewrite didn't keep, for tests.
 #[cfg(test)]
 pub(crate) fn page_count_reachable(pdf: &Pdf) -> usize {
     let mut queue: VecDeque<ObjectId> = VecDeque::new();
-    refs(&Object::Dictionary(pdf.trailer.clone()), &mut |id| {
+    refs(&Object::from(pdf.trailer.clone()), &mut |id| {
         queue.push_back(id)
     });
     let mut seen = HashSet::new();
@@ -1136,9 +1155,7 @@ pub(crate) fn page_count_reachable(pdf: &Pdf) -> usize {
         let Some(obj) = pdf.objects.get(&id) else {
             continue;
         };
-        if let Object::Dictionary(d) = obj
-            && d.get(b"Type").ok().and_then(|t| t.as_name().ok()) == Some(b"Page")
-        {
+        if matches!(obj.value(), Value::Dict(d) if d.has_type(b"Page")) {
             pages += 1;
         }
         refs(obj, &mut |r| queue.push_back(r));

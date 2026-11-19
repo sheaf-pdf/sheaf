@@ -15,7 +15,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
 
-use crate::pdf::{Dictionary, Object, StringFormat};
+use crate::pdf::{Dictionary, Object, Value};
 
 use crate::source::{ContentLimits, Limits};
 
@@ -168,7 +168,7 @@ pub fn object(operand: &[u8], depth: usize) -> Option<Object> {
 /// dictionary without those entries ([`object`]), nested no more than
 /// `depth` deep.
 pub(crate) fn without_entries(dict: &[u8], keys: &[&[u8]], depth: usize) -> Option<Vec<u8>> {
-    let Object::Dictionary(mut left) = object(dict, depth)? else {
+    let Some(Value::Dict(mut left)) = object(dict, depth).map(Object::into_value) else {
         return None;
     };
     let inner = dict.strip_suffix(b">>").filter(|i| i.starts_with(b"<<"))?;
@@ -199,7 +199,7 @@ pub(crate) fn without_entries(dict: &[u8], keys: &[&[u8]], depth: usize) -> Opti
         left.remove(key);
     }
     let (whole, _) = next_raw(&out, 0, depth)?.ok()?;
-    (whole == (0..out.len()) && object(&out, depth)? == Object::Dictionary(left)).then_some(out)
+    (whole == (0..out.len()) && object(&out, depth)? == Object::from(left)).then_some(out)
 }
 
 /// What's next in an operand read as an object.
@@ -221,7 +221,7 @@ fn item(s: &[u8], at: &mut usize, depth: usize, close: Option<&[u8]>) -> Option<
     let (end, value) = match *rest.first()? {
         b'(' => {
             let end = literal_string(s, start).ok()?;
-            let string = Object::String(literal(&s[start..end]), StringFormat::Literal);
+            let string = crate::pdf::literal(literal(&s[start..end]));
             (end, Some(string))
         }
         b'<' if rest.starts_with(b"<<") => {
@@ -230,7 +230,7 @@ fn item(s: &[u8], at: &mut usize, depth: usize, close: Option<&[u8]>) -> Option<
         }
         b'<' => {
             let end = hex_string(s, start).ok()?;
-            let string = Object::String(hex(&s[start..end]), StringFormat::Hexadecimal);
+            let string = Object::hex(hex(&s[start..end]));
             (end, Some(string))
         }
         b'[' => {
@@ -252,7 +252,7 @@ fn item(s: &[u8], at: &mut usize, depth: usize, close: Option<&[u8]>) -> Option<
         b')' | b'>' | b']' | b'{' | b'}' => (start + 1, None),
         b'/' => {
             let end = word_end(s, start + 1);
-            (end, Some(Object::Name(name(&s[start..end])?.into_owned())))
+            (end, Some(Object::name(name(&s[start..end])?.into_owned())))
         }
         _ => {
             let end = word_end(s, start);
@@ -269,7 +269,7 @@ fn array(s: &[u8], at: &mut usize, depth: usize) -> Option<Object> {
     loop {
         match item(s, at, depth, Some(b"]")) {
             Some(Item::Value(element)) => elements.extend(element),
-            Some(Item::Close) => return Some(Object::Array(elements)),
+            Some(Item::Close) => return Some(Object::from(elements)),
             None => return None,
         }
     }
@@ -286,15 +286,15 @@ fn dictionary(s: &[u8], at: &mut usize, depth: usize) -> Option<Object> {
     };
     loop {
         let Ok(key) = next(at)? else {
-            return Some(Object::Dictionary(dict));
+            return Some(Object::from(dict));
         };
-        let Some(Object::Name(key)) = key else {
+        let Some(Value::Name(key)) = key.map(Object::into_value) else {
             continue;
         };
         match next(at)? {
             Ok(Some(value)) => dict.set(key, value),
             Ok(None) => {}
-            Err(()) => return Some(Object::Dictionary(dict)),
+            Err(()) => return Some(Object::from(dict)),
         }
     }
 }
@@ -302,16 +302,16 @@ fn dictionary(s: &[u8], at: &mut usize, depth: usize) -> Option<Object> {
 /// A word as an object: a number, `true`, `false` or `null`.
 fn word(word: &[u8]) -> Option<Object> {
     Some(match word {
-        b"true" => Object::Boolean(true),
-        b"false" => Object::Boolean(false),
-        b"null" => Object::Null,
+        b"true" => Object::from(true),
+        b"false" => Object::from(false),
+        b"null" => Object::null(),
         n if !is_number(n) => return None,
         n => {
             let n = std::str::from_utf8(n).ok()?;
             if n.contains('.') {
-                Object::Real(n.parse().ok()?)
+                Object::from(n.parse::<f64>().ok()?)
             } else {
-                Object::Integer(n.parse().ok()?)
+                Object::from(n.parse::<i64>().ok()?)
             }
         }
     })

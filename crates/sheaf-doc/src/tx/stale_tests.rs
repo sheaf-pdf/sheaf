@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use crate::pdf::{Object, dictionary};
+use crate::pdf::{Object, dictionary, literal};
 use in_progress::NoProgress;
 use sheaf_edit::{Anchor, Bring, Op, OutlineBring, PageRef, PageSel, Rotation, Turn};
 
@@ -203,8 +203,8 @@ fn a_relowered_insert_keeps_every_id_it_drew() {
     let at = f.pages.clone();
     let item = |title: &str, page: usize| {
         dictionary! {
-            "Title" => Object::string_literal(title),
-            "Dest" => vec![at[page].into(), "Fit".into()],
+            "Title" => literal(title),
+            "Dest" => vec![at[page].into(), Object::name("Fit")],
         }
     };
     let outline = vec![(0, item("One", 0)), (1, item("Two", 1))];

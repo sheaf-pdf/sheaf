@@ -1,7 +1,7 @@
 //! What a file claims to conform to, from its XMP metadata: PDF/A (ISO
 //! 19005) and PDF/UA (ISO 14289), each claim an attribute or an element.
 
-use crate::pdf::LazyPdf;
+use crate::pdf::{LazyPdf, StreamExt};
 use anyhow::{Context, Result};
 use quick_xml::NsReader;
 use quick_xml::events::Event;
@@ -63,14 +63,14 @@ impl Claim {
 
 /// The claims in `pdf`'s catalog `/Metadata`; none without one.
 pub(super) fn read(pdf: &LazyPdf, limits: &Limits) -> Result<Conformance> {
-    let Ok(metadata) = pdf.catalog()?.get(b"Metadata") else {
+    let Some(metadata) = pdf.catalog()?.get(b"Metadata") else {
         return Ok(Conformance::default());
     };
     let (_, metadata) = pdf.dereference(metadata)?;
     let xml = metadata
         .as_stream()
         .context("the catalog's /Metadata isn't a stream")?
-        .get_plain_content_with_limit(limits.reader.max_decompressed)
+        .decompressed_content_with_limit(limits.reader.max_decompressed)
         .context("decoding the XMP metadata")?;
     claims(&xml).context("reading the XMP metadata")
 }

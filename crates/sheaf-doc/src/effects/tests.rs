@@ -244,7 +244,7 @@ fn wm_image(src: &Src, n: u32, scale: f32) -> WatermarkContent {
         image: ImageRef::Placed(Placed {
             at: ObjRef {
                 src: src.clone(),
-                id: (n, 0),
+                id: crate::pdf::ObjectId::new(n, 0),
             },
             res: ResId(u128::from(n)),
             turns: 0,
@@ -686,7 +686,7 @@ fn flattened(st: &DocState, i: u64, n: u64, form: u32) -> Val {
     let placed = crate::model::Placement {
         form: crate::model::FormRef::Base(ObjRef {
             src: def.base.src.clone(),
-            id: (form, 0),
+            id: crate::pdf::ObjectId::new(form, 0),
         }),
         matrix: crate::geom::Affine::IDENTITY,
         tag: crate::model::PlaceTag::Untagged,

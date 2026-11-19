@@ -5,14 +5,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, StreamExt, dictionary, literal};
 
 /// A PDF of `n` pages saying "<tag> page i", bookmarked "<tag> i" each.
 fn pdf(dir: &Path, tag: &str, n: usize) -> PathBuf {
     let mut pdf = Pdf::with_version("1.5");
     let pages_id = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     });
     let mut page_ids = Vec::new();
     for i in 1..=n {
@@ -21,7 +23,7 @@ fn pdf(dir: &Path, tag: &str, n: usize) -> PathBuf {
             format!("BT /F1 24 Tf 72 700 Td ({tag} page {i}) Tj ET").into_bytes(),
         ));
         page_ids.push(pdf.add_object(dictionary! {
-            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+            "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
         }));
@@ -29,7 +31,7 @@ fn pdf(dir: &Path, tag: &str, n: usize) -> PathBuf {
     pdf.objects.insert(
         pages_id,
         dictionary! {
-            "Type" => "Pages",
+            "Type" => Object::name("Pages"),
             "Kids" => page_ids.iter().map(|&p| p.into()).collect::<Vec<Object>>(),
             "Count" => n as i64,
         }
@@ -40,9 +42,9 @@ fn pdf(dir: &Path, tag: &str, n: usize) -> PathBuf {
     let items: Vec<_> = (0..n).map(|_| pdf.new_object_id()).collect();
     for (i, &id) in items.iter().enumerate() {
         let mut d = dictionary! {
-            "Title" => Object::string_literal(format!("{tag} {}", i + 1)),
+            "Title" => literal(format!("{tag} {}", i + 1)),
             "Parent" => outlines,
-            "Dest" => vec![page_ids[i].into(), "Fit".into()],
+            "Dest" => vec![page_ids[i].into(), Object::name("Fit")],
         };
         if i > 0 {
             d.set("Prev", items[i - 1]);
@@ -55,13 +57,13 @@ fn pdf(dir: &Path, tag: &str, n: usize) -> PathBuf {
     pdf.objects.insert(
         outlines,
         dictionary! {
-            "Type" => "Outlines", "First" => items[0], "Last" => items[n - 1],
+            "Type" => Object::name("Outlines"), "First" => items[0], "Last" => items[n - 1],
             "Count" => n as i64,
         }
         .into(),
     );
     let catalog = pdf.add_object(dictionary! {
-        "Type" => "Catalog", "Pages" => pages_id, "Outlines" => outlines,
+        "Type" => Object::name("Catalog"), "Pages" => pages_id, "Outlines" => outlines,
     });
     pdf.trailer.set("Root", catalog);
     let path = dir.join(format!("{tag}.pdf"));
@@ -80,14 +82,14 @@ fn sheaf(args: &[&str]) -> std::process::Output {
 fn outline(path: &Path) -> Vec<(String, Vec<String>)> {
     let pdf = Pdf::load(path).unwrap();
     let title = |d: &sheaf_doc::pdf::Dictionary| {
-        sheaf_doc::file::text_string(d.get(b"Title").unwrap().as_str().unwrap())
+        sheaf_doc::file::text_string(d.get(b"Title").unwrap().as_bytes().unwrap())
     };
     let kids = |parent: &sheaf_doc::pdf::Dictionary| {
         let mut out = Vec::new();
-        let mut next = parent.get(b"First").ok().map(|o| o.as_reference().unwrap());
+        let mut next = parent.get(b"First").map(|o| o.as_reference().unwrap());
         while let Some(id) = next {
             let d = pdf.get_dictionary(id).unwrap().clone();
-            next = d.get(b"Next").ok().map(|o| o.as_reference().unwrap());
+            next = d.get(b"Next").map(|o| o.as_reference().unwrap());
             out.push(d);
         }
         out
@@ -116,13 +118,13 @@ fn combines_pdfs_and_images_with_bookmarks() {
         let pages = doc.get_pages();
         let (p2, p3) = (pages[&2], pages[&3]);
         let link = doc.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Link",
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"),
             "Rect" => vec![72.into(), 72.into(), 144.into(), 96.into()],
-            "Dest" => vec![p3.into(), "Fit".into()],
+            "Dest" => vec![p3.into(), Object::name("Fit")],
         });
         doc.get_dictionary_mut(p2)
             .unwrap()
-            .set("Annots", vec![Object::Reference(link)]);
+            .set("Annots", vec![Object::from(link)]);
         doc.save(&b).unwrap();
     }
     let img = dir.join("photo.png");
@@ -147,14 +149,14 @@ fn combines_pdfs_and_images_with_bookmarks() {
     let pdf = Pdf::load(&out).unwrap();
     assert_eq!(pdf.get_pages().len(), 3 + 2 + 1);
     let says = |text: &str| {
-        pdf.objects.values().any(|o| match o {
-            Object::Stream(s) => {
+        pdf.objects.values().any(|o| match o.as_stream() {
+            Some(s) => {
                 let data = s
                     .decompressed_content()
-                    .unwrap_or_else(|_| s.content.clone());
+                    .unwrap_or_else(|_| s.raw_bytes().to_vec());
                 String::from_utf8_lossy(&data).contains(text)
             }
-            _ => false,
+            None => false,
         })
     };
     assert!(says("B page 2") && says("B page 4"));

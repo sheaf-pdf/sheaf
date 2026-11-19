@@ -43,7 +43,7 @@ fn blank_pdf(path: &Path, rotate: i64) {
     let pages_id = pdf.new_object_id();
     let content = pdf.add_object(Stream::new(dictionary! {}, Vec::new()));
     let mut page = dictionary! {
-        "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+        "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         "CropBox" => vec![20.into(), 30.into(), 600.into(), 770.into()],
     };
@@ -53,11 +53,12 @@ fn blank_pdf(path: &Path, rotate: i64) {
     let page_id = pdf.add_object(page);
     pdf.objects.insert(
         pages_id,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => vec![Object::Reference(page_id)], "Count" => 1,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![Object::from(page_id)], "Count" => 1,
         }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
     pdf.save(path).unwrap();
 }

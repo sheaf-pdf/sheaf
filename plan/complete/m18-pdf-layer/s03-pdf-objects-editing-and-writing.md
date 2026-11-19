@@ -15,7 +15,7 @@ Status: done · Part of [M18: the PDF layer](../../m18-pdf-layer/README.md) · i
   string's form (literal or hex).
 - **Writing:** `serialize/object.rs` moves in, byte for byte; it's
   sheaf's code, MIT OR Apache-2.0. sheaf keeps its own copy until
-  [slice 12](../../m18-pdf-layer/slices/s12-sheaf-writes-through-pdf-structure.md).
+  [slice 12](s12-sheaf-writes-through-pdf-structure.md).
 - **Caps** on depth and size, as pdf-lint's `NESTING` is now, from one
   limits value.
 

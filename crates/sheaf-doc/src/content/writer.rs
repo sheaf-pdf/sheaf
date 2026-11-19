@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
-use crate::pdf::{Dictionary, Object};
+use crate::pdf::{Dictionary, Object, Value};
 
 use super::font::{Font, Unencoded};
 use super::names::ResKind;
@@ -94,7 +94,7 @@ pub struct GState {
 impl GState {
     /// It as an ExtGState resource.
     fn res(self) -> Res {
-        let mut dict = crate::pdf::dictionary! { "Type" => "ExtGState" };
+        let mut dict = crate::pdf::dictionary! { "Type" => Object::name("ExtGState") };
         if let Some(a) = self.fill_alpha {
             dict.set("ca", a.clamp(0.0, 1.0));
         }
@@ -102,7 +102,7 @@ impl GState {
             dict.set("CA", a.clamp(0.0, 1.0));
         }
         if let Some(b) = self.blend {
-            dict.set("BM", Object::Name(b.name().into()));
+            dict.set("BM", Object::name(b.name()));
         }
         Res::dict(dict)
     }
@@ -264,23 +264,23 @@ impl Reserved {
         let mut names = BTreeMap::new();
         let resources = resources
             .and_then(|r| direct(objects, r))
-            .and_then(|r| r.as_dict().ok());
+            .and_then(Object::as_dict);
         for kind in ResKind::ALL {
             let Some(category) = resources
-                .and_then(|r| direct(objects, r.get(kind.key()).ok()?))
-                .and_then(|c| c.as_dict().ok())
+                .and_then(|r| direct(objects, r.get(kind.key())?))
+                .and_then(Object::as_dict)
             else {
                 continue;
             };
             for (name, bound) in category.iter() {
                 let mut ids = Vec::new();
-                if let Object::Reference(id) = bound {
-                    ids.push(Res::written(*id).id);
+                if let Some(id) = bound.as_reference() {
+                    ids.push(Res::written(id).id);
                 }
                 if let Some(resolved) = direct(objects, bound).filter(|o| !reaches(o)) {
                     ids.push(ResId::of(std::slice::from_ref(resolved)));
                 }
-                names.insert((kind, name.clone()), ids);
+                names.insert((kind, name.to_vec()), ids);
             }
         }
         Reserved { names }
@@ -321,11 +321,11 @@ impl Reserved {
 
 /// Whether `object` refers to another.
 fn reaches(object: &Object) -> bool {
-    match object {
-        Object::Reference(_) => true,
-        Object::Array(items) => items.iter().any(reaches),
-        Object::Dictionary(dict) => dict.iter().any(|(_, o)| reaches(o)),
-        Object::Stream(stream) => stream.dict.iter().any(|(_, o)| reaches(o)),
+    match object.value() {
+        Value::Ref(_) => true,
+        Value::Array(items) => items.iter().any(reaches),
+        Value::Dict(dict) => dict.iter().any(|(_, o)| reaches(o)),
+        Value::Stream(stream) => stream.dict.iter().any(|(_, o)| reaches(o)),
         _ => false,
     }
 }

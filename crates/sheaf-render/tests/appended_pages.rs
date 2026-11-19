@@ -31,7 +31,7 @@ fn rect(r: [i64; 4]) -> Object {
 /// A file whose root boxes its pages, with a node under it turned 90° and
 /// cropped holding two pages, then a page of the root's own; each page
 /// draws a blue block at its bottom left and a red one where it says.
-/// Written by lopdf in `kind`.
+/// Written in `kind`.
 fn file(kind: XrefKind) -> Vec<u8> {
     let mut pdf = Pdf::with_version("1.7");
     let root = pdf.new_object_id();
@@ -39,8 +39,10 @@ fn file(kind: XrefKind) -> Vec<u8> {
     let page = |pdf: &mut Pdf, parent, [x, y]: [i64; 2]| {
         let content = format!("0 0 1 rg 46 82 60 40 re f 1 0 0 rg {x} {y} 30 30 re f");
         let content = pdf.add_object(Stream::new(dictionary! {}, content.into_bytes()));
-        let page = dictionary! { "Type" => "Page", "Parent" => parent, "Contents" => content };
-        Object::Reference(pdf.add_object(page))
+        let page = dictionary! {
+            "Type" => Object::name("Page"), "Parent" => parent, "Contents" => content,
+        };
+        Object::from(pdf.add_object(page))
     };
     let under = vec![
         page(&mut pdf, node, [400, 500]),
@@ -48,20 +50,21 @@ fn file(kind: XrefKind) -> Vec<u8> {
     ];
     pdf.objects.insert(
         node,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Parent" => root, "Kids" => under, "Count" => 2,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Parent" => root, "Kids" => under, "Count" => 2,
             "Rotate" => 90, "CropBox" => rect([36, 72, 576, 720]),
         }),
     );
     let own = page(&mut pdf, root, [300, 300]);
     pdf.objects.insert(
         root,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => vec![node.into(), own], "Count" => 3,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![node.into(), own], "Count" => 3,
             "MediaBox" => rect([0, 0, 612, 792]), "Resources" => Dictionary::new(),
         }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => root });
     pdf.trailer.set("Root", catalog);
     pdf.xref_kind = kind;
     let mut bytes = Vec::new();

@@ -26,7 +26,7 @@
 
 use std::collections::HashSet;
 
-use crate::pdf::{Object, ObjectId};
+use crate::pdf::{Object, ObjectId, Value};
 
 use super::{MarkDraw, ViewInputs};
 use crate::annot::AnnotId;
@@ -116,7 +116,7 @@ fn annots_kept(
         index: def.base.index,
         copy: 0,
     };
-    let objects: HashSet<ObjectId> = base.iter().filter_map(|e| e.as_reference().ok()).collect();
+    let objects: HashSet<ObjectId> = base.iter().filter_map(Object::as_reference).collect();
     let listed = |id: ObjectId| objects.contains(&id);
     // The base's entries each record is read from, by object, and by place
     // for one written into `/Annots`; and of those, what the overlay draws
@@ -161,12 +161,7 @@ fn annots_kept(
                     return false;
                 };
                 kept.insert(r.id);
-                kept.extend(
-                    as_read
-                        .companions
-                        .iter()
-                        .filter_map(|c| c.as_reference().ok()),
-                );
+                kept.extend(as_read.companions.iter().filter_map(|o| o.as_reference()));
             }
             AnnotBody::Foreign(f) => {
                 if f.copy != 0 || dead_link(st, src, || base.to_vec(), f) {
@@ -175,7 +170,10 @@ fn annots_kept(
                 match (&f.src, read) {
                     (Some(_), Some(r)) if listed(r.id) => _ = kept.insert(r.id),
                     (None, _)
-                        if matches!(base.get(f.summary.slot), Some(Object::Dictionary(_))) =>
+                        if matches!(
+                            base.get(f.summary.slot).map(Object::value),
+                            Some(Value::Dict(_))
+                        ) =>
                     {
                         _ = kept_slots.insert(f.summary.slot)
                     }
@@ -231,18 +229,21 @@ fn annots_kept(
         )
         .collect();
     for (slot, entry) in base.iter().enumerate() {
-        let held = match entry {
-            Object::Reference(r) => kept.contains(r),
-            _ => kept_slots.contains(&slot),
+        let held = match entry.as_reference() {
+            Some(r) => kept.contains(&r),
+            None => kept_slots.contains(&slot),
         };
         let Some(dict) = (!held)
             .then(|| pdf.dereference(entry).ok())
             .flatten()
-            .and_then(|(_, o)| o.as_dict().ok())
+            .and_then(|(_, o)| match o.value() {
+                Value::Dict(d) => Some(d),
+                _ => None,
+            })
         else {
             continue;
         };
-        let subtype = dict.get(b"Subtype").and_then(Object::as_name).ok();
+        let subtype = dict.get(b"Subtype").and_then(Object::as_name);
         let widget = subtype == Some(b"Widget".as_slice());
         // PDFium draws no pop-up from `/Annots`, and the render's flags
         // leave out the kinds they don't draw.
@@ -254,9 +255,9 @@ fn annots_kept(
         if !drawn {
             continue;
         }
-        let of_record = match entry {
-            Object::Reference(r) => recorded.contains(r),
-            _ => recorded_slots.contains(&slot),
+        let of_record = match entry.as_reference() {
+            Some(r) => recorded.contains(&r),
+            None => recorded_slots.contains(&slot),
         };
         // A record's that the overlay doesn't draw as it is, one deleted,
         // or sheaf's own, written with its mark alone.
@@ -282,10 +283,12 @@ fn annots_kept(
 fn tree_kept(st: &DocState, src: &Src, w: &Widget, id: ObjectId) -> bool {
     let pdf = src.pdf();
     // What `object`'s `/Parent` names; None when it isn't a reference.
-    let parent = |object: ObjectId| match pdf.get_dictionary(object).map(|d| d.get(b"Parent")) {
-        Ok(Err(_)) => Some(None),
-        Ok(Ok(Object::Reference(r))) => Some(Some(*r)),
-        _ => None,
+    let parent = |object: ObjectId| match pdf.get_dictionary(object) {
+        Ok(d) => match d.get(b"Parent") {
+            None => Some(None),
+            Some(o) => Some(Some(o.as_reference()?)),
+        },
+        Err(_) => None,
     };
     let node = |field: FieldId| st.field(field).filter(|node| node.inst.copy == 0);
     let at = |field: FieldId| {
@@ -383,7 +386,7 @@ mod emitted {
     use std::borrow::Cow;
     use std::collections::HashMap;
 
-    use crate::pdf::{Dictionary, Object, ObjectId};
+    use crate::pdf::{Dictionary, Object, ObjectId, StreamExt, Value};
 
     use super::ViewInputs;
     use crate::geom::{Geom, Rect};
@@ -441,24 +444,24 @@ mod emitted {
         /// Whether `built`, a value the emission writes, is `read`, the
         /// source's: equal, each reference naming the same number.
         fn same(&self, built: &Object, read: &Object) -> bool {
-            match (built, read) {
-                (Object::Reference(b), Object::Reference(r)) => self.number(*b) == Some(*r),
-                (Object::Array(a), Object::Array(b)) => {
+            match (built.value(), read.value()) {
+                (Value::Ref(b), Value::Ref(r)) => self.number(*b) == Some(*r),
+                (Value::Array(a), Value::Array(b)) => {
                     a.len() == b.len() && a.iter().zip(b).all(|(a, b)| self.same(a, b))
                 }
-                (Object::Dictionary(a), Object::Dictionary(b)) => self.same_dict(a, b, &[]),
-                (Object::Stream(a), Object::Stream(b)) => {
-                    a.content == b.content && self.same_dict(&a.dict, &b.dict, &[b"Length"])
+                (Value::Dict(a), Value::Dict(b)) => self.same_dict(a, b, &[]),
+                (Value::Stream(a), Value::Stream(b)) => {
+                    a.raw_bytes() == b.raw_bytes() && self.same_dict(&a.dict, &b.dict, &[b"Length"])
                 }
-                (Object::String(a, _), Object::String(b, _)) => a == b,
-                (a, b) => a == b,
+                (Value::String(a, _), Value::String(b, _)) => a == b,
+                _ => built.eq_value(read),
             }
         }
 
         /// [`same`](Self::same) for dictionaries, but for the keys `but`.
         fn same_dict(&self, built: &Dictionary, read: &Dictionary, but: &[&[u8]]) -> bool {
             let keys = |d: &Dictionary| -> Vec<Vec<u8>> {
-                let mut keys: Vec<Vec<u8>> = (d.iter().map(|(k, _)| k.clone()))
+                let mut keys: Vec<Vec<u8>> = (d.iter().map(|(k, _)| k.to_vec()))
                     .filter(|k| !but.contains(&k.as_slice()))
                     .collect();
                 keys.sort();
@@ -466,29 +469,28 @@ mod emitted {
             };
             keys(built) == keys(read)
                 && (built.iter())
-                    .filter(|(k, _)| !but.contains(&k.as_slice()))
-                    .all(|(k, v)| read.get(k).is_ok_and(|r| self.same(v, r)))
+                    .filter(|(k, _)| !but.contains(k))
+                    .all(|(k, v)| read.get(k).is_some_and(|r| self.same(v, r)))
         }
 
         /// The source's object `id`, as a dictionary.
         fn read(&self, id: ObjectId) -> Option<&'a Dictionary> {
-            match self.src.pdf().get(id).ok()? {
-                Object::Dictionary(d) => Some(d),
-                Object::Stream(s) => Some(&s.dict),
-                _ => None,
-            }
+            self.src.pdf().get(id).ok()?.as_dict()
         }
 
         /// The dictionary entry `o` of an emitted `/Annots` is: one the
         /// emission writes, or the source's object it names.
         fn entry(&self, o: &'a Object) -> Option<Cow<'a, Dictionary>> {
-            let r = match o {
-                Object::Dictionary(d) => return Some(Cow::Borrowed(d)),
-                Object::Reference(r) => *r,
+            let r = match o.value() {
+                Value::Dict(d) => return Some(Cow::Borrowed(d)),
+                Value::Ref(r) => *r,
                 _ => return None,
             };
             match self.e.syms.key(r).and_then(|key| self.written.get(&key)) {
-                Some(SymObject::Built(Object::Dictionary(d))) => Some(Cow::Borrowed(d)),
+                Some(SymObject::Built(obj)) => match obj.value() {
+                    Value::Dict(d) => Some(Cow::Borrowed(d)),
+                    _ => None,
+                },
                 Some(SymObject::Raw(raw)) => Some(Cow::Owned(
                     raw.src.pdf().get_dictionary(raw.id).ok()?.clone(),
                 )),
@@ -500,22 +502,16 @@ mod emitted {
         /// A box as written, its numbers read through references.
         fn rect(&self, o: Option<&Object>) -> Option<Rect> {
             let pdf = self.src.pdf();
-            let Some(Object::Array(items)) = o else {
-                return None;
-            };
-            let [a, b, c, d] = items.as_slice() else {
+            let items = o?.as_array()?;
+            let [a, b, c, d] = items else {
                 return None;
             };
             let number = |o: &Object| {
-                let o = match o {
-                    Object::Reference(r) => pdf.get(self.number(*r)?).ok()?,
-                    o => o,
+                let o = match o.as_reference() {
+                    Some(r) => pdf.get(self.number(r)?).ok()?,
+                    None => o,
                 };
-                match o {
-                    Object::Integer(i) => Some(*i as f32),
-                    Object::Real(r) => Some(*r as f32),
-                    _ => Some(0.0),
-                }
+                Some(o.as_number().unwrap_or(0.0) as f32)
             };
             Some(Rect::new(number(a)?, number(b)?, number(c)?, number(d)?))
         }
@@ -523,30 +519,36 @@ mod emitted {
         /// Whether page `page` is written as its base page, `facts`, is.
         pub(super) fn page(&self, page: PageId, facts: &PageFacts, inputs: &ViewInputs) -> bool {
             let key = ObjKey::Page(page);
-            let (Some(&at), Some(SymObject::Built(Object::Dictionary(built)))) =
+            let (Some(&at), Some(SymObject::Built(built_obj))) =
                 (self.e.owned.get(&key), self.written.get(&key))
             else {
+                return false;
+            };
+            let Value::Dict(built) = built_obj.value() else {
                 return false;
             };
             let Some(read) = self.read(facts.id).filter(|_| at == facts.id) else {
                 return false;
             };
             // What it inherited, as it has it where it is.
-            let none = Object::Dictionary(Dictionary::new());
+            let none = Object::from(Dictionary::new());
             let resources = facts.resources.as_deref().unwrap_or(&none);
-            let rotate = built.get(b"Rotate").and_then(Object::as_i64).unwrap_or(0);
+            let rotate = built
+                .get(b"Rotate")
+                .and_then(Object::as_integer)
+                .unwrap_or(0);
             let geom = Geom::read(
-                self.rect(built.get(b"MediaBox").ok()),
-                self.rect(built.get(b"CropBox").ok()),
+                self.rect(built.get(b"MediaBox")),
+                self.rect(built.get(b"CropBox")),
                 rotate,
             );
             let was = &facts.geom;
             self.same_dict(built, read, PAGE_PLACED)
                 && built
                     .get(b"Resources")
-                    .is_ok_and(|r| self.same(r, resources))
+                    .is_some_and(|r| self.same(r, resources))
                 && (geom.media, geom.crop, geom.rotate) == (was.media, was.crop, was.rotate)
-                && self.annots(built.get(b"Annots").ok(), &facts.annots, inputs)
+                && self.annots(built.get(b"Annots"), &facts.annots, inputs)
         }
 
         /// Whether `built`, an emitted page's `/Annots`, draws as `base`, its
@@ -559,12 +561,12 @@ mod emitted {
             inputs: &ViewInputs,
         ) -> bool {
             let pdf = self.src.pdf();
-            let drawn = |d: &Dictionary| match d.get(b"Subtype").and_then(Object::as_name).ok() {
+            let drawn = |d: &Dictionary| match d.get(b"Subtype").and_then(Object::as_name) {
                 Some(b"Popup") => false,
                 Some(b"Widget") => inputs.widgets,
                 _ => inputs.draws_annots(),
             };
-            let items = built.and_then(|a| a.as_array().ok());
+            let items = built.and_then(Object::as_array);
             let mut ours = Vec::new();
             for o in items.into_iter().flatten() {
                 match self.entry(o) {
@@ -574,26 +576,29 @@ mod emitted {
                 }
             }
             let theirs: Vec<(&Object, &Dictionary)> = (base.iter())
-                .filter_map(|o| Some((o, pdf.dereference(o).ok()?.1.as_dict().ok()?)))
+                .filter_map(|o| {
+                    let (_, resolved) = pdf.dereference(o).ok()?;
+                    match resolved.value() {
+                        Value::Dict(d) => Some((o, d)),
+                        _ => None,
+                    }
+                })
                 .filter(|(_, d)| drawn(d))
                 .collect();
             ours.len() == theirs.len()
-                && ours
-                    .iter()
-                    .zip(&theirs)
-                    .all(|((o, d), (r, read))| match (o, r) {
-                        (Object::Reference(o), Object::Reference(r)) => {
+                && ours.iter().zip(&theirs).all(|((o, d), (r, read))| {
+                    match (o.value(), r.value()) {
+                        (Value::Ref(o), Value::Ref(r)) => {
                             let placed = match self.e.syms.key(*o) {
                                 Some(ObjKey::Field(_)) => FIELD_PLACED,
                                 _ => ANNOT_PLACED,
                             };
                             self.number(*o) == Some(*r) && self.same_dict(d, read, placed)
                         }
-                        (Object::Dictionary(_), Object::Dictionary(_)) => {
-                            self.same_dict(d, read, ANNOT_PLACED)
-                        }
+                        (Value::Dict(_), Value::Dict(_)) => self.same_dict(d, read, ANNOT_PLACED),
                         _ => false,
-                    })
+                    }
+                })
         }
 
         /// Whether the catalog, and with widgets the form and its fields,
@@ -609,18 +614,26 @@ mod emitted {
                 true => &[b"Pages", b"AcroForm", b"OCProperties"],
                 false => &[b"Pages", b"AcroForm"],
             };
-            let form = (catalog.get(b"AcroForm").ok())
+            let form = catalog
+                .get(b"AcroForm")
                 .and_then(|f| pdf.dereference(f).ok())
-                .and_then(|(_, f)| f.as_dict().ok());
+                .and_then(|(_, f)| match f.value() {
+                    Value::Dict(d) => Some(d),
+                    _ => None,
+                });
             self.written.iter().all(|(key, obj)| {
                 let built = match obj {
-                    SymObject::Built(Object::Dictionary(d)) => d,
+                    SymObject::Built(o) => match o.value() {
+                        Value::Dict(d) => d,
+                        _ => return true,
+                    },
                     _ => return true,
                 };
                 match key {
                     ObjKey::Catalog => self.same_dict(built, catalog, placed),
                     ObjKey::AcroForm if inputs.widgets => form.is_some_and(|read| {
-                        let q = |d: &Dictionary| d.get(b"Q").and_then(Object::as_i64).unwrap_or(0);
+                        let q =
+                            |d: &Dictionary| d.get(b"Q").and_then(Object::as_integer).unwrap_or(0);
                         let needs = |d: &Dictionary| {
                             d.get(b"NeedAppearances")
                                 .and_then(Object::as_bool)

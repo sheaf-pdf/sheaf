@@ -3,7 +3,7 @@
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
-use sheaf_doc::pdf::{Document as Pdf, Stream, dictionary};
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_edit::Rotation;
 use sheaf_image::raster::PixelFormat;
 use sheaf_render::PageIndex;
@@ -18,14 +18,18 @@ fn red_page() -> Vec<u8> {
         b"1 0 0 rg 0 0 100 100 re f".to_vec(),
     ));
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+        "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
         "MediaBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
     });
     pdf.objects.insert(
         pages_id,
-        dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1,
+        }
+        .into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();

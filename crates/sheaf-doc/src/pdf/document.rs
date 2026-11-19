@@ -1,22 +1,25 @@
-//! In-memory PDF document owned by `sheaf_doc::pdf` (M18 slice 10).
+//! In-memory PDF document owned by `sheaf_doc::pdf` (M18 slices 10–12).
 //!
-//! Replaces `lopdf::Document` across `sheaf` with the exact surface `sheaf`
-//! uses: loaded whole through [`super::LazyPdf`] (`pdf-structure`) for the
-//! Rewrite graph, stamp libraries, form checks and test assertions, and built
-//! in memory for PDFs `sheaf` synthesizes (`serialize/built.rs`, `annot.rs`,
-//! fixtures, and CLI helpers), written through `crate::serialize`.
+//! Loaded whole through [`super::LazyPdf`] (`pdf-structure`) for the Rewrite
+//! graph, stamp libraries, form checks and test assertions, and built in
+//! memory for PDFs `sheaf` synthesizes (`serialize/built.rs`, `annot.rs`,
+//! fixtures, and CLI helpers), written through `pdf_objects::serialize` and
+//! `pdf_structure::write`.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use crate::serialize::xref::{Entry, Section};
-use crate::serialize::{full, object, objstm};
+use pdf_crypt::{Password, Permissions, Protection};
+use pdf_objects::{Object, ObjectId, Value, resolve_fn};
+use pdf_structure::write::{Encryptor, Entry, Section, container, packable};
 
+use crate::serialize::full;
+
+use super::write as obj_write;
 use super::{
-    Dictionary, EncryptionState, Error, FileBytes, Object, ObjectId, Permissions, ReadLimits,
-    Result, XrefKind, encryption,
+    Dictionary, Error, FileBytes, ReadLimits, Result, StreamExt, XrefKind, deflate_options,
 };
 
 const DEREF_LIMIT: usize = 128;
@@ -46,7 +49,7 @@ pub struct Document {
     pub version: String,
     /// Trailer dictionary (`/Root`, `/Info`, `/ID`, and `/Encrypt` when held un-decrypted).
     pub trailer: Dictionary,
-    /// Indirect objects keyed by `(number, generation)`.
+    /// Indirect objects keyed by `ObjectId`.
     pub objects: BTreeMap<ObjectId, Object>,
     /// Highest object number allocated or loaded so far.
     pub max_id: u32,
@@ -56,6 +59,8 @@ pub struct Document {
     pub xref_start: usize,
     /// Whether this document was decrypted from an encrypted source on load.
     pub(crate) decrypted: bool,
+    /// Optional active encryptor when encrypting on `save_to` / `save`.
+    encryptor: Option<Encryptor>,
 }
 
 impl Default for Document {
@@ -76,6 +81,7 @@ impl Document {
             xref_kind: XrefKind::Stream,
             xref_start: 0,
             decrypted: false,
+            encryptor: None,
         }
     }
 
@@ -126,7 +132,7 @@ impl Document {
     /// Allocates the next unused `(id, 0)` object identifier.
     pub fn new_object_id(&mut self) -> ObjectId {
         self.max_id += 1;
-        (self.max_id, 0)
+        ObjectId::new(self.max_id, 0)
     }
 
     /// Inserts `object` at a freshly allocated [`ObjectId`] and returns it.
@@ -143,7 +149,7 @@ impl Document {
     ) -> Result<(Option<ObjectId>, &'a Object)> {
         let mut nb_deref = 0;
         let mut id = None;
-        while let Ok(ref_id) = object.as_reference() {
+        while let Some(ref_id) = object.as_reference() {
             id = Some(ref_id);
             object = self
                 .objects
@@ -167,42 +173,69 @@ impl Document {
     pub fn get_object_mut(&mut self, mut id: ObjectId) -> Result<&mut Object> {
         let mut nb_deref = 0;
         loop {
-            match self.objects.get(&id) {
-                Some(Object::Reference(next)) => {
-                    id = *next;
+            match self.objects.get(&id).and_then(Object::as_reference) {
+                Some(next) => {
+                    id = next;
                     nb_deref += 1;
                     if nb_deref > DEREF_LIMIT {
                         return Err(Error::ReferenceLimit);
                     }
                 }
-                Some(_) => break,
-                None => return Err(Error::ObjectNotFound(id)),
+                None => {
+                    if !self.objects.contains_key(&id) {
+                        return Err(Error::ObjectNotFound(id));
+                    }
+                    break;
+                }
             }
         }
         self.objects.get_mut(&id).ok_or(Error::ObjectNotFound(id))
     }
 
-    /// Looks up `id` as a dictionary.
+    /// Looks up `id` as a plain dictionary (not a stream).
     pub fn get_dictionary(&self, id: ObjectId) -> Result<&Dictionary> {
-        self.get_object(id).and_then(Object::as_dict)
+        match self.get_object(id)?.value() {
+            Value::Dict(d) => Ok(d),
+            _ => Err(Error::ObjectType {
+                expected: "Dictionary",
+            }),
+        }
     }
 
-    /// Looks up `id` mutably as a dictionary.
+    /// Looks up `id` mutably as a plain dictionary (not a stream).
     pub fn get_dictionary_mut(&mut self, id: ObjectId) -> Result<&mut Dictionary> {
-        self.get_object_mut(id).and_then(Object::as_dict_mut)
+        let obj = self.get_object_mut(id)?;
+        if !matches!(obj.value(), Value::Dict(_)) {
+            return Err(Error::ObjectType {
+                expected: "Dictionary",
+            });
+        }
+        obj.as_dict_mut().ok_or(Error::ObjectType {
+            expected: "Dictionary",
+        })
     }
 
     /// Returns the document `/Root` catalog dictionary.
     pub fn catalog(&self) -> Result<&Dictionary> {
-        self.trailer
+        let id = self
+            .trailer
             .get(b"Root")
             .and_then(Object::as_reference)
-            .and_then(|id| self.get_dictionary(id))
+            .ok_or(Error::ObjectType {
+                expected: "Catalog reference",
+            })?;
+        self.get_dictionary(id)
     }
 
     /// Returns a mutable reference to the document `/Root` catalog dictionary.
     pub fn catalog_mut(&mut self) -> Result<&mut Dictionary> {
-        let id = self.trailer.get(b"Root").and_then(Object::as_reference)?;
+        let id = self
+            .trailer
+            .get(b"Root")
+            .and_then(Object::as_reference)
+            .ok_or(Error::ObjectType {
+                expected: "Catalog reference",
+            })?;
         self.get_dictionary_mut(id)
     }
 
@@ -230,10 +263,14 @@ impl Document {
                 break;
             }
             let dict = self.get_dictionary(id).ok()?;
-            if let Ok(res) = dict.get(b"Resources") {
-                return self.dereference(res).ok()?.1.as_dict().ok();
+            if let Some(res) = dict.get(b"Resources") {
+                let (_, resolved) = self.dereference(res).ok()?;
+                return match resolved.value() {
+                    Value::Dict(d) => Some(d),
+                    _ => None,
+                };
             }
-            cur = dict.get(b"Parent").and_then(Object::as_reference).ok();
+            cur = dict.get(b"Parent").and_then(Object::as_reference);
         }
         None
     }
@@ -243,20 +280,26 @@ impl Document {
         let Ok(page) = self.get_dictionary(page_id) else {
             return Ok(Vec::new());
         };
-        let entries: &[Object] = match page.get(b"Annots") {
-            Ok(Object::Reference(id)) => self.get_object(*id).and_then(Object::as_array)?,
-            Ok(Object::Array(entries)) => entries,
+        let Some(annots) = page.get(b"Annots") else {
+            return Ok(Vec::new());
+        };
+        let entries: &[Object] = match annots.value() {
+            Value::Ref(id) => self
+                .get_object(*id)?
+                .as_array()
+                .ok_or(Error::ObjectType { expected: "Array" })?,
+            Value::Array(entries) => entries,
             _ => return Ok(Vec::new()),
         };
         let mut out = Vec::with_capacity(entries.len());
         for entry in entries {
-            match entry {
-                Object::Reference(id) => {
+            match entry.value() {
+                Value::Ref(id) => {
                     if let Ok(dict) = self.get_dictionary(*id) {
                         out.push(dict);
                     }
                 }
-                Object::Dictionary(dict) => out.push(dict),
+                Value::Dict(dict) => out.push(dict),
                 _ => {}
             }
         }
@@ -270,20 +313,23 @@ impl Document {
         let Ok(page) = self.get_dictionary(page_id) else {
             return Vec::new();
         };
-        let Ok(contents) = page.get(b"Contents") else {
+        let Some(contents) = page.get(b"Contents") else {
             return Vec::new();
         };
         let mut streams = Vec::new();
         let mut cur = contents;
         let mut deref = 0;
         loop {
-            match cur {
-                Object::Reference(id) => match self.objects.get(id) {
-                    None | Some(Object::Stream(_)) => {
+            match cur.value() {
+                Value::Ref(id) => match self.objects.get(id).map(Object::value) {
+                    None | Some(Value::Stream(_)) => {
                         streams.push(*id);
                         break;
                     }
-                    Some(other) => {
+                    Some(_) => {
+                        let Some(other) = self.objects.get(id) else {
+                            break;
+                        };
                         deref += 1;
                         if deref > DEREF_LIMIT {
                             break;
@@ -291,13 +337,9 @@ impl Document {
                         cur = other;
                     }
                 },
-                Object::Array(arr) => {
+                Value::Array(arr) => {
                     for item in arr {
-                        if let Ok((_, Object::Stream(_))) = self.dereference(item)
-                            && let Ok(id) = item.as_reference()
-                        {
-                            streams.push(id);
-                        } else if let Ok(id) = item.as_reference() {
+                        if let Some(id) = item.as_reference() {
                             streams.push(id);
                         }
                     }
@@ -306,17 +348,23 @@ impl Document {
                 _ => break,
             }
         }
+        let resolve = resolve_fn(|id| self.objects.get(&id));
         let mut out = Vec::new();
         for (i, id) in streams.into_iter().enumerate() {
-            let Ok(Object::Stream(stream)) = self.get_object(id) else {
+            let Ok(obj) = self.get_object(id) else {
+                continue;
+            };
+            let Some(stream) = obj.as_stream() else {
                 continue;
             };
             if i > 0 && !out.is_empty() {
                 out.push(b'\n');
             }
-            match stream.decompressed_content() {
+            match stream
+                .decompressed_content_resolved(ReadLimits::DEFAULT.max_decompressed, Some(&resolve))
+            {
                 Ok(decoded) => out.extend_from_slice(&decoded),
-                Err(_) => out.extend_from_slice(&stream.content),
+                Err(_) => out.extend_from_slice(stream.raw_bytes()),
             }
         }
         out
@@ -325,14 +373,17 @@ impl Document {
     /// Removes all objects unreachable from `self.trailer`, returning their IDs.
     pub fn prune_objects(&mut self) -> Vec<ObjectId> {
         let mut reachable = HashSet::new();
-        let mut stack = Vec::new();
-        collect_refs_dict(&self.trailer, &mut stack);
+        let mut stack: Vec<ObjectId> = self
+            .trailer
+            .iter()
+            .flat_map(|(_, v)| v.references())
+            .collect();
         while let Some(id) = stack.pop() {
             if !reachable.insert(id) {
                 continue;
             }
             if let Some(obj) = self.objects.get(&id) {
-                collect_refs_obj(obj, &mut stack);
+                stack.extend(obj.references());
             }
         }
         let removed: Vec<ObjectId> = self
@@ -353,54 +404,53 @@ impl Document {
         self.trailer.has(b"Encrypt")
     }
 
-    /// Encrypts all objects in `self` in place under `state` and records the
-    /// `/Encrypt` dictionary in `self.objects` and `self.trailer`.
-    pub fn encrypt(&mut self, state: &EncryptionState) -> Result<()> {
+    /// Configures revision-6 AES-256 encryption (OS CSPRNG keys, salts, and IVs)
+    /// to be applied when saving `self`.
+    pub fn encrypt_aes256(
+        &mut self,
+        user_password: &str,
+        owner_password: &str,
+        permissions: Permissions,
+    ) -> Result<()> {
         if self.is_encrypted() {
             return Err(Error::AlreadyEncrypted);
         }
-        let unencrypted_metadata = (!state.encrypt_metadata())
-            .then(|| {
-                self.catalog()
-                    .ok()?
-                    .get(b"Metadata")
-                    .and_then(Object::as_reference)
-                    .ok()
-            })
-            .flatten();
-        let encrypted_dict = state.encode()?;
-        for (&id, obj) in &mut self.objects {
-            if Some(id) == unencrypted_metadata {
-                continue;
-            }
-            let is_xref = matches!(
-                obj,
-                Object::Stream(s) if s.dict.get(b"Type").and_then(Object::as_name).ok() == Some(b"XRef")
-            );
-            if is_xref {
-                continue;
-            }
-            let saved_type =
-                if !state.encrypt_metadata() && obj.type_name().ok() == Some(b"Metadata") {
-                    match obj {
-                        Object::Stream(s) => s.dict.remove(b"Type"),
-                        Object::Dictionary(d) => d.remove(b"Type"),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-            encryption::encrypt_object(state, id, obj)?;
-            if let Some(t) = saved_type {
-                match obj {
-                    Object::Stream(s) => s.dict.set("Type", t),
-                    Object::Dictionary(d) => d.set("Type", t),
-                    _ => {}
-                }
-            }
+        let user_enc = (!user_password.is_empty())
+            .then(|| Password(user_password).prepared())
+            .transpose()
+            .map_err(|e| Error::Decryption(super::DecryptionError::Failed(e.to_string())))?;
+        let owner_enc = (!owner_password.is_empty())
+            .then(|| Password(owner_password).prepared())
+            .transpose()
+            .map_err(|e| Error::Decryption(super::DecryptionError::Failed(e.to_string())))?;
+        let mut protection = Protection::DEFAULT;
+        protection.user = user_enc.as_ref();
+        protection.owner = owner_enc.as_ref();
+        protection.permissions = permissions;
+        let enc = Encryptor::create(&protection)
+            .map_err(|e| Error::Decryption(super::DecryptionError::Failed(e.to_string())))?;
+        if self.version.as_str() < "2.0" {
+            self.version = "2.0".to_string();
         }
-        let encrypt_id = self.add_object(encrypted_dict);
+        let encrypt_id = self.add_object(enc.dictionary().clone());
         self.trailer.set("Encrypt", encrypt_id);
+        self.encryptor = Some(enc);
+        Ok(())
+    }
+
+    /// Configures deterministic test encryption from `spec` (`#[cfg(any(test, feature = "fixtures"))]`),
+    /// recording `/Encrypt` in `self.objects` and `self.trailer` so callers may
+    /// inspect or mutate the dictionary before `save` / `save_to`.
+    #[cfg(any(test, feature = "fixtures"))]
+    pub fn encrypt(&mut self, spec: &super::test_crypt::TestEncryption) -> Result<()> {
+        if self.is_encrypted() {
+            return Err(Error::AlreadyEncrypted);
+        }
+        let enc = spec.encryptor(self);
+        let dict = spec.encrypt_dict(self);
+        let encrypt_id = self.add_object(dict);
+        self.trailer.set("Encrypt", encrypt_id);
+        self.encryptor = Some(enc);
         Ok(())
     }
 
@@ -423,7 +473,7 @@ impl Document {
 
     /// Writes `self` to `target` with object streams (up to 100 objects per
     /// stream) and a cross-reference stream (falling back to plain objects if
-    /// already encrypted in place).
+    /// already encrypted).
     pub fn save_modern(&mut self, target: &mut impl Write) -> std::io::Result<()> {
         self.save_packed(target, 100)
     }
@@ -451,28 +501,73 @@ impl Document {
         out.extend_from_slice(format!("%PDF-{}\n", self.version).as_bytes());
         out.extend_from_slice(full::BINARY);
 
+        let encrypt_id = self.trailer.get(b"Encrypt").and_then(Object::as_reference);
+        let resolve = resolve_fn(|id| self.objects.get(&id));
+        let encrypting = match &self.encryptor {
+            Some(enc) => Some(enc.laid_out(None, encrypt_id, &self.trailer, &resolve)?),
+            None => None,
+        };
+
         let mut next = self.max_id.saturating_add(1).max(1);
         let mut section = Section::full(next);
         let mut packable_members: Vec<(u32, Vec<u8>)> = Vec::new();
+        let deflate = deflate_options();
 
         for (&id, obj) in &self.objects {
             if full::left_out(obj) {
                 continue;
             }
-            next = next.max(id.0.saturating_add(1));
-            if pack.is_some() && objstm::packable(id, obj) {
-                let mut member_bytes = Vec::new();
-                anyhow::Context::with_context(object::write(&mut member_bytes, obj), || {
-                    format!("writing object {} {}", id.0, id.1)
-                })?;
-                packable_members.push((id.0, member_bytes));
-            } else {
-                let pos = object::indirect(&mut out, id, obj)?;
+            next = next.max(id.number.saturating_add(1));
+            if Some(id) == encrypt_id {
+                let offset = obj_write::indirect_renumbered(
+                    &mut out,
+                    id,
+                    obj,
+                    &(),
+                    &obj_write::non_zero_ref,
+                )?;
                 section.insert(
-                    id.0,
+                    id.number,
                     Entry::InUse {
-                        pos,
-                        generation: id.1,
+                        offset,
+                        generation: id.generation,
+                    },
+                );
+                continue;
+            }
+            if pack.is_some() && packable(id, obj) {
+                let mut member_bytes = Vec::new();
+                anyhow::Context::with_context(
+                    obj_write::write_renumbered(&mut member_bytes, obj, &obj_write::non_zero_ref),
+                    || format!("writing object {id}"),
+                )?;
+                packable_members.push((id.number, member_bytes));
+            } else {
+                let offset = match &encrypting {
+                    Some(enc) => {
+                        let stripped = strip_identity_metadata(enc, id, obj);
+                        let body = stripped.as_ref().unwrap_or(obj);
+                        obj_write::indirect_renumbered(
+                            &mut out,
+                            id,
+                            body,
+                            enc,
+                            &obj_write::non_zero_ref,
+                        )?
+                    }
+                    None => obj_write::indirect_renumbered(
+                        &mut out,
+                        id,
+                        obj,
+                        &(),
+                        &obj_write::non_zero_ref,
+                    )?,
+                };
+                section.insert(
+                    id.number,
+                    Entry::InUse {
+                        offset,
+                        generation: id.generation,
                     },
                 );
             }
@@ -480,28 +575,43 @@ impl Document {
 
         if let Some(per) = pack {
             for chunk in packable_members.chunks(per) {
-                if let Some(stream) = objstm::container(chunk) {
+                if let Some(stream) = container(chunk, deflate)? {
                     let container_id = next;
                     next += 1;
-                    let pos =
-                        object::indirect(&mut out, (container_id, 0), &Object::Stream(stream))?;
-                    section.insert(container_id, Entry::InUse { pos, generation: 0 });
+                    let offset = obj_write::indirect(
+                        &mut out,
+                        ObjectId::new(container_id, 0),
+                        &Object::from(stream),
+                    )?;
+                    section.insert(
+                        container_id,
+                        Entry::InUse {
+                            offset,
+                            generation: 0,
+                        },
+                    );
                     for (index, &(member_num, _)) in chunk.iter().enumerate() {
                         section.insert(
                             member_num,
-                            Entry::Packed {
-                                container: container_id,
+                            Entry::Compressed {
+                                stream: container_id,
                                 index: index as u16,
                             },
                         );
                     }
                 } else {
                     for (member_num, member_bytes) in chunk {
-                        let pos = out.len();
+                        let offset = out.len();
                         out.extend_from_slice(format!("{member_num} 0 obj\n").as_bytes());
                         out.extend_from_slice(member_bytes);
                         out.extend_from_slice(b"\nendobj\n");
-                        section.insert(*member_num, Entry::InUse { pos, generation: 0 });
+                        section.insert(
+                            *member_num,
+                            Entry::InUse {
+                                offset,
+                                generation: 0,
+                            },
+                        );
                     }
                 }
             }
@@ -518,30 +628,38 @@ impl Document {
                 section.table(&mut out, trailer, pos)?;
             }
             XrefKind::Stream => {
-                section.stream(&mut out, next, trailer, pos)?;
+                section.stream(&mut out, next, trailer, pos, deflate)?;
             }
         }
         Ok(out)
     }
 }
 
-fn collect_refs_obj(obj: &Object, stack: &mut Vec<ObjectId>) {
-    let mut work = vec![obj];
-    while let Some(cur) = work.pop() {
-        match cur {
-            Object::Reference(id) => stack.push(*id),
-            Object::Array(items) => work.extend(items.iter()),
-            Object::Dictionary(dict) => work.extend(dict.iter().map(|(_, v)| v)),
-            Object::Stream(stream) => work.extend(stream.dict.iter().map(|(_, v)| v)),
-            _ => {}
-        }
+/// If a newly created encryption (`encrypt_aes256`) encrypts metadata and the
+/// catalog's `/Metadata` stream carries `/Filter /Crypt` (default `/Identity`),
+/// strip that filter so `Encrypting::stream` encrypts it instead of refusing
+/// `Unencryptable::Metadata`.
+fn strip_identity_metadata(
+    enc: &pdf_structure::write::Encrypting<'_>,
+    _id: ObjectId,
+    obj: &Object,
+) -> Option<Object> {
+    if enc.at().is_some() {
+        return None;
     }
-}
-
-fn collect_refs_dict(dict: &Dictionary, stack: &mut Vec<ObjectId>) {
-    for (_, v) in dict.iter() {
-        collect_refs_obj(v, stack);
+    let Value::Stream(stream) = obj.value() else {
+        return None;
+    };
+    if !stream.dict.has_type(b"Metadata") {
+        return None;
     }
+    if stream.dict.get(b"Filter").and_then(Object::as_name) == Some(b"Crypt") {
+        let mut copy = stream.as_ref().clone();
+        copy.dict.remove(b"Filter");
+        copy.dict.remove(b"DecodeParms");
+        return Some(Object::from(copy));
+    }
+    None
 }
 
 struct PageTreeIter<'a> {
@@ -555,9 +673,9 @@ impl<'a> PageTreeIter<'a> {
     fn new(doc: &'a Document) -> Self {
         let root_kids = doc
             .catalog()
+            .ok()
             .and_then(|cat| cat.get(b"Pages"))
             .and_then(Object::as_reference)
-            .ok()
             .and_then(|pages_id| Self::kids(doc, pages_id));
         Self {
             doc,
@@ -569,13 +687,8 @@ impl<'a> PageTreeIter<'a> {
 
     fn kids(doc: &'a Document, pages_id: ObjectId) -> Option<&'a [Object]> {
         let pages = doc.get_dictionary(pages_id).ok()?;
-        let kids = pages.get(b"Kids").ok()?;
-        doc.dereference(kids)
-            .ok()?
-            .1
-            .as_array()
-            .ok()
-            .map(Vec::as_slice)
+        let kids = pages.get(b"Kids")?;
+        doc.dereference(kids).ok()?.1.as_array()
     }
 }
 
@@ -590,20 +703,18 @@ impl Iterator for PageTreeIter<'_> {
                 }
                 self.iter_limit -= 1;
                 self.kids = Some(rest);
-                if let Ok(kid_id) = kid.as_reference() {
-                    match self
-                        .doc
-                        .get_dictionary(kid_id)
-                        .and_then(Dictionary::get_type)
-                    {
-                        Ok(b"Page") => return Some(kid_id),
-                        Ok(b"Pages") if self.stack.len() < PAGE_TREE_DEPTH_LIMIT => {
-                            if !rest.is_empty() {
-                                self.stack.push(rest);
+                if let Some(kid_id) = kid.as_reference() {
+                    match self.doc.get_dictionary(kid_id) {
+                        Ok(dict) => match dict.type_name() {
+                            Some(b"Page") | None => return Some(kid_id),
+                            Some(b"Pages") if self.stack.len() < PAGE_TREE_DEPTH_LIMIT => {
+                                if !rest.is_empty() {
+                                    self.stack.push(rest);
+                                }
+                                self.kids = Self::kids(self.doc, kid_id);
                             }
-                            self.kids = Self::kids(self.doc, kid_id);
-                        }
-                        Ok(_) => {}
+                            Some(_) => {}
+                        },
                         Err(_) => return Some(kid_id),
                     }
                 }
@@ -614,125 +725,3 @@ impl Iterator for PageTreeIter<'_> {
 }
 
 impl std::iter::FusedIterator for PageTreeIter<'_> {}
-
-/// Encryption parameters over [`Document`], bridged to `EncryptionState` until
-/// slice 12 replaces `lopdf::encryption` with `pdf_crypt`.
-#[derive(Clone, Debug)]
-pub enum EncryptionVersion<'a> {
-    V1 {
-        document: &'a Document,
-        owner_password: &'a str,
-        user_password: &'a str,
-        permissions: Permissions,
-    },
-    V2 {
-        document: &'a Document,
-        owner_password: &'a str,
-        user_password: &'a str,
-        key_length: usize,
-        permissions: Permissions,
-    },
-    V4 {
-        document: &'a Document,
-        encrypt_metadata: bool,
-        crypt_filters:
-            BTreeMap<Vec<u8>, std::sync::Arc<dyn encryption::crypt_filters::CryptFilter>>,
-        stream_filter: Vec<u8>,
-        string_filter: Vec<u8>,
-        owner_password: &'a str,
-        user_password: &'a str,
-        permissions: Permissions,
-    },
-    V5 {
-        encrypt_metadata: bool,
-        crypt_filters:
-            BTreeMap<Vec<u8>, std::sync::Arc<dyn encryption::crypt_filters::CryptFilter>>,
-        file_encryption_key: &'a [u8],
-        stream_filter: Vec<u8>,
-        string_filter: Vec<u8>,
-        owner_password: &'a str,
-        user_password: &'a str,
-        permissions: Permissions,
-    },
-}
-
-impl TryFrom<EncryptionVersion<'_>> for EncryptionState {
-    type Error = Error;
-
-    fn try_from(version: EncryptionVersion<'_>) -> std::result::Result<Self, Self::Error> {
-        let mut carrier = lopdf::Document::new();
-        match version {
-            EncryptionVersion::V1 {
-                document,
-                owner_password,
-                user_password,
-                permissions,
-            } => {
-                carrier.trailer = document.trailer.clone();
-                EncryptionState::try_from(lopdf::EncryptionVersion::V1 {
-                    document: &carrier,
-                    owner_password,
-                    user_password,
-                    permissions,
-                })
-            }
-            EncryptionVersion::V2 {
-                document,
-                owner_password,
-                user_password,
-                key_length,
-                permissions,
-            } => {
-                carrier.trailer = document.trailer.clone();
-                EncryptionState::try_from(lopdf::EncryptionVersion::V2 {
-                    document: &carrier,
-                    owner_password,
-                    user_password,
-                    key_length,
-                    permissions,
-                })
-            }
-            EncryptionVersion::V4 {
-                document,
-                encrypt_metadata,
-                crypt_filters,
-                stream_filter,
-                string_filter,
-                owner_password,
-                user_password,
-                permissions,
-            } => {
-                carrier.trailer = document.trailer.clone();
-                EncryptionState::try_from(lopdf::EncryptionVersion::V4 {
-                    document: &carrier,
-                    encrypt_metadata,
-                    crypt_filters,
-                    stream_filter,
-                    string_filter,
-                    owner_password,
-                    user_password,
-                    permissions,
-                })
-            }
-            EncryptionVersion::V5 {
-                encrypt_metadata,
-                crypt_filters,
-                file_encryption_key,
-                stream_filter,
-                string_filter,
-                owner_password,
-                user_password,
-                permissions,
-            } => EncryptionState::try_from(lopdf::EncryptionVersion::V5 {
-                encrypt_metadata,
-                crypt_filters,
-                file_encryption_key,
-                stream_filter,
-                string_filter,
-                owner_password,
-                user_password,
-                permissions,
-            }),
-        }
-    }
-}

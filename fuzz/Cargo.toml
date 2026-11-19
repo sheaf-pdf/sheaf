@@ -23,11 +23,6 @@ libfuzzer-sys = "0.4"
 # and `interp`'s page from its content fixtures.
 sheaf-doc = { path = "../crates/sheaf-doc", features = ["fixtures"] }
 
-# sheaf-doc's lopdf is the workspace's patched one (vendor/lopdf/SHEAF.md);
-# a workspace's patches don't reach a crate outside it.
-[patch.crates-io]
-lopdf = { path = "../vendor/lopdf" }
-
 [[bin]]
 name = "lazy_reader"
 path = "fuzz_targets/lazy_reader.rs"

@@ -9,7 +9,9 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::pdf::{LazyPdf, Object, Stream, dictionary};
+#[cfg(any(test, feature = "fixtures"))]
+use crate::pdf::StreamExt;
+use crate::pdf::{LazyPdf, Object, Stream, Value, dictionary, literal};
 
 use super::Limits;
 use crate::PageId;
@@ -60,7 +62,9 @@ pub fn sheaf_annot(data: &[u8]) {
     for entry in page.annots.iter() {
         let _ = crate::file::sheaf_mark(pdf, entry);
         let _ = crate::file::is_ours(pdf, entry);
-        if let Ok((_, crate::pdf::Object::Dictionary(d))) = pdf.dereference(entry) {
+        if let Ok((_, obj)) = pdf.dereference(entry)
+            && let Value::Dict(d) = obj.value()
+        {
             let _ = crate::annot::staleness(pdf, d, false);
         }
     }
@@ -131,21 +135,25 @@ pub fn splice(data: &[u8]) -> usize {
     let mut pdf = crate::pdf::Document::with_version("1.7");
     let (first, second) = data.split_at(data.len() / 2);
     let streams = [first, second].map(|s| pdf.add_object(Stream::new(dictionary! {}, s.to_vec())));
-    let piece = dictionary! { "ADBE_CompoundType" => dictionary! { "Private" => "Header" } };
+    let piece = dictionary! {
+        "ADBE_CompoundType" => dictionary! { "Private" => Object::name("Header") },
+    };
     let acrobat = pdf.add_object(Stream::new(
-        dictionary! { "Subtype" => "Form", "PieceInfo" => piece },
+        dictionary! { "Subtype" => Object::name("Form"), "PieceInfo" => piece },
         b"BT (h) Tj ET".to_vec(),
     ));
     let nested = pdf.add_object(Stream::new(
-        dictionary! { "Subtype" => "Form" },
+        dictionary! { "Subtype" => Object::name("Form") },
         b"/Artifact <</Subtype /Footer>> BDC EMC".to_vec(),
     ));
-    let resources = Object::Dictionary(dictionary! {
+    let resources = Object::from(dictionary! {
         "Properties" => dictionary! { "P0" => dictionary! {
-            "Type" => "Pagination", "Subtype" => "Header", "SHEF_Gen" => Object::string_literal("g1"),
+            "Type" => Object::name("Pagination"),
+            "Subtype" => Object::name("Header"),
+            "SHEF_Gen" => literal("g1"),
         } },
         "XObject" => dictionary! { "X0" => acrobat, "X1" => nested },
-        "ColorSpace" => dictionary! { "CS3" => "DeviceRGB" },
+        "ColorSpace" => dictionary! { "CS3" => Object::name("DeviceRGB") },
     });
     let Ok(content) = PageContent::read(&pdf, &streams, lim) else {
         return 0;
@@ -253,35 +261,32 @@ fn font_parts(data: &[u8]) -> Vec<&[u8]> {
 fn with_fonts(page: &content::fixture::Fixture, parts: &[&[u8]]) -> content::fixture::Fixture {
     let mut pdf = page.pdf.clone();
     let font = |name: &[u8]| -> crate::pdf::ObjectId {
-        let fonts = page
-            .resources()
-            .and_then(|r| r.as_dict().ok()?.get(b"Font").ok());
-        let font = fonts.and_then(|f| f.as_dict().ok()?.get(name).ok()?.as_reference().ok());
+        let fonts = page.resources().and_then(|r| r.as_dict()?.get(b"Font"));
+        let font = fonts.and_then(|f| f.as_dict()?.get(name)?.as_reference());
         font.expect("the fuzz page has the font")
     };
     let get = |pdf: &crate::pdf::Document, id, key: &[u8]| -> Option<Object> {
-        Some(pdf.get_dictionary(id).ok()?.get(key).ok()?.clone())
+        pdf.get_dictionary(id).ok()?.get(key).cloned()
     };
     let descendant =
         |pdf: &crate::pdf::Document, name| match get(pdf, font(name), b"DescendantFonts") {
-            Some(Object::Array(fonts)) => fonts.first().and_then(|f| f.as_reference().ok()),
-            _ => None,
+            Some(obj) => obj.as_array()?.first().and_then(Object::as_reference),
+            None => None,
         };
-    let array = |part: &[u8]| match content::object(part, Limits::DEFAULT.content.depth) {
-        Some(array @ Object::Array(_)) => Some(array),
-        _ => None,
+    let array = |part: &[u8]| {
+        content::object(part, Limits::DEFAULT.content.depth).filter(|o| o.as_array().is_some())
     };
     let mut set_stream = |id: Option<crate::pdf::ObjectId>, data: &[u8]| {
-        if let Some(stream) = id.and_then(|id| pdf.get_object_mut(id).ok()?.as_stream_mut().ok()) {
+        if let Some(stream) = id.and_then(|id| pdf.get_object_mut(id).ok()?.as_stream_mut()) {
             stream.set_plain_content(data.to_vec());
         }
     };
-    let cmap = get(&page.pdf, font(b"CM"), b"Encoding").and_then(|e| e.as_reference().ok());
+    let cmap = get(&page.pdf, font(b"CM"), b"Encoding").and_then(|e| e.as_reference());
     let procs = get(&page.pdf, font(content::fixture::SQUARES), b"CharProcs");
-    let proc = procs.and_then(|p| p.as_dict().ok()?.get(b"a").ok()?.as_reference().ok());
+    let proc = procs.and_then(|p| p.as_dict()?.get(b"a")?.as_reference());
     let descriptor = get(&page.pdf, font(b"TT"), b"FontDescriptor");
-    let descriptor = descriptor.and_then(|d| d.as_reference().ok());
-    let program = descriptor.and_then(|d| get(&page.pdf, d, b"FontFile2")?.as_reference().ok());
+    let descriptor = descriptor.and_then(|d| d.as_reference());
+    let program = descriptor.and_then(|d| get(&page.pdf, d, b"FontFile2")?.as_reference());
     for (id, data) in [cmap, proc].into_iter().zip(parts) {
         set_stream(id, data);
     }
@@ -481,20 +486,20 @@ impl OpJson {
         let mut third = f.dict(pages[2]).clone();
         write_marks(&mut f.pdf, &mut third, &holding(&every_mark_kind()));
         *f.dict(pages[2]) = third;
-        let rect = || Object::Array([72, 600, 92, 620].map(Object::from).to_vec());
+        let rect = || Object::from([72, 600, 92, 620].map(Object::from).to_vec());
         let comment = f.pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(),
-            "NM" => Object::string_literal("a1b2-c3"), "Contents" => Object::string_literal("Why?"),
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "Rect" => rect(),
+            "NM" => literal("a1b2-c3"), "Contents" => literal("Why?"),
         });
         let reply = f.pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(), "IRT" => comment,
-            "NM" => Object::string_literal("acro-1"), "Contents" => Object::string_literal("Because."),
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "Rect" => rect(), "IRT" => comment,
+            "NM" => literal("acro-1"), "Contents" => literal("Because."),
         });
         f.set_annots(3, &[comment, reply]);
         let item = |title: &str, page| {
             dictionary! {
-                "Title" => Object::string_literal(title),
-                "Dest" => vec![Object::Reference(page), "Fit".into()],
+                "Title" => literal(title),
+                "Dest" => vec![Object::from(page), Object::name("Fit")],
             }
         };
         outline_tree(
@@ -509,9 +514,9 @@ impl OpJson {
         let catalog = f.catalog;
         let labels = vec![
             0.into(),
-            dictionary! { "S" => "r" }.into(),
+            dictionary! { "S" => Object::name("r") }.into(),
             2.into(),
-            dictionary! { "S" => "D" }.into(),
+            dictionary! { "S" => Object::name("D") }.into(),
         ];
         f.dict(catalog)
             .set("PageLabels", dictionary! { "Nums" => labels });
@@ -649,7 +654,7 @@ fn assert_rewritten(content: &Concat, res: &ResCx, rewritten: &[Cow<[u8]>]) {
         panic!("a list written again is one token: {changed:?}")
     };
     let read = |list: &[u8]| content::object(list, lim.content.depth);
-    let Some(Object::Dictionary(mut left)) = read(was) else {
+    let Some(Value::Dict(mut left)) = read(was).map(Object::into_value) else {
         panic!("a list written again was one")
     };
     for key in LIST_KEYS {
@@ -657,7 +662,7 @@ fn assert_rewritten(content: &Concat, res: &ResCx, rewritten: &[Cow<[u8]>]) {
     }
     assert_eq!(
         read(now),
-        Some(Object::Dictionary(left)),
+        Some(Object::from(left)),
         "the list written again"
     );
 }
@@ -681,13 +686,11 @@ fn annotated_page(data: &[u8]) -> Option<Src> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
-    use crate::pdf::encryption::crypt_filters::{Aes128CryptFilter, CryptFilter};
-    use crate::pdf::{EncryptionState, EncryptionVersion, Permissions, XrefKind};
-
-    use crate::pdf::{Document as Pdf, Object, ObjectId};
+    use crate::pdf::test_crypt::{CipherKind, TestEncryption};
+    use crate::pdf::{Document as Pdf, Object, ObjectId, XrefKind};
 
     use super::*;
     use crate::forms::fixture::{Form, every_kind, every_mark_kind, hybrid_reference};
@@ -959,23 +962,9 @@ mod tests {
         modern.pdf.save_modern(&mut streams).unwrap();
         let mut classic = every_kind();
         classic.pdf.xref_kind = XrefKind::Table;
-        let std_cf = BTreeMap::from([(
-            b"StdCF".to_vec(),
-            std::sync::Arc::new(Aes128CryptFilter) as std::sync::Arc<dyn CryptFilter>,
-        )]);
         let plain = plaintext();
         // The empty user password: the bodies open it, and decrypt.
-        let aes = EncryptionState::try_from(EncryptionVersion::V4 {
-            document: &plain,
-            encrypt_metadata: true,
-            crypt_filters: std_cf,
-            stream_filter: b"StdCF".to_vec(),
-            string_filter: b"StdCF".to_vec(),
-            owner_password: "owner",
-            user_password: "",
-            permissions: Permissions::all(),
-        })
-        .unwrap();
+        let aes = TestEncryption::new(CipherKind::Aes128, "", "owner");
         let [aes_table, aes_stream] = encrypted(&plain, &aes, |_| {});
         vec![
             tree,
@@ -1069,7 +1058,7 @@ mod tests {
     }
 
     /// [`sheaf_annot`]'s fixtures: every kind of mark as a save writes it,
-    /// the annotations' objects as lopdf writes them,
+    /// the annotations' indirect objects as written,
     /// numbered from 4 in `/Annots` order, without the appearances and
     /// files they refer to, but for what makes a page stamp and an
     /// attachment marks: the stamp's appearance, after them, which names
@@ -1087,19 +1076,16 @@ mod tests {
             .iter()
             .map(|e| e.as_reference().unwrap())
             .collect();
-        let number: HashMap<ObjectId, ObjectId> =
-            (4..).zip(&entries).map(|(n, id)| (*id, (n, 0))).collect();
+        let number: HashMap<ObjectId, ObjectId> = (4..)
+            .zip(&entries)
+            .map(|(n, id)| (*id, ObjectId::new(n, 0)))
+            .collect();
         // The appearance that draws a form: the page stamp's.
         let draws_a_form = |d: &crate::pdf::Dictionary| {
-            let n = d
-                .get(b"AP")
-                .and_then(Object::as_dict)
-                .ok()?
-                .get(b"N")
-                .ok()?;
-            let n = n.as_reference().ok()?;
-            let s = f.pdf.get_object(n).ok()?.as_stream().ok()?;
-            let resources = s.dict.get(b"Resources").and_then(Object::as_dict).ok()?;
+            let n = d.get(b"AP").and_then(Object::as_dict)?.get(b"N")?;
+            let n = n.as_reference()?;
+            let s = f.pdf.get_object(n).ok()?.as_stream()?;
+            let resources = s.dict.get(b"Resources").and_then(Object::as_dict)?;
             resources.has(b"XObject").then(|| s.clone())
         };
         let mut out = Pdf::with_version("1.7");
@@ -1112,11 +1098,12 @@ mod tests {
                 d.remove(key);
             }
             if let Some(stream) = ap {
-                out.objects.insert((next, 0), stream.into());
-                d.set("AP", dictionary! { "N" => (next, 0) });
+                let next_id = ObjectId::new(next, 0);
+                out.objects.insert(next_id, stream.into());
+                d.set("AP", dictionary! { "N" => next_id });
                 next += 1;
             }
-            if let Ok(irt) = d.get(b"IRT").and_then(Object::as_reference) {
+            if let Some(irt) = d.get(b"IRT").and_then(Object::as_reference) {
                 d.set("IRT", number[&irt]);
             }
             out.objects.insert(number[id], d.into());

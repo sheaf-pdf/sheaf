@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use sheaf_doc::export::Export;
 use sheaf_doc::materialize::AskAnswers;
-use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary, literal};
 use sheaf_doc::save::text_string;
 use sheaf_doc::tx::fixture::add;
 use sheaf_doc::{Actor, Annot, AnnotId, AnnotKind, Box2, Pt};
@@ -47,7 +47,7 @@ fn pdf(dir: &Path) -> PathBuf {
         };
         let content = pdf.add_object(Stream::new(dictionary! {}, square.to_vec()));
         let mut page = dictionary! {
-            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+            "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         };
         if n == 2 {
@@ -56,34 +56,35 @@ fn pdf(dir: &Path) -> PathBuf {
         let page_id = pdf.add_object(page);
         if n == 1 {
             let note = pdf.add_object(dictionary! {
-                "Type" => "Annot", "Subtype" => "Text", "P" => page_id,
+                "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "P" => page_id,
                 "Rect" => vec![100.into(), 600.into(), 120.into(), 620.into()],
                 "Contents" => text_string("Check “this” (please)"),
-                "T" => Object::string_literal("Ann"),
-                "NM" => Object::string_literal("ann-1"),
-                "M" => Object::string_literal("D:20261001120000"),
+                "T" => literal("Ann"),
+                "NM" => literal("ann-1"),
+                "M" => literal("D:20261001120000"),
                 "C" => vec![0.into(), 0.into(), 1.into()],
             });
             let reply = pdf.add_object(dictionary! {
-                "Type" => "Annot", "Subtype" => "Text", "P" => page_id,
+                "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "P" => page_id,
                 "Rect" => vec![100.into(), 600.into(), 120.into(), 620.into()],
-                "Contents" => Object::string_literal("Done"),
-                "T" => Object::string_literal("Bo"),
-                "NM" => Object::string_literal("bo-1"),
+                "Contents" => literal("Done"),
+                "T" => literal("Bo"),
+                "NM" => literal("bo-1"),
                 "IRT" => note,
-                "M" => Object::string_literal("D:20261002120000"),
+                "M" => literal("D:20261002120000"),
             });
             pdf.get_dictionary_mut(page_id)
                 .unwrap()
                 .set("Annots", vec![note.into(), reply.into()]);
         }
-        kids.push(Object::Reference(page_id));
+        kids.push(Object::from(page_id));
     }
     pdf.objects.insert(
         pages_id,
-        dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => 3 }.into(),
+        dictionary! { "Type" => Object::name("Pages"), "Kids" => kids, "Count" => 3 }.into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
     let path = dir.join("review.pdf");
     pdf.save(&path).unwrap();
@@ -453,9 +454,9 @@ fn links_are_foreign_records() {
     let mut file = Pdf::load(pdf(&dir)).unwrap();
     let page = file.page_iter().next().unwrap();
     let link = file.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Link",
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"),
         "Rect" => vec![300.into(), 300.into(), 400.into(), 400.into()],
-        "A" => dictionary! { "S" => "URI", "URI" => Object::string_literal("https://example.com") },
+        "A" => dictionary! { "S" => Object::name("URI"), "URI" => literal("https://example.com") },
     });
     file.get_dictionary_mut(page)
         .unwrap()
@@ -479,7 +480,7 @@ fn links_are_foreign_records() {
     let list = back.get_dictionary(page).unwrap().get(b"Annots").unwrap();
     let kept = list.as_array().unwrap().iter().any(|e| {
         let d = back.get_dictionary(e.as_reference().unwrap()).unwrap();
-        d.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Link".as_slice())
+        d.get(b"Subtype").and_then(Object::as_name) == Some(b"Link".as_slice())
     });
     assert!(kept, "the link is kept");
 }

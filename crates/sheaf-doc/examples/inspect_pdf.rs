@@ -1,5 +1,5 @@
-//! Dev tool: what lopdf sees in a file — page count, encryption, object
-//! count — optionally after decrypting with a password.
+//! Dev tool: what `sheaf_doc::pdf` sees in a file — page count, encryption,
+//! object count — optionally after decrypting with a password.
 //!
 //! Usage: cargo run -p sheaf-doc --example inspect_pdf <file.pdf> [password]
 

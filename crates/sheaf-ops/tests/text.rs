@@ -31,7 +31,7 @@ use futures::executor::block_on;
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::geom::Geom;
 use sheaf_doc::materialize::How;
-use sheaf_doc::pdf::{Document as Pdf, Stream, XrefKind, dictionary};
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, XrefKind, dictionary};
 use sheaf_doc::realize::{EngineKey, GroupKey, ViewInputs};
 use sheaf_doc::serialize::fixture::revision_cut_out;
 use sheaf_doc::store::BlobKind;
@@ -52,11 +52,15 @@ use common::{file, opened, ready, views, written};
 fn turned() -> Vec<u8> {
     let mut pdf = Pdf::with_version("1.5");
     let pages = pdf.new_object_id();
-    let font = dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" };
+    let font = dictionary! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
+    };
     let content = b"BT /F1 18 Tf 0 1 -1 0 300 200 Tm (Inserted upright) Tj ET".to_vec();
     let content = pdf.add_object(Stream::new(dictionary! {}, content));
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page",
+        "Type" => Object::name("Page"),
         "Parent" => pages,
         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         "CropBox" => vec![36.into(), 48.5.into(), 560.into(), 740.into()],
@@ -66,9 +70,13 @@ fn turned() -> Vec<u8> {
     });
     pdf.objects.insert(
         pages,
-        dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1,
+        }
+        .into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();

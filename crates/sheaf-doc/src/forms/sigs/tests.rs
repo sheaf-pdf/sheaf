@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use crate::pdf::Object;
+use crate::pdf::{Object, ObjectId, literal};
 
 use super::*;
 use crate::forms::corpus::Corpus;
@@ -12,7 +12,7 @@ use crate::source::Limits;
 use crate::store::{BlobKind, Store};
 
 /// One signature field, `Sig`, on a page with a text field, `a.b`.
-fn signable() -> (Form, crate::pdf::ObjectId) {
+fn signable() -> (Form, ObjectId) {
     let mut f = Form::new(1);
     let b = f.text("b", 0, row(1));
     f.group("a", &[b]);
@@ -68,7 +68,7 @@ fn a_certification_s_p_and_its_default() {
         assert_eq!(read_back(&mut f).signed, [certified(p as u8)], "P={p}");
     }
     // No /P is 2; one past 1–3 is 1.
-    for (p, reads) in [(None, 2), (Some(Object::Integer(7)), 1)] {
+    for (p, reads) in [(None, 2), (Some(Object::from(7_i64)), 1)] {
         let (mut f, sig) = signable();
         f.certify(sig, 3);
         let v = f.pdf.get_dictionary(sig).unwrap().get(b"V").unwrap();
@@ -170,7 +170,7 @@ fn field_mdp_locks_and_lock_p() {
 #[test]
 fn an_unreadable_signature_asks() {
     let (mut f, sig) = signable();
-    f.dict(sig).set("V", Object::Reference((9999, 0)));
+    f.dict(sig).set("V", Object::from(ObjectId::new(9999, 0)));
     f.dict(f.acroform).set("SigFlags", 3);
     let sigs = read_back(&mut f);
     let unreadable = Signature {
@@ -186,7 +186,7 @@ fn an_unreadable_signature_asks() {
     // A value that's no dictionary, as a form's root may pass down to
     // every field, signs nothing.
     let (mut f, sig) = signable();
-    f.dict(sig).set("V", Object::string_literal(""));
+    f.dict(sig).set("V", literal(""));
     assert_eq!(read_back(&mut f).signed, []);
     // A damaged form's: one stands for them.
     let (mut f, sig) = signable();

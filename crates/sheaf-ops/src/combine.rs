@@ -416,7 +416,7 @@ mod tests {
             let mut annots = Vec::new();
             for a in &marks {
                 let main = to_pdf_in(a, &mut f.pdf, &mut cx).main;
-                annots.push(sheaf_doc::pdf::Object::Reference(f.pdf.add_object(main)));
+                annots.push(sheaf_doc::pdf::Object::from(f.pdf.add_object(main)));
             }
             let page = f.pages[0];
             f.dict(page).set("Annots", annots);

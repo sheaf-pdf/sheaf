@@ -79,7 +79,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use crate::pdf::{Dictionary, Object, ObjectId};
+use crate::pdf::{Dictionary, Object, ObjectId, StreamExt, Value, deflate_best};
 use anyhow::{Context as _, Result, bail};
 use in_progress::Progress;
 
@@ -315,7 +315,7 @@ pub struct Syms {
 impl Syms {
     /// A reference to `key`'s object.
     pub fn placeholder(&mut self, key: ObjKey) -> Object {
-        Object::Reference(self.id(key))
+        Object::from(self.id(key))
     }
 
     /// The placeholder that names `key`.
@@ -325,12 +325,18 @@ impl Syms {
             self.keys.push(key);
             next
         });
-        (i, PLACEHOLDER)
+        ObjectId::new(i, PLACEHOLDER)
     }
 
     /// The key placeholder `r` names: None for a reference that isn't
     /// one.
-    pub fn key(&self, (i, generation): ObjectId) -> Option<ObjKey> {
+    pub fn key(
+        &self,
+        ObjectId {
+            number: i,
+            generation,
+        }: ObjectId,
+    ) -> Option<ObjKey> {
         (generation == PLACEHOLDER)
             .then(|| self.keys.get(i as usize).copied())
             .flatten()
@@ -370,8 +376,8 @@ impl PdfVersion {
         let pdf = src.pdf();
         let header = PdfVersion::parse(pdf.version().as_bytes()).unwrap_or(PdfVersion::new(1, 4));
         let catalog = (pdf.catalog().ok())
-            .and_then(|c| c.get(b"Version").ok())
-            .and_then(|v| v.as_name().ok())
+            .and_then(|c| c.get(b"Version"))
+            .and_then(Object::as_name)
             .and_then(PdfVersion::parse);
         header.max(catalog.unwrap_or(header))
     }
@@ -641,10 +647,10 @@ impl<'a> Cx<'a> {
         if !self.hides(aid) {
             return;
         }
-        let flags = match dict.get(b"F") {
-            Ok(&Object::Integer(f)) => f,
-            Ok(&Object::Reference(r)) => (self.read(r))
-                .and_then(|(f, _, _)| f.as_i64().ok())
+        let flags = match dict.get(b"F").map(Object::value) {
+            Some(&Value::Integer(f)) => f,
+            Some(&Value::Ref(r)) => (self.read(r))
+                .and_then(|(f, _, _)| f.as_integer())
                 .unwrap_or(0),
             _ => 0,
         };
@@ -691,20 +697,20 @@ impl<'a> Cx<'a> {
 
     fn same_dict(&self, built: &Dictionary, read: &Dictionary) -> bool {
         built.len() == read.len()
-            && (built.iter()).all(|(k, v)| read.get(k).is_ok_and(|r| self.same(v, r)))
+            && (built.iter()).all(|(k, v)| read.get(k).is_some_and(|r| self.same(v, r)))
     }
 
     fn same(&self, built: &Object, read: &Object) -> bool {
-        match (built, read) {
-            (Object::Reference(p), Object::Reference(r)) => {
+        match (built.value(), read.value()) {
+            (Value::Ref(p), Value::Ref(r)) => {
                 self.syms.key(*p).and_then(|k| self.number_known(k)) == Some(*r)
             }
-            (Object::Array(a), Object::Array(b)) => {
+            (Value::Array(a), Value::Array(b)) => {
                 a.len() == b.len() && a.iter().zip(b).all(|(a, b)| self.same(a, b))
             }
-            (Object::Dictionary(a), Object::Dictionary(b)) => self.same_dict(a, b),
-            (Object::Stream(_), _) | (_, Object::Stream(_)) => false,
-            (Object::Reference(_), _) | (_, Object::Reference(_)) => false,
+            (Value::Dict(a), Value::Dict(b)) => self.same_dict(a, b),
+            (Value::Stream(_), _) | (_, Value::Stream(_)) => false,
+            (Value::Ref(_), _) | (_, Value::Ref(_)) => false,
             (a, b) => a == b,
         }
     }
@@ -745,8 +751,8 @@ impl<'a> Cx<'a> {
         let src = self.srcs.get(&blob)?.clone();
         let mut read = src.pdf().object_unkept(obj).ok()?;
         for _ in 0..16 {
-            match *read {
-                Object::Reference(next) => read = src.pdf().object_unkept(next).ok()?,
+            match read.value() {
+                Value::Ref(next) => read = src.pdf().object_unkept(*next).ok()?,
                 _ => return Some((read, src, copy)),
             }
         }
@@ -794,7 +800,7 @@ impl Sink for Cx<'_> {
             return self.page_res.get(&key).cloned();
         }
         let (obj, src, copy) = self.read(id)?;
-        let Object::Dictionary(d) = &*obj else {
+        let Value::Dict(d) = obj.value() else {
             return None;
         };
         let scope = Scope { src: &src, copy };
@@ -803,7 +809,7 @@ impl Sink for Cx<'_> {
 
     fn array(&mut self, id: ObjectId) -> Option<Vec<Object>> {
         let (obj, src, copy) = self.read(id)?;
-        let Object::Array(items) = &*obj else {
+        let Value::Array(items) = obj.value() else {
             return None;
         };
         let scope = Scope { src: &src, copy };
@@ -833,19 +839,10 @@ impl Sink for Cx<'_> {
 /// `obj`, one of a resource's objects, as written: each reference `(i, 0)`
 /// among them the placeholder of `key(i)`, its streams compressed.
 fn part(cx: &mut Cx, obj: &Object, key: &dyn Fn(usize) -> ObjKey) -> Object {
-    fn follow(obj: &mut Object, to: &mut dyn FnMut(usize) -> ObjectId) {
-        match obj {
-            Object::Reference(r) => *r = to(r.0 as usize),
-            Object::Array(items) => items.iter_mut().for_each(|o| follow(o, to)),
-            Object::Dictionary(d) => d.iter_mut().for_each(|(_, o)| follow(o, to)),
-            Object::Stream(s) => s.dict.iter_mut().for_each(|(_, o)| follow(o, to)),
-            _ => {}
-        }
-    }
     let mut obj = obj.clone();
-    follow(&mut obj, &mut |i| cx.syms.id(key(i)));
-    if let Object::Stream(s) = &mut obj {
-        let _ = s.compress();
+    obj.renumber(|r| Some(cx.syms.id(key(r.number as usize))));
+    if let Some(s) = obj.as_stream_mut() {
+        s.compress();
     }
     obj
 }
@@ -854,10 +851,7 @@ fn part(cx: &mut Cx, obj: &Object, key: &dyn Fn(usize) -> ObjKey) -> Object {
 /// it: what a [`Deferred`] stream's data is made as, whatever its size, as
 /// its dictionary says so before it's made.
 pub(crate) fn deflated(data: &[u8]) -> Result<Vec<u8>> {
-    use std::io::Write as _;
-    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
-    z.write_all(data)?;
-    Ok(z.finish()?)
+    Ok(deflate_best(data))
 }
 
 /// What each page of `st` is written as ([`Shown`]): its base page, as
@@ -1033,7 +1027,7 @@ fn emit_overlay(
         .trailer()
         .get(b"Root")
         .and_then(Object::as_reference);
-    if let Ok(at) = catalog {
+    if let Some(at) = catalog {
         cx.own(ObjKey::Catalog, at);
     }
     claim(&mut cx, pages);
@@ -1234,7 +1228,7 @@ fn appended(cx: &mut Cx, p: &dyn Progress) -> Result<()> {
     if let Some(ranges) = labels.filter(|_| cx.writes(&ObjKey::Labels)) {
         cx.push(
             ObjKey::Labels,
-            Object::Dictionary(crate::labels::number_tree(&ranges)),
+            Object::from(crate::labels::number_tree(&ranges)),
         );
     }
     if cx.writes(&ObjKey::Catalog) {
@@ -1288,12 +1282,8 @@ fn reached(objects: &mut Vec<(ObjKey, SymObject)>, syms: &Syms) {
 
 /// Each reference in `obj`, to `to`.
 fn refs(obj: &Object, to: &mut dyn FnMut(ObjectId)) {
-    match obj {
-        Object::Reference(r) => to(*r),
-        Object::Array(items) => items.iter().for_each(|o| refs(o, to)),
-        Object::Dictionary(d) => d.iter().for_each(|(_, o)| refs(o, to)),
-        Object::Stream(s) => s.dict.iter().for_each(|(_, o)| refs(o, to)),
-        _ => {}
+    for r in obj.references() {
+        to(r);
     }
 }
 
@@ -1388,8 +1378,8 @@ mod tests {
         let r = |o: &Object| o.as_reference().unwrap();
         assert_eq!(syms.key(r(&a)), Some(ObjKey::Catalog));
         assert_eq!(syms.key(r(&b)), Some(ObjKey::Labels));
-        assert_eq!(syms.key((0, 0)), None);
-        assert_eq!(syms.key((9, PLACEHOLDER)), None);
+        assert_eq!(syms.key(ObjectId::new(0, 0)), None);
+        assert_eq!(syms.key(ObjectId::new(9, PLACEHOLDER)), None);
         assert_eq!(syms.keys(), [ObjKey::Catalog, ObjKey::Labels]);
     }
 }

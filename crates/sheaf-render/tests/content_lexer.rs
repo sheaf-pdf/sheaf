@@ -116,8 +116,8 @@ fn direct<'a>(pdf: &'a LazyPdf, object: &'a Object) -> Option<&'a Object> {
 
 /// A page's resource category (`/XObject`, `/Shading`).
 fn category<'a>(pdf: &'a LazyPdf, page: &'a PageFacts, key: &[u8]) -> Option<&'a Dictionary> {
-    let resources = direct(pdf, page.resources.as_deref()?)?.as_dict().ok()?;
-    direct(pdf, resources.get(key).ok()?)?.as_dict().ok()
+    let resources = direct(pdf, page.resources.as_deref()?)?.as_dict()?;
+    direct(pdf, resources.get(key)?)?.as_dict()
 }
 
 /// Whether a string operand holds a byte.
@@ -153,13 +153,13 @@ fn lexed(
     let xobjects = category(pdf, page, b"XObject");
     let shadings = category(pdf, page, b"Shading");
     let mut subtype = |name: &[u8]| -> Option<Vec<u8>> {
-        let id = xobjects?.get(name).ok()?.as_reference().ok()?;
+        let id = xobjects?.get(name)?.as_reference()?;
         subtypes
             .entry(id)
             .or_insert_with(|| {
                 let object = pdf.object_unkept(id).ok()?;
-                let dict = &object.as_stream().ok()?.dict;
-                Some(dict.get(b"Subtype").ok()?.as_name().ok()?.to_vec())
+                let dict = &object.as_stream()?.dict;
+                Some(dict.get(b"Subtype")?.as_name()?.to_vec())
             })
             .clone()
     };

@@ -28,7 +28,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
-use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId};
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, StreamExt, Value};
 use anyhow::{Context, Result};
 use quick_xml::events::{BytesStart, Event};
 
@@ -314,13 +314,13 @@ fn check_pdf(pdf: &Pdf, bytes: &[u8], password: Option<&str>) -> Report {
         widgets: pages.of.len(),
         template_widgets: templates.len(),
         need_appearances: form
-            .and_then(|f| f.get(b"NeedAppearances").ok())
-            .and_then(|o| o.as_bool().ok())
+            .and_then(|f| f.get(b"NeedAppearances"))
+            .and_then(Object::as_bool)
             .unwrap_or(false),
         sig_flags: form
-            .and_then(|f| f.get(b"SigFlags").ok())
+            .and_then(|f| f.get(b"SigFlags"))
             .and_then(|o| resolve(pdf, o))
-            .and_then(|o| o.as_i64().ok())
+            .and_then(Object::as_integer)
             .unwrap_or(0),
         ..Default::default()
     };
@@ -329,7 +329,9 @@ fn check_pdf(pdf: &Pdf, bytes: &[u8], password: Option<&str>) -> Report {
     // The widgets themselves.
     let orphans = pages.of.keys().filter(|w| !tree.widgets.contains(w));
     let off_page = pdf.objects.iter().filter(|(id, o)| {
-        o.as_dict().is_ok_and(is_widget) && !pages.of.contains_key(id) && !templates.contains(id)
+        matches!(o.value(), Value::Dict(d) if is_widget(d))
+            && !pages.of.contains_key(id)
+            && !templates.contains(id)
     });
     let shared = pages.of.iter().filter(|(_, p)| p.len() > 1);
     let widgets: [(Vec<ObjectId>, Named); 5] = [
@@ -394,8 +396,8 @@ fn check_pdf(pdf: &Pdf, bytes: &[u8], password: Option<&str>) -> Report {
     // XFA.
     if let Some((packets, template)) = form.and_then(|f| xfa_of(pdf, f)) {
         let dynamic = catalog
-            .and_then(|c| c.get(b"NeedsRendering").ok())
-            .and_then(|o| o.as_bool().ok())
+            .and_then(|c| c.get(b"NeedsRendering"))
+            .and_then(Object::as_bool)
             .unwrap_or(false);
         if !dynamic && let Some(xfa) = template.as_deref().and_then(xfa_paths) {
             let acroform: BTreeSet<String> =
@@ -419,12 +421,15 @@ fn check_pdf(pdf: &Pdf, bytes: &[u8], password: Option<&str>) -> Report {
         .chain([bytes.len()])
         .collect();
     let perms = catalog
-        .and_then(|c| c.get(b"Perms").ok())
+        .and_then(|c| c.get(b"Perms"))
         .and_then(|p| resolve(pdf, p))
-        .and_then(|p| p.as_dict().ok());
+        .and_then(Object::as_dict);
     let perm = |key: &[u8]| {
-        let o = perms?.get(key).ok()?;
-        Some((o.as_reference().ok(), resolve(pdf, o)?.as_dict().ok()?))
+        let o = perms?.get(key)?;
+        let Value::Dict(d) = resolve(pdf, o)?.value() else {
+            return None;
+        };
+        Some((o.as_reference(), d))
     };
     let mut signatures: Vec<(String, &Dictionary)> = Vec::new();
     let mut seen = HashSet::new();
@@ -440,9 +445,10 @@ fn check_pdf(pdf: &Pdf, bytes: &[u8], password: Option<&str>) -> Report {
     for f in tree.fields.iter().filter(|f| f.ft == b"Sig") {
         report.signature_fields += 1;
         let Some(v) = f.value else { continue };
-        let (id, sig) = match v {
-            Object::Reference(id) => (Some(*id), pdf.get_dictionary(*id).ok()),
-            o => (None, o.as_dict().ok()),
+        let (id, sig) = match v.value() {
+            Value::Ref(id) => (Some(*id), pdf.get_dictionary(*id).ok()),
+            Value::Dict(d) => (None, Some(d)),
+            _ => (None, None),
         };
         let Some(sig) = sig.filter(|s| s.has(b"ByteRange")) else {
             continue;
@@ -499,8 +505,8 @@ fn push(findings: &mut Vec<Finding>, mut names: Vec<String>, finding: Named) {
 }
 
 fn acroform(pdf: &Pdf) -> Option<&Dictionary> {
-    let form = pdf.catalog().ok()?.get(b"AcroForm").ok()?;
-    resolve(pdf, form)?.as_dict().ok()
+    let form = pdf.catalog().ok()?.get(b"AcroForm")?;
+    resolve(pdf, form)?.as_dict()
 }
 
 /// A terminal field, as the check reads it: inherited keys resolved.
@@ -528,11 +534,8 @@ impl Field<'_> {
 
     /// A button's value: the state its widgets show it in.
     fn state(&self) -> Option<&[u8]> {
-        match self.value? {
-            Object::Name(n) => Some(n.as_slice()),
-            Object::String(s, _) => Some(s.as_slice()),
-            _ => None,
-        }
+        let v = self.value?;
+        v.as_name().or_else(|| v.as_bytes())
     }
 }
 
@@ -565,11 +568,11 @@ struct Inherited<'a> {
 fn read_tree<'a>(pdf: &'a Pdf, form: Option<&'a Dictionary>) -> Tree<'a> {
     let mut tree = Tree::default();
     let roots = form
-        .and_then(|f| f.get(b"Fields").ok())
+        .and_then(|f| f.get(b"Fields"))
         .and_then(|f| resolve(pdf, f))
-        .and_then(|f| f.as_array().ok());
+        .and_then(Object::as_array);
     for root in roots.into_iter().flatten() {
-        if let Ok(id) = root.as_reference() {
+        if let Some(id) = root.as_reference() {
             tree.node(pdf, id, Inherited::default(), "", 1);
         }
     }
@@ -605,8 +608,8 @@ impl<'a> Tree<'a> {
         let Ok(dict) = pdf.get_dictionary(id) else {
             return;
         };
-        let name = match dict.get(b"T").ok().and_then(|t| resolve(pdf, t)) {
-            Some(t) if t.as_str().is_ok_and(|s| s.len() > LIMITS.name) => None,
+        let name = match dict.get(b"T").and_then(|t| resolve(pdf, t)) {
+            Some(t) if t.as_bytes().is_some_and(|s| s.len() > LIMITS.name) => None,
             Some(t) if up_name.is_empty() => Some(pdf_text(t)),
             Some(t) => Some(format!("{up_name}.{}", pdf_text(t))),
             None => Some(up_name.to_string()),
@@ -619,10 +622,10 @@ impl<'a> Tree<'a> {
         };
         self.names += name.len();
         let mut here = up;
-        if let Some(ft) = dict.get(b"FT").ok().and_then(|o| o.as_name().ok()) {
+        if let Some(ft) = dict.get(b"FT").and_then(Object::as_name) {
             here.ft = ft;
         }
-        if let Ok(v) = dict.get(b"V")
+        if let Some(v) = dict.get(b"V")
             && let Some(value) = resolve_once(pdf, v)
         {
             here.value = Some(value);
@@ -633,10 +636,9 @@ impl<'a> Tree<'a> {
         }
         let kids: Vec<ObjectId> = dict
             .get(b"Kids")
-            .ok()
             .and_then(|k| resolve(pdf, k))
-            .and_then(|k| k.as_array().ok())
-            .map(|k| k.iter().filter_map(|o| o.as_reference().ok()).collect())
+            .and_then(Object::as_array)
+            .map(|k| k.iter().filter_map(Object::as_reference).collect())
             .unwrap_or_default();
         let mut widgets = Vec::new();
         if is_widget(dict) {
@@ -679,15 +681,14 @@ impl<'a> Tree<'a> {
     /// A hash of a value's text (each item's, for a list), to compare
     /// values across revisions by; None when it's empty.
     fn digest(&mut self, pdf: &Pdf, v: &Object) -> Option<u64> {
-        if let Ok(id) = v.as_reference()
+        if let Some(id) = v.as_reference()
             && let Some(&digest) = self.values.get(&id)
         {
             return digest;
         }
-        let items = match resolve(pdf, v) {
-            Some(Object::Array(items)) => items.as_slice(),
-            _ => std::slice::from_ref(v),
-        };
+        let items = resolve(pdf, v)
+            .and_then(Object::as_array)
+            .unwrap_or_else(|| std::slice::from_ref(v));
         let mut h = DefaultHasher::new();
         let mut empty = true;
         for item in items {
@@ -697,7 +698,7 @@ impl<'a> Tree<'a> {
             }
         }
         let digest = (!empty).then(|| h.finish());
-        if let Ok(id) = v.as_reference() {
+        if let Some(id) = v.as_reference() {
             self.values.insert(id, digest);
         }
         digest
@@ -705,18 +706,18 @@ impl<'a> Tree<'a> {
 
     /// A string's, name's or stream's text, hashed; None when it's empty.
     fn text(&mut self, pdf: &Pdf, o: &Object) -> Option<u64> {
-        if let Ok(id) = o.as_reference()
+        if let Some(id) = o.as_reference()
             && let Some(&text) = self.texts.get(&id)
         {
             return text;
         }
-        let text = match resolve(pdf, o) {
-            Some(s @ Object::String(..)) => hash(pdf_text(s).as_bytes()),
-            Some(Object::Name(n)) => hash(n),
-            Some(Object::Stream(s)) => hash(&s.content),
+        let text = resolve(pdf, o).and_then(|s| match s.value() {
+            Value::String(..) => hash(pdf_text(s).as_bytes()),
+            Value::Name(n) => hash(n.as_bytes()),
+            Value::Stream(st) => hash(st.raw_bytes()),
             _ => None,
-        };
-        if let Ok(id) = o.as_reference() {
+        });
+        if let Some(id) = o.as_reference() {
             self.texts.insert(id, text);
         }
         text
@@ -737,7 +738,7 @@ fn twice() -> String {
 }
 
 fn parent_of(d: &Dictionary) -> Option<ObjectId> {
-    d.get(b"Parent").ok()?.as_reference().ok()
+    d.get(b"Parent")?.as_reference()
 }
 
 /// The widgets on pages, with the pages each is on, and those with a
@@ -756,11 +757,11 @@ fn on_pages(pdf: &Pdf) -> OnPages {
         out.count += 1;
         for (id, w) in widgets_on(pdf, page) {
             out.of.entry(id).or_default().push(i);
-            match w.get(b"P") {
-                Err(_) => {}
-                Ok(Object::Reference(p)) if *p == page => {}
-                Ok(Object::Reference(p)) if pdf.get_object(*p).is_ok() => out.wrong.push(id),
-                Ok(_) => out.null.push(id),
+            match w.get(b"P").map(Object::value) {
+                None => {}
+                Some(Value::Ref(p)) if *p == page => {}
+                Some(Value::Ref(p)) if pdf.get_object(*p).is_ok() => out.wrong.push(id),
+                Some(_) => out.null.push(id),
             }
         }
     }
@@ -772,13 +773,13 @@ fn widgets_on(pdf: &Pdf, page: ObjectId) -> Vec<(ObjectId, &Dictionary)> {
     let annots = pdf
         .get_dictionary(page)
         .ok()
-        .and_then(|d| d.get(b"Annots").ok())
+        .and_then(|d| d.get(b"Annots"))
         .and_then(|a| resolve(pdf, a))
-        .and_then(|a| a.as_array().ok());
+        .and_then(Object::as_array);
     annots
         .into_iter()
         .flatten()
-        .filter_map(|a| a.as_reference().ok())
+        .filter_map(Object::as_reference)
         .filter_map(|id| Some((id, pdf.get_dictionary(id).ok().filter(|d| is_widget(d))?)))
         .collect()
 }
@@ -789,28 +790,29 @@ fn on_templates(pdf: &Pdf, pages: &OnPages) -> HashSet<ObjectId> {
     let names = pdf
         .catalog()
         .ok()
-        .and_then(|c| c.get(b"Names").ok())
+        .and_then(|c| c.get(b"Names"))
         .and_then(|n| resolve(pdf, n))
-        .and_then(|n| n.as_dict().ok());
+        .and_then(Object::as_dict);
     let mut todo: Vec<&Object> = names
         .into_iter()
-        .flat_map(|n| [n.get(b"Templates").ok(), n.get(b"Pages").ok()])
+        .flat_map(|n| [n.get(b"Templates"), n.get(b"Pages")])
         .flatten()
         .collect();
     let mut seen = HashSet::new();
     let mut out = HashSet::new();
     while let Some(node) = todo.pop() {
-        if let Ok(id) = node.as_reference()
+        if let Some(id) = node.as_reference()
             && (!seen.insert(id) || seen.len() > LIMITS.nodes)
         {
             continue;
         }
-        let Some(d) = resolve(pdf, node).and_then(|n| n.as_dict().ok()) else {
+        let Some(d) = resolve(pdf, node).and_then(Object::as_dict) else {
             continue;
         };
         let array = |key: &[u8]| {
-            let a = d.get(key).ok().and_then(|a| resolve(pdf, a));
-            a.and_then(|a| a.as_array().ok()).map(Vec::as_slice)
+            d.get(key)
+                .and_then(|a| resolve(pdf, a))
+                .and_then(Object::as_array)
         };
         todo.extend(array(b"Kids").unwrap_or_default());
         // Pairs of a name and a page.
@@ -819,7 +821,7 @@ fn on_templates(pdf: &Pdf, pages: &OnPages) -> HashSet<ObjectId> {
             .iter()
             .skip(1)
             .step_by(2);
-        for page in named.filter_map(|p| p.as_reference().ok()) {
+        for page in named.filter_map(Object::as_reference) {
             if seen.insert(page) {
                 let widgets = widgets_on(pdf, page).into_iter().map(|(id, _)| id);
                 out.extend(widgets.filter(|id| !pages.of.contains_key(id)));
@@ -831,15 +833,14 @@ fn on_templates(pdf: &Pdf, pages: &OnPages) -> HashSet<ObjectId> {
 
 fn is_widget(d: &Dictionary) -> bool {
     d.get(b"Subtype")
-        .ok()
-        .and_then(|s| s.as_name().ok())
+        .and_then(Object::as_name)
         .is_some_and(|s| s == b"Widget")
 }
 
 /// Whether a widget has the Hidden flag: no viewer draws it.
 fn hidden(pdf: &Pdf, id: ObjectId) -> bool {
-    let flags = pdf.get_dictionary(id).ok().and_then(|w| w.get(b"F").ok());
-    flags.and_then(|f| f.as_i64().ok()).unwrap_or(0) & 2 != 0
+    let flags = pdf.get_dictionary(id).ok().and_then(|w| w.get(b"F"));
+    flags.and_then(Object::as_integer).unwrap_or(0) & 2 != 0
 }
 
 /// A widget's full name, from `/T` up its `/Parent` chain. Past
@@ -851,9 +852,9 @@ fn name_up(pdf: &Pdf, id: ObjectId) -> String {
     let mut at = Some(id);
     while let Some(id) = at.filter(|&id| seen.insert(id) && seen.len() <= LIMITS.depth) {
         let Ok(d) = pdf.get_dictionary(id) else { break };
-        if let Some(t) = d.get(b"T").ok().and_then(|t| resolve(pdf, t)) {
-            let part = match t.as_str() {
-                Ok(s) if s.len() > SHOWN_NAME => "…".to_string(),
+        if let Some(t) = d.get(b"T").and_then(|t| resolve(pdf, t)) {
+            let part = match t.as_bytes() {
+                Some(s) if s.len() > SHOWN_NAME => "…".to_string(),
                 _ => pdf_text(t),
             };
             len += part.len() + 1;
@@ -872,15 +873,15 @@ fn name_up(pdf: &Pdf, id: ObjectId) -> String {
 /// A `/V`, resolved; but a reference to a dictionary (a signature) stays
 /// one, so a certification's signature is known in its field.
 fn resolve_once<'a>(pdf: &'a Pdf, o: &'a Object) -> Option<&'a Object> {
-    match o {
-        Object::Reference(id) if pdf.get_dictionary(*id).is_ok() => Some(o),
-        o => resolve(pdf, o),
+    match o.as_reference() {
+        Some(id) if pdf.get_dictionary(id).is_ok() => Some(o),
+        _ => resolve(pdf, o),
     }
 }
 
 /// A dictionary's `/DA`, unless it's longer than [`FormLimits::da`].
 fn da_of<'a>(pdf: &'a Pdf, d: &'a Dictionary) -> Option<&'a [u8]> {
-    let da = resolve(pdf, d.get(b"DA").ok()?)?.as_str().ok()?;
+    let da = resolve(pdf, d.get(b"DA")?)?.as_bytes()?;
     (da.len() <= LIMITS.da).then_some(da)
 }
 
@@ -911,12 +912,12 @@ fn da_font(da: &[u8]) -> Option<Vec<u8>> {
 fn missing_fonts(pdf: &Pdf, form: Option<&Dictionary>, fields: &[Field]) -> Vec<(String, usize)> {
     let form_da = form.and_then(|f| da_of(pdf, f));
     let fonts = form
-        .and_then(|f| f.get(b"DR").ok())
+        .and_then(|f| f.get(b"DR"))
         .and_then(|d| resolve(pdf, d))
-        .and_then(|d| d.as_dict().ok())
-        .and_then(|d| d.get(b"Font").ok())
+        .and_then(Object::as_dict)
+        .and_then(|d| d.get(b"Font"))
         .and_then(|f| resolve(pdf, f))
-        .and_then(|f| f.as_dict().ok());
+        .and_then(Object::as_dict);
     let mut missing: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
     for f in fields.iter().filter(|f| f.ft != b"Sig") {
         for &w in &f.widgets {
@@ -982,19 +983,18 @@ fn appears(pdf: &Pdf, id: ObjectId, state: Option<&[u8]>) -> bool {
     };
     let Some(normal) = w
         .get(b"AP")
-        .ok()
         .and_then(|ap| resolve(pdf, ap))
-        .and_then(|ap| ap.as_dict().ok())
-        .and_then(|ap| ap.get(b"N").ok())
+        .and_then(Object::as_dict)
+        .and_then(|ap| ap.get(b"N"))
         .and_then(|n| resolve(pdf, n))
     else {
         return false;
     };
-    let current = w.get(b"AS").ok().and_then(|s| s.as_name().ok());
-    match (normal, state) {
-        (Object::Stream(_), None) => true,
-        (Object::Dictionary(states), None) => current.is_some_and(|s| states.has(s)),
-        (Object::Dictionary(states), Some(want)) => current == Some(want) && states.has(want),
+    let current = w.get(b"AS").and_then(Object::as_name);
+    match (normal.value(), state) {
+        (Value::Stream(_), None) => true,
+        (Value::Dict(states), None) => current.is_some_and(|s| states.has(s)),
+        (Value::Dict(states), Some(want)) => current == Some(want) && states.has(want),
         _ => false,
     }
 }
@@ -1045,9 +1045,8 @@ fn startxref(bytes: &[u8]) -> Option<u64> {
 fn byte_range_fits(sig: &Dictionary, bytes: &[u8], ends: &HashSet<usize>) -> Result<(), u64> {
     let range: Vec<i64> = sig
         .get(b"ByteRange")
-        .ok()
-        .and_then(|r| r.as_array().ok())
-        .map(|r| r.iter().filter_map(|n| n.as_i64().ok()).collect())
+        .and_then(Object::as_array)
+        .map(|r| r.iter().filter_map(Object::as_integer).collect())
         .unwrap_or_default();
     let [start, a, b, c] = range[..] else {
         return Err(0);
@@ -1067,16 +1066,16 @@ fn byte_range_fits(sig: &Dictionary, bytes: &[u8], ends: &HashSet<usize>) -> Res
 /// when it's one stream).
 fn xfa_of(pdf: &Pdf, form: &Dictionary) -> Option<(Vec<String>, Option<Vec<u8>>)> {
     let content = |o: &Object| {
-        let s = resolve(pdf, o)?.as_stream().ok()?;
+        let s = resolve(pdf, o)?.as_stream()?;
         s.decompressed_content_with_limit(LIMITS.xfa).ok()
     };
-    match resolve(pdf, form.get(b"XFA").ok()?)? {
-        Object::Array(items) => {
+    match resolve(pdf, form.get(b"XFA")?)?.value() {
+        Value::Array(items) => {
             let mut packets = Vec::new();
             let mut template = None;
             for pair in items.chunks(2) {
                 let name = pair[0]
-                    .as_str()
+                    .as_bytes()
                     .map(|n| String::from_utf8_lossy(n).into_owned());
                 let name = name.unwrap_or_default();
                 if name == "template"
@@ -1088,7 +1087,10 @@ fn xfa_of(pdf: &Pdf, form: &Dictionary) -> Option<(Vec<String>, Option<Vec<u8>>)
             }
             Some((packets, template))
         }
-        o @ Object::Stream(_) => Some((vec!["xdp".into()], content(o))),
+        Value::Stream(s) => Some((
+            vec!["xdp".into()],
+            s.decompressed_content_with_limit(LIMITS.xfa).ok(),
+        )),
         _ => None,
     }
 }
@@ -1481,7 +1483,7 @@ mod tests {
         );
     }
 
-    /// The font a `/DA` sets, as `da_font` read it through lopdf's
+    /// The font a `/DA` sets, as `da_font` read it through
     /// `Content::decode` before it lexed: what it must still find.
     fn decoded_font(da: &[u8]) -> Option<Vec<u8>> {
         let content = crate::pdf::content::Content::decode(da).ok()?;
@@ -1490,7 +1492,7 @@ mod tests {
             .iter()
             .rev()
             .find(|op| op.operator == "Tf")?;
-        Some(tf.operands.first()?.as_name().ok()?.to_vec())
+        Some(tf.operands.first()?.as_name()?.to_vec())
     }
 
     /// Every `/DA` in `pdf` the check would read: a widget's, a field's
@@ -1499,10 +1501,10 @@ mod tests {
         let mut out = Vec::new();
         let mut todo: Vec<&Object> = pdf.objects.values().collect();
         while let Some(object) = todo.pop() {
-            let dict = match object {
-                Object::Dictionary(d) => d,
-                Object::Stream(s) => &s.dict,
-                Object::Array(items) => {
+            let dict = match object.value() {
+                Value::Dict(d) => d,
+                Value::Stream(s) => &s.dict,
+                Value::Array(items) => {
                     todo.extend(items);
                     continue;
                 }

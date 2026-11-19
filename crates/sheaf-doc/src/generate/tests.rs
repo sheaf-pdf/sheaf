@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::pdf::dictionary;
+use crate::pdf::{ObjectId, Value, dictionary, literal};
 use sheaf_edit::{FontChoice, GridPos, HeaderFooterSpec, Rotation, Z};
 
 use super::*;
@@ -163,20 +163,20 @@ fn a_block_is_a_pagination_artifact_in_its_own_state() {
     start.extend(b" BDC\nq\n");
     assert!(ops.starts_with(&start), "{}", String::from_utf8_lossy(ops));
     assert!(ops.ends_with(b"Q\nEMC\n"));
-    let Object::Dictionary(list) = object(&drawn.res.0[0]) else {
+    let Value::Dict(list) = object(&drawn.res.0[0]).value() else {
         panic!("a property list");
     };
     let want = dictionary! {
-        "Type" => "Pagination",
-        "Subtype" => "Watermark",
-        "SHEF_Gen" => Object::string_literal("gab"),
+        "Type" => Object::name("Pagination"),
+        "Subtype" => Object::name("Watermark"),
+        "SHEF_Gen" => literal("gab"),
     };
     assert_eq!(list, &want);
-    let Object::Dictionary(gs) = object(&drawn.res.0[1]) else {
+    let Value::Dict(gs) = object(&drawn.res.0[1]).value() else {
         panic!("a graphics state");
     };
-    assert_eq!(gs.get(b"ca").unwrap().as_float().unwrap(), 0.3);
-    assert_eq!(gs.get(b"CA").unwrap().as_float().unwrap(), 0.3);
+    assert_eq!(gs.get(b"ca").unwrap().as_number().unwrap() as f32, 0.3);
+    assert_eq!(gs.get(b"CA").unwrap().as_number().unwrap() as f32, 0.3);
     let drawn_text = b"(Caf\xe9 ??) Tj";
     assert!(ops.windows(drawn_text.len()).any(|w| w == drawn_text));
     // Without sheaf's private data, its list says its kind alone, and it
@@ -188,12 +188,12 @@ fn a_block_is_a_pagination_artifact_in_its_own_state() {
         &Reserved::default(),
         Private::Strip,
     );
-    let Object::Dictionary(list) = object(&stripped.res.0[0]) else {
+    let Value::Dict(list) = object(&stripped.res.0[0]).value() else {
         panic!("a property list");
     };
     assert_eq!(
         list,
-        &dictionary! { "Type" => "Pagination", "Subtype" => "Watermark" }
+        &dictionary! { "Type" => Object::name("Pagination"), "Subtype" => Object::name("Watermark") }
     );
     let after = |ops: &[u8]| ops[ops.windows(3).position(|w| w == b"BDC").unwrap()..].to_vec();
     assert_eq!(after(&stripped.ops), after(ops));
@@ -283,7 +283,7 @@ fn an_image_keeps_its_proportions_and_its_turn() {
     let d = crate::tx::tests::doc_of(1, &[]);
     let at = ObjRef {
         src: d.primary().clone(),
-        id: (1, 0),
+        id: ObjectId::new(1, 0),
     };
     let image = WatermarkGen {
         content: WatermarkContent::Image {
@@ -305,7 +305,7 @@ fn an_image_keeps_its_proportions_and_its_turn() {
         Private::Keep,
     );
     assert!(none.ops.is_empty() && none.res.0.is_empty());
-    let res = Res::dict(dictionary! { "Subtype" => "Image" });
+    let res = Res::dict(dictionary! { "Subtype" => Object::name("Image") });
     for (turns, across, up) in [(0, 40.0, 20.0), (1, 20.0, 40.0)] {
         let art = Art::Image {
             res: res.clone(),
@@ -442,11 +442,11 @@ fn a_header_goes_out_in_win_ansi_with_a_named_list() {
     assert_eq!(font.res, Std14::TimesRoman.resource().into());
     for (need, kind) in [(&drawn.res.0[0], "Header"), (&drawn.res.0[2], "Footer")] {
         let want = dictionary! {
-            "Type" => "Pagination",
-            "Subtype" => kind,
-            "SHEF_Gen" => Object::string_literal("g2a"),
+            "Type" => Object::name("Pagination"),
+            "Subtype" => Object::name(kind),
+            "SHEF_Gen" => literal("g2a"),
         };
-        assert_eq!(object(need), &Object::Dictionary(want));
+        assert_eq!(object(need), &Object::from(want));
         let name = format!("/{} BDC", String::from_utf8_lossy(&need.name));
         assert!(String::from_utf8_lossy(out).contains(&name), "{out:?}");
     }

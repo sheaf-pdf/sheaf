@@ -1,12 +1,10 @@
 # The disallowed-methods bans of the lint ledger (plan/complete/m10.5-edit-api/README.md,
-# Lint ledgers), landed in M10.5 slice 19. Test code is allowed them (the
-# crate root's `cfg_attr(test, allow(...))`); a legitimate use elsewhere
-# carries an `#[allow]` with its reason.
+# Lint ledgers), landed in M10.5 slice 19 and updated for sheaf_doc::pdf in M18 slice 13.
+# Test code is allowed them (the crate root's `cfg_attr(test, allow(...))`); a
+# legitimate use elsewhere carries an `#[allow]` with its reason.
 disallowed-methods = [
-    { path = "lopdf::content::Content::decode", reason = "content is read by sheaf_doc::content's lexer, which keeps every byte; decoding to operations loses them" },
-    { path = "lopdf::content::Content::encode", reason = "content is written by sheaf_doc::content's writer or spliced, never re-encoded from operations" },
-    { path = "lopdf::Document::get_page_content", reason = "a page's content is read through its Source and sheaf_doc::content's lexer, stream by stream" },
-    { path = "lopdf::Document::change_page_content", reason = "a page's content is written by the emitter (materialize), not edited in lopdf's graph" },
-    { path = "lopdf::Document::add_page_contents", reason = "a page's content is written by the emitter (materialize), not edited in lopdf's graph" },
+    { path = "sheaf_doc::pdf::content::Content::decode", reason = "content is read by sheaf_doc::content's lexer, which keeps every byte; decoding to operations loses them", allow-invalid = true },
+    { path = "sheaf_doc::pdf::content::Content::encode", reason = "content is written by sheaf_doc::content's writer or spliced, never re-encoded from operations" },
+    { path = "sheaf_doc::pdf::Document::get_page_content", reason = "a page's content is read through its Source and sheaf_doc::content's lexer, stream by stream" },
     { path = "std::env::temp_dir", reason = "sheaf writes no document content to the temp directory: memory sources, and durable writes beside their target" },
 ]

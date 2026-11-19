@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary, literal};
 
 fn scratch(name: &str) -> PathBuf {
     let dir =
@@ -26,20 +26,20 @@ fn pdf(dir: &Path) -> PathBuf {
     for _ in 0..2 {
         let content = pdf.add_object(Stream::new(dictionary! {}, Vec::new()));
         let id = pdf.add_object(dictionary! {
-            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+            "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         });
         page_ids.push(id);
-        kids.push(Object::Reference(id));
+        kids.push(Object::from(id));
     }
     let comment = |pdf: &mut Pdf, subtype: &str, who: &str, name: &str, text: &str| {
         pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => subtype,
+            "Type" => Object::name("Annot"), "Subtype" => Object::name(subtype),
             "Rect" => vec![72.into(), 600.into(), 200.into(), 620.into()],
-            "Contents" => Object::string_literal(text),
-            "T" => Object::string_literal(who),
-            "NM" => Object::string_literal(name),
-            "M" => Object::string_literal("D:20261001120000"),
+            "Contents" => literal(text),
+            "T" => literal(who),
+            "NM" => literal(name),
+            "M" => literal("D:20261001120000"),
         })
     };
     let note = comment(&mut pdf, "Text", "Ann", "n1", "Tie to the ledger, please");
@@ -53,9 +53,10 @@ fn pdf(dir: &Path) -> PathBuf {
     }
     pdf.objects.insert(
         pages_id,
-        dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => 2 }.into(),
+        dictionary! { "Type" => Object::name("Pages"), "Kids" => kids, "Count" => 2 }.into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
     let path = dir.join("review.pdf");
     pdf.save(&path).unwrap();
@@ -151,7 +152,7 @@ fn the_summary_has_its_title_producer_and_date() {
         let info = written.trailer.get(b"Info").unwrap().as_reference();
         let info = written.get_dictionary(info.unwrap()).unwrap();
         let text = |key: &[u8]| {
-            let s = info.get(key).and_then(Object::as_str);
+            let s = info.get(key).and_then(Object::as_bytes);
             String::from_utf8_lossy(s.unwrap()).into_owned()
         };
         assert_eq!(text(b"Title"), "review.pdf", "{layout}");
@@ -170,7 +171,7 @@ fn blank(dir: &Path) -> PathBuf {
         .map(|_| {
             let content = pdf.add_object(Stream::new(dictionary! {}, Vec::new()));
             pdf.add_object(dictionary! {
-                "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+                "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
                 "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             })
             .into()
@@ -178,9 +179,10 @@ fn blank(dir: &Path) -> PathBuf {
         .collect();
     pdf.objects.insert(
         pages_id,
-        dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => 2 }.into(),
+        dictionary! { "Type" => Object::name("Pages"), "Kids" => kids, "Count" => 2 }.into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
     let path = dir.join("blank.pdf");
     pdf.save(&path).unwrap();

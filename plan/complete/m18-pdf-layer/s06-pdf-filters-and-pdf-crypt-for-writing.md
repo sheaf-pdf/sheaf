@@ -46,7 +46,7 @@ predictor sheaf's cross-reference streams use (`serialize/xref.rs`).
   decrypt, likewise, every revision and method;
 - every test on both backends; on each, the same bytes as sheaf's
   compression today on that backend, for sheaf's settings
-  ([slice 12](../../m18-pdf-layer/slices/s12-sheaf-writes-through-pdf-structure.md) holds sheaf's
+  ([slice 12](s12-sheaf-writes-through-pdf-structure.md) holds sheaf's
   outputs to it);
 - throughput on each backend beside flate2's, on sheaf's corpus streams;
 - the builder's dictionaries open in qpdf, pdf.js and PDFium;

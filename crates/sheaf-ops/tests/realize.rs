@@ -36,7 +36,7 @@ use sheaf_doc::layers::LayerId;
 use sheaf_doc::model::Mark;
 use sheaf_doc::pdf::{
     Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, ReadLimits, Stream, XrefKind,
-    dictionary,
+    dictionary, literal,
 };
 use sheaf_doc::realize::{EngineKey, GROUP, OcgOverride, PageView, Realization, ViewInputs};
 use sheaf_doc::serialize::fixture::{
@@ -199,7 +199,7 @@ fn two_edited_pages_sharing_a_font_and_a_duplicate_render_as_saved() {
     let written = numbered(section);
     let unique: HashSet<u32> = written.iter().copied().collect();
     assert_eq!(unique.len(), written.len(), "{written:?}");
-    let pages: HashSet<u32> = src.pages().iter().map(|p| p.id.0).collect();
+    let pages: HashSet<u32> = src.pages().iter().map(|p| p.id.number).collect();
     let size = src.xref().size;
     let catalog = src
         .pdf()
@@ -210,7 +210,7 @@ fn two_edited_pages_sharing_a_font_and_a_duplicate_render_as_saved() {
         .unwrap();
     for n in written {
         assert!(
-            n >= size || pages.contains(&n) || n == catalog.0,
+            n >= size || pages.contains(&n) || n == catalog.number,
             "{n} under {size}"
         );
     }
@@ -553,13 +553,13 @@ fn print_preview_draws_what_prints() {
     for (flags, y) in [(4, 100), (4 | 2, 200), (4 | 32, 300), (0, 400)] {
         let form = f.pdf.add_object(Stream::new(
             dictionary! {
-                "Type" => "XObject", "Subtype" => "Form",
+                "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"),
                 "BBox" => vec![0.into(), 0.into(), 100.into(), 40.into()],
             },
             b"0 0 1 rg 0 0 100 40 re f".to_vec(),
         ));
         annots.push(f.pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Square", "P" => page, "F" => flags,
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Square"), "P" => page, "F" => flags,
             "Rect" => vec![72.into(), y.into(), 172.into(), (y + 40).into()],
             "AP" => dictionary! { "N" => form },
         }));
@@ -707,7 +707,7 @@ fn a_sound_base_pdfium_refuses_draws_from_its_groups() {
 }
 
 /// Over a base whose newest cross-reference stream is past its `/Size`'s
-/// other objects (as lopdf writes one, and as slice 2's 5801985 is), the
+/// other objects (as `save_to` writes one, and as slice 2's 5801985 is), the
 /// section numbers what's new past `/Size` and the stream, which PDFium
 /// would otherwise read as the stream; the page renders as saved.
 #[test]
@@ -717,7 +717,7 @@ fn allocator_numbers_above_size_and_xref_streams() {
     let stream = src.xref().max_stream.unwrap();
     assert!(
         stream + 1 >= src.xref().size,
-        "lopdf numbers its stream last"
+        "save_to numbers its stream last"
     );
     let p0 = d.page(0).unwrap();
     let header = fx::set_header(fx::header("Draft"), Some(&[p0]));
@@ -732,7 +732,7 @@ fn allocator_numbers_above_size_and_xref_streams() {
     )
     .unwrap();
     let written = numbered(&r.segments[1]);
-    let own: HashSet<u32> = src.pdf().ids().map(|id| id.0).collect();
+    let own: HashSet<u32> = src.pdf().ids().map(|id| id.number).collect();
     let fresh: Vec<u32> = written.into_iter().filter(|n| !own.contains(n)).collect();
     assert!(!fresh.is_empty());
     assert!(fresh.iter().all(|&n| n > stream), "{fresh:?} past {stream}");
@@ -747,20 +747,20 @@ fn layered(off: bool) -> (Vec<u8>, [ObjectId; 2]) {
     let mut pdf = Pdf::with_version("1.7");
     let root = pdf.new_object_id();
     let ocg = |pdf: &mut Pdf, name: &str| {
-        pdf.add_object(dictionary! { "Type" => "OCG", "Name" => Object::string_literal(name) })
+        pdf.add_object(dictionary! { "Type" => Object::name("OCG"), "Name" => literal(name) })
     };
     let ids = [ocg(&mut pdf, "Blue"), ocg(&mut pdf, "Red")];
     let content = b"/OC /L0 BDC 0 0 1 rg 100 500 200 200 re f EMC \
                     /OC /L1 BDC 1 0 0 rg 300 100 150 150 re f EMC";
     let content = pdf.add_object(Stream::new(dictionary! {}, content.to_vec()));
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page", "Parent" => root, "Contents" => content,
+        "Type" => Object::name("Page"), "Parent" => root, "Contents" => content,
         "Resources" => dictionary! { "Properties" => dictionary! { "L0" => ids[0], "L1" => ids[1] } },
     });
     pdf.objects.insert(
         root,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         }),
     );
@@ -770,7 +770,7 @@ fn layered(off: bool) -> (Vec<u8>, [ObjectId; 2]) {
     }
     let props = dictionary! { "OCGs" => ids.map(Object::from).to_vec(), "D" => config };
     let catalog = pdf.add_object(dictionary! {
-        "Type" => "Catalog", "Pages" => root, "OCProperties" => props,
+        "Type" => Object::name("Catalog"), "Pages" => root, "OCProperties" => props,
     });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
@@ -818,13 +818,13 @@ fn a_hidden_layer_s_patch_hides_its_content() {
 fn their_square(pdf: &mut Pdf, name: &str, x: i64) -> ObjectId {
     let ap = pdf.add_object(Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Form",
+            "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"),
             "BBox" => vec![0.into(), 0.into(), 80.into(), 80.into()],
         },
         b"0 0.6 0 rg 0 0 80 80 re f".to_vec(),
     ));
     pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Square", "NM" => Object::string_literal(name),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Square"), "NM" => literal(name),
         "Rect" => vec![x.into(), 300.into(), (x + 80).into(), 380.into()],
         "C" => vec![0.into(), 0.6.into(), 0.into()], "AP" => dictionary! { "N" => ap },
     })
@@ -877,15 +877,15 @@ fn a_cropped_page_s_comments_render_once_as_saved() {
     let square = their_square(&mut f.pdf, "theirs", 300);
     let ap = f.pdf.add_object(Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Form",
+            "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"),
             "BBox" => vec![0.into(), 0.into(), 100.into(), 20.into()],
         },
         b"1 0 1 RG 2 w 1 1 98 18 re S".to_vec(),
     ));
     let link = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Link",
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"),
         "Rect" => vec![300.into(), 500.into(), 400.into(), 520.into()],
-        "Dest" => vec![f.pages[1].into(), Object::Name(b"Fit".to_vec())],
+        "Dest" => vec![f.pages[1].into(), Object::name("Fit")],
         "AP" => dictionary! { "N" => ap },
     });
     let mut annots = f.annots(0);

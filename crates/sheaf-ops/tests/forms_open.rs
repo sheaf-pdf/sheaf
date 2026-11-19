@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use sheaf_doc::forms::FormClass;
 use sheaf_doc::forms::fixture::{Form, every_kind, hybrid_reference, hybrid_update, row};
 use sheaf_doc::materialize::{How, StrategyKind};
-use sheaf_doc::pdf::{Object, XrefKind, dictionary};
+use sheaf_doc::pdf::{Object, XrefKind, dictionary, literal};
 use sheaf_doc::serialize::fixture::object_streams_of;
 use sheaf_doc::tx::fixture::rotate;
 use sheaf_doc::{Document, Store};
@@ -52,13 +52,11 @@ fn facts_of(path: &Path) -> sheaf_doc::open::Facts {
 fn cyclic() -> Form {
     let mut f = Form::new(1);
     f.text("ok", 0, row(0));
-    let a = f
+    let a = f.pdf.add_object(dictionary! { "T" => literal("a") });
+    let b = f
         .pdf
-        .add_object(dictionary! { "T" => Object::string_literal("a") });
-    let b = f.pdf.add_object(
-        dictionary! { "T" => Object::string_literal("b"), "Kids" => vec![Object::Reference(a)] },
-    );
-    f.dict(a).set("Kids", vec![Object::Reference(b)]);
+        .add_object(dictionary! { "T" => literal("b"), "Kids" => vec![Object::from(a)] });
+    f.dict(a).set("Kids", vec![Object::from(b)]);
     f.dict(a).set("Parent", b);
     f.dict(b).set("Parent", a);
     let mut fields = f.fields();
@@ -71,7 +69,7 @@ fn cyclic() -> Form {
 fn own_parent() -> Form {
     let mut f = Form::new(1);
     let a = f.text("a", 0, row(0));
-    f.dict(a).set("Kids", vec![Object::Reference(a)]);
+    f.dict(a).set("Kids", vec![Object::from(a)]);
     f.dict(a).set("Parent", a);
     f
 }
@@ -82,8 +80,8 @@ fn deep() -> Form {
     let mut below = f.text("leaf", 0, row(0));
     for i in 0..10_000 {
         let up = f.pdf.add_object(dictionary! {
-            "T" => Object::string_literal(format!("n{i}")),
-            "Kids" => vec![Object::Reference(below)],
+            "T" => literal(format!("n{i}")),
+            "Kids" => vec![Object::from(below)],
         });
         f.dict(below).set("Parent", up);
         below = up;

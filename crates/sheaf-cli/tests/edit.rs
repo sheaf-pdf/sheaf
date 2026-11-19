@@ -184,8 +184,8 @@ fn signed(corpus: &Corpus) -> Vec<Entry> {
 fn byte_ranges(bytes: &[u8]) -> Vec<Vec<i64>> {
     let pdf = Pdf::load_mem(bytes).unwrap();
     let mut out: Vec<Vec<i64>> = (pdf.objects.values())
-        .filter_map(|o| o.as_dict().ok()?.get(b"ByteRange").ok()?.as_array().ok())
-        .map(|a| a.iter().map(|n| n.as_i64().unwrap()).collect())
+        .filter_map(|o| o.as_dict()?.get(b"ByteRange")?.as_array())
+        .map(|a| a.iter().map(|n| n.as_integer().unwrap()).collect())
         .collect();
     out.sort();
     out
@@ -421,8 +421,13 @@ fn the_command_line_writes_nothing_but_its_outputs() {
     let pdf = Pdf::load(dir.join("edited.pdf")).unwrap();
     assert_eq!(pdf.get_pages().len(), 7);
     let comment = |o: &Object| {
-        let subtype = o.as_dict().ok().and_then(|d| d.get(b"Subtype").ok());
-        matches!(subtype, Some(Object::Name(n)) if n == b"Text" || n == b"Highlight")
+        let sheaf_doc::pdf::Value::Dict(d) = o.value() else {
+            return false;
+        };
+        matches!(
+            d.get(b"Subtype").and_then(Object::as_name),
+            Some(b"Text" | b"Highlight")
+        )
     };
     assert_eq!(pdf.objects.values().filter(|o| comment(o)).count(), 0);
     let _ = std::fs::remove_dir_all(&dir);

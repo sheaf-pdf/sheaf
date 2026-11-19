@@ -92,7 +92,7 @@ fn signatures_fit(bytes: &[u8]) -> bool {
 fn rewrites(before: &[u8], now: &[u8], id: ObjectId) -> bool {
     assert!(now.starts_with(before), "an Append keeps the file's bytes");
     let section = &now[before.len()..];
-    let header = format!("{} {} obj", id.0, id.1);
+    let header = format!("{id} obj");
     let at_line = |sep: &str| holds(section, format!("{sep}{header}").as_bytes());
     section.starts_with(header.as_bytes()) || at_line("\n") || at_line("\r")
 }
@@ -101,7 +101,8 @@ fn rewrites(before: &[u8], now: &[u8], id: ObjectId) -> bool {
 fn perms(bytes: &[u8]) -> (ObjectId, Object) {
     let pdf = Pdf::load_mem(bytes).unwrap();
     let root = pdf.trailer.get(b"Root").unwrap().as_reference().unwrap();
-    let perms = pdf.catalog().unwrap().get(b"Perms").unwrap().clone();
+    let mut perms = pdf.catalog().unwrap().get(b"Perms").unwrap().clone();
+    perms.unplace();
     (root, perms)
 }
 
@@ -882,7 +883,10 @@ fn claiming(description: &str) -> Vec<u8> {
     let mut pdf = Pdf::load_mem(&text_file(1)).unwrap();
     let xml = crate::source::tests::xmp(description);
     let metadata = Stream::new(
-        dictionary! { "Type" => "Metadata", "Subtype" => "XML" },
+        dictionary! {
+            "Type" => Object::name("Metadata"),
+            "Subtype" => Object::name("XML"),
+        },
         xml.into_bytes(),
     );
     let metadata = pdf.add_object(metadata);

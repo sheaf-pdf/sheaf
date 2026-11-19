@@ -35,7 +35,7 @@
 
 use std::sync::Arc;
 
-use crate::pdf::{Dictionary, Object, Stream, StringFormat, dictionary};
+use crate::pdf::{Dictionary, Object, Stream, StreamExt, Value, dictionary, literal};
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use sheaf_edit::Rotation;
@@ -295,7 +295,7 @@ pub fn box_of(arr: &[crate::pdf::Object]) -> Option<[f32; 4]> {
     }
     let v: Vec<f32> = arr
         .iter()
-        .map(|o| o.as_float().unwrap_or(0.0) as f32)
+        .map(|o| o.as_number().unwrap_or(0.0) as f32)
         .collect();
     Some([
         v[0].min(v[2]),
@@ -907,7 +907,7 @@ pub fn attachment_icon(icon: &str, at: Box2) -> Vec<Vec<Pt>> {
 
 /// `/BE` for a cloudy border.
 fn cloudy_style() -> Dictionary {
-    dictionary! { "S" => Object::Name(b"C".to_vec()), "I" => 1 }
+    dictionary! { "S" => Object::name("C"), "I" => 1 }
 }
 
 /// A mark's cloudy border, laid out upright and drawn in user space
@@ -1181,7 +1181,7 @@ pub fn emission(a: &Annot, held: Held) -> Emitted {
         main.set(
             "FS",
             dictionary! {
-                "Type" => "Filespec",
+                "Type" => Object::name("Filespec"),
                 "F" => pdf_text_string(&name.chars().map(|c| if c.is_ascii() { c } else { '_' }).collect::<String>()),
                 "UF" => pdf_text_string(name),
                 "EF" => dictionary! { "F" => ef, "UF" => ef },
@@ -1388,7 +1388,7 @@ fn user_box(up: &Affine, b: Box2) -> [f32; 4] {
 }
 
 fn pdf_rect(r: [f32; 4]) -> Object {
-    Object::Array(r.iter().map(|v| Object::from(*v)).collect())
+    Object::from(r.iter().map(|v| Object::from(*v)).collect::<Vec<_>>())
 }
 
 /// A path through `points`, not painted.
@@ -1446,13 +1446,13 @@ fn ellipse_path(w: &mut ContentWriter<'_>, [x0, y0, x1, y1]: [f32; 4]) {
 /// would read back as a NUL, which no JSON string holds.
 fn pdf_text_string(s: &str) -> Object {
     if crate::file::is_pdf_doc_ascii(s) {
-        Object::String(s.as_bytes().to_vec(), StringFormat::Literal)
+        literal(s.as_bytes())
     } else {
         let mut bytes = vec![0xFE, 0xFF];
         for u in s.encode_utf16() {
             bytes.extend_from_slice(&u.to_be_bytes());
         }
-        Object::String(bytes, StringFormat::Hexadecimal)
+        Object::hex(bytes)
     }
 }
 
@@ -1471,10 +1471,10 @@ pub const DASH: [f32; 2] = [4.0, 3.0];
 fn border_style(a: &Annot) -> Dictionary {
     let mut bs = dictionary! { "W" => a.stroke };
     if a.dashed {
-        bs.set("S", Object::Name(b"D".to_vec()));
+        bs.set("S", Object::name("D"));
         bs.set(
             "D",
-            Object::Array(DASH.iter().map(|v| Object::from(*v)).collect()),
+            Object::from(DASH.iter().map(|v| Object::from(*v)).collect::<Vec<_>>()),
         );
     }
     bs
@@ -1485,11 +1485,11 @@ fn border_style(a: &Annot) -> Dictionary {
 fn inner_box(outer: [f32; 4], inner: [f32; 4]) -> Object {
     let [llx, lly, urx, ury] = outer;
     let [x0, y0, x1, y1] = inner;
-    Object::Array(
+    Object::from(
         [x0 - llx, y0 - lly, urx - x1, ury - y1]
             .iter()
             .map(|v| Object::from(v.max(0.0)))
-            .collect(),
+            .collect::<Vec<_>>(),
     )
 }
 
@@ -1692,7 +1692,7 @@ impl Appearance {
     /// once a file each.
     pub fn form(self, sink: &mut dyn Sink) -> Stream {
         let mut form = Stream::new(self.form_dict(sink), self.content);
-        let _ = form.compress();
+        form.compress();
         form
     }
 
@@ -1703,8 +1703,8 @@ impl Appearance {
         let mut resources = Dictionary::new();
         crate::content::sink::bind(sink, &self.needs, &mut resources);
         dictionary! {
-            "Type" => "XObject",
-            "Subtype" => "Form",
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
             "BBox" => pdf_rect(self.bbox),
             "Resources" => resources,
         }
@@ -1780,7 +1780,7 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
         blend: Some(blend),
     });
     let mut dict = dictionary! {
-        "Type" => "Annot",
+        "Type" => Object::name("Annot"),
         "Rect" => pdf_rect(rect),
         "NM" => pdf_text_string(&a.name()),
         "T" => pdf_text_string(&a.author),
@@ -1796,13 +1796,22 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
     }
     let c = a.color;
     let color = Color::rgb8(c);
-    let color_arr = Object::Array(c.iter().map(|v| Object::from(*v as f32 / 255.0)).collect());
-    let interior =
-        |f: [u8; 3]| Object::Array(f.iter().map(|v| Object::from(*v as f32 / 255.0)).collect());
+    let color_arr = Object::from(
+        c.iter()
+            .map(|v| Object::from(*v as f32 / 255.0))
+            .collect::<Vec<_>>(),
+    );
+    let interior = |f: [u8; 3]| {
+        Object::from(
+            f.iter()
+                .map(|v| Object::from(*v as f32 / 255.0))
+                .collect::<Vec<_>>(),
+        )
+    };
 
     match &shown {
         AnnotKind::Highlight { rects } => {
-            dict.set("Subtype", Object::Name(b"Highlight".to_vec()));
+            dict.set("Subtype", Object::name("Highlight"));
             dict.set("C", color_arr);
             let mut quads = Vec::new();
             w.fill_color(color);
@@ -1814,7 +1823,7 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
                 box_path(&mut w, b);
                 w.paint(Paint::Fill);
             }
-            dict.set("QuadPoints", Object::Array(quads));
+            dict.set("QuadPoints", Object::from(quads));
         }
         AnnotKind::Underline { rects }
         | AnnotKind::StrikeOut { rects }
@@ -1824,14 +1833,14 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
                 AnnotKind::StrikeOut { .. } => b"StrikeOut",
                 _ => b"Squiggly",
             };
-            dict.set("Subtype", Object::Name(subtype.to_vec()));
+            dict.set("Subtype", Object::name(subtype));
             dict.set("C", color_arr);
             let mut quads = Vec::new();
             for r in rects {
                 let [x0, y0, x1, y1] = user_box(&user, *r);
                 quads.extend([x0, y1, x1, y1, x0, y0, x1, y0].map(Object::from));
             }
-            dict.set("QuadPoints", Object::Array(quads));
+            dict.set("QuadPoints", Object::from(quads));
             // Drawn as the text reads, then taken to user space, so the
             // line follows the text whatever the page's /Rotate.
             w.stroke_color(color);
@@ -1842,10 +1851,10 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
             }
         }
         AnnotKind::Replace { at, .. } | AnnotKind::Insert { at } => {
-            dict.set("Subtype", Object::Name(b"Caret".to_vec()));
+            dict.set("Subtype", Object::name("Caret"));
             dict.set("RD", inner_box(rect_user, user_box(&user, *at)));
             dict.set("C", color_arr);
-            dict.set("Sy", Object::Name(b"None".to_vec()));
+            dict.set("Sy", Object::name("None"));
             w.fill_color(color);
             path(&mut w, caret_points(*at).map(up));
             w.close();
@@ -1854,8 +1863,8 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
         AnnotKind::Reply { .. } | AnnotKind::Status { .. } => {
             // The writer sets /IRT and /Rect from the parent. Nothing to
             // draw: a thread is read in a comments list.
-            dict.set("Subtype", Object::Name(b"Text".to_vec()));
-            dict.set("Name", Object::Name(b"Comment".to_vec()));
+            dict.set("Subtype", Object::name("Text"));
+            dict.set("Name", Object::name("Comment"));
             dict.set("C", color_arr);
             dict.set("Open", false);
             if let AnnotKind::Status { model, state, .. } = &a.kind {
@@ -1866,8 +1875,8 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
         AnnotKind::FileAttachment {
             pos, icon, name, ..
         } => {
-            dict.set("Subtype", Object::Name(b"FileAttachment".to_vec()));
-            dict.set("Name", Object::Name(icon.clone().into_bytes()));
+            dict.set("Subtype", Object::name("FileAttachment"));
+            dict.set("Name", Object::name(icon.as_str()));
             dict.set("C", color_arr);
             if a.contents.is_empty() {
                 dict.set("Contents", pdf_text_string(name));
@@ -1882,8 +1891,8 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
             }
         }
         AnnotKind::Note { pos } => {
-            dict.set("Subtype", Object::Name(b"Text".to_vec()));
-            dict.set("Name", Object::Name(b"Comment".to_vec()));
+            dict.set("Subtype", Object::name("Text"));
+            dict.set("Name", Object::name("Comment"));
             dict.set("C", color_arr);
             dict.set("Open", false);
             let b = user_box(&user, icon_box(*pos));
@@ -1904,24 +1913,24 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
             }
         }
         AnnotKind::FreeText { rect, size } => {
-            dict.set("Subtype", Object::Name(b"FreeText".to_vec()));
+            dict.set("Subtype", Object::name("FreeText"));
             dict.set("RD", inner_box(rect_user, user_box(&user, *rect)));
             dict.set("DA", default_appearance(*size, c));
-            dict.set("C", Object::Array(vec![]));
+            dict.set("C", Vec::<Object>::new());
         }
         AnnotKind::Tape {
             rect, size, look, ..
         } => {
-            dict.set("Subtype", Object::Name(b"FreeText".to_vec()));
+            dict.set("Subtype", Object::name("FreeText"));
             dict.set("DA", default_appearance(*size, c));
-            dict.set("C", Object::Array(vec![Object::Real(1.0); 3]));
+            dict.set("C", vec![Object::from(1.0_f64); 3]);
             let tape = a.tape().unwrap_or_default();
             tape_content(&mut w, *rect, *size, look, &tape, c, &user);
         }
         AnnotKind::Square { rect } | AnnotKind::Ellipse { rect } => {
             let square = matches!(a.kind, AnnotKind::Square { .. });
             let subtype: &[u8] = if square { b"Square" } else { b"Circle" };
-            dict.set("Subtype", Object::Name(subtype.to_vec()));
+            dict.set("Subtype", Object::name(subtype));
             dict.set("C", color_arr);
             dict.set("BS", border_style(a));
             stroke_style(&mut w, a);
@@ -1948,20 +1957,18 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
         AnnotKind::Polygon { points } | AnnotKind::Polyline { points } => {
             let closed = matches!(a.kind, AnnotKind::Polygon { .. });
             let subtype: &[u8] = if closed { b"Polygon" } else { b"PolyLine" };
-            dict.set("Subtype", Object::Name(subtype.to_vec()));
+            dict.set("Subtype", Object::name(subtype));
             dict.set("C", color_arr);
             dict.set("BS", border_style(a));
             dict.set(
                 "Vertices",
-                Object::Array(
-                    points
-                        .iter()
-                        .flat_map(|p| {
-                            let u = up(*p);
-                            [Object::from(u.x), Object::from(u.y)]
-                        })
-                        .collect(),
-                ),
+                points
+                    .iter()
+                    .flat_map(|p| {
+                        let u = up(*p);
+                        [Object::from(u.x), Object::from(u.y)]
+                    })
+                    .collect::<Vec<_>>(),
             );
             stroke_style(&mut w, a);
             let filled = closed && a.fill.is_some();
@@ -1995,8 +2002,8 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
                 Measured::Perimeter => b"PolyLine",
                 Measured::Area => b"Polygon",
             };
-            dict.set("Subtype", Object::Name(subtype.to_vec()));
-            dict.set("IT", Object::Name(what.intent().to_vec()));
+            dict.set("Subtype", Object::name(subtype));
+            dict.set("IT", Object::name(what.intent()));
             dict.set("C", color_arr);
             dict.set("BS", border_style(a));
             dict.set("Measure", crate::measure::measure_dict(scale));
@@ -2012,18 +2019,18 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
             );
             let users: Vec<Pt> = points.iter().map(|p| up(*p)).collect();
             let coords = |pts: &[Pt]| {
-                Object::Array(
+                Object::from(
                     pts.iter()
                         .flat_map(|u| [Object::from(u.x), Object::from(u.y)])
-                        .collect(),
+                        .collect::<Vec<_>>(),
                 )
             };
             stroke_style(&mut w, a);
             match (what, users.as_slice()) {
                 (Measured::Distance, [ua, .., ub]) => {
                     dict.set("L", coords(&[*ua, *ub]));
-                    let arrow = || Object::Name(b"OpenArrow".to_vec());
-                    dict.set("LE", Object::Array(vec![arrow(), arrow()]));
+                    let arrow = || Object::name("OpenArrow");
+                    dict.set("LE", vec![arrow(), arrow()]);
                     path(&mut w, [*ua, *ub]);
                     w.paint(Paint::Stroke);
                     arrowhead(&mut w, *ua, *ub, a.stroke);
@@ -2046,34 +2053,30 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
             point,
             size,
         } => {
-            dict.set("Subtype", Object::Name(b"FreeText".to_vec()));
-            dict.set("IT", Object::Name(b"FreeTextCallout".to_vec()));
+            dict.set("Subtype", Object::name("FreeText"));
+            dict.set("IT", Object::name("FreeTextCallout"));
             dict.set("DA", default_appearance(*size, c));
-            dict.set("C", Object::Array(vec![]));
+            dict.set("C", Vec::<Object>::new());
             dict.set("BS", border_style(a));
             let end = callout_end(*rect, *knee);
             let (up_point, up_knee, up_end) = (up(*point), up(*knee), up(end));
             dict.set(
                 "CL",
-                Object::Array(
-                    [up_point, up_knee, up_end]
-                        .iter()
-                        .flat_map(|p| [Object::from(p.x), Object::from(p.y)])
-                        .collect(),
-                ),
+                [up_point, up_knee, up_end]
+                    .iter()
+                    .flat_map(|p| [Object::from(p.x), Object::from(p.y)])
+                    .collect::<Vec<_>>(),
             );
-            dict.set("LE", Object::Name(b"OpenArrow".to_vec()));
+            dict.set("LE", Object::name("OpenArrow"));
             // The box inside /Rect, for viewers that lay the text out.
             let b = user_box(&user, *rect);
             let [bx0, by0, bx1, by1] = b;
             dict.set(
                 "RD",
-                Object::Array(
-                    [bx0 - llx, by0 - lly, urx - bx1, ury - by1]
-                        .iter()
-                        .map(|v| Object::from(v.max(0.0)))
-                        .collect(),
-                ),
+                [bx0 - llx, by0 - lly, urx - bx1, ury - by1]
+                    .iter()
+                    .map(|v| Object::from(v.max(0.0)))
+                    .collect::<Vec<_>>(),
             );
             stroke_style(&mut w, a);
             w.fill_color(Color::Gray(1.0));
@@ -2086,12 +2089,9 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
         AnnotKind::Connector { rect, .. } => {
             // A Link so other viewers jump too; the writer fills in /Dest once
             // the partner's page object is known.
-            dict.set("Subtype", Object::Name(b"Link".to_vec()));
-            dict.set(
-                "Border",
-                Object::Array(vec![0i64.into(), 0i64.into(), 0i64.into()]),
-            );
-            dict.set("H", Object::Name(b"I".to_vec()));
+            dict.set("Subtype", Object::name("Link"));
+            dict.set("Border", vec![0i64.into(), 0i64.into(), 0i64.into()]);
+            dict.set("H", Object::name("I"));
             // A disc in the mark's color; its label goes on it in white.
             w.fill_color(color);
             ellipse_path(&mut w, user_box(&user, *rect));
@@ -2103,23 +2103,22 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
             arrow,
             arrow_start,
         } => {
-            dict.set("Subtype", Object::Name(b"Line".to_vec()));
+            dict.set("Subtype", Object::name("Line"));
             dict.set("C", color_arr);
             dict.set("BS", border_style(a));
             let (ua, ub) = (up(*pa), up(*pb));
             dict.set(
                 "L",
-                Object::Array(vec![ua.x.into(), ua.y.into(), ub.x.into(), ub.y.into()]),
+                vec![
+                    Object::from(ua.x),
+                    Object::from(ua.y),
+                    Object::from(ub.x),
+                    Object::from(ub.y),
+                ],
             );
             if *arrow || *arrow_start {
-                let end = |on: bool| {
-                    Object::Name(if on {
-                        b"OpenArrow".to_vec()
-                    } else {
-                        b"None".to_vec()
-                    })
-                };
-                dict.set("LE", Object::Array(vec![end(*arrow_start), end(*arrow)]));
+                let end = |on: bool| Object::name(if on { "OpenArrow" } else { "None" });
+                dict.set("LE", vec![end(*arrow_start), end(*arrow)]);
             }
             stroke_style(&mut w, a);
             path(&mut w, [ua, ub]);
@@ -2132,34 +2131,34 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
             }
         }
         AnnotKind::Ink { paths } => {
-            dict.set("Subtype", Object::Name(b"Ink".to_vec()));
+            dict.set("Subtype", Object::name("Ink"));
             dict.set("C", color_arr);
             dict.set("BS", border_style(a));
-            let mut ink_list = Vec::new();
+            let mut ink_list: Vec<Object> = Vec::new();
             stroke_style(&mut w, a);
             w.line_cap(LineCap::Round);
             w.line_join(LineJoin::Round);
             for line in paths {
                 let users: Vec<Pt> = line.iter().map(|p| up(*p)).collect();
-                ink_list.push(Object::Array(
+                ink_list.push(Object::from(
                     users
                         .iter()
                         .flat_map(|u| [Object::from(u.x), Object::from(u.y)])
-                        .collect(),
+                        .collect::<Vec<_>>(),
                 ));
                 path(&mut w, users);
                 w.paint(Paint::Stroke);
             }
-            dict.set("InkList", Object::Array(ink_list));
+            dict.set("InkList", ink_list);
         }
         AnnotKind::PageStamp { name, .. } => {
-            dict.set("Subtype", Object::Name(b"Stamp".to_vec()));
+            dict.set("Subtype", Object::name("Stamp"));
             if a.contents.is_empty() {
                 dict.set("Contents", pdf_text_string(name));
             }
         }
         AnnotKind::PageBorder { rect, status } => {
-            dict.set("Subtype", Object::Name(b"Square".to_vec()));
+            dict.set("Subtype", Object::name("Square"));
             dict.set("C", color_arr);
             dict.set("BS", border_style(a));
             if a.contents.is_empty() {
@@ -2170,7 +2169,7 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
             w.paint(Paint::Stroke);
         }
         AnnotKind::TextStamp { rect, text, .. } => {
-            dict.set("Subtype", Object::Name(b"Stamp".to_vec()));
+            dict.set("Subtype", Object::name("Stamp"));
             if a.contents.is_empty() {
                 dict.set("Contents", pdf_text_string(text));
             }
@@ -2222,9 +2221,9 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
             w.paint(Paint::Stroke);
         }
         AnnotKind::Stamp { .. } => {
-            dict.set("Subtype", Object::Name(b"Stamp".to_vec()));
+            dict.set("Subtype", Object::name("Stamp"));
             // Which tick it is is the mark's id, in /SHEF_Annot.
-            dict.set("Name", Object::Name(b"Tick".to_vec()));
+            dict.set("Name", Object::name("Tick"));
         }
     }
 
@@ -2646,15 +2645,10 @@ fn snapped(v: f64, scale: f64) -> f64 {
 /// `/RD` is the inset to an inner box that's put on the steps itself, so
 /// a box read as `/Rect` less `/RD` is off by half a step at most.
 fn on_grid(dict: &mut Dictionary) {
-    let numbers = |o: &Object| -> Option<Vec<f64>> {
-        o.as_array()
-            .ok()?
-            .iter()
-            .map(|v| v.as_float().ok())
-            .collect()
-    };
-    let rect = dict.get(b"Rect").ok().and_then(numbers);
-    let rd = dict.get(b"RD").ok().and_then(numbers);
+    let numbers =
+        |o: &Object| -> Option<Vec<f64>> { o.as_array()?.iter().map(Object::as_number).collect() };
+    let rect = dict.get(b"Rect").and_then(numbers);
+    let rd = dict.get(b"RD").and_then(numbers);
     if let (Some([x0, y0, x1, y1]), Some([l, b, r, t])) = (
         rect.as_deref().and_then(|v| <[f64; 4]>::try_from(v).ok()),
         rd.as_deref().and_then(|v| <[f64; 4]>::try_from(v).ok()),
@@ -2670,12 +2664,12 @@ fn on_grid(dict: &mut Dictionary) {
             outer[2] - inner[2],
             outer[3] - inner[3],
         ];
-        dict.set("RD", inset.map(Object::Real).to_vec());
+        dict.set("RD", inset.map(Object::from).to_vec());
     }
     fn walk(o: &mut Object, scale: f64) {
-        match o {
-            Object::Real(v) => *v = snapped(*v, scale),
-            Object::Array(items) => items.iter_mut().for_each(|v| walk(v, scale)),
+        match o.value_mut() {
+            Value::Real(v) => *v = snapped(*v, scale),
+            Value::Array(items) => items.iter_mut().for_each(|v| walk(v, scale)),
             _ => {}
         }
     }
@@ -2690,7 +2684,7 @@ fn on_grid(dict: &mut Dictionary) {
         b"IC",
         b"CA",
     ] {
-        if let Ok(o) = dict.get_mut(key) {
+        if let Some(o) = dict.get_mut(key) {
             walk(o, steps_per_unit(key));
         }
     }
@@ -2719,9 +2713,9 @@ pub fn staleness<'a, P: Objects + ?Sized>(
 /// digest reads is direct, so it's read with no file, and a reference
 /// reads as nothing.
 fn written_staleness(dict: &Dictionary, threaded: bool) -> String {
-    digest(dict, threaded, |o| match o {
-        Object::Reference(_) => None,
-        direct => Some(direct),
+    digest(dict, threaded, |o| match o.as_reference() {
+        Some(_) => None,
+        None => Some(o),
     })
 }
 
@@ -2749,7 +2743,7 @@ fn digest<'a>(
         b"CL",
         b"RD",
     ];
-    let number = |o| resolve(o).and_then(|o| o.as_float().ok());
+    let number = |o| resolve(o).and_then(Object::as_number);
     // In steps of 1/`scale`.
     let numbers = |out: &mut Vec<u8>, items: &mut dyn Iterator<Item = Option<f64>>, scale: f64| {
         for v in items {
@@ -2764,10 +2758,11 @@ fn digest<'a>(
     let mut out = Vec::new();
     for key in KEYS {
         let scale = steps_per_unit(key);
-        match (key, dict.get(key).ok().and_then(&resolve)) {
+        let val = dict.get(key).and_then(&resolve);
+        match (key, val.map(Object::value)) {
             (b"Rect", _) if threaded => {}
-            (b"Subtype", Some(Object::Name(n))) => out.extend_from_slice(n),
-            (b"Rect", Some(Object::Array(r))) => {
+            (b"Subtype", Some(Value::Name(n))) => out.extend_from_slice(n.as_bytes()),
+            (b"Rect", Some(Value::Array(r))) => {
                 let c: Vec<Option<f64>> = r.iter().map(number).collect();
                 match c.as_slice() {
                     [Some(x0), Some(y0), Some(x1), Some(y1)] => {
@@ -2777,26 +2772,28 @@ fn digest<'a>(
                     _ => numbers(&mut out, &mut c.into_iter(), scale),
                 }
             }
-            (b"Contents" | b"T" | b"M" | b"NM", Some(Object::String(text, _))) => {
-                let text: String = crate::file::text_string(text).nfc().collect();
-                out.extend_from_slice(text.as_bytes());
+            (b"Contents" | b"T" | b"M" | b"NM", Some(Value::String(text, _))) => {
+                if let Some(bytes) = text.as_bytes() {
+                    let text: String = crate::file::text_string(bytes).nfc().collect();
+                    out.extend_from_slice(text.as_bytes());
+                }
             }
-            (b"C" | b"IC", Some(Object::Array(c))) => {
+            (b"C" | b"IC", Some(Value::Array(c))) => {
                 numbers(&mut out, &mut c.iter().map(number), scale);
             }
-            (b"CA", ca) => {
-                let ca = ca.map_or(Some(1.0), |o| o.as_float().ok());
+            (b"CA", _) => {
+                let ca = val.map_or(Some(1.0), Object::as_number);
                 numbers(&mut out, &mut std::iter::once(ca), scale);
             }
-            (b"InkList", Some(Object::Array(paths))) => {
+            (b"InkList", Some(Value::Array(paths))) => {
                 for path in paths {
-                    if let Some(Object::Array(p)) = resolve(path) {
+                    if let Some(p) = resolve(path).and_then(Object::as_array) {
                         numbers(&mut out, &mut p.iter().map(number), scale);
                     }
                     out.push(b';');
                 }
             }
-            (_, Some(Object::Array(v))) => numbers(&mut out, &mut v.iter().map(number), scale),
+            (_, Some(Value::Array(v))) => numbers(&mut out, &mut v.iter().map(number), scale),
             _ => {}
         }
         // Each key's value ends with a byte no text or number has.
@@ -2871,7 +2868,7 @@ mod tests {
             let form = pdf.get_object(ap).unwrap().as_stream().unwrap();
             let resources = form.dict.get(b"Resources").unwrap().as_dict().unwrap();
             for (key, into) in [(&b"Font"[..], &mut fonts), (b"ExtGState", &mut states)] {
-                if let Ok(category) = resources.get(key) {
+                if let Some(category) = resources.get(key) {
                     for (_, r) in category.as_dict().unwrap() {
                         into.insert(r.as_reference().unwrap());
                     }
@@ -2973,14 +2970,14 @@ mod tests {
             .unwrap()
             .clone();
         assert_eq!(
-            dict.get(b"CreationDate").unwrap().as_str().unwrap(),
+            dict.get(b"CreationDate").unwrap().as_bytes().unwrap(),
             b"D:20261010000000"
         );
         assert_eq!(
             dict.get(b"Subtype").unwrap().as_name().unwrap(),
             b"FreeText"
         );
-        let json = dict.get(b"SHEF_Annot").unwrap().as_str().unwrap();
+        let json = dict.get(b"SHEF_Annot").unwrap().as_bytes().unwrap();
         // Non-ASCII contents force UTF-16 for the JSON string too; decode it.
         let json = if json.starts_with(&[0xFE, 0xFF]) {
             let units: Vec<u16> = json[2..]
@@ -2996,13 +2993,11 @@ mod tests {
         assert_eq!(payload.v, VERSION);
         assert_eq!(payload.std, staleness(&pdf, &dict, false));
         // On one line, turned with the mark, in WinAnsi.
-        let content = String::from_utf8_lossy(&stream.content);
+        let decoded = stream.decompressed_content().unwrap();
+        let content = String::from_utf8_lossy(&decoded);
         assert!(content.contains("0 1 -1 0 "), "{content}");
         let line = b"(Hello \\(world\\) \xE9) Tj";
-        assert!(
-            stream.content.windows(line.len()).any(|w| w == line),
-            "{content}"
-        );
+        assert!(decoded.windows(line.len()).any(|w| w == line), "{content}");
     }
 
     fn mark(kind: AnnotKind) -> Annot {
@@ -3058,8 +3053,14 @@ mod tests {
         let main = to_pdf(&text, &mut pdf).main;
         let ap = main.get(b"AP").unwrap().as_dict().unwrap();
         let id = ap.get(b"N").unwrap().as_reference().unwrap();
-        let content = &pdf.get_object(id).unwrap().as_stream().unwrap().content;
-        let content = String::from_utf8_lossy(content);
+        let decoded = pdf
+            .get_object(id)
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .decompressed_content()
+            .unwrap();
+        let content = String::from_utf8_lossy(&decoded);
         // Along user y, from its first line's start: (102, 114) upright.
         let tm = "0 1 -1 0 114 102 Tm";
         assert!(content.contains(tm), "{content}");
@@ -3139,7 +3140,7 @@ mod tests {
         let main = to_pdf(&square, &mut pdf).main;
         let ic = main.get(b"IC").unwrap().as_array().unwrap();
         assert_eq!(ic.len(), 3);
-        assert_eq!(ic[0].as_float().unwrap(), 1.0);
+        assert_eq!(ic[0].as_number().unwrap(), 1.0);
         let bs = main.get(b"BS").unwrap().as_dict().unwrap();
         assert_eq!(bs.get(b"S").unwrap().as_name().unwrap(), b"D");
         assert_eq!(bs.get(b"D").unwrap().as_array().unwrap().len(), 2);
@@ -3148,9 +3149,9 @@ mod tests {
         square.fill = None;
         square.dashed = false;
         let main = to_pdf(&square, &mut pdf).main;
-        assert!(main.get(b"IC").is_err());
+        assert!(main.get(b"IC").is_none());
         let bs = main.get(b"BS").unwrap().as_dict().unwrap();
-        assert!(bs.get(b"S").is_err());
+        assert!(bs.get(b"S").is_none());
 
         let line = mark(AnnotKind::Line {
             a: Pt { x: 0.0, y: 0.0 },
@@ -3216,7 +3217,7 @@ mod tests {
         let main = to_pdf(&tick, &mut pdf).main;
         assert_eq!(main.get(b"Subtype").unwrap().as_name().unwrap(), b"Stamp");
         assert_eq!(main.get(b"Name").unwrap().as_name().unwrap(), b"Tick");
-        let json = main.get(b"SHEF_Annot").unwrap().as_str().unwrap();
+        let json = main.get(b"SHEF_Annot").unwrap().as_bytes().unwrap();
         let json = crate::file::text_string(json);
         assert_eq!(from_json(json.as_bytes()).unwrap().mark.id, tick.id);
     }
@@ -3295,7 +3296,7 @@ mod tests {
         let cl = main.get(b"CL").unwrap().as_array().unwrap();
         assert_eq!(cl.len(), 6);
         // The leader starts at the point.
-        assert_eq!(cl[1].as_float().unwrap(), 200.0);
+        assert_eq!(cl[1].as_number().unwrap(), 200.0);
         // It meets the box at its left side, level with the knee.
         assert_eq!(
             callout_end(bx(200.0, 100.0, 120.0, 40.0), Pt { x: 180.0, y: 120.0 }),

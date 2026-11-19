@@ -1,8 +1,11 @@
-//! M18 slice 1's guard: every crate in the workspace reaches the PDF
-//! layer through `sheaf_doc::pdf` (`crates/sheaf-doc/src/pdf.rs`, or
-//! `crates/sheaf-doc/src/pdf/`). No other `.rs` file under `crates/`
-//! may name `lopdf` or any `pdf_*` family crate in a `use`, path or
-//! macro body.
+//! M18 slices 1 and 13's guard:
+//! 1. `lopdf` is gone from every `.rs` file in `crates/` (including inside
+//!    `sheaf_doc::pdf`).
+//! 2. Every crate in the workspace reaches the `pdf-*` family crates through
+//!    `sheaf_doc::pdf` (`crates/sheaf-doc/src/pdf/`). No `.rs` file outside
+//!    that door may name `pdf_tokenizer`, `pdf_objects`, `pdf_filters`,
+//!    `pdf_crypt`, `pdf_structure` or `pdf_content_streams` in a `use`, path
+//!    or macro body.
 
 use std::path::{Path, PathBuf};
 
@@ -13,8 +16,9 @@ use syn::{Ident, UseTree};
 const DOOR_FILE: &str = "sheaf-doc/src/pdf.rs";
 const DOOR_DIR: &str = "sheaf-doc/src/pdf/";
 
-const BANNED: &[&str] = &[
-    "lopdf",
+const GONE: &[&str] = &["lopdf"];
+
+const DOOR_ONLY: &[&str] = &[
     "pdf_tokenizer",
     "pdf_objects",
     "pdf_filters",
@@ -35,13 +39,12 @@ fn only_the_door_names_the_pdf_layer_crates() {
     let mut hits = Vec::new();
     for rel in files {
         let shown = shown(&rel);
-        if shown == DOOR_FILE || shown.starts_with(DOOR_DIR) {
-            continue;
-        }
+        let in_door = shown == DOOR_FILE || shown.starts_with(DOOR_DIR);
         let full = crates.join(&rel);
         let src = std::fs::read_to_string(&full).unwrap_or_else(|e| panic!("{shown}: {e}"));
         let file = syn::parse_file(&src).unwrap_or_else(|e| panic!("{shown}: {e}"));
-        let mut scan = Scan::default();
+        let banned: &[&str] = if in_door { GONE } else { ALL_BANNED };
+        let mut scan = Scan::new(banned);
         scan.visit_file(&file);
         for (line, name) in scan.lines {
             hits.push(format!("crates/{shown}:{line} ({name})"));
@@ -49,11 +52,21 @@ fn only_the_door_names_the_pdf_layer_crates() {
     }
     assert!(
         hits.is_empty(),
-        "files outside sheaf_doc::pdf name a PDF-layer crate directly; reach it through \
-         `sheaf_doc::pdf` (or `crate::pdf` in sheaf-doc):\n{}",
+        "lopdf is retired, and files outside sheaf_doc::pdf must reach PDF-layer crates \
+         through `sheaf_doc::pdf` (or `crate::pdf` in sheaf-doc):\n{}",
         hits.join("\n")
     );
 }
+
+const ALL_BANNED: &[&str] = &[
+    "lopdf",
+    "pdf_tokenizer",
+    "pdf_objects",
+    "pdf_filters",
+    "pdf_crypt",
+    "pdf_structure",
+    "pdf_content_streams",
+];
 
 #[test]
 fn a_probe_catches_uses_paths_and_macros_but_not_strings() {
@@ -67,10 +80,11 @@ fn f() -> pdf_structure::Result<()> {
 }
 "#;
     let file = syn::parse_file(src).unwrap();
-    let mut scan = Scan::default();
+    let mut scan = Scan::new(ALL_BANNED);
     scan.visit_file(&file);
     let lines: Vec<usize> = scan.lines.into_iter().map(|(l, _)| l).collect();
     assert_eq!(lines, [2, 4, 6]);
+    assert_eq!(DOOR_ONLY.len() + GONE.len(), ALL_BANNED.len());
 }
 
 fn rust_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
@@ -96,14 +110,21 @@ fn shown(path: &Path) -> String {
     parts.join("/")
 }
 
-#[derive(Default)]
-struct Scan {
+struct Scan<'b> {
+    banned: &'b [&'static str],
     lines: std::collections::BTreeSet<(usize, &'static str)>,
 }
 
-impl Scan {
+impl<'b> Scan<'b> {
+    fn new(banned: &'b [&'static str]) -> Self {
+        Self {
+            banned,
+            lines: std::collections::BTreeSet::new(),
+        }
+    }
+
     fn check(&mut self, ident: &Ident) {
-        for &banned in BANNED {
+        for &banned in self.banned {
             if ident == banned {
                 self.lines.insert((ident.span().start().line, banned));
             }
@@ -121,7 +142,7 @@ impl Scan {
     }
 }
 
-impl<'ast> Visit<'ast> for Scan {
+impl<'ast> Visit<'ast> for Scan<'_> {
     fn visit_path(&mut self, p: &'ast syn::Path) {
         if let Some(first) = p.segments.first() {
             self.check(&first.ident);

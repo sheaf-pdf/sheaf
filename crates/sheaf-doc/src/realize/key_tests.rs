@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-use crate::pdf::{Object, dictionary};
+use crate::pdf::{Object, ObjectId, dictionary};
 use im::Vector;
 use in_progress::NoProgress;
 use sheaf_edit::{
@@ -224,7 +224,10 @@ fn toggling_a_layer_changes_the_keys_of_its_source_s_pages_only() {
     let st = d.state();
     let screen = ViewInputs::screen();
     let before = keys(st, &screen);
-    for (source, layer) in [(d.primary().id(), (9, 0)), (other.id(), (4, 0))] {
+    for (source, layer) in [
+        (d.primary().id(), ObjectId::new(9, 0)),
+        (other.id(), ObjectId::new(4, 0)),
+    ] {
         let off = OcgOverride {
             off: BTreeMap::from([(source, BTreeSet::from([LayerId::new(layer)]))]),
         };
@@ -462,7 +465,7 @@ fn records_change_the_keys_of_the_pages_drawing_them() {
     let elsewhere = Foreign {
         src: f.src.as_ref().map(|r| ObjRef {
             src: r.src.clone(),
-            id: (r.id.0 + 1, 0),
+            id: ObjectId::new(r.id.number + 1, 0),
         }),
         ..Foreign::clone(f)
     };
@@ -800,9 +803,9 @@ fn a_link_s_page_reads_the_page_it_leads_to() {
     let mut f = crate::forms::fixture::every_kind_in(3);
     let last = f.pages[2];
     let link = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Link",
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"),
         "Rect" => vec![200.into(), 200.into(), 300.into(), 220.into()],
-        "Dest" => vec![last.into(), Object::Name(b"Fit".to_vec())],
+        "Dest" => vec![last.into(), Object::name("Fit")],
         "Border" => vec![0.into(), 0.into(), 2.into()],
     });
     let mut annots = f.annots(0);

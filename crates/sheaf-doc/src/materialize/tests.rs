@@ -10,7 +10,10 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::pdf::content::{Content, Operation};
-use crate::pdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
+use crate::pdf::{
+    Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, StreamExt, Value, dictionary,
+    literal,
+};
 use in_progress::NoProgress;
 
 use super::*;
@@ -37,38 +40,54 @@ pub(crate) fn file(tag: &str, n: usize, tagged: bool) -> Pdf {
     let mut pdf = Pdf::with_version("1.5");
     let pages = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     });
     let resources = pdf.add_object(dictionary! { "Font" => dictionary! { "F1" => font } });
     let mut kids = Vec::new();
     for i in 0..n {
         let content = text(&format!("{tag} {i}"));
         let content = pdf.add_object(Stream::new(dictionary! {}, content));
-        let mut page = dictionary! { "Type" => "Page", "Parent" => pages, "Contents" => content };
+        let mut page = dictionary! {
+            "Type" => Object::name("Page"),
+            "Parent" => pages,
+            "Contents" => content,
+        };
         if tagged {
             page.set("StructParents", i as i64);
         }
-        kids.push(Object::Reference(pdf.add_object(page)));
+        kids.push(Object::from(pdf.add_object(page)));
     }
     pdf.objects.insert(
         pages,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => kids, "Count" => n as i64, "Resources" => resources,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"),
+            "Kids" => kids,
+            "Count" => n as i64,
+            "Resources" => resources,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         }),
     );
     let xmp = pdf.add_object(Stream::new(
-        dictionary! { "Type" => "Metadata", "Subtype" => "XML" },
+        dictionary! {
+            "Type" => Object::name("Metadata"),
+            "Subtype" => Object::name("XML"),
+        },
         b"<x:xmpmeta/>".to_vec(),
     ));
-    let mut catalog = dictionary! { "Type" => "Catalog", "Pages" => pages, "Metadata" => xmp };
+    let mut catalog = dictionary! {
+        "Type" => Object::name("Catalog"),
+        "Pages" => pages,
+        "Metadata" => xmp,
+    };
     if tagged {
-        let root = pdf.add_object(dictionary! { "Type" => "StructTreeRoot" });
+        let root = pdf.add_object(dictionary! { "Type" => Object::name("StructTreeRoot") });
         catalog.set("StructTreeRoot", root);
         catalog.set("MarkInfo", dictionary! { "Marked" => true });
     }
     let catalog = pdf.add_object(catalog);
-    let info = pdf.add_object(dictionary! { "Title" => Object::string_literal(tag) });
+    let info = pdf.add_object(dictionary! { "Title" => literal(tag) });
     pdf.trailer.set("Root", catalog);
     pdf.trailer.set("Info", info);
     pdf
@@ -78,9 +97,9 @@ pub(crate) fn file(tag: &str, n: usize, tagged: bool) -> Pdf {
 fn text(text: &str) -> Vec<u8> {
     let ops = vec![
         Operation::new("BT", vec![]),
-        Operation::new("Tf", vec!["F1".into(), 24.into()]),
+        Operation::new("Tf", vec![Object::name("F1"), 24.into()]),
         Operation::new("Td", vec![72.into(), 700.into()]),
-        Operation::new("Tj", vec![Object::string_literal(text)]),
+        Operation::new("Tj", vec![literal(text)]),
         Operation::new("ET", vec![]),
     ];
     Content { operations: ops }.encode().unwrap()
@@ -196,15 +215,16 @@ fn written_anew(src: &Src) -> BTreeSet<ObjectId> {
 /// Whether `obj` describes where a file's objects are, which a write
 /// writes for itself: an object stream or a cross-reference stream.
 fn layout(obj: &Object) -> bool {
-    matches!(obj, Object::Stream(s) if s.dict.has_type(b"ObjStm") || s.dict.has_type(b"XRef"))
+    obj.as_stream()
+        .is_some_and(|s| s.dict.has_type(b"ObjStm") || s.dict.has_type(b"XRef"))
 }
 
 /// Whether encrypting `obj` changes it: it holds a string, or is a stream.
 fn encrypts(obj: &Object) -> bool {
-    match obj {
-        Object::String(..) | Object::Stream(_) => true,
-        Object::Array(items) => items.iter().any(encrypts),
-        Object::Dictionary(d) => d.iter().any(|(_, v)| encrypts(v)),
+    match obj.value() {
+        Value::String(..) | Value::Stream(_) => true,
+        Value::Array(items) => items.iter().any(encrypts),
+        Value::Dict(d) => d.iter().any(|(_, v)| encrypts(v)),
         _ => false,
     }
 }
@@ -242,21 +262,27 @@ fn an_identity_rewrite_keeps_every_number_and_copies_what_it_didnt_touch() {
 }
 
 /// The same document written twice, and on two threads, is the same
-/// bytes: encrypted with AES too, whose IVs are keyed hashes.
+/// bytes when unencrypted or RC4-encrypted; AES draws fresh OS CSPRNG
+/// IVs on every rewrite while decrypting to the same object graph.
 #[test]
 fn a_rewrite_is_the_same_bytes_every_time() {
     let other = bytes(&file("B", 2, false));
     let plain = bytes(&file("A", 3, false));
-    let state = &rc4_aes_128_and_aes_256(&form())[1].1;
-    let [aes, _] = encrypted(&form(), state, |_| {});
-    for (base, password) in [(plain, None), (aes, Some(USER))] {
-        let mut d = open(&base, password);
+    let states = rc4_aes_128_and_aes_256(&form());
+    let [rc4, _] = encrypted(&form(), &states[0].1, |_| {});
+    let [aes, _] = encrypted(&form(), &states[1].1, |_| {});
+    let edited = |base: &[u8], password: Option<&str>| {
+        let mut d = open(base, password);
         let first = d.page(0).unwrap();
         d.commit_ops(vec![fx::duplicate(&[first])], "dup").unwrap();
         let turn = fx::rotate(&[first], Turn::Quarter);
         d.commit_ops(vec![turn], "turn").unwrap();
         let source = add(&d, &other, "other.pdf");
         insert(&mut d, &source, 1);
+        d
+    };
+    for (base, password) in [(plain, None), (rc4, Some(USER))] {
+        let d = edited(&base, password);
         let input = SaveInput::detached(&d.snapshot());
         let once = write(&input, Profile::default()).bytes;
         let again = std::thread::scope(|scope| {
@@ -269,6 +295,23 @@ fn a_rewrite_is_the_same_bytes_every_time() {
         });
         assert_eq!(write(&input, Profile::default()).bytes, once);
         assert_eq!(again, [once.clone(), once]);
+    }
+
+    let d = edited(&aes, Some(USER));
+    let input = SaveInput::detached(&d.snapshot());
+    let once = write(&input, Profile::default()).bytes;
+    let again = write(&input, Profile::default()).bytes;
+    assert_ne!(once, again);
+    let first_pdf = Pdf::load_mem_with_password(&once, USER).unwrap();
+    let second_pdf = Pdf::load_mem_with_password(&again, USER).unwrap();
+    assert_eq!(
+        first_pdf.objects.keys().collect::<Vec<_>>(),
+        second_pdf.objects.keys().collect::<Vec<_>>(),
+    );
+    for (id, obj) in &first_pdf.objects {
+        if !layout(obj) {
+            assert!(same(obj, &second_pdf.objects[id]), "{id:?}");
+        }
     }
 }
 
@@ -300,7 +343,7 @@ fn a_duplicate_moved_before_its_original_leaves_copy_0_with_the_original_object(
             .unwrap()
             .clone()
     };
-    assert_eq!(contents(pages[0]), contents(pages[1]));
+    assert!(contents(pages[0]).eq_value(&contents(pages[1])));
     assert_eq!(out.record.map.get(&ObjKey::Page(first)), Some(originals[0]));
     assert_eq!(out.record.map.get(&ObjKey::Page(copy)), Some(pages[0]));
 }
@@ -413,7 +456,10 @@ fn an_encrypted_base_rewrites_encrypted() {
                 d.primary().crypt().unwrap().clone(),
                 crate::serialize::crypt::Crypt::of(&now).unwrap().unwrap(),
             );
-            assert_eq!(back.dict(), crypt.dict(), "{name}");
+            assert!(
+                Object::from(back.dict().clone()).eq_value(&Object::from(crypt.dict().clone())),
+                "{name}"
+            );
             assert_eq!(back.at(), crypt.at(), "{name}");
             assert_eq!(back.first_id(), crypt.first_id(), "{name}");
             let anew = written_anew(&source(&before, Some(USER)));
@@ -519,13 +565,13 @@ fn dense_numbering_writes_alike_streams_once() {
         .unwrap()
         .as_stream()
         .unwrap()
-        .content
-        .clone();
+        .raw_bytes()
+        .to_vec();
     pdf.get_object_mut(second)
         .unwrap()
         .as_stream_mut()
         .unwrap()
-        .set_content(data);
+        .set_bytes(data);
     let d = open(&bytes(&pdf), None);
     let dense = Profile {
         numbering: Numbering::Dense,
@@ -533,7 +579,7 @@ fn dense_numbering_writes_alike_streams_once() {
     };
     let out = rewrite(&d, dense);
     let now = source_of(&out);
-    let numbers: Vec<u32> = ids(now.pdf()).iter().map(|id| id.0).collect();
+    let numbers: Vec<u32> = ids(now.pdf()).iter().map(|id| id.number).collect();
     assert_eq!(numbers, (1..=numbers.len() as u32).collect::<Vec<_>>());
     let contents: Vec<Object> = (now.page_ids())
         .map(|id| {
@@ -545,7 +591,7 @@ fn dense_numbering_writes_alike_streams_once() {
                 .clone()
         })
         .collect();
-    assert_eq!(contents[0], contents[1]);
+    assert!(contents[0].eq_value(&contents[1]));
     assert_eq!(out.record.map.identity, None);
     assert!(out.record.present.is_empty());
 }
@@ -630,8 +676,8 @@ fn a_second_save_keeps_the_first_save_s_numbers() {
     for (key, at) in &numbered {
         assert_eq!(second.record.map.get(key), Some(*at), "{key:?}");
     }
-    let past = numbered.iter().map(|(_, id)| id.0).max().unwrap();
-    assert!(second.record.map.get(&ObjKey::Page(added)).unwrap().0 > past);
+    let past = numbered.iter().map(|(_, id)| id.number).max().unwrap();
+    assert!(second.record.map.get(&ObjKey::Page(added)).unwrap().number > past);
     // What the second save wrote reads as the document.
     let now = source_of(&second);
     assert_eq!(now.page_count(), 4);
@@ -647,50 +693,66 @@ const LAST: u32 = crate::serialize::NUMBERS - 1;
 /// the second (`/Far`, "FARTWO") and 4,294,967,000, which nothing is
 /// (`/Gone`).
 fn far() -> Vec<u8> {
-    let far = |n: u32| Object::Reference((n, 0));
+    let far = |n: u32| Object::from(ObjectId::new(n, 0));
     let members = [
-        (
-            u32::MAX - 5,
-            dictionary! { "Said" => Object::string_literal("FARONE") },
-        ),
-        (
-            u32::MAX - 4,
-            dictionary! { "Said" => Object::string_literal("FARTWO") },
-        ),
+        (u32::MAX - 5, dictionary! { "Said" => literal("FARONE") }),
+        (u32::MAX - 4, dictionary! { "Said" => literal("FARTWO") }),
     ];
     let mut pairs = String::new();
     let mut data = Vec::new();
     for (n, dict) in members {
         pairs.push_str(&format!("{n} {} ", data.len()));
-        crate::serialize::object::write(&mut data, &Object::Dictionary(dict)).unwrap();
+        crate::serialize::object::write(&mut data, &Object::from(dict)).unwrap();
         data.push(b'\n');
     }
     let objstm = Stream::new(
-        dictionary! { "Type" => "ObjStm", "N" => 2, "First" => pairs.len() as i64 },
+        dictionary! {
+            "Type" => Object::name("ObjStm"),
+            "N" => 2,
+            "First" => pairs.len() as i64,
+        },
         [pairs.into_bytes(), data].concat(),
     );
     let content = text("FAR 0");
     let media = vec![0.into(), 0.into(), 200.into(), 200.into()];
     let objects: [Object; 6] = [
-        dictionary! { "Type" => "Catalog", "Pages" => (2, 0), "Far" => far(u32::MAX - 5) }.into(),
-        dictionary! { "Type" => "Pages", "Kids" => vec![(3, 0).into()], "Count" => 1 }.into(),
         dictionary! {
-            "Type" => "Page", "Parent" => (2, 0), "MediaBox" => media, "Contents" => (5, 0),
-            "Resources" => dictionary! { "Font" => dictionary! { "F1" => (6, 0) } },
+            "Type" => Object::name("Catalog"),
+            "Pages" => ObjectId::new(2, 0),
+            "Far" => far(u32::MAX - 5),
+        }
+        .into(),
+        dictionary! {
+            "Type" => Object::name("Pages"),
+            "Kids" => vec![Object::from(ObjectId::new(3, 0))],
+            "Count" => 1,
+        }
+        .into(),
+        dictionary! {
+            "Type" => Object::name("Page"),
+            "Parent" => ObjectId::new(2, 0),
+            "MediaBox" => media,
+            "Contents" => ObjectId::new(5, 0),
+            "Resources" => dictionary! {
+                "Font" => dictionary! { "F1" => ObjectId::new(6, 0) },
+            },
         }
         .into(),
         objstm.into(),
         Stream::new(dictionary! {}, content).into(),
         dictionary! {
-            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
-            "Far" => far(u32::MAX - 4), "Gone" => far(4_294_967_000),
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name("Helvetica"),
+            "Far" => far(u32::MAX - 4),
+            "Gone" => far(4_294_967_000),
         }
         .into(),
     ];
     let mut out = b"%PDF-1.7\n".to_vec();
     let mut rows = vec![0, 0, 0, 0, 0, 0xff, 0xff];
     for (num, obj) in (1..).zip(&objects) {
-        let pos = crate::serialize::object::indirect(&mut out, (num, 0), obj).unwrap();
+        let pos = crate::serialize::object::indirect(&mut out, ObjectId::new(num, 0), obj).unwrap();
         rows.push(1);
         rows.extend_from_slice(&(pos as u32).to_be_bytes());
         rows.extend_from_slice(&[0, 0]);
@@ -702,14 +764,14 @@ fn far() -> Vec<u8> {
     }
     let start = out.len();
     let xref = dictionary! {
-        "Type" => "XRef",
+        "Type" => Object::name("XRef"),
         "Size" => i64::from(u32::MAX - 3),
         "W" => vec![1.into(), 4.into(), 2.into()],
         "Index" => vec![0.into(), 7.into(), i64::from(u32::MAX - 5).into(), 2.into()],
-        "Root" => (1, 0),
+        "Root" => ObjectId::new(1, 0),
     };
-    let xref_stream = Object::Stream(Stream::new(xref, rows));
-    crate::serialize::object::indirect(&mut out, (7, 0), &xref_stream).unwrap();
+    let xref_stream = Object::from(Stream::new(xref, rows));
+    crate::serialize::object::indirect(&mut out, ObjectId::new(7, 0), &xref_stream).unwrap();
     out.extend_from_slice(format!("startxref\n{start}\n%%EOF\n").as_bytes());
     out
 }
@@ -721,7 +783,7 @@ fn far_of(pdf: &LazyPdf, id: ObjectId) -> (ObjectId, Vec<u8>) {
         .as_reference()
         .unwrap();
     let said = pdf.get_dictionary(at).unwrap().get(b"Said").unwrap();
-    (at, said.as_str().unwrap().to_vec())
+    (at, said.as_bytes().unwrap().to_vec())
 }
 
 /// Objects a base holds at numbers past what a PDF may use, placed sparsely
@@ -733,27 +795,34 @@ fn far_of(pdf: &LazyPdf, id: ObjectId) -> (ObjectId, Vec<u8>) {
 fn objects_numbered_past_the_last_number_are_given_new_ones() {
     let base = far();
     let mut d = open(&base, None);
-    assert_eq!(lazy(&base, None).ids().filter(|id| id.0 > LAST).count(), 2);
+    assert_eq!(
+        lazy(&base, None)
+            .ids()
+            .filter(|id| id.number > LAST)
+            .count(),
+        2
+    );
     let first = save(&mut d);
     assert!(first.bytes.len() < 4096, "{} bytes", first.bytes.len());
     assert!(first.notes.iter().any(|n| n.0.contains("new numbers")));
     let pdf = lazy(&first.bytes, None);
     assert!(pdf.base_sound());
-    assert!(pdf.ids().all(|id| id.0 < 16), "{:?}", ids(&pdf));
+    assert!(pdf.ids().all(|id| id.number < 16), "{:?}", ids(&pdf));
     assert!(pdf.xref().size < 16);
     let catalog = pdf.trailer().get(b"Root").unwrap().as_reference().unwrap();
+    let id6 = ObjectId::new(6, 0);
     let (one, said) = far_of(&pdf, catalog);
     assert_eq!(said, b"FARONE");
-    let (two, said) = far_of(&pdf, (6, 0));
+    let (two, said) = far_of(&pdf, id6);
     assert_eq!(said, b"FARTWO");
-    assert!(one.0 >= 7 && two.0 >= 7 && one != two);
-    let font = pdf.get_dictionary((6, 0)).unwrap();
-    assert_eq!(font.get(b"Gone").unwrap(), &Object::Null);
+    assert!(one.number >= 7 && two.number >= 7 && one != two);
+    let font = pdf.get_dictionary(id6).unwrap();
+    assert!(font.get(b"Gone").unwrap().is_null());
     // The record keeps where they went, and the next save writes them
     // there.
     let key = |n: u32| ObjKey::Base {
         blob: d.primary().id(),
-        obj: (n, 0),
+        obj: ObjectId::new(n, 0),
         copy: 0,
     };
     assert_eq!(first.record.map.get(&key(u32::MAX - 5)), Some(one));
@@ -767,7 +836,7 @@ fn objects_numbered_past_the_last_number_are_given_new_ones() {
         .as_reference()
         .unwrap();
     assert_eq!(far_of(&again, catalog).0, one);
-    assert_eq!(far_of(&again, (6, 0)).0, two);
+    assert_eq!(far_of(&again, id6).0, two);
 }
 
 /// A page that names a number past the file's objects, which nothing is,
@@ -777,11 +846,11 @@ fn objects_numbered_past_the_last_number_are_given_new_ones() {
 #[test]
 fn a_reference_to_nothing_stays_one() {
     let mut pdf = file("A", 1, false);
-    let nothing = (pdf.max_id + 2, 0);
+    let nothing = ObjectId::new(pdf.max_id + 2, 0);
     let page = pdf.page_iter().next().unwrap();
     pdf.get_dictionary_mut(page)
         .unwrap()
-        .set("Nothing", Object::Reference(nothing));
+        .set("Nothing", Object::from(nothing));
     let mut d = open(&bytes(&pdf), None);
     let other = bytes(&file("B", 3, false));
     let source = add(&d, &other, "other.pdf");
@@ -791,13 +860,13 @@ fn a_reference_to_nothing_stays_one() {
     let out = rewrite(&d, Profile::default());
     let written = lazy(&out.bytes, None);
     assert!(
-        written.ids().any(|id| id.0 > nothing.0),
+        written.ids().any(|id| id.number > nothing.number),
         "{:?}",
         ids(&written)
     );
     assert!(written.get(nothing).is_err());
     let page = written.get_dictionary(page).unwrap();
-    assert_eq!(page.get(b"Nothing").unwrap(), &Object::Reference(nothing));
+    assert_eq!(page.get(b"Nothing").unwrap().as_reference(), Some(nothing));
 }
 
 /// A base whose cross-reference stream is the last number a PDF may use,
@@ -807,38 +876,48 @@ fn a_reference_to_nothing_stays_one() {
 /// input had it: the save gave no such number.
 #[test]
 fn a_size_at_the_last_number_isnt_reserved() {
-    let gone = Object::Reference((u32::MAX, 0));
+    let gone = Object::from(ObjectId::new(u32::MAX, 0));
     let media = vec![0.into(), 0.into(), 200.into(), 200.into()];
     let objects = [
-        dictionary! { "Type" => "Catalog", "Pages" => (2, 0) },
-        dictionary! { "Type" => "Pages", "Kids" => vec![(3, 0).into()], "Count" => 1 },
+        dictionary! { "Type" => Object::name("Catalog"), "Pages" => ObjectId::new(2, 0) },
         dictionary! {
-            "Type" => "Page", "Parent" => (2, 0), "MediaBox" => media,
-            "Resources" => dictionary! { "Font" => dictionary! { "F1" => (4, 0) } },
+            "Type" => Object::name("Pages"),
+            "Kids" => vec![Object::from(ObjectId::new(3, 0))],
+            "Count" => 1,
         },
         dictionary! {
-            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+            "Type" => Object::name("Page"),
+            "Parent" => ObjectId::new(2, 0),
+            "MediaBox" => media,
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => ObjectId::new(4, 0) } },
+        },
+        dictionary! {
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name("Helvetica"),
             "Gone" => gone.clone(),
         },
     ];
     let mut base = b"%PDF-1.7\n".to_vec();
     let mut rows = vec![0, 0, 0, 0, 0, 0xff, 0xff];
     for (num, dict) in (1..).zip(objects) {
-        let pos = crate::serialize::object::indirect(&mut base, (num, 0), &dict.into()).unwrap();
+        let pos =
+            crate::serialize::object::indirect(&mut base, ObjectId::new(num, 0), &dict.into())
+                .unwrap();
         rows.push(1);
         rows.extend_from_slice(&(pos as u32).to_be_bytes());
         rows.extend_from_slice(&[0, 0]);
     }
     let start = base.len();
     let xref = dictionary! {
-        "Type" => "XRef",
+        "Type" => Object::name("XRef"),
         "Size" => i64::from(LAST + 1),
         "W" => vec![1.into(), 4.into(), 2.into()],
         "Index" => vec![0.into(), 5.into()],
-        "Root" => (1, 0),
+        "Root" => ObjectId::new(1, 0),
     };
-    let stream = Object::Stream(Stream::new(xref, rows));
-    crate::serialize::object::indirect(&mut base, (LAST, 0), &stream).unwrap();
+    let stream = Object::from(Stream::new(xref, rows));
+    crate::serialize::object::indirect(&mut base, ObjectId::new(LAST, 0), &stream).unwrap();
     base.extend_from_slice(format!("startxref\n{start}\n%%EOF\n").as_bytes());
     let opened = lazy(&base, None);
     assert_eq!(opened.xref().max_stream, Some(LAST));
@@ -853,8 +932,8 @@ fn a_size_at_the_last_number_isnt_reserved() {
     let pdf = lazy(&out.bytes, None);
     assert!(pdf.base_sound());
     assert!(pdf.xref().size < 16, "/Size {}", pdf.xref().size);
-    let font = pdf.get_dictionary((4, 0)).unwrap();
-    assert_eq!(font.get(b"Gone").unwrap(), &gone);
+    let font = pdf.get_dictionary(ObjectId::new(4, 0)).unwrap();
+    assert!(font.get(b"Gone").unwrap().eq_value(&gone));
 }
 
 /// A cancelled write stops as cancelled.
@@ -890,7 +969,7 @@ fn every_page_carries_its_inheritable_keys() {
         for key in [b"Resources".as_slice(), b"MediaBox", b"Rotate"] {
             assert!(page.has(key), "{id:?}: {}", String::from_utf8_lossy(key));
         }
-        assert_eq!(page.get(b"Rotate").unwrap().as_i64().unwrap(), 0);
+        assert_eq!(page.get(b"Rotate").unwrap().as_integer().unwrap(), 0);
     }
     let tree = &out.record.tree;
     assert_eq!(tree.nodes.len(), 3);
@@ -908,7 +987,7 @@ fn the_header_gives_the_version_needed() {
     let catalog = pdf.trailer.get(b"Root").unwrap().as_reference().unwrap();
     let out = rewrite(&open(&bytes(&pdf), None), Profile::default());
     assert_eq!(header(&out), b"%PDF-1.4");
-    (pdf.get_dictionary_mut(catalog).unwrap()).set("Version", Object::Name(b"1.7".to_vec()));
+    (pdf.get_dictionary_mut(catalog).unwrap()).set("Version", Object::name("1.7"));
     let out = rewrite(&open(&bytes(&pdf), None), Profile::default());
     assert_eq!(header(&out), b"%PDF-1.7");
     assert!(!source_of(&out).pdf().catalog().unwrap().has(b"Version"));
@@ -932,14 +1011,14 @@ fn linked() -> Pdf {
     let mut pdf = file("B", 2, false);
     let pages: Vec<ObjectId> = pdf.get_pages().into_values().collect();
     let link = pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Link", "P" => pages[0],
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"), "P" => pages[0],
         "Rect" => vec![0.into(), 0.into(), 50.into(), 50.into()],
-        "Dest" => vec![pages[1].into(), "Fit".into()],
+        "Dest" => vec![pages[1].into(), Object::name("Fit")],
     });
     let note = pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Square", "P" => pages[0],
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Square"), "P" => pages[0],
         "Rect" => vec![100.into(), 100.into(), 150.into(), 150.into()],
-        "Contents" => Object::string_literal("their note"),
+        "Contents" => literal("their note"),
     });
     (pdf.get_dictionary_mut(pages[0]).unwrap()).set("Annots", vec![link.into(), note.into()]);
     pdf
@@ -948,19 +1027,24 @@ fn linked() -> Pdf {
 /// Page `id`'s annotations in `src`, each with its `/P` and its link's
 /// destination page, when it has them.
 fn annots(src: &Src, id: ObjectId) -> Vec<(ObjectId, Option<Object>, Option<Object>)> {
+    let unplaced = |o: &Object| {
+        let mut o = o.clone();
+        o.unplace();
+        o
+    };
     let pdf = src.pdf();
     let page = pdf.get_dictionary(id).unwrap();
-    let Ok(Object::Array(list)) = page.get(b"Annots") else {
+    let Some(list) = page.get(b"Annots").and_then(Object::as_array) else {
         return Vec::new();
     };
     (list.iter())
         .map(|a| {
             let at = a.as_reference().unwrap();
             let d = pdf.get_dictionary(at).unwrap();
-            let dest = (d.get(b"Dest").ok())
-                .and_then(|d| d.as_array().ok())
-                .map(|d| d[0].clone());
-            (at, d.get(b"P").ok().cloned(), dest)
+            let dest = (d.get(b"Dest"))
+                .and_then(Object::as_array)
+                .map(|d| unplaced(&d[0]));
+            (at, d.get(b"P").map(unplaced), dest)
         })
         .collect()
 }
@@ -980,12 +1064,8 @@ fn copied_pages_bring_what_they_reach_but_other_pages() {
     let pages: Vec<ObjectId> = now.page_ids().collect();
     let on_first = annots(&now, pages[1]);
     assert_eq!(on_first.len(), 2);
-    assert_eq!(on_first[0].2, Some(Object::Reference(pages[2])));
-    assert!(
-        on_first
-            .iter()
-            .all(|a| a.1 == Some(Object::Reference(pages[1])))
-    );
+    assert_eq!(on_first[0].2, Some(Object::from(pages[2])));
+    assert!(on_first.iter().all(|a| a.1 == Some(Object::from(pages[1]))));
     assert!(holds(&now.bytes()[..], b"their note"));
 
     // Only the first: the link goes, the comment stays.
@@ -997,7 +1077,7 @@ fn copied_pages_bring_what_they_reach_but_other_pages() {
     assert_eq!(pages.len(), 2);
     let on_first = annots(&now, pages[1]);
     assert_eq!(on_first.len(), 1);
-    assert_eq!(on_first[0].1, Some(Object::Reference(pages[1])));
+    assert_eq!(on_first[0].1, Some(Object::from(pages[1])));
 
     // A duplicate of a page of this file: its comment is its own.
     let mut d = open(&other, None);
@@ -1010,12 +1090,12 @@ fn copied_pages_bring_what_they_reach_but_other_pages() {
     assert_eq!(copy.len(), original.len());
     for (a, b) in original.iter().zip(&copy) {
         assert_ne!(a.0, b.0);
-        assert_eq!(a.1, Some(Object::Reference(pages[0])));
-        assert_eq!(b.1, Some(Object::Reference(pages[1])));
+        assert_eq!(a.1, Some(Object::from(pages[0])));
+        assert_eq!(b.1, Some(Object::from(pages[1])));
     }
     // Both links lead to the page after the duplicate.
-    assert_eq!(original[0].2, Some(Object::Reference(pages[2])));
-    assert_eq!(copy[0].2, Some(Object::Reference(pages[2])));
+    assert_eq!(original[0].2, Some(Object::from(pages[2])));
+    assert_eq!(copy[0].2, Some(Object::from(pages[2])));
 }
 
 /// The catalog of `pdf`, to change.
@@ -1031,12 +1111,8 @@ fn items(src: &Src) -> Vec<(ObjectId, Dictionary)> {
         while let Some(id) = next {
             let item = pdf.get_dictionary(id).unwrap().clone();
             out.push((id, item.clone()));
-            level(
-                pdf,
-                item.get(b"First").and_then(Object::as_reference).ok(),
-                out,
-            );
-            next = item.get(b"Next").and_then(Object::as_reference).ok();
+            level(pdf, item.get(b"First").and_then(Object::as_reference), out);
+            next = item.get(b"Next").and_then(Object::as_reference);
         }
     }
     let pdf = src.pdf();
@@ -1046,9 +1122,9 @@ fn items(src: &Src) -> Vec<(ObjectId, Dictionary)> {
         .get(b"Outlines")
         .unwrap()
         .as_reference();
-    let first = (root.ok())
+    let first = root
         .and_then(|r| pdf.get_dictionary(r).ok())
-        .and_then(|r| r.get(b"First").and_then(Object::as_reference).ok());
+        .and_then(|r| r.get(b"First").and_then(Object::as_reference));
     let mut out = Vec::new();
     level(pdf, first, &mut out);
     out
@@ -1057,7 +1133,7 @@ fn items(src: &Src) -> Vec<(ObjectId, Dictionary)> {
 /// The item of `items` titled `title`.
 fn titled<'a>(items: &'a [(ObjectId, Dictionary)], title: &str) -> &'a (ObjectId, Dictionary) {
     (items.iter())
-        .find(|(_, d)| d.get(b"Title").unwrap().as_str().unwrap() == title.as_bytes())
+        .find(|(_, d)| d.get(b"Title").unwrap().as_bytes().unwrap() == title.as_bytes())
         .unwrap_or_else(|| panic!("no {title}"))
 }
 
@@ -1078,42 +1154,62 @@ fn outlined() -> (Pdf, ObjectId) {
         .as_reference()
         .unwrap();
     let elem = pdf.add_object(dictionary! {
-        "Type" => "StructElem", "S" => "Sect", "P" => tree, "Pg" => pages[1], "K" => 0,
+        "Type" => Object::name("StructElem"),
+        "S" => Object::name("Sect"),
+        "P" => tree,
+        "Pg" => pages[1],
+        "K" => 0,
     });
     (pdf.get_dictionary_mut(tree).unwrap()).set("K", elem);
     let [outlines, site, chapter, section] = [(); 4].map(|_| pdf.new_object_id());
-    let link =
-        dictionary! { "S" => "URI", "URI" => Object::string_literal("https://example.com/") };
+    let link = dictionary! {
+        "S" => Object::name("URI"),
+        "URI" => literal("https://example.com/"),
+    };
     let objects = [
         (
             site,
             dictionary! {
-                "Title" => Object::string_literal("Site"), "Parent" => outlines, "Next" => chapter,
+                "Title" => literal("Site"), "Parent" => outlines, "Next" => chapter,
                 "A" => link, "Zz" => 7,
             },
         ),
         (
             chapter,
             dictionary! {
-                "Title" => Object::string_literal("Chapter"), "Parent" => outlines, "Prev" => site,
+                "Title" => literal("Chapter"), "Parent" => outlines, "Prev" => site,
                 "First" => section, "Last" => section, "Count" => -1, "SE" => elem,
-                "Dest" => vec![pages[1].into(), "XYZ".into(), Object::Null, Object::Null, Object::Null],
+                "Dest" => vec![
+                    pages[1].into(),
+                    Object::name("XYZ"),
+                    Object::null(),
+                    Object::null(),
+                    Object::null(),
+                ],
             },
         ),
         (
             section,
             dictionary! {
-                "Title" => Object::string_literal("Section"), "Parent" => chapter,
-                "A" => dictionary! { "S" => "GoTo", "D" => vec![pages[2].into(), "Fit".into()] },
+                "Title" => literal("Section"), "Parent" => chapter,
+                "A" => dictionary! {
+                    "S" => Object::name("GoTo"),
+                    "D" => vec![pages[2].into(), Object::name("Fit")],
+                },
             },
         ),
         (
             outlines,
-            dictionary! { "Type" => "Outlines", "First" => site, "Last" => chapter, "Count" => 2 },
+            dictionary! {
+                "Type" => Object::name("Outlines"),
+                "First" => site,
+                "Last" => chapter,
+                "Count" => 2,
+            },
         ),
     ];
     for (id, dict) in objects {
-        pdf.objects.insert(id, Object::Dictionary(dict));
+        pdf.objects.insert(id, Object::from(dict));
     }
     catalog_of(&mut pdf).set("Outlines", outlines);
     (pdf, elem)
@@ -1147,7 +1243,7 @@ fn outline_actions_se_and_closed_items_survive_a_reorder() {
     let now = source_of(&out);
     let new = items(&now);
     let titles: Vec<&[u8]> = (new.iter())
-        .map(|(_, d)| d.get(b"Title").unwrap().as_str().unwrap())
+        .map(|(_, d)| d.get(b"Title").unwrap().as_bytes().unwrap())
         .collect();
     assert_eq!(titles, [&b"Chapter"[..], b"Section", b"Site"]);
     for title in ["Site", "Chapter", "Section"] {
@@ -1156,13 +1252,16 @@ fn outline_actions_se_and_closed_items_survive_a_reorder() {
     let pdf = now.pdf();
     let (_, site_item) = titled(&new, "Site");
     assert_eq!(action(pdf, site_item, b"S").as_name().unwrap(), b"URI");
-    let uri = action(pdf, site_item, b"URI").as_str().unwrap();
+    let uri = action(pdf, site_item, b"URI").as_bytes().unwrap();
     assert_eq!(uri, b"https://example.com/");
-    assert_eq!(site_item.get(b"Zz").unwrap().as_i64().unwrap(), 7);
+    assert_eq!(site_item.get(b"Zz").unwrap().as_integer().unwrap(), 7);
     let (_, chapter_item) = titled(&new, "Chapter");
-    assert_eq!(chapter_item.get(b"SE").unwrap(), &Object::Reference(elem));
+    assert_eq!(chapter_item.get(b"SE").unwrap().as_reference(), Some(elem));
     assert!(pdf.get_dictionary(elem).unwrap().has_type(b"StructElem"));
-    assert_eq!(chapter_item.get(b"Count").unwrap().as_i64().unwrap(), -1);
+    assert_eq!(
+        chapter_item.get(b"Count").unwrap().as_integer().unwrap(),
+        -1
+    );
     let (section, _) = titled(&new, "Section");
     assert_eq!(
         span(now.pdf(), &out.bytes, *section),
@@ -1190,31 +1289,37 @@ fn outlined_other() -> Pdf {
     let mut pdf = file("B", 2, false);
     let pages: Vec<ObjectId> = pdf.get_pages().into_values().collect();
     let link = pdf.add_object(dictionary! {
-        "S" => "URI", "URI" => Object::string_literal("https://b.example/"),
+        "S" => Object::name("URI"),
+        "URI" => literal("https://b.example/"),
     });
     let [outlines, web, two] = [(); 3].map(|_| pdf.new_object_id());
     let objects = [
         (
             web,
             dictionary! {
-                "Title" => Object::string_literal("Web"), "Parent" => outlines, "Next" => two,
+                "Title" => literal("Web"), "Parent" => outlines, "Next" => two,
                 "A" => link,
             },
         ),
         (
             two,
             dictionary! {
-                "Title" => Object::string_literal("Two"), "Parent" => outlines, "Prev" => web,
-                "Dest" => vec![pages[1].into(), "Fit".into()],
+                "Title" => literal("Two"), "Parent" => outlines, "Prev" => web,
+                "Dest" => vec![pages[1].into(), Object::name("Fit")],
             },
         ),
         (
             outlines,
-            dictionary! { "Type" => "Outlines", "First" => web, "Last" => two, "Count" => 2 },
+            dictionary! {
+                "Type" => Object::name("Outlines"),
+                "First" => web,
+                "Last" => two,
+                "Count" => 2,
+            },
         ),
     ];
     for (id, dict) in objects {
-        pdf.objects.insert(id, Object::Dictionary(dict));
+        pdf.objects.insert(id, Object::from(dict));
     }
     catalog_of(&mut pdf).set("Outlines", outlines);
     pdf
@@ -1235,14 +1340,14 @@ fn a_kept_bookmark_from_an_inserted_file_keeps_its_action() {
     assert_eq!(new.len(), 2);
     let pdf = now.pdf();
     let (_, web) = titled(&new, "Web");
-    assert!(web.get(b"A").unwrap().as_reference().is_ok());
+    assert!(web.get(b"A").unwrap().as_reference().is_some());
     assert_eq!(action(pdf, web, b"S").as_name().unwrap(), b"URI");
-    let uri = action(pdf, web, b"URI").as_str().unwrap();
+    let uri = action(pdf, web, b"URI").as_bytes().unwrap();
     assert_eq!(uri, b"https://b.example/");
     let (_, two) = titled(&new, "Two");
     let dest = two.get(b"Dest").unwrap().as_array().unwrap();
     let pages: Vec<ObjectId> = now.page_ids().collect();
-    assert_eq!(dest[0], Object::Reference(pages[2]));
+    assert_eq!(dest[0].as_reference(), Some(pages[2]));
     let read = crate::open::outline(&now);
     let kept: Vec<(bool, Option<u32>)> = read.iter().map(|i| (i.kept, i.page)).collect();
     assert_eq!(kept, [(true, None), (false, Some(2))]);
@@ -1376,13 +1481,14 @@ fn a_stream_whose_length_is_an_object_is_written_anew() {
         (5, content.len().to_string().into_bytes()),
     ]);
     let read = source(&before, None);
-    assert!(read.raw_span((4, 0)).is_some() && read.raw_span_whole((4, 0)).is_none());
-    assert!(read.raw_span_whole((3, 0)).is_some());
+    let id4 = ObjectId::new(4, 0);
+    assert!(read.raw_span(id4).is_some() && read.raw_span_whole(id4).is_none());
+    assert!(read.raw_span_whole(ObjectId::new(3, 0)).is_some());
     let d = open(&before, None);
     let out = rewrite(&d, Profile::default());
     let now = source_of(&out);
-    let stream = now.pdf().get((4, 0)).unwrap().as_stream().unwrap().clone();
-    assert_eq!(stream.content, content);
+    let stream = now.pdf().get(id4).unwrap().as_stream().unwrap().clone();
+    assert_eq!(stream.raw_bytes(), content.as_slice());
     assert!(!holds(&out.bytes, b"5 0 R"));
 }
 
@@ -1418,8 +1524,9 @@ fn an_object_at_another_entry_doesnt_shadow_the_one_the_table_lists() {
     ]);
     let src = source(&before, None);
     let eager = graph::eager(&src).unwrap();
-    let current = src.pdf().get((4, 0)).unwrap();
-    assert!(same(&eager.objects[&(4, 0)], current));
+    let id4 = ObjectId::new(4, 0);
+    let current = src.pdf().get(id4).unwrap();
+    assert!(same(&eager.objects[&id4], current));
     let d = open(&before, None);
     for numbering in [Numbering::Stable, Numbering::Dense] {
         let profile = Profile {
@@ -1474,7 +1581,7 @@ fn an_object_without_its_endobj_is_written_with_it() {
         body(5, stream, false),
     ]);
     let src = source(&before, None);
-    for id in [(4, 0), (5, 0)] {
+    for id in [ObjectId::new(4, 0), ObjectId::new(5, 0)] {
         assert!(src.raw_span(id).is_some() && src.raw_span_whole(id).is_none());
     }
     let d = open(&before, None);
@@ -1507,7 +1614,12 @@ fn an_object_a_copy_names_that_doesnt_read_is_copied_as_null() {
             b"<< /Type /XObject /Subtype /Form /BBox [0 0 40 ]] >>".to_vec(),
         ),
     ]);
-    assert!(source(&before, None).pdf().object_unkept((5, 0)).is_err());
+    assert!(
+        source(&before, None)
+            .pdf()
+            .object_unkept(ObjectId::new(5, 0))
+            .is_err()
+    );
     let mut d = open(&before, None);
     let first = d.page(0).unwrap();
     d.commit_ops(vec![fx::duplicate(&[first])], "dup").unwrap();
@@ -1529,10 +1641,10 @@ fn an_object_a_copy_names_that_doesnt_read_is_copied_as_null() {
         .unwrap()
         .as_dict()
         .unwrap();
-    assert!(matches!(
-        pdf.dereference(ap.get(b"N").unwrap()),
-        Ok((_, Object::Null))
-    ));
+    assert!(
+        pdf.dereference(ap.get(b"N").unwrap())
+            .is_ok_and(|(_, o)| o.is_null())
+    );
 }
 
 /// The fast paths that copy an unchanged object as the file has it write
@@ -1574,19 +1686,14 @@ fn the_fast_paths_write_what_the_built_path_would() {
     let d = open(&before, None);
     let out = rewrite(&d, Profile::default());
     let now = lazy(&out.bytes, None);
-    let dict = |id: u32| now.get_dictionary((id, 0)).unwrap().clone();
+    let dict = |id: u32| now.get_dictionary(ObjectId::new(id, 0)).unwrap().clone();
     assert!(!dict(4).has(b"RT"));
-    assert_eq!(
-        dict(6).get(b"Type").unwrap(),
-        &Object::Name(b"Outlines".to_vec())
-    );
+    assert_eq!(dict(6).type_name(), Some(&b"Outlines"[..]));
     assert!(!dict(5).has(b"Kids"));
     let was = lazy(&before, None);
     for id in [4, 5, 6] {
-        assert_ne!(
-            span(&now, &out.bytes, (id, 0)),
-            span(&was, &before, (id, 0))
-        );
+        let id = ObjectId::new(id, 0);
+        assert_ne!(span(&now, &out.bytes, id), span(&was, &before, id));
     }
 }
 

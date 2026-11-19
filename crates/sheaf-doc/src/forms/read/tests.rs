@@ -4,12 +4,11 @@
 //! hybrid-reference files, built and from the corpus. Then any tree at
 //! all, as a proptest.
 
-use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::pdf::{Object, ObjectId, Stream, StringFormat, dictionary};
+use crate::pdf::{Object, ObjectId, Stream, StreamExt, deflate_best, dictionary, literal};
 use proptest::prelude::*;
 
 use super::*;
@@ -34,11 +33,11 @@ fn read_within(f: &mut Form, limits: FormLimits) -> FileForm {
     read(&store.open(f.bytes().into(), kind).unwrap())
 }
 
-/// A placeholder for a real past f64's range, which lopdf can't write:
+/// A placeholder for a real past f64's range, which the writer can't write:
 /// [`with_huge`] puts a 9, 318 zeros and a point in its place, which reads
 /// as infinity.
 fn huge() -> Object {
-    Object::string_literal("~".repeat(320))
+    literal("~".repeat(320))
 }
 
 /// `bytes` with each [`huge`] placeholder swapped for its real, byte for
@@ -72,8 +71,8 @@ fn state(s: &str) -> Option<Value> {
 }
 
 fn js(script: &str) -> Object {
-    Object::Dictionary(dictionary! {
-        "S" => "JavaScript", "JS" => Object::string_literal(script),
+    Object::from(dictionary! {
+        "S" => Object::name("JavaScript"), "JS" => literal(script),
     })
 }
 
@@ -186,24 +185,21 @@ fn fields_inherit_from_their_parents() {
         d.remove(b"DA");
     }
     // b's own keys win over its parent's.
-    f.dict(b).set("FT", "Ch");
+    f.dict(b).set("FT", Object::name("Ch"));
     f.dict(b).set("Q", 1);
-    f.dict(b).set("TU", Object::string_literal("Choose one"));
+    f.dict(b).set("TU", literal("Choose one"));
     let parent = f.group("p", &[a, b]);
-    let opt = vec![
-        Object::string_literal("x"),
-        vec![Object::string_literal("e"), Object::string_literal("Shown")].into(),
-    ];
+    let opt = vec![literal("x"), vec![literal("e"), literal("Shown")].into()];
     let p = f.dict(parent);
-    p.set("FT", "Tx");
+    p.set("FT", Object::name("Tx"));
     p.set("Ff", flags::MULTILINE as i64);
-    p.set("V", Object::string_literal("shared"));
-    p.set("DV", Object::string_literal("default"));
-    p.set("DA", Object::string_literal("/Cour 9 Tf 0 0 1 rg"));
+    p.set("V", literal("shared"));
+    p.set("DV", literal("default"));
+    p.set("DA", literal("/Cour 9 Tf 0 0 1 rg"));
     p.set("Q", 2);
     p.set("MaxLen", 5000);
     p.set("Opt", opt);
-    p.set("TU", Object::string_literal("not inherited"));
+    p.set("TU", literal("not inherited"));
     let form = read_back(&mut f);
     let (a, b) = (field(&form, "p.a"), field(&form, "p.b"));
     assert_eq!(a.kind, FieldKind::Text);
@@ -237,10 +233,10 @@ fn the_forms_own_keys() {
     let form1 = f.fields()[0];
     let kids = f.widgets_of(form1);
     let co = vec![
-        Object::Reference(kids[1]),
+        Object::from(kids[1]),
         // A parent isn't a field that calculates.
-        Object::Reference(form1),
-        Object::Reference(kids[0]),
+        Object::from(form1),
+        Object::from(kids[0]),
     ];
     let d = f.dict(f.acroform);
     d.set("NeedAppearances", true);
@@ -335,27 +331,27 @@ fn scripts_by_trigger_and_at_document_level() {
     let d = f.text("d", 0, row(3));
     f.dict(d).set(
         "AA",
-        dictionary! { "K" => dictionary! { "S" => "ResetForm" } },
+        dictionary! { "K" => dictionary! { "S" => Object::name("ResetForm") } },
     );
     // A script in a stream, compressed.
     let script = "event.value = util.printx(\"999-99-9999\", event.value);";
     let mut stream = Stream::new(dictionary! {}, script.as_bytes().to_vec());
-    stream.compress().unwrap();
+    stream.compress();
     let stream = f.pdf.add_object(stream);
     let e = f.text("e", 0, row(4));
     f.dict(e).set(
         "AA",
-        dictionary! { "F" => dictionary! { "S" => "JavaScript", "JS" => stream } },
+        dictionary! { "F" => dictionary! { "S" => Object::name("JavaScript"), "JS" => stream } },
     );
     // Document scripts: Adobe's version check, and one in a kid.
     let kid = f.pdf.add_object(dictionary! {
-        "Names" => vec![Object::string_literal("init"), js("var x = 1;")],
+        "Names" => vec![literal("init"), js("var x = 1;")],
     });
     f.dict(f.catalog).set(
         "Names",
         dictionary! { "JavaScript" => dictionary! {
-            "Names" => vec![Object::string_literal("!ADBE::0100_VersChkStrings"), js("")],
-            "Kids" => vec![Object::Reference(kid)],
+            "Names" => vec![literal("!ADBE::0100_VersChkStrings"), js("")],
+            "Kids" => vec![Object::from(kid)],
         } },
     );
     let form = read_back(&mut f);
@@ -397,19 +393,16 @@ fn shared_document_scripts_count_once() {
     // Two nodes share one /Names array, and a third, a direct object in a
     // /Kids array, lists that array as its own kids.
     let mut f = Form::new(1);
-    let names = f.pdf.add_object(vec![
-        Object::string_literal("a"),
-        js("var a;"),
-        Object::string_literal("b"),
-        js("var b;"),
-    ]);
+    let names = f
+        .pdf
+        .add_object(vec![literal("a"), js("var a;"), literal("b"), js("var b;")]);
     let kids = f.pdf.new_object_id();
     f.pdf.objects.insert(
         kids,
-        Object::Array(vec![
-            Object::Dictionary(dictionary! { "Names" => names }),
-            Object::Dictionary(dictionary! { "Names" => names }),
-            Object::Dictionary(dictionary! { "Kids" => kids }),
+        Object::from(vec![
+            Object::from(dictionary! { "Names" => names }),
+            Object::from(dictionary! { "Names" => names }),
+            Object::from(dictionary! { "Kids" => kids }),
         ]),
     );
     f.dict(f.catalog).set(
@@ -454,7 +447,7 @@ fn usage_rights_signatures_and_a_certification() {
 fn values_of_every_shape() {
     let mut f = Form::new(1);
     // One value object, many fields.
-    let shared = f.pdf.add_object(Object::string_literal("same"));
+    let shared = f.pdf.add_object(literal("same"));
     let many: Vec<ObjectId> = (0..1000)
         .map(|i| {
             let t = f.text(&format!("t{i}"), 0, [0.0, 0.0, 10.0, 10.0]);
@@ -463,20 +456,19 @@ fn values_of_every_shape() {
         })
         .collect();
     let list = f.choice("list", 0, row(1), &["a", "b", "c"], false);
-    let items = vec![Object::string_literal("a"), Object::string_literal("c")];
+    let items = vec![literal("a"), literal("c")];
     f.dict(list).set("V", items);
     f.dict(list).set("Ff", flags::MULTI_SELECT as i64);
     // A check box's state written as a string; a text field's as a name.
     let cb = f.check_box("cb", 0, row(2), false);
-    f.dict(cb).set("V", Object::string_literal("Yes"));
+    f.dict(cb).set("V", literal("Yes"));
     let named = f.text("named", 0, row(3));
-    f.dict(named).set("V", Object::Name(b"Plain".to_vec()));
+    f.dict(named).set("V", Object::name(b"Plain"));
     // UTF-16, and text in a stream.
     let utf16 = f.text("utf16", 0, row(4));
     let mut bytes = vec![0xFE, 0xFF];
     bytes.extend("Łukasz".encode_utf16().flat_map(u16::to_be_bytes));
-    f.dict(utf16)
-        .set("V", Object::String(bytes, StringFormat::Hexadecimal));
+    f.dict(utf16).set("V", Object::hex(bytes));
     let streamed = f.text("streamed", 0, row(5));
     let s = f
         .pdf
@@ -507,9 +499,10 @@ fn values_of_every_shape() {
 fn widgets_are_finite_and_clamped() {
     let mut f = Form::new(1);
     // A link first: slots count every annotation, as PDFium does.
-    let link = f
-        .pdf
-        .add_object(dictionary! { "Type" => "Annot", "Subtype" => "Link" });
+    let link = f.pdf.add_object(dictionary! {
+        "Type" => Object::name("Annot"),
+        "Subtype" => Object::name("Link"),
+    });
     f.set_annots(0, &[link]);
     let a = f.text("a", 0, row(0));
     let rect = [300.into(), huge(), (-2e9).into(), 10.into()];
@@ -518,13 +511,16 @@ fn widgets_are_finite_and_clamped() {
     d.set(
         "MK",
         dictionary! {
-            "BG" => vec![Object::Real(2.0)],
-            "BC" => vec![Object::Real(0.5), huge(), Object::Integer(-1)],
+            "BG" => vec![Object::from(2.0)],
+            "BC" => vec![Object::from(0.5), huge(), Object::from(-1)],
             "R" => -90,
-            "CA" => Object::string_literal("4"),
+            "CA" => literal("4"),
         },
     );
-    d.set("BS", dictionary! { "W" => Object::Real(1e9), "S" => "U" });
+    d.set(
+        "BS",
+        dictionary! { "W" => Object::from(1e9), "S" => Object::name("U") },
+    );
     d.set("F", 4 | 32);
     let b = f.text("b", 0, row(1));
     let d = f.dict(b);
@@ -541,8 +537,7 @@ fn widgets_are_finite_and_clamped() {
     // A radio button's own /DA, apart from its field's.
     let pick = f.radio("pick", 0, &[row(2)], Some(0));
     let kid = f.widgets_of(pick)[0];
-    f.dict(kid)
-        .set("DA", Object::string_literal("/ZaDb 12 Tf 1 0 0 rg"));
+    f.dict(kid).set("DA", literal("/ZaDb 12 Tf 1 0 0 rg"));
     let form = read(&source(with_huge(f.bytes())));
     let [wa, wb, wk] = &form.widgets[&0][..] else {
         panic!("{:?}", form.widgets)
@@ -601,13 +596,11 @@ fn assert_damaged_within(f: &mut Form, limits: FormLimits, why: &str) {
 fn damaged_trees_are_not_fillable() {
     // A cycle through /Kids.
     let mut f = Form::new(1);
-    let a = f
+    let a = f.pdf.add_object(dictionary! { "T" => literal("a") });
+    let b = f
         .pdf
-        .add_object(dictionary! { "T" => Object::string_literal("a") });
-    let b = f.pdf.add_object(
-        dictionary! { "T" => Object::string_literal("b"), "Kids" => vec![Object::Reference(a)] },
-    );
-    f.dict(a).set("Kids", vec![Object::Reference(b)]);
+        .add_object(dictionary! { "T" => literal("b"), "Kids" => vec![Object::from(a)] });
+    f.dict(a).set("Kids", vec![Object::from(b)]);
     f.dict(a).set("Parent", b);
     f.dict(b).set("Parent", a);
     f.set_fields(&[a]);
@@ -617,16 +610,14 @@ fn damaged_trees_are_not_fillable() {
     // kid.
     let mut f = Form::new(1);
     let ok = f.text("ok", 0, row(0));
-    let a = f
-        .pdf
-        .add_object(dictionary! { "T" => Object::string_literal("a") });
-    f.dict(a).set("Kids", vec![Object::Reference(a)]);
+    let a = f.pdf.add_object(dictionary! { "T" => literal("a") });
+    f.dict(a).set("Kids", vec![Object::from(a)]);
     f.dict(a).set("Parent", a);
     f.set_fields(&[ok, a]);
     assert_damaged(&mut f, "its own ancestor");
     let mut f = Form::new(1);
     let w = f.text("w", 0, row(0));
-    f.dict(w).set("Kids", vec![Object::Reference(w)]);
+    f.dict(w).set("Kids", vec![Object::from(w)]);
     assert_damaged(&mut f, "its own ancestor");
 
     // Smaller caps, for trees past them that would take long to build.
@@ -643,14 +634,17 @@ fn damaged_trees_are_not_fillable() {
     let mut f = Form::new(1);
     let kids: Vec<Object> = (0..100)
         .map(|i| {
-            let t = Object::string_literal(format!("k{i}"));
-            Object::Reference(f.pdf.add_object(dictionary! { "FT" => "Tx", "T" => t }))
+            let t = literal(format!("k{i}"));
+            Object::from(
+                f.pdf
+                    .add_object(dictionary! { "FT" => Object::name("Tx"), "T" => t }),
+            )
         })
         .collect();
     let kids = f.pdf.add_object(kids);
     let parents: Vec<ObjectId> = (0..100)
         .map(|i| {
-            let t = Object::string_literal(format!("p{i}"));
+            let t = literal(format!("p{i}"));
             f.pdf.add_object(dictionary! { "T" => t, "Kids" => kids })
         })
         .collect();
@@ -662,8 +656,8 @@ fn damaged_trees_are_not_fillable() {
     let mut below = f.text("leaf", 0, row(0));
     for i in 0..10_000 {
         let up = f.pdf.add_object(dictionary! {
-            "T" => Object::string_literal(format!("n{i}")),
-            "Kids" => vec![Object::Reference(below)],
+            "T" => literal(format!("n{i}")),
+            "Kids" => vec![Object::from(below)],
         });
         f.dict(below).set("Parent", up);
         below = up;
@@ -675,7 +669,7 @@ fn damaged_trees_are_not_fillable() {
     let mut f = Form::new(1);
     let fields: Vec<ObjectId> = (0..=small.nodes)
         .map(|i| {
-            let t = Object::string_literal(format!("f{i}"));
+            let t = literal(format!("f{i}"));
             f.pdf.add_object(dictionary! { "T" => t })
         })
         .collect();
@@ -685,11 +679,14 @@ fn damaged_trees_are_not_fillable() {
     // More widgets on pages than the cap, under one field.
     let mut f = Form::new(1);
     let widgets: Vec<ObjectId> = (0..=small.widgets)
-        .map(|_| f.pdf.add_object(dictionary! { "Subtype" => "Widget" }))
+        .map(|_| {
+            f.pdf
+                .add_object(dictionary! { "Subtype" => Object::name("Widget") })
+        })
         .collect();
-    let kids: Vec<Object> = widgets.iter().map(|&w| Object::Reference(w)).collect();
+    let kids: Vec<Object> = widgets.iter().map(|&w| Object::from(w)).collect();
     let many = f.pdf.add_object(dictionary! {
-        "FT" => "Btn", "T" => Object::string_literal("many"), "Kids" => kids,
+        "FT" => Object::name("Btn"), "T" => literal("many"), "Kids" => kids,
     });
     f.set_fields(&[many]);
     f.set_annots(0, &widgets);
@@ -720,33 +717,29 @@ fn damaged_trees_are_not_fillable() {
     // And a list box's value.
     let mut f = Form::new(1);
     let list = f.choice("list", 0, row(0), &["a"], false);
-    let items = vec![Object::string_literal("a"); caps.items + 1];
+    let items = vec![literal("a"); caps.items + 1];
     f.dict(list).set("V", items);
     assert_damaged(&mut f, "a value has more than 10000 items");
 
     // A value over 1 MiB, as a string.
     let mut f = Form::new(1);
     let t = f.text("t", 0, row(0));
-    f.dict(t)
-        .set("V", Object::string_literal(vec![b'x'; caps.text + 1]));
+    f.dict(t).set("V", literal(vec![b'x'; caps.text + 1]));
     assert_damaged(&mut f, "longer than 1 MiB");
 
     // More text in all than the cap: 5 values of 1 MiB.
     let mut f = Form::new(1);
     for i in 0..5 {
         let t = f.text(&format!("t{i}"), 0, row(0));
-        f.dict(t)
-            .set("V", Object::string_literal(vec![b'x'; caps.text]));
+        f.dict(t).set("V", literal(vec![b'x'; caps.text]));
     }
     assert_damaged_within(&mut f, small, "its text comes to more than 4 MiB");
 
     // A value that inflates past 1 MiB.
     let mut f = Form::new(1);
-    let mut zeros = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
-    zeros.write_all(&vec![b'0'; caps.text + 1]).unwrap();
     let bomb = f.pdf.add_object(Stream::new(
-        dictionary! { "Filter" => "FlateDecode" },
-        zeros.finish().unwrap(),
+        dictionary! { "Filter" => Object::name("FlateDecode") },
+        deflate_best(&vec![b'0'; caps.text + 1]),
     ));
     let t = f.text("t", 0, row(0));
     f.dict(t).set("V", bomb);
@@ -764,10 +757,8 @@ fn fields_listed_twice_are_read_once() {
     let x = f.radio("x", 0, &[row(2)], Some(0));
     let y = f.radio("y", 0, &[row(3)], Some(0));
     let shared = f.widgets_of(x)[0];
-    f.dict(y).set(
-        "Kids",
-        vec![Object::Reference(shared), Object::Reference(shared)],
-    );
+    f.dict(y)
+        .set("Kids", vec![Object::from(shared), Object::from(shared)]);
     f.set_fields(&[twice, kid, parent, x, y, twice]);
     let form = read_back(&mut f);
     assert_eq!(form.facts.damaged, None);
@@ -801,7 +792,7 @@ fn a_page_listed_twice_has_its_widgets_at_both_indexes() {
     // PDFium does: the page object twice is two pages.
     let mut f = Form::new(1);
     let a = f.text("a", 0, row(0));
-    let page = Object::Reference(f.pages[0]);
+    let page = Object::from(f.pages[0]);
     let root = f
         .dict(f.catalog)
         .get(b"Pages")
@@ -829,12 +820,11 @@ fn a_template_s_widgets_are_outside() {
     let annots: Vec<_> = f.annots(0).into_iter().filter(|&a| a != spawned).collect();
     f.set_annots(0, &annots);
     let template = f.pdf.add_object(dictionary! {
-        "Type" => "Page",
+        "Type" => Object::name("Page"),
         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
-        "Annots" => vec![Object::Reference(spawned)],
+        "Annots" => vec![Object::from(spawned)],
     });
-    let templates =
-        dictionary! { "Names" => vec![Object::string_literal("extra"), template.into()] };
+    let templates = dictionary! { "Names" => vec![literal("extra"), template.into()] };
     f.dict(f.catalog)
         .set("Names", dictionary! { "Templates" => templates });
     let form = read_back(&mut f);
@@ -919,7 +909,7 @@ fn hybrid_reference_files_read_their_newest_revision() {
     // streams, and `city` only in the first section's.
     let src = source(hybrid_update(&first));
     let acroform = src.pdf().catalog().unwrap().get(b"AcroForm").unwrap();
-    assert_eq!(acroform.as_reference().unwrap(), (11, 0));
+    assert_eq!(acroform.as_reference().unwrap(), ObjectId::new(11, 0));
     let form = read(&src);
     assert_eq!(
         fields(&form),
@@ -935,18 +925,16 @@ fn hybrid_reference_files_read_their_newest_revision() {
 
 /// A crafted file can point thousands of sections' /XRefStm at one large
 /// cross-reference stream, by offsets that differ only in the white-space,
-/// comments and zeros before its header. lopdf reads it once
-/// (vendor/lopdf/SHEAF.md): read for each section, this file takes
-/// seconds to load, not milliseconds. Its 1,003 sections are within the
-/// lazy reader's cap, and its source opens and its form reads as quickly.
+/// comments and zeros before its header. The reader reads it once: read
+/// for each section, this file takes seconds to load, not milliseconds.
+/// Its 1,003 sections are within the lazy reader's cap, and its source
+/// opens and its form reads as quickly.
 #[test]
 fn a_cross_reference_stream_many_sections_share_is_read_once() {
     let mut bytes = hybrid_reference();
     let mut prev = source(bytes.clone()).xref().start;
     // A million free entries, 7 MB unpacked.
-    let mut entries = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
-    entries.write_all(&vec![0; 7_000_000]).unwrap();
-    let entries = entries.finish().unwrap();
+    let entries = deflate_best(&vec![0; 7_000_000]);
     let padding = [" ".repeat(300), "%\n".repeat(300), "0".repeat(100)].concat();
     let at = bytes.len();
     bytes.extend_from_slice(padding.as_bytes());
@@ -971,7 +959,7 @@ fn a_cross_reference_stream_many_sections_share_is_read_once() {
     let pdf = crate::file::load_pdf_mem(&bytes, None).unwrap();
     let took = start.elapsed();
     let acroform = pdf.catalog().unwrap().get(b"AcroForm").unwrap();
-    assert!(resolve(&pdf, acroform).unwrap().as_dict().is_ok());
+    assert!(resolve(&pdf, acroform).unwrap().as_dict().is_some());
     assert!(took.as_secs_f32() < 1.0, "{took:?}");
 
     let start = Instant::now();
@@ -1135,45 +1123,45 @@ fn node() -> impl Strategy<Value = Node> {
 fn tree_file(nodes: &[Node], roots: &[usize]) -> Vec<u8> {
     let mut f = Form::new(1);
     let base = f.pdf.max_id + 1;
-    let id = |i: usize| -> ObjectId { (base + i as u32, 0) };
+    let id = |i: usize| -> ObjectId { ObjectId::new(base + i as u32, 0) };
     let mut on_page = Vec::new();
     for (i, n) in nodes.iter().enumerate() {
         let mut d = crate::pdf::Dictionary::new();
         if let Some(name) = &n.name {
-            d.set("T", Object::string_literal(name.as_str()));
+            d.set("T", literal(name.as_str()));
         }
         if let Some(ft) = n.ft {
-            d.set("FT", ft);
+            d.set("FT", Object::name(ft));
         }
         if let Some(ff) = n.ff {
             d.set("Ff", ff);
         }
         let v = match &n.value {
-            Some(Val::Text(t)) => Some(Object::string_literal(t.as_str())),
-            Some(Val::Name(t)) => Some(Object::Name(t.clone().into_bytes())),
+            Some(Val::Text(t)) => Some(literal(t.as_str())),
+            Some(Val::Name(t)) => Some(Object::name(t.as_bytes())),
             Some(Val::Items(items)) => Some(
                 items
                     .iter()
-                    .map(|t| Object::string_literal(t.as_str()))
+                    .map(|t| literal(t.as_str()))
                     .collect::<Vec<_>>()
                     .into(),
             ),
             Some(Val::Number(v)) => Some((*v).into()),
-            Some(Val::Ref(r)) => Some(Object::Reference(id(*r))),
+            Some(Val::Ref(r)) => Some(Object::from(id(*r))),
             None => None,
         };
         if let Some(v) = v {
             d.set("V", v);
         }
         if let Some(kids) = &n.kids {
-            let kids: Vec<Object> = kids.iter().map(|&k| Object::Reference(id(k))).collect();
+            let kids: Vec<Object> = kids.iter().map(|&k| Object::from(id(k))).collect();
             d.set("Kids", kids);
         }
         if let Some(p) = n.parent {
             d.set("Parent", id(p));
         }
         if n.widget {
-            d.set("Subtype", "Widget");
+            d.set("Subtype", Object::name("Widget"));
         }
         if let Some(rect) = &n.rect {
             d.set(
@@ -1186,10 +1174,10 @@ fn tree_file(nodes: &[Node], roots: &[usize]) -> Vec<u8> {
             d.set("MK", dictionary! { "BG" => c.clone(), "BC" => c });
         }
         if let Some(n) = n.opt {
-            let opt: Vec<Object> = (0..n).map(|i| Object::Integer(i as i64)).collect();
+            let opt: Vec<Object> = (0..n).map(|i| Object::from(i as i64)).collect();
             d.set("Opt", opt);
         }
-        f.pdf.objects.insert(id(i), Object::Dictionary(d));
+        f.pdf.objects.insert(id(i), Object::from(d));
         if n.on_page {
             on_page.push(id(i));
         }
@@ -1267,9 +1255,8 @@ fn corpus_hybrid_forms_bind_their_xfa() {
             .catalog()
             .unwrap()
             .get(b"AcroForm")
-            .ok()
             .and_then(|f| resolve(pdf, f))
-            .and_then(|f| f.as_dict().ok())
+            .and_then(Object::as_dict)
             .unwrap();
         let xfa: HashSet<String> = crate::forms::xfa::read(pdf, acroform, &src.limits().forms)
             .into_iter()

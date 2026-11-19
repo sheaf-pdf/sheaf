@@ -155,7 +155,7 @@ use sheaf_doc::content::{FontApprox, FontKind, FontProgram, Fonts, Foreign, Page
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::geom::{Affine, Rect};
 use sheaf_doc::materialize::ObjKey;
-use sheaf_doc::pdf::{Dictionary, Object, ObjectId, Stream, dictionary};
+use sheaf_doc::pdf::{Dictionary, Object, ObjectId, Stream, StreamExt, dictionary};
 use sheaf_doc::serialize::append::{self, Base};
 use sheaf_doc::source::{Limits, PageFacts};
 use sheaf_doc::store::{BlobKind, Src, Store};
@@ -508,15 +508,18 @@ fn one_page(fonts: Dictionary, content: String) -> Vec<u8> {
     let stream = pdf.add_object(Stream::new(dictionary! {}, content.into_bytes()));
     let pages = pdf.new_object_id();
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page",
+        "Type" => Object::name("Page"),
         "Parent" => pages,
         "MediaBox" => vec![0.into(), 0.into(), 5000.into(), 900.into()],
         "Contents" => stream,
         "Resources" => dictionary! { "Font" => fonts },
     });
-    let kids = dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 };
-    pdf.objects.insert(pages, Object::Dictionary(kids));
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    let kids = dictionary! {
+        "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1,
+    };
+    pdf.objects.insert(pages, Object::from(kids));
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).expect("it saves");
@@ -593,12 +596,12 @@ fn standard_14_widths_are_pdfium_s_faces_but_where_guessed() {
         for chunk in names.chunks(128) {
             let differences: Vec<Object> = [128.into()]
                 .into_iter()
-                .chain(chunk.iter().map(|&n| Object::Name(n.into())))
+                .chain(chunk.iter().map(|&n| Object::name(n)))
                 .collect();
             let font = dictionary! {
-                "Type" => "Font",
-                "Subtype" => "Type1",
-                "BaseFont" => std14.name(),
+                "Type" => Object::name("Font"),
+                "Subtype" => Object::name("Type1"),
+                "BaseFont" => Object::name(std14.name()),
                 "Encoding" => dictionary! { "Differences" => differences },
             };
             let none = sheaf_doc::pdf::Document::new();
@@ -708,7 +711,7 @@ fn written_again(src: &Src) -> anyhow::Result<Option<Written>> {
             pages.push(written.clone());
             continue;
         }
-        let dict = pdf.get_object(page.id).and_then(Object::as_dict);
+        let dict = pdf.get_dictionary(page.id);
         let encoded = (PageContent::read(pdf, &page.contents, lim))
             .map_err(|fault| Unwritten::Unread(fault.to_string()))
             .and_then(|content| {
@@ -723,18 +726,18 @@ fn written_again(src: &Src) -> anyhow::Result<Option<Written>> {
                 Err(e) => Err(Unwritten::Unread(format!("its dictionary: {e}"))),
             });
         let written = encoded.map(|(encoded, mut dict)| {
-            let stream = (next, 0);
+            let stream = ObjectId::new(next, 0);
             next += 1;
             let content = Stream::new(dictionary! {}, encoded.content.clone());
-            objects.insert(stream, (key(stream), Object::Stream(content)));
+            objects.insert(stream, (key(stream), Object::from(content)));
             dict.set("Contents", stream);
-            objects.insert(page.id, (key(page.id), Object::Dictionary(dict)));
+            objects.insert(page.id, (key(page.id), Object::from(dict)));
             for (id, data) in encoded.forms {
                 if let btree_map::Entry::Vacant(slot) = objects.entry(id) {
-                    let form = pdf.get_object(id).and_then(Object::as_stream);
+                    let form = pdf.get_object(id).ok().and_then(Object::as_stream);
                     let mut form = form.expect("a form it drew").clone();
                     form.set_plain_content(data);
-                    slot.insert((key(id), Object::Stream(form)));
+                    slot.insert((key(id), Object::from(form)));
                 }
             }
             encoded.content
@@ -824,15 +827,21 @@ const WRITE_UNEXPLAINED: &str = "SHEAF_INTERP_WRITE_UNEXPLAINED";
 /// The file whose glyphs held to PDFium's box on every side can't all be,
 /// the program theirs are drawn from, and how many are past their
 /// tolerance, exactly: its TrueType program `482 0 R`'s stream is corrupt,
-/// and lopdf's inflate reads it to its end where zlib's stops ("invalid
+/// and sheaf's inflate reads it to its end where zlib's stops ("invalid
 /// distance too far back"), so sheaf reads the program, with what the bad
 /// stretch decodes to, while PDFium, short of it, can't load it and draws
 /// in a substitute face (`NWODGU+TimesNewRoman`). The file's other glyphs
 /// are held as every file's. Greg accepted the allowance by this exact
 /// count (2026-10-24); which reading is right is backlog F27's research,
 /// decided on merit, not by PDFium's recovery.
-const PROGRAM_DECODED_OTHERWISE: (&str, ObjectId, usize) =
-    ("forms/safedocs/5208359.pdf", (482, 0), 38);
+const PROGRAM_DECODED_OTHERWISE: (&str, ObjectId, usize) = (
+    "forms/safedocs/5208359.pdf",
+    ObjectId {
+        number: 482,
+        generation: 0,
+    },
+    38,
+);
 
 /// How far from the page, in points, a glyph is compared: frames.rs's
 /// `FAR`, 2^17, where an `f32` still holds 1/64 pt. Farther, a
@@ -1461,30 +1470,24 @@ struct Showing {
 /// and `/FontFile3` that's a reference.
 fn program_of(src: &Src, font: &Foreign) -> Option<ObjectId> {
     fn dict<'a>(pdf: &'a sheaf_doc::pdf::LazyPdf, o: &'a Object) -> Option<&'a Dictionary> {
-        pdf.dereference(o).ok()?.1.as_dict().ok()
+        pdf.dereference(o).ok()?.1.as_dict()
     }
     let pdf = src.pdf();
-    let mut font = pdf.get_object(font.id()?).ok()?.as_dict().ok()?;
-    if let Ok(descendants) = font.get(b"DescendantFonts") {
-        let first = pdf
-            .dereference(descendants)
-            .ok()?
-            .1
-            .as_array()
-            .ok()?
-            .first()?;
+    let mut font = pdf.get_object(font.id()?).ok()?.as_dict()?;
+    if let Some(descendants) = font.get(b"DescendantFonts") {
+        let first = pdf.dereference(descendants).ok()?.1.as_array()?.first()?;
         font = dict(pdf, first)?;
     }
-    let descriptor = dict(pdf, font.get(b"FontDescriptor").ok()?)?;
+    let descriptor = dict(pdf, font.get(b"FontDescriptor")?)?;
     [&b"FontFile"[..], b"FontFile2", b"FontFile3"]
         .into_iter()
-        .find_map(|key| descriptor.get(key).ok()?.as_reference().ok())
+        .find_map(|key| descriptor.get(key)?.as_reference())
 }
 
 fn font_name(src: &Src, font: &Foreign) -> String {
     let named = font.id().and_then(|id| {
-        let dict = src.pdf().get_object(id).and_then(Object::as_dict).ok()?;
-        let name = dict.get(b"BaseFont").and_then(Object::as_name).ok()?;
+        let dict = src.pdf().get_object(id).ok()?.as_dict()?;
+        let name = dict.get(b"BaseFont").and_then(Object::as_name)?;
         Some(String::from_utf8_lossy(name).into_owned())
     });
     format!(
@@ -2353,9 +2356,7 @@ fn glyph_boxes_are_pdfium_characters_on_every_page() {
     let (otherwise, program, allowed) = PROGRAM_DECODED_OTHERWISE;
     assert!(
         unheld.is_none(),
-        "{otherwise}: {unheld:?} glyphs of {} {} R's past their tolerance, not {allowed}",
-        program.0,
-        program.1
+        "{otherwise}: {unheld:?} glyphs of {program} R's past their tolerance, not {allowed}",
     );
     assert_eq!(uncompared, 0, "pages not compared");
     assert!(

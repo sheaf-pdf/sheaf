@@ -21,7 +21,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
+use crate::pdf::{
+    Dictionary, Document as Pdf, Object, ObjectId, Stream, StreamExt, Value, dictionary, literal,
+};
 use anyhow::{Context, Result, bail};
 use sheaf_edit::{PageSize, Rotation};
 
@@ -61,10 +63,9 @@ pub fn read_collection(pdf: &Pdf) -> (Option<String>, Vec<StampPage>) {
     let title = pdf
         .trailer
         .get(b"Info")
-        .ok()
         .and_then(|i| pdf.dereference(i).ok())
-        .and_then(|(_, i)| i.as_dict().ok())
-        .and_then(|i| i.get(b"Title").ok())
+        .and_then(|(_, i)| i.as_dict())
+        .and_then(|i| i.get(b"Title"))
         .map(crate::file::pdf_text)
         .filter(|t| !t.trim().is_empty());
     let names = page_names(pdf);
@@ -81,7 +82,7 @@ pub fn read_collection(pdf: &Pdf) -> (Option<String>, Vec<StampPage>) {
                     .cloned()
                     .unwrap_or_else(|| format!("Stamp {}", i + 1)),
                 text: dict
-                    .and_then(|d| d.get(TEXT_KEY.as_bytes()).ok())
+                    .and_then(|d| d.get(TEXT_KEY.as_bytes()))
                     .map(crate::file::pdf_text)
                     .filter(|t| !t.is_empty()),
                 size: geom.shown(),
@@ -98,12 +99,12 @@ fn page_names(pdf: &Pdf) -> HashMap<ObjectId, String> {
     let Some(root) = pdf
         .catalog()
         .ok()
-        .and_then(|c| c.get(b"Names").ok())
+        .and_then(|c| c.get(b"Names"))
         .and_then(|n| pdf.dereference(n).ok())
-        .and_then(|(_, n)| n.as_dict().ok())
-        .and_then(|n| n.get(b"Pages").ok())
+        .and_then(|(_, n)| n.as_dict())
+        .and_then(|n| n.get(b"Pages"))
         .and_then(|p| pdf.dereference(p).ok())
-        .and_then(|(_, p)| p.as_dict().ok())
+        .and_then(|(_, p)| p.as_dict())
     else {
         return out;
     };
@@ -114,10 +115,10 @@ fn page_names(pdf: &Pdf) -> HashMap<ObjectId, String> {
         if seen > 10_000 {
             break;
         }
-        if let Ok(names) = node.get(b"Names").and_then(Object::as_array) {
+        if let Some(names) = node.get(b"Names").and_then(Object::as_array) {
             for pair in names.chunks(2) {
                 let [key, value] = pair else { continue };
-                let Ok(id) = value.as_reference() else {
+                let Some(id) = value.as_reference() else {
                     continue;
                 };
                 let key = crate::file::pdf_text(key);
@@ -128,9 +129,11 @@ fn page_names(pdf: &Pdf) -> HashMap<ObjectId, String> {
                 out.insert(id, name);
             }
         }
-        if let Ok(kids) = node.get(b"Kids").and_then(Object::as_array) {
+        if let Some(kids) = node.get(b"Kids").and_then(Object::as_array) {
             for k in kids {
-                if let Ok((_, Object::Dictionary(d))) = pdf.dereference(k) {
+                if let Ok((_, o)) = pdf.dereference(k)
+                    && let Value::Dict(d) = o.value()
+                {
                     todo.push(d.clone());
                 }
             }
@@ -158,14 +161,14 @@ pub fn one_page(pdf: &Pdf, index: usize) -> Result<Vec<u8>> {
     }
     dict.set("Parent", pages_id);
     let page_id = map[&page];
-    out.objects.insert(page_id, Object::Dictionary(dict));
+    out.objects.insert(page_id, Object::from(dict));
     finish(&mut out, pages_id, vec![page_id], None, Vec::new())
 }
 
 /// A page's visible box as a PDF rectangle.
 fn visible_array(geom: &Geom) -> Object {
     let v = geom.visible();
-    Object::Array([v.x0, v.y0, v.x1, v.y1].map(Object::from).to_vec())
+    Object::from([v.x0, v.y0, v.x1, v.y1].map(Object::from).to_vec())
 }
 
 /// A page copied into `dst` without what a stamp doesn't need: its
@@ -182,9 +185,7 @@ fn page_without_extras(
         trimmed.remove(key);
     }
     let mut scratch = src.clone();
-    scratch
-        .objects
-        .insert(page, Object::Dictionary(trimmed.clone()));
+    scratch.objects.insert(page, Object::from(trimmed.clone()));
     let mut dict = copy_page_dict(&scratch, page, dst, map)?;
     // Resources a page inherits from its tree.
     if !dict.has(b"Resources")
@@ -222,13 +223,13 @@ fn copy_page_dict(
         if k == b"Parent" {
             continue;
         }
-        out.set(k.clone(), remap(src, v, dst, map)?);
+        out.set(k, remap(src, v, dst, map)?);
     }
     // Hold the id so later allocations don't collide; the caller may
     // replace this placeholder, or it stays as the page.
     dst.objects
         .entry(new_id)
-        .or_insert_with(|| Object::Dictionary(out.clone()));
+        .or_insert_with(|| Object::from(out.clone()));
     Ok(out)
 }
 
@@ -248,10 +249,10 @@ fn inherited_as<T>(
     let mut id = page;
     for _ in 0..64 {
         let d = pdf.get_dictionary(id).ok()?;
-        if let Some(v) = d.get(key).ok().and_then(&read) {
+        if let Some(v) = d.get(key).and_then(&read) {
             return Some(v);
         }
-        id = d.get(b"Parent").ok()?.as_reference().ok()?;
+        id = d.get(b"Parent")?.as_reference()?;
     }
     None
 }
@@ -267,21 +268,22 @@ fn geom(pdf: &Pdf, page: ObjectId) -> Geom {
             pdf.dereference(o).ok().map(|(_, o)| o.clone())
         })
     };
-    let number = |o: &Object| match pdf.dereference(o).map(|(_, o)| o) {
-        Ok(Object::Integer(i)) => *i as f32,
-        Ok(Object::Real(r)) => *r as f32,
-        _ => 0.0,
+    let number = |o: &Object| {
+        pdf.dereference(o)
+            .ok()
+            .and_then(|(_, o)| o.as_number())
+            .unwrap_or(0.0) as f32
     };
-    let boxed = |key: &[u8]| match found(key)? {
-        Object::Array(a) if a.len() == 4 => {
+    let boxed = |key: &[u8]| match found(key)?.value() {
+        Value::Array(a) if a.len() == 4 => {
             let [a, b, c, d] = [0, 1, 2, 3].map(|i| number(&a[i]));
             Some(Rect::new(a, b, c, d))
         }
         _ => None,
     };
-    let rotate = match found(b"Rotate") {
-        Some(Object::Integer(i)) => i,
-        Some(Object::Real(r)) => r as i64,
+    let rotate = match found(b"Rotate").as_ref().map(Object::value) {
+        Some(Value::Integer(i)) => *i,
+        Some(Value::Real(r)) => *r as i64,
         _ => 0,
     };
     Geom::read(boxed(b"MediaBox"), boxed(b"CropBox"), rotate)
@@ -313,7 +315,7 @@ pub fn build_collection(
             dict.set(TEXT_KEY, text_string(t));
         }
         let id = map[&page];
-        out.objects.insert(id, Object::Dictionary(dict));
+        out.objects.insert(id, Object::from(dict));
         kids.push(id);
         names.push((format!("#{}={name}", random_id()), id));
     }
@@ -333,20 +335,20 @@ fn finish(
     }
     out.objects.insert(
         pages_id,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages",
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"),
             "Count" => kids.len() as i64,
-            "Kids" => kids.iter().map(|k| Object::Reference(*k)).collect::<Vec<_>>(),
+            "Kids" => kids.iter().map(|k| Object::from(*k)).collect::<Vec<_>>(),
         }),
     );
-    let mut catalog = dictionary! { "Type" => "Catalog", "Pages" => pages_id };
+    let mut catalog = dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id };
     if !names.is_empty() {
         // A name tree's keys are sorted.
         let mut names = names;
         names.sort_by(|a, b| a.0.cmp(&b.0));
         let arr: Vec<Object> = names
             .into_iter()
-            .flat_map(|(k, id)| [text_string(&k), Object::Reference(id)])
+            .flat_map(|(k, id)| [text_string(&k), Object::from(id)])
             .collect();
         catalog.set(
             "Names",
@@ -364,13 +366,13 @@ fn finish(
 
 fn text_string(s: &str) -> Object {
     if s.is_ascii() {
-        Object::string_literal(s)
+        literal(s)
     } else {
         let mut b = vec![0xFE, 0xFF];
         for u in s.encode_utf16() {
             b.extend(u.to_be_bytes());
         }
-        Object::String(b, crate::pdf::StringFormat::Hexadecimal)
+        Object::hex(b)
     }
 }
 
@@ -433,16 +435,16 @@ fn stamp_of(img: image::DynamicImage) -> Result<Vec<u8>> {
     let mut out = Pdf::with_version("1.5");
     let pages_id = out.new_object_id();
     let mut image = dictionary! {
-        "Type" => "XObject", "Subtype" => "Image",
+        "Type" => Object::name("XObject"), "Subtype" => Object::name("Image"),
         "Width" => w as i64, "Height" => h as i64,
-        "ColorSpace" => "DeviceRGB", "BitsPerComponent" => 8,
+        "ColorSpace" => Object::name("DeviceRGB"), "BitsPerComponent" => 8,
     };
     if alpha.iter().any(|a| *a < 255) {
         let mask = Stream::new(
             dictionary! {
-                "Type" => "XObject", "Subtype" => "Image",
+                "Type" => Object::name("XObject"), "Subtype" => Object::name("Image"),
                 "Width" => w as i64, "Height" => h as i64,
-                "ColorSpace" => "DeviceGray", "BitsPerComponent" => 8,
+                "ColorSpace" => Object::name("DeviceGray"), "BitsPerComponent" => 8,
             },
             alpha,
         );
@@ -456,7 +458,7 @@ fn stamp_of(img: image::DynamicImage) -> Result<Vec<u8>> {
         format!("q {pw} 0 0 {ph} 0 0 cm /Im Do Q").into_bytes(),
     ));
     let page = out.add_object(dictionary! {
-        "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+        "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
         "MediaBox" => vec![0.into(), 0.into(), Object::from(pw), Object::from(ph)],
         "Resources" => dictionary! { "XObject" => dictionary! { "Im" => image } },
     });
@@ -464,7 +466,7 @@ fn stamp_of(img: image::DynamicImage) -> Result<Vec<u8>> {
 }
 
 fn compressed(mut s: Stream) -> Stream {
-    let _ = s.compress();
+    s.compress();
     s
 }
 
@@ -520,10 +522,8 @@ pub fn page_forms(src: &Src, pages: &[u32], dst: &mut Pdf) -> Result<Vec<PageFor
         let resources = (page.resources.as_deref())
             .map(|r| remap(src.pdf(), r, dst, &mut map))
             .transpose()?;
-        let content =
-            PageContent::read(src.pdf(), &page.contents, src.limits()).with_context(|| {
-                format!("reading the content of page {} {} R", page.id.0, page.id.1)
-            })?;
+        let content = PageContent::read(src.pdf(), &page.contents, src.limits())
+            .with_context(|| format!("reading the content of page {} R", page.id))?;
         // Adding 0 makes a -0 0, the matrix as it's written.
         let Affine { a, b, c, d, e, f } = shown_matrix(&geom);
         let matrix = Affine {
@@ -535,8 +535,8 @@ pub fn page_forms(src: &Src, pages: &[u32], dst: &mut Pdf) -> Result<Vec<PageFor
             f: f + 0.0,
         };
         let mut form = dictionary! {
-            "Type" => "XObject",
-            "Subtype" => "Form",
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
             "BBox" => visible_array(&geom),
         };
         if matrix != Affine::IDENTITY {
@@ -577,16 +577,13 @@ pub fn form_to_pdf<P: Objects + ?Sized>(src: &P, form: ObjectId) -> Result<Vec<u
 /// Form `form`'s `/BBox` and `/Matrix` (the identity when it has none);
 /// None when it isn't a form with a box.
 pub(crate) fn form_frame<P: Objects + ?Sized>(src: &P, form: ObjectId) -> Option<(Rect, Affine)> {
-    let Ok(Object::Stream(s)) = src.get_object(form) else {
-        return None;
-    };
+    let s = src.get_object(form).ok()?.as_stream()?;
     let numbers = |key: &[u8], n: usize| -> Option<Vec<f32>> {
-        let (_, array) = src.dereference(s.dict.get(key).ok()?).ok()?;
+        let (_, array) = src.dereference(s.dict.get(key)?).ok()?;
         let values: Vec<f32> = array
-            .as_array()
-            .ok()?
+            .as_array()?
             .iter()
-            .map(|v| v.as_float().unwrap_or(0.0) as f32)
+            .map(|v| v.as_number().unwrap_or(0.0) as f32)
             .collect();
         (values.len() == n).then_some(values)
     };
@@ -611,7 +608,7 @@ mod tests {
             format!("{color} rg 0 0 100 50 re f").into_bytes(),
         ));
         let page = out.add_object(dictionary! {
-            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+            "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
             "MediaBox" => vec![0.into(), 0.into(), 100.into(), 50.into()],
         });
         finish(&mut out, pages_id, vec![page], None, Vec::new()).unwrap()
@@ -664,8 +661,7 @@ mod tests {
             .get(b"Names")
             .unwrap()
             .as_array()
-            .unwrap()
-            .clone();
+            .unwrap();
         let key = crate::file::pdf_text(&names[0]);
         assert!(key.starts_with('#') && key.ends_with("=Paid"), "{key}");
         assert_eq!(read_collection(&pdf).1[0].name, "Paid");
@@ -681,9 +677,9 @@ mod tests {
         let content = pdf.add_object(Stream::new(dictionary! {}, b"0 0 100 50 re f".to_vec()));
         let width = pdf.add_object(100);
         let page = pdf.add_object(dictionary! {
-            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+            "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
             "MediaBox" => vec![0.into(), 0.into(), width.into(), 50.into()],
-            "Rotate" => Object::Real(90.0),
+            "Rotate" => Object::from(90.0_f64),
         });
         let bytes = finish(&mut pdf, pages_id, vec![page], None, Vec::new()).unwrap();
         let built = build_collection("x", &[("Turned".into(), None, bytes)]).unwrap();
@@ -705,7 +701,7 @@ mod tests {
         let pages_id = pdf.new_object_id();
         let content = pdf.add_object(Stream::new(dictionary! {}, b"0 0 10 10 re f".to_vec()));
         let page = pdf.add_object(dictionary! {
-            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+            "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
             "MediaBox" => vec![0.into(), 0.into(), 100.into(), 50.into()],
         });
         let bytes = finish(&mut pdf, pages_id, vec![page], None, Vec::new()).unwrap();
@@ -715,7 +711,7 @@ mod tests {
         let dict = &dst.get_object(form.id).unwrap().as_stream().unwrap().dict;
         assert_eq!(
             dict.get(b"Resources").unwrap(),
-            &Object::Dictionary(Dictionary::new())
+            &Object::from(Dictionary::new())
         );
     }
 
@@ -732,7 +728,7 @@ mod tests {
             b"0 0 1 rg 60 70 10 10 re f".to_vec(),
         ));
         let page = pdf.add_object(dictionary! {
-            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+            "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
             "MediaBox" => vec![0.into(), 0.into(), 300.into(), 200.into()],
             "CropBox" => vec![50.into(), 60.into(), 250.into(), 160.into()],
             "Rotate" => 90,
@@ -748,7 +744,10 @@ mod tests {
         let s = dst.get_object(form).unwrap().as_stream().unwrap();
         let numbers = |key: &[u8]| -> Vec<f32> {
             let array = s.dict.get(key).unwrap().as_array().unwrap();
-            array.iter().map(|v| v.as_float().unwrap() as f32).collect()
+            array
+                .iter()
+                .map(|v| v.as_number().unwrap() as f32)
+                .collect()
         };
         assert_eq!(numbers(b"BBox"), [50.0, 60.0, 250.0, 160.0]);
         let [a, b, c, d, e, f] = numbers(b"Matrix")[..] else {
@@ -767,7 +766,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|v| v.as_float().unwrap() as f32)
+            .map(|v| v.as_number().unwrap() as f32)
             .collect();
         assert_eq!(media, [0.0, 0.0, 100.0, 200.0]);
     }
@@ -780,41 +779,42 @@ mod tests {
         let mut pdf = Pdf::with_version("1.5");
         let pages_id = pdf.new_object_id();
         let font = pdf.add_object(dictionary! {
-            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name("Helvetica"),
         });
         let content = pdf.add_object(Stream::new(
             dictionary! {},
             b"BT /F1 12 Tf 10 10 Td (Hi) Tj ET".to_vec(),
         ));
         let metadata = pdf.add_object(Stream::new(
-            dictionary! { "Type" => "Metadata", "Subtype" => "XML" },
+            dictionary! { "Type" => Object::name("Metadata"), "Subtype" => Object::name("XML") },
             b"<x/>".to_vec(),
         ));
         let note = pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Text",
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"),
             "Rect" => vec![0.into(), 0.into(), 10.into(), 10.into()],
         });
         let page = pdf.add_object(dictionary! {
-            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+            "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
             "Metadata" => metadata, "Annots" => vec![note.into()],
         });
         pdf.objects.insert(
             pages_id,
-            Object::Dictionary(dictionary! {
-                "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1,
+            Object::from(dictionary! {
+                "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1,
                 "MediaBox" => vec![0.into(), 0.into(), 100.into(), 50.into()],
                 "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
             }),
         );
-        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        let catalog =
+            pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
         pdf.trailer.set("Root", catalog);
         let src = crate::forms::fixture::source(crate::serialize::full::write_built(&pdf).unwrap());
         let mut dst = Pdf::with_version("1.5");
         let form = page_form(&src, &mut dst).unwrap();
         assert_eq!(dst.objects.len(), 2, "the form and its font");
-        let Object::Stream(s) = dst.get_object(form.id).unwrap() else {
-            panic!("a form")
-        };
+        let s = dst.get_object(form.id).unwrap().as_stream().unwrap();
         let content = String::from_utf8(s.decompressed_content().unwrap()).unwrap();
         assert!(content.contains("(Hi) Tj"), "{content}");
         let fonts = s.dict.get(b"Resources").unwrap().as_dict().unwrap();
@@ -836,9 +836,7 @@ mod tests {
         let size = form.geom.shown();
         assert_eq!((size.width, size.height), (100.0, 50.0));
         let form = form.id;
-        let Object::Stream(s) = dst.get_object(form).unwrap() else {
-            panic!()
-        };
+        let s = dst.get_object(form).unwrap().as_stream().unwrap();
         assert_eq!(s.dict.get(b"Subtype").unwrap().as_name().unwrap(), b"Form");
         let content = String::from_utf8(s.decompressed_content().unwrap()).unwrap();
         assert!(content.contains("re f"), "{content}");

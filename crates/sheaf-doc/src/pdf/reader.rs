@@ -1,22 +1,19 @@
-//! M18 slice 8: `LazyPdf` backed by `pdf_structure::Reading`, converting
-//! objects to `lopdf`'s model at the door until slice 11 moves sheaf onto
-//! `pdf_objects`' types directly.
+//! M18 slices 8 and 11–12: `LazyPdf` backed directly by
+//! `pdf_structure::Reading` and `pdf_objects::Object`, with zero conversion.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
-use super::Document;
-use lopdf::encryption::DecryptionError;
-use lopdf::{
-    Dictionary, EncryptionState, Error, Limit, Object, ObjectId, Result, Stream, StringFormat,
-};
 use pdf_crypt::Password;
 use pdf_filters::Backend;
-use pdf_objects::object::{Data, Dict, Form, Object as PdfObj, ObjectId as PdfId, Str, Value};
+use pdf_objects::object::{Data, Dict, Object, ObjectId, Stream, Value};
 use pdf_objects::parse::Parser;
 use pdf_structure::read::{Fault, Options};
+use pdf_structure::write::Encryptor;
 use pdf_structure::{ByteSource, Encryption, Origin, Reading, Record, Unread};
+
+use super::{DecryptionError, Document, Error, Limit, Result};
 
 /// Caps on what [`LazyPdf`] reads. Breaking one is [`Error::Limit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,14 +116,17 @@ impl KeptError {
 /// A PDF read lazily through [`pdf_structure::Reading`].
 pub struct LazyPdf {
     reading: Reading<Box<dyn ByteSource>>,
+    /// Leading preamble offset stripped when `%PDF-` sits past the 1,024-byte
+    /// window `pdf-structure` checks on open (`0` otherwise).
+    extra_header: usize,
     limits: ReadLimits,
     version: String,
-    trailer: Dictionary,
+    trailer: Dict,
     facts: XrefFacts,
     sound: bool,
-    crypt: Option<(EncryptionState, ObjectId)>,
-    /// Converted `lopdf::Object` cache per listed object, sorted by `ObjectId`
-    /// (removed in slice 11 when callers take `pdf_objects::Object` directly).
+    crypt: Option<(Encryptor, ObjectId)>,
+    /// Materialized `Arc<Object>` cache per listed object, sorted by `ObjectId`
+    /// (streams hold decrypted `Data::Bytes` so callers read `&Stream` directly).
     slots: Box<[(ObjectId, OnceLock<Kept>)]>,
 }
 
@@ -139,7 +139,7 @@ impl LazyPdf {
         limits: &ReadLimits,
     ) -> Result<LazyPdf> {
         let mut pdf = Self::open_unauthenticated(bytes, password, limits)?;
-        pdf.authenticate(password)?;
+        pdf.authenticate()?;
         Ok(pdf)
     }
 
@@ -169,6 +169,13 @@ impl LazyPdf {
         options.passwords = passwords;
 
         let mut boxed: Box<dyn ByteSource> = Box::new(bytes);
+        let extra_header = find_extra_header(&*boxed)?;
+        if extra_header > 0 {
+            boxed = Box::new(SubSource {
+                inner: boxed,
+                start: extra_header,
+            });
+        }
         let blank_ranges = precheck_xref_stream_caps(&*boxed, limits)?;
         if !blank_ranges.is_empty() {
             boxed = Box::new(BlankedSource::new(boxed, blank_ranges));
@@ -178,11 +185,12 @@ impl LazyPdf {
             other => Error::Syntax(other.to_string()),
         })?;
 
-        let Some(header_offset) = reading.facts().header_offset else {
-            return Err(Error::Parse(lopdf::ParseError::InvalidFileHeader));
+        let Some(inner_header_offset) = reading.facts().header_offset else {
+            return Err(Error::Syntax("invalid PDF file header".to_string()));
         };
+        let header_offset = inner_header_offset + extra_header;
         let Some(ver) = reading.header_version() else {
-            return Err(Error::Parse(lopdf::ParseError::InvalidFileHeader));
+            return Err(Error::Syntax("invalid PDF file header".to_string()));
         };
         let version = ver.to_string();
 
@@ -210,23 +218,45 @@ impl LazyPdf {
         }
 
         let unwritten = reading.trailer().unwritten.is_some();
-        if unwritten && !reading.trailer().dict().has(b"Root") {
-            return Err(Error::Parse(lopdf::ParseError::InvalidXref));
+        let mut trailer = clean_trailer(reading.trailer());
+        if unwritten {
+            if !trailer.has(b"Root") {
+                return Err(Error::Syntax("invalid cross-reference table".to_string()));
+            }
+            let root_valid = trailer
+                .get(b"Root")
+                .and_then(Object::as_reference)
+                .is_some_and(|id| {
+                    reading
+                        .get(id)
+                        .is_ok_and(|o| matches!(o.value(), Value::Dict(_)))
+                });
+            if !root_valid {
+                let found_root = reading
+                    .ids()
+                    .filter(|id| {
+                        reading
+                            .get(*id)
+                            .is_ok_and(|o| o.as_dict().is_some_and(|d| d.has_type(b"Catalog")))
+                    })
+                    .last();
+                match found_root {
+                    Some(cat_id) => trailer.set("Root", cat_id),
+                    None => return Err(Error::Syntax("invalid cross-reference table".to_string())),
+                }
+            }
         }
 
         let sound = !unwritten && !entry_shifted;
         let sf = reading.facts();
         let (start, kind) = match sf.newest {
-            Some((pos, k)) if sound => (pos.saturating_sub(header_offset), XrefKind::from(k)),
+            Some((pos, k)) if sound => (pos.saturating_sub(inner_header_offset), XrefKind::from(k)),
             Some((_, k)) => (0, XrefKind::from(k)),
             None => (0, XrefKind::Table),
         };
-
-        let trailer = convert_trailer(reading.trailer());
         let size = trailer
             .get(b"Size")
-            .and_then(Object::as_i64)
-            .ok()
+            .and_then(Object::as_integer)
             .and_then(|s| u32::try_from(s).ok())
             .unwrap_or(0);
 
@@ -242,13 +272,12 @@ impl LazyPdf {
             sections: if sound { sf.sections } else { 0 },
         };
 
-        let slots: Box<[(ObjectId, OnceLock<Kept>)]> = reading
-            .ids()
-            .map(|id| ((id.number, id.generation), OnceLock::new()))
-            .collect();
+        let slots: Box<[(ObjectId, OnceLock<Kept>)]> =
+            reading.ids().map(|id| (id, OnceLock::new())).collect();
 
-        let mut pdf = LazyPdf {
+        Ok(LazyPdf {
             reading,
+            extra_header,
             limits: *limits,
             version,
             trailer,
@@ -256,9 +285,7 @@ impl LazyPdf {
             sound,
             crypt: None,
             slots,
-        };
-        let _ = &mut pdf;
-        Ok(pdf)
+        })
     }
 
     pub fn base_sound(&self) -> bool {
@@ -273,7 +300,7 @@ impl LazyPdf {
         &self.version
     }
 
-    pub fn trailer(&self) -> &Dictionary {
+    pub fn trailer(&self) -> &Dict {
         &self.trailer
     }
 
@@ -281,25 +308,23 @@ impl LazyPdf {
         self.crypt.is_some()
     }
 
-    pub fn encryption(&self) -> Option<(&EncryptionState, ObjectId)> {
-        self.crypt.as_ref().map(|(state, at)| (state, *at))
-    }
-
-    /// Underlying `pdf_structure::Reading` (for slices 9–12).
-    #[allow(dead_code)]
-    pub(crate) fn reading(&self) -> &Reading<Box<dyn ByteSource>> {
-        &self.reading
+    pub fn encryption(&self) -> Option<(&Encryptor, ObjectId)> {
+        self.crypt.as_ref().map(|(enc, at)| (enc, *at))
     }
 
     pub fn ids(&self) -> impl Iterator<Item = ObjectId> + '_ {
         self.slots.iter().map(|&(id, _)| id)
     }
 
-    pub fn catalog(&self) -> Result<&Dictionary> {
-        self.trailer
+    pub fn catalog(&self) -> Result<&Dict> {
+        let id = self
+            .trailer
             .get(b"Root")
             .and_then(Object::as_reference)
-            .and_then(|id| self.get_dictionary(id))
+            .ok_or(Error::ObjectType {
+                expected: "Catalog reference",
+            })?;
+        self.get_dictionary(id)
     }
 
     pub fn get(&self, id: ObjectId) -> Result<&Object> {
@@ -318,28 +343,33 @@ impl LazyPdf {
         if let Some(kept) = slot.get() {
             return kept.as_ref().cloned().map_err(KeptError::to_error);
         }
-        let oid = PdfId::from(id);
         let (obj, _) = self
             .reading
-            .object_unkept(oid)
+            .object_unkept(id)
             .map_err(|e| self.map_reading_error(id, e))?;
-        let converted = self.convert_object(id, &obj, false)?;
-        Ok(Arc::new(converted))
+        let loaded = self.materialize_stream(id, obj, false)?;
+        Ok(Arc::new(loaded))
     }
 
     pub fn get_object(&self, id: ObjectId) -> Result<&Object> {
         self.dereference(self.get(id)?).map(|(_, obj)| obj)
     }
 
-    pub fn get_dictionary(&self, id: ObjectId) -> Result<&Dictionary> {
-        self.get_object(id).and_then(Object::as_dict)
+    /// Resolves `id` as a plain PDF dictionary (not a stream).
+    pub fn get_dictionary(&self, id: ObjectId) -> Result<&Dict> {
+        match self.get_object(id)?.value() {
+            Value::Dict(d) => Ok(d),
+            _ => Err(Error::ObjectType {
+                expected: "Dictionary",
+            }),
+        }
     }
 
     pub fn dereference<'a>(&'a self, object: &'a Object) -> Result<(Option<ObjectId>, &'a Object)> {
         let mut object = object;
         let mut id = None;
         let mut chain = 0;
-        while let Ok(next) = object.as_reference() {
+        while let Some(next) = object.as_reference() {
             chain += 1;
             if chain > self.limits.max_depth {
                 return Err(Error::Limit(Limit::Depth));
@@ -351,63 +381,88 @@ impl LazyPdf {
     }
 
     pub fn is_read(&self, id: ObjectId) -> bool {
-        self.slot(id).is_some_and(|s| s.get().is_some())
-            || self.reading.record(PdfId::from(id)).is_some()
+        self.slot(id).is_some_and(|s| s.get().is_some()) || self.reading.record(id).is_some()
     }
 
     /// Byte span of `id` in the outer file (`None` for object-stream members
     /// or unreadable objects), read without keeping `id` in memory.
     pub fn raw_span(&self, id: ObjectId) -> Option<Range<usize>> {
-        let oid = PdfId::from(id);
-        if let Some(rec) = self.reading.record(oid) {
+        let shift = |r: Range<usize>| (r.start + self.extra_header)..(r.end + self.extra_header);
+        if let Some(rec) = self.reading.record(id) {
             if rec.at.stream().is_some() {
                 return None;
             }
             if self.is_encrypted() && self.object_unkept(id).is_err() {
                 return None;
             }
-            return Some(rec.at.range());
+            return Some(shift(rec.at.range()));
         }
-        let (obj, rec) = self.reading.object_unkept(oid).ok()?;
+        let (obj, rec) = self.reading.object_unkept(id).ok()?;
         if rec.at.stream().is_some() {
             return None;
         }
-        if self.is_encrypted() && self.convert_object(id, &obj, false).is_err() {
+        if self.is_encrypted() && self.materialize_stream(id, obj, false).is_err() {
             return None;
         }
-        Some(rec.at.range())
+        Some(shift(rec.at.range()))
     }
 
     /// [`LazyPdf::raw_span`] of an object a writer may copy verbatim: at its
     /// cross-reference offset (`Origin::File`), ending with `endobj`, and for
     /// streams having a direct `/Length` matching `endstream`.
     pub fn raw_span_whole(&self, id: ObjectId) -> Option<Range<usize>> {
-        let oid = PdfId::from(id);
-        if let Some(rec) = self.reading.record(oid) {
+        let shift = |r: Range<usize>| (r.start + self.extra_header)..(r.end + self.extra_header);
+        if let Some(rec) = self.reading.record(id) {
             let span = whole_span(rec)?;
             if self.is_encrypted() && self.object_unkept(id).is_err() {
                 return None;
             }
-            return Some(span);
+            return Some(shift(span));
         }
-        let (obj, rec) = self.reading.object_unkept(oid).ok()?;
+        let (obj, rec) = self.reading.object_unkept(id).ok()?;
         let span = whole_span(&rec)?;
-        if self.is_encrypted() && self.convert_object(id, &obj, false).is_err() {
+        if self.is_encrypted() && self.materialize_stream(id, obj, false).is_err() {
             return None;
         }
-        Some(span)
+        Some(shift(span))
     }
 
-    /// Materializes every readable in-use object into an in-memory `Document`
-    /// through `pdf_structure::Reading::to_document`, matching what `LazyPdf`
-    /// reads (`Encrypt` stripped as Rewrite expects).
+    /// Materializes every readable in-use object into an in-memory `Document`,
+    /// matching what `LazyPdf` reads (`Encrypt` stripped as Rewrite expects).
     pub fn to_document(&self) -> Result<Document> {
-        self.to_document_and_raw(false).map(|(doc, _)| doc)
+        let encrypt_id = self.crypt.as_ref().map(|(_, at)| *at);
+        let mut out = Document::with_version(self.version.clone());
+        out.xref_kind = self.facts.kind;
+        out.xref_start = self.facts.start;
+        out.decrypted = self.crypt.is_some();
+        let mut trailer = self.trailer.clone();
+        if self.crypt.is_some() {
+            trailer.remove(b"Encrypt");
+        }
+        out.trailer = trailer;
+        for &(id, _) in &self.slots {
+            if Some(id) == encrypt_id {
+                continue;
+            }
+            let Ok((obj, _)) = self.reading.object_unkept(id) else {
+                continue;
+            };
+            let Some((loaded, _)) = self.load_doc_object(id, &obj)? else {
+                continue;
+            };
+            out.max_id = out.max_id.max(id.number);
+            out.objects.insert(id, loaded);
+        }
+        Ok(out)
     }
 
     /// [`LazyPdf::to_document`], plus first-parse verbatim spans and decoded
     /// object-stream member bytes when `want_raw` is `true` (M18 slice 9).
     pub fn to_document_and_raw(&self, want_raw: bool) -> Result<(Document, RawCopies)> {
+        if !want_raw {
+            return Ok((self.to_document()?, RawCopies::default()));
+        }
+        let shift = |r: Range<usize>| (r.start + self.extra_header)..(r.end + self.extra_header);
         let pdoc = self.reading.to_document().map_err(|e| match e {
             pdf_structure::Error::Io(io) => Error::IO(io),
             other => Error::Syntax(other.to_string()),
@@ -423,87 +478,84 @@ impl LazyPdf {
         }
         out.trailer = trailer;
         let mut raw = RawCopies::default();
-        for (oid, obj) in pdoc.objects() {
-            let id = (oid.number, oid.generation);
+        for (id, obj) in pdoc.objects() {
             if Some(id) == encrypt_id {
                 continue;
             }
-            let mut decrypt_fallback = false;
-            let converted = match obj.value() {
-                Value::Stream(s) => {
-                    let data = match (&s.data, self.reading.encryption()) {
-                        (Data::Bytes(b), _) => b.as_slice().to_vec(),
-                        (Data::At(span), Encryption::None) => self
-                            .reading
-                            .source()
-                            .read_at(span.range())
-                            .map_err(Error::IO)?
-                            .into_owned(),
-                        _ => match self.reading.data(oid) {
-                            Ok(bytes) => bytes.into_owned(),
-                            Err(pdf_structure::Error::Decrypt(pdf_crypt::Error {
-                                data: Some(plain),
-                                fault: pdf_crypt::Fault::Short { .. },
-                            })) => plain,
-                            // Stream stored in the clear in an encrypted file
-                            // (e.g. 0169467's XMP): keep raw bytes so Rewrite
-                            // re-encrypts them cleanly, never copying raw.
-                            Err(pdf_structure::Error::Decrypt(_)) => match s.data.at() {
-                                Some(span) => {
-                                    decrypt_fallback = true;
-                                    self.reading
-                                        .source()
-                                        .read_at(span.range())
-                                        .map_err(Error::IO)?
-                                        .into_owned()
-                                }
-                                None => continue,
-                            },
-                            Err(_) => continue,
-                        },
-                    };
-                    let mut dict = convert_dict(&s.dict);
-                    dict.set("Length", data.len() as i64);
-                    Object::Stream(Stream {
-                        dict,
-                        content: data,
-                        allows_compression: true,
-                        start_position: s.data.at().map(|sp| sp.start()),
-                    })
-                }
-                _ => convert_value(obj),
+            let Some((loaded, decrypt_fallback)) = self.load_doc_object(id, obj)? else {
+                continue;
             };
-            if want_raw
-                && !decrypt_fallback
-                && let Some(rec) = pdoc.record(oid)
-            {
+            if !decrypt_fallback && let Some(rec) = pdoc.record(id) {
                 if let Some(span) = whole_span(rec) {
-                    raw.spans.insert(id, span);
-                } else if id.1 == 0
+                    raw.spans.insert(id, shift(span));
+                } else if id.generation == 0
                     && let Origin::Stream { stream, .. } = rec.origin
                 {
-                    let stm_oid = PdfId::new(stream, 0);
-                    if !pdoc.in_the_clear(stm_oid)
-                        && let Some(held) = pdoc.held(stm_oid)
-                        && let Some(slice) = rec.at.stream_slice_in(stm_oid, held)
+                    let stm_id = ObjectId::new(stream, 0);
+                    if !pdoc.in_the_clear(stm_id)
+                        && let Some(held) = pdoc.held(stm_id)
+                        && let Some(slice) = rec.at.stream_slice_in(stm_id, held)
                     {
                         raw.members.insert(id, slice.to_vec());
                     }
                 }
             }
-            out.max_id = out.max_id.max(id.0);
-            out.objects.insert(id, converted);
+            out.max_id = out.max_id.max(id.number);
+            out.objects.insert(id, loaded);
         }
         Ok((out, raw))
+    }
+
+    fn load_doc_object(&self, id: ObjectId, obj: &Object) -> Result<Option<(Object, bool)>> {
+        let mut decrypt_fallback = false;
+        let loaded = match obj.value() {
+            Value::Stream(s) => {
+                let data = match (&s.data, self.reading.encryption()) {
+                    (Data::Bytes(b), _) => b.as_slice().to_vec(),
+                    (Data::At(span), Encryption::None) => self
+                        .reading
+                        .source()
+                        .read_at(span.range())
+                        .map_err(Error::IO)?
+                        .into_owned(),
+                    _ => match self.reading.data(id) {
+                        Ok(bytes) => bytes.into_owned(),
+                        Err(pdf_structure::Error::Decrypt(pdf_crypt::Error {
+                            data: Some(plain),
+                            fault: pdf_crypt::Fault::Short { .. },
+                        })) => plain,
+                        // Stream stored in the clear in an encrypted file
+                        // (e.g. 0169467's XMP): keep raw bytes so Rewrite
+                        // re-encrypts them cleanly, never copying raw.
+                        Err(pdf_structure::Error::Decrypt(_)) => match s.data.at() {
+                            Some(span) => {
+                                decrypt_fallback = true;
+                                self.reading
+                                    .source()
+                                    .read_at(span.range())
+                                    .map_err(Error::IO)?
+                                    .into_owned()
+                            }
+                            None => return Ok(None),
+                        },
+                        Err(_) => return Ok(None),
+                    },
+                };
+                let mut dict = s.dict.clone();
+                dict.set("Length", data.len() as i64);
+                Object::from(Stream::new(dict, data))
+            }
+            _ => obj.clone(),
+        };
+        Ok(Some((loaded, decrypt_fallback)))
     }
 
     /// Decoded bytes of an object-stream member `(container_id, bytes)`
     /// when `id` was read from an object stream (`Origin::Stream`).
     pub fn member_bytes(&self, id: ObjectId) -> Option<(u32, Vec<u8>)> {
-        let oid = PdfId::from(id);
-        let rec = match self.reading.record(oid) {
+        let rec = match self.reading.record(id) {
             Some(rec) => rec.clone(),
-            None => self.reading.object_unkept(oid).ok()?.1,
+            None => self.reading.object_unkept(id).ok()?.1,
         };
         let Origin::Stream { stream, .. } = rec.origin else {
             return None;
@@ -524,10 +576,9 @@ impl LazyPdf {
         if let Some(kept) = slot.get() {
             return kept.as_ref().map_err(KeptError::to_error);
         }
-        let oid = PdfId::from(id);
-        let outcome = match self.reading.get(oid) {
-            Ok(obj) => match self.convert_object(id, obj, true) {
-                Ok(converted) => Ok(Arc::new(converted)),
+        let outcome = match self.reading.get(id) {
+            Ok(obj) => match self.materialize_stream(id, obj.clone(), true) {
+                Ok(loaded) => Ok(Arc::new(loaded)),
                 Err(e) => match cacheable(&e) {
                     Some(ke) => Err(ke),
                     None => return Err(e),
@@ -546,42 +597,38 @@ impl LazyPdf {
             .map_err(KeptError::to_error)
     }
 
-    fn convert_object(&self, id: ObjectId, obj: &PdfObj, keep_stream_obj: bool) -> Result<Object> {
-        match obj.value() {
-            Value::Stream(s) => {
-                let oid = PdfId::from(id);
-                let data: Vec<u8> = match (&s.data, keep_stream_obj, self.reading.encryption()) {
-                    (Data::Bytes(b), _, _) => b.as_slice().to_vec(),
-                    (Data::At(span), false, Encryption::None) => self
-                        .reading
-                        .source()
-                        .read_at(span.range())
-                        .map_err(Error::IO)?
-                        .into_owned(),
-                    _ => match self.reading.data(oid) {
-                        Ok(bytes) => bytes.into_owned(),
-                        // An empty AES stream written as just a 16-byte IV with
-                        // no ciphertext block decrypts to empty in qpdf, PDFium
-                        // and lopdf (`Fault::Short` with `Some(vec![])`).
-                        Err(pdf_structure::Error::Decrypt(pdf_crypt::Error {
-                            data: Some(plain),
-                            fault: pdf_crypt::Fault::Short { .. },
-                        })) => plain,
-                        Err(e) => return Err(self.map_reading_error(id, e)),
-                    },
-                };
-                let mut dict = convert_dict(&s.dict);
-                let start_pos = s.data.at().map(|sp| sp.start());
-                dict.set("Length", data.len() as i64);
-                Ok(Object::Stream(Stream {
-                    dict,
-                    content: data,
-                    allows_compression: true,
-                    start_position: start_pos,
-                }))
-            }
-            _ => Ok(convert_value(obj)),
-        }
+    fn materialize_stream(
+        &self,
+        id: ObjectId,
+        obj: Object,
+        keep_stream_obj: bool,
+    ) -> Result<Object> {
+        let Value::Stream(s) = obj.value() else {
+            return Ok(obj);
+        };
+        let data: Vec<u8> = match (&s.data, keep_stream_obj, self.reading.encryption()) {
+            (Data::Bytes(b), _, _) => b.as_slice().to_vec(),
+            (Data::At(span), false, Encryption::None) => self
+                .reading
+                .source()
+                .read_at(span.range())
+                .map_err(Error::IO)?
+                .into_owned(),
+            _ => match self.reading.data(id) {
+                Ok(bytes) => bytes.into_owned(),
+                // An empty AES stream written as just a 16-byte IV with
+                // no ciphertext block decrypts to empty in qpdf and PDFium
+                // (`Fault::Short` with `Some(vec![])`).
+                Err(pdf_structure::Error::Decrypt(pdf_crypt::Error {
+                    data: Some(plain),
+                    fault: pdf_crypt::Fault::Short { .. },
+                })) => plain,
+                Err(e) => return Err(self.map_reading_error(id, e)),
+            },
+        };
+        let mut dict = s.dict.clone();
+        dict.set("Length", data.len() as i64);
+        Ok(Object::from(Stream::new(dict, data)))
     }
 
     fn map_reading_error(&self, _id: ObjectId, err: pdf_structure::Error) -> Error {
@@ -626,7 +673,7 @@ impl LazyPdf {
     }
 
     fn container_hit_limit(&self, stream: u32) -> bool {
-        let sid = PdfId::new(stream, 0);
+        let sid = ObjectId::new(stream, 0);
         self.reading.faults().into_iter().any(|(place, fault)| {
             place.object == Some(sid)
                 && matches!(
@@ -639,32 +686,43 @@ impl LazyPdf {
         })
     }
 
-    fn authenticate(&mut self, password: Option<&str>) -> Result<()> {
+    fn authenticate(&mut self) -> Result<()> {
         let encrypt_entry = match self.trailer.get(b"Encrypt") {
-            Ok(Object::Null) | Err(_) => return Ok(()),
-            Ok(other) => other.clone(),
+            None => return Ok(()),
+            Some(o) if o.is_null() => return Ok(()),
+            Some(other) => other,
         };
-        let Ok(encrypt_id) = encrypt_entry.as_reference() else {
+        let Some(encrypt_id) = encrypt_entry.as_reference() else {
             return Err(Error::InvalidPassword);
         };
-        let mut doc = lopdf::Document::new();
-        doc.trailer = self.trailer.clone();
-        if let Ok(enc_obj) = self.get(encrypt_id) {
-            doc.objects.insert(encrypt_id, enc_obj.clone());
-        } else {
-            return Err(Error::InvalidPassword);
-        }
 
         match self.reading.encryption() {
             Encryption::None => Ok(()),
-            Encryption::Locked | Encryption::Plain => Err(Error::InvalidPassword),
-            Encryption::Unsupported(_) => match decode_lopdf_encryption(&doc, password) {
-                Err(e) => Err(e),
-                Ok(_) => Err(Error::InvalidPassword),
-            },
-            Encryption::Opened { by, .. } => {
-                let state = decode_lopdf_encryption_opened(&doc, password, *by)?;
-                self.crypt = Some((state, encrypt_id));
+            Encryption::Locked | Encryption::Plain | Encryption::Unsupported(_) => {
+                Err(Error::InvalidPassword)
+            }
+            Encryption::Opened {
+                strings,
+                streams,
+                files,
+                ..
+            } => {
+                for method in [strings.as_ref(), streams.as_ref(), files.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    if let pdf_crypt::Method::Unknown(name) = method {
+                        return Err(Error::Decryption(DecryptionError::UndefinedCryptFilter(
+                            name.clone(),
+                        )));
+                    }
+                }
+                let Some(encryptor) =
+                    Encryptor::of(&self.reading).map_err(|_| Error::InvalidPassword)?
+                else {
+                    return Ok(());
+                };
+                self.crypt = Some((encryptor.reusing_rc4_keystreams(), encrypt_id));
                 Ok(())
             }
             _ => Err(Error::InvalidPassword),
@@ -682,6 +740,66 @@ fn whole_span(rec: &Record) -> Option<Range<usize>> {
         return None;
     }
     Some(rec.at.range())
+}
+
+/// `ByteSource` wrapper stripping leading preamble bytes when `%PDF-` sits past
+/// byte 1,024, so `pdf_structure::Reading` sees `%PDF-` at offset 0.
+struct SubSource {
+    inner: Box<dyn ByteSource>,
+    start: usize,
+}
+
+impl ByteSource for SubSource {
+    fn len(&self) -> usize {
+        self.inner.len() - self.start
+    }
+
+    fn whole(&self) -> Option<&[u8]> {
+        self.inner.whole().map(|b| &b[self.start..])
+    }
+
+    fn read_at(&self, range: Range<usize>) -> std::io::Result<std::borrow::Cow<'_, [u8]>> {
+        self.inner
+            .read_at((range.start + self.start)..(range.end + self.start))
+    }
+
+    fn first_window(&self) -> usize {
+        self.inner.first_window()
+    }
+}
+
+/// Returns `offset >= 1024` if `%PDF-` is absent from the first 1,024 bytes of
+/// `source` and appears later in the stream (`0` otherwise).
+fn find_extra_header(source: &dyn ByteSource) -> Result<usize> {
+    let len = source.len();
+    if len < 5 {
+        return Ok(0);
+    }
+    let first = match source.whole() {
+        Some(b) => std::borrow::Cow::Borrowed(&b[..len.min(1024)]),
+        None => source.read_at(0..len.min(1024)).map_err(Error::IO)?,
+    };
+    if first.windows(5).any(|w| w == b"%PDF-") {
+        return Ok(0);
+    }
+    if len <= 1024 {
+        return Ok(0);
+    }
+    if let Some(whole) = source.whole() {
+        return Ok(whole.windows(5).position(|w| w == b"%PDF-").unwrap_or(0));
+    }
+    let mut window = source.first_window().max(4096);
+    loop {
+        let end = window.min(len);
+        let chunk = source.read_at(0..end).map_err(Error::IO)?;
+        if let Some(pos) = chunk.windows(5).position(|w| w == b"%PDF-") {
+            return Ok(pos);
+        }
+        if end == len {
+            return Ok(0);
+        }
+        window = window.saturating_mul(2);
+    }
 }
 
 /// `ByteSource` wrapper used only when multiple `/Prev` sections point
@@ -749,7 +867,7 @@ fn check_xref_dict_caps(
     total_rows: &mut usize,
     max_entries: usize,
 ) -> Result<()> {
-    match dict.get(b"Index").map(PdfObj::value) {
+    match dict.get(b"Index").map(Object::value) {
         Some(Value::Array(arr)) => {
             for pair in arr.as_chunks::<2>().0 {
                 let Some(start) = pair[0].as_integer().and_then(|n| u64::try_from(n).ok()) else {
@@ -766,7 +884,7 @@ fn check_xref_dict_caps(
             }
         }
         _ => {
-            if let Some(size) = dict.get(b"Size").and_then(PdfObj::as_integer) {
+            if let Some(size) = dict.get(b"Size").and_then(Object::as_integer) {
                 let Ok(count) = u32::try_from(size) else {
                     return Err(Error::Limit(Limit::Objects));
                 };
@@ -806,8 +924,6 @@ fn skip_pdf_space_and_comments(
                     i += 1;
                 }
                 if i == win.len() && pos + i < len {
-                    // Comment spans past this window: advance into it; if
-                    // we land mid-comment without `%`, find newline first.
                     pos += i;
                     while pos < len {
                         let cwin = match source.whole() {
@@ -968,7 +1084,7 @@ fn precheck_xref_stream_caps(
             check_xref_dict_caps(dict, limits, &mut total_rows, max_entries)?;
             next = dict
                 .get(b"Prev")
-                .and_then(PdfObj::as_integer)
+                .and_then(Object::as_integer)
                 .and_then(|n| usize::try_from(n).ok());
             continue;
         }
@@ -991,7 +1107,19 @@ fn precheck_xref_stream_caps(
                 .and_then(|n| usize::try_from(n).ok())
             && let Some(stm_pos) = header_offset.checked_add(stm_off).filter(|&p| p < len)
         {
-            let obj_pos = skip_pdf_space_and_comments(source, stm_pos, len)?;
+            let mut obj_pos = skip_pdf_space_and_comments(source, stm_pos, len)?;
+            while obj_pos + 1 < len {
+                let zwin = slice(obj_pos..(obj_pos + 256).min(len))?;
+                let mut skip = 0;
+                while skip + 1 < zwin.len() && zwin[skip] == b'0' && zwin[skip + 1].is_ascii_digit()
+                {
+                    skip += 1;
+                }
+                obj_pos += skip;
+                if skip == 0 || skip + 1 < zwin.len() {
+                    break;
+                }
+            }
             if obj_pos < len {
                 let s_win = slice(obj_pos..(obj_pos + 4096).min(len))?;
                 let mut s_parser =
@@ -1015,7 +1143,7 @@ fn precheck_xref_stream_caps(
         }
         next = t_dict
             .get(b"Prev")
-            .and_then(PdfObj::as_integer)
+            .and_then(Object::as_integer)
             .and_then(|n| usize::try_from(n).ok());
     }
     Ok(blank_ranges)
@@ -1035,7 +1163,7 @@ pub(super) fn load_document(
     {
         return pdf.to_locked_document();
     }
-    pdf.authenticate(password)?;
+    pdf.authenticate()?;
     pdf.to_document()
 }
 
@@ -1049,9 +1177,8 @@ impl LazyPdf {
         out.xref_kind = self.facts.kind;
         out.xref_start = self.facts.start;
         out.trailer = self.trailer.clone();
-        for (oid, obj) in pdoc.objects() {
-            let id = (oid.number, oid.generation);
-            let converted = match obj.value() {
+        for (id, obj) in pdoc.objects() {
+            let loaded = match obj.value() {
                 Value::Stream(s) => {
                     let data = match &s.data {
                         Data::Bytes(b) => b.as_slice().to_vec(),
@@ -1063,72 +1190,17 @@ impl LazyPdf {
                             .into_owned(),
                         _ => Vec::new(),
                     };
-                    let mut dict = convert_dict(&s.dict);
+                    let mut dict = s.dict.clone();
                     dict.set("Length", data.len() as i64);
-                    Object::Stream(Stream {
-                        dict,
-                        content: data,
-                        allows_compression: true,
-                        start_position: s.data.at().map(|sp| sp.start()),
-                    })
+                    Object::from(Stream::new(dict, data))
                 }
-                _ => convert_value(obj),
+                _ => obj.clone(),
             };
-            out.max_id = out.max_id.max(id.0);
-            out.objects.insert(id, converted);
+            out.max_id = out.max_id.max(id.number);
+            out.objects.insert(id, loaded);
         }
         Ok(out)
     }
-}
-
-fn decode_lopdf_encryption(
-    doc: &lopdf::Document,
-    password: Option<&str>,
-) -> Result<EncryptionState> {
-    if doc.authenticate_password("").is_ok() {
-        return EncryptionState::decode(doc, b"");
-    }
-    if let Some(pw) = password {
-        for enc in Password(pw).encodings() {
-            if let Ok(state) = EncryptionState::decode(doc, enc.as_bytes()) {
-                return Ok(state);
-            }
-        }
-        if doc.authenticate_password(pw).is_ok() {
-            return EncryptionState::decode(doc, pw.as_bytes());
-        }
-    }
-    match EncryptionState::decode(doc, password.unwrap_or("").as_bytes()) {
-        Err(e @ Error::Decryption(DecryptionError::UndefinedCryptFilter(_))) => Err(e),
-        _ => Err(Error::InvalidPassword),
-    }
-}
-
-fn decode_lopdf_encryption_opened(
-    doc: &lopdf::Document,
-    password: Option<&str>,
-    by: Option<(usize, pdf_crypt::Encoding)>,
-) -> Result<EncryptionState> {
-    if let Ok(state) = EncryptionState::decode(doc, b"")
-        && (by.is_none() || by.is_some_and(|(idx, _)| idx == 0))
-    {
-        return Ok(state);
-    }
-    if let Some(pw) = password {
-        for enc in Password(pw).encodings() {
-            if let Ok(state) = EncryptionState::decode(doc, enc.as_bytes()) {
-                return Ok(state);
-            }
-        }
-        return EncryptionState::decode(doc, pw.as_bytes()).map_err(|e| match e {
-            Error::Decryption(DecryptionError::IncorrectPassword) => Error::InvalidPassword,
-            other => other,
-        });
-    }
-    EncryptionState::decode(doc, b"").map_err(|e| match e {
-        Error::Decryption(DecryptionError::IncorrectPassword) => Error::InvalidPassword,
-        other => other,
-    })
 }
 
 fn cacheable(err: &Error) -> Option<KeptError> {
@@ -1146,9 +1218,9 @@ fn cacheable(err: &Error) -> Option<KeptError> {
     })
 }
 
-fn convert_trailer(trailer: &pdf_structure::Trailer) -> Dictionary {
+fn clean_trailer(trailer: &pdf_structure::Trailer) -> Dict {
     let src = trailer.dict();
-    let mut dict = convert_dict(src);
+    let mut dict = src.clone();
     dict.remove(b"Prev");
     dict.remove(b"XRefStm");
     if trailer.stream.is_some() || src.has_type(b"XRef") {
@@ -1161,51 +1233,9 @@ fn convert_trailer(trailer: &pdf_structure::Trailer) -> Dictionary {
     dict
 }
 
-fn convert_dict(dict: &Dict) -> Dictionary {
-    let mut out = Dictionary::new();
-    for (key, value) in dict.iter() {
-        out.set(key.to_vec(), convert_value(value));
-    }
-    out
-}
-
-fn convert_value(obj: &PdfObj) -> Object {
-    match obj.value() {
-        Value::Null => Object::Null,
-        Value::Bool(b) => Object::Boolean(*b),
-        Value::Integer(i) => Object::Integer(*i),
-        Value::Real(r) => Object::Real(*r),
-        Value::Name(n) => Object::Name(n.as_bytes().to_vec()),
-        Value::String(s, form) => {
-            let bytes = match s {
-                Str::Bytes(b) | Str::Encrypted(b) => b.as_slice().to_vec(),
-            };
-            let fmt = match form {
-                Some(Form::Hex) => StringFormat::Hexadecimal,
-                _ => StringFormat::Literal,
-            };
-            Object::String(bytes, fmt)
-        }
-        Value::Array(items) => Object::Array(items.iter().map(convert_value).collect()),
-        Value::Dict(d) => Object::Dictionary(convert_dict(d)),
-        Value::Ref(id) => Object::Reference((id.number, id.generation)),
-        Value::Stream(s) => {
-            let data = s.data.bytes().map_or_else(Vec::new, <[u8]>::to_vec);
-            Object::Stream(Stream::new(convert_dict(&s.dict), data))
-        }
-    }
-}
-
-fn file_id(trailer: &Dictionary) -> Option<[Vec<u8>; 2]> {
-    match trailer
-        .get(b"ID")
-        .and_then(Object::as_array)
-        .ok()?
-        .as_slice()
-    {
-        [Object::String(first, _), Object::String(second, _)] => {
-            Some([first.clone(), second.clone()])
-        }
+fn file_id(trailer: &Dict) -> Option<[Vec<u8>; 2]> {
+    match trailer.get(b"ID").and_then(Object::as_array)? {
+        [first, second] => Some([first.as_bytes()?.to_vec(), second.as_bytes()?.to_vec()]),
         _ => None,
     }
 }

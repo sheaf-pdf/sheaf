@@ -46,16 +46,16 @@ impl Mark {
         at: Range<usize>,
     ) -> Mark {
         let dict: Option<&Dictionary> = props.as_ref().and_then(Props::dict);
-        let get = |key: &[u8]| dict.and_then(|d| d.get(key).ok());
+        let get = |key: &[u8]| dict.and_then(|d| d.get(key));
         let mcid = get(b"MCID")
-            .and_then(|n| n.as_i64().ok())
+            .and_then(Object::as_integer)
             .and_then(|n| u32::try_from(n).ok());
         let actual_text = get(b"ActualText")
-            .and_then(|t| t.as_str().ok())
+            .and_then(Object::as_bytes)
             .map(crate::file::text_string);
         let oc = named
             .filter(|_| tag == b"OC")
-            .and_then(|r| r.as_reference().ok());
+            .and_then(Object::as_reference);
         Mark {
             tag,
             props,

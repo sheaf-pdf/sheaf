@@ -263,14 +263,16 @@ mod tests {
         let mut pdf = Pdf::with_version("1.7");
         let root = pdf.new_object_id();
         let font = pdf.add_object(dictionary! {
-            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name("Helvetica"),
         });
         let piece = dictionary! { "ADBE_CompoundType" => dictionary! {
-            "DocSettings" => dictionary! {}, "Private" => "Header",
+            "DocSettings" => dictionary! {}, "Private" => Object::name("Header"),
         } };
         let form = pdf.add_object(Stream::new(
             dictionary! {
-                "Type" => "XObject", "Subtype" => "Form", "PieceInfo" => piece,
+                "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"), "PieceInfo" => piece,
                 "BBox" => vec![0.into(), 0.into(), 300.into(), 60.into()],
                 "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
             },
@@ -287,21 +289,23 @@ mod tests {
         let kids: Vec<Object> = (drawn.into_iter())
             .map(|content| {
                 let content = pdf.add_object(Stream::new(dictionary! {}, content.to_vec()));
-                let page =
-                    dictionary! { "Type" => "Page", "Parent" => root, "Contents" => content };
+                let page = dictionary! {
+                    "Type" => Object::name("Page"), "Parent" => root, "Contents" => content,
+                };
                 pdf.add_object(page).into()
             })
             .collect();
         let pages = dictionary! {
-            "Type" => "Pages", "Kids" => kids, "Count" => 3,
+            "Type" => Object::name("Pages"), "Kids" => kids, "Count" => 3,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "Resources" => dictionary! {
                 "Font" => dictionary! { "F1" => font },
                 "XObject" => dictionary! { "Fm0" => form },
             },
         };
-        pdf.objects.insert(root, Object::Dictionary(pages));
-        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
+        pdf.objects.insert(root, Object::from(pages));
+        let catalog =
+            pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => root });
         pdf.trailer.set("Root", catalog);
         let mut bytes = Vec::new();
         pdf.save_to(&mut bytes).unwrap();

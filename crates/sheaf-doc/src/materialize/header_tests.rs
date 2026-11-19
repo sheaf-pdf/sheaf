@@ -13,7 +13,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary, literal};
 use in_progress::NoProgress;
 use sheaf_edit::{BatesSpec, FontChoice, HeaderFooterSpec, LabelStyle, Op, PageSel};
 
@@ -68,7 +68,7 @@ fn numbers(doc: &Document) -> Vec<Option<u64>> {
 /// The `/SHEF_Block` dictionary of stream `id` of `pdf`, if it has one.
 fn marker(pdf: &Pdf, id: ObjectId) -> Option<Dictionary> {
     let (dict, _) = stream(pdf, id);
-    dict.get(b"SHEF_Block").ok()?.as_dict().ok().cloned()
+    dict.get(b"SHEF_Block")?.as_dict().cloned()
 }
 
 /// The blocks of generators on each page of `pdf`, in order.
@@ -87,7 +87,7 @@ fn fonts(pdf: &Pdf, base: &[u8]) -> usize {
     (pdf.objects.values())
         .filter(|o| {
             o.as_dict()
-                .is_ok_and(|d| d.get(b"BaseFont").and_then(Object::as_name).ok() == Some(base))
+                .is_some_and(|d| d.get(b"BaseFont").and_then(Object::as_name) == Some(base))
         })
         .count()
 }
@@ -119,14 +119,14 @@ fn block_shape(how: How) {
         let m = marker(&pdf, blocks[i][0]).unwrap();
         assert_eq!(m.get(b"K").unwrap().as_name().unwrap(), b"Gen");
         assert_eq!(
-            m.get(b"G").unwrap().as_str().unwrap(),
+            m.get(b"G").unwrap().as_bytes().unwrap(),
             id.to_string().as_bytes()
         );
         for digest in [&b"L"[..], b"R"] {
-            assert_eq!(m.get(digest).unwrap().as_str().unwrap().len(), 16);
+            assert_eq!(m.get(digest).unwrap().as_bytes().unwrap().len(), 16);
         }
         let n = format!("{}", 7 + i);
-        assert_eq!(m.get(b"N").unwrap().as_str().unwrap(), n.as_bytes());
+        assert_eq!(m.get(b"N").unwrap().as_bytes().unwrap(), n.as_bytes());
         let text = drawn(&pdf, page);
         let want = [format!("(X000{n}) Tj"), format!("(Page {} of 3) Tj", i + 1)];
         assert!(want.iter().all(|w| text.contains(w)), "{how:?}: {text}");
@@ -624,10 +624,10 @@ fn what_sheaf_wouldn_t_write_as_a_header_isn_t_found() {
             .and_then(Object::as_reference)
             .unwrap();
         let mut json: serde_json::Value =
-            serde_json::from_slice(pdf.get_object(at).unwrap().as_str().unwrap()).unwrap();
+            serde_json::from_slice(pdf.get_object(at).unwrap().as_bytes().unwrap()).unwrap();
         edit(&mut json);
         let json = serde_json::to_vec(&json).unwrap();
-        pdf.objects.insert(at, Object::string_literal(json));
+        pdf.objects.insert(at, literal(json));
         let mut out = Vec::new();
         pdf.save_to(&mut out).unwrap();
         let (_, again) = opened(&dir, "b.pdf", &out);

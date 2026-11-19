@@ -29,7 +29,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
-use crate::pdf::{Dictionary, Object};
+use crate::pdf::{Dictionary, Object, StreamExt, Value};
 use skrifa::MetadataProvider;
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::{DrawSettings, OutlinePen};
@@ -82,13 +82,13 @@ pub(super) fn read_file(
     };
     let file = [&b"FontFile"[..], b"FontFile2", b"FontFile3"]
         .into_iter()
-        .filter_map(|key| descriptor.get(key).ok()?.as_reference().ok())
+        .filter_map(|key| descriptor.get(key)?.as_reference())
         .find(|&id| is_stream(objects, id));
     let Some(id) = file else {
         return Ok(None);
     };
     let decoded = objects.read(id, |o| {
-        let stream = o.as_stream().ok()?;
+        let stream = o.as_stream()?;
         Some(stream.decompressed_content_with_limit(*budget))
     });
     match decoded {
@@ -1231,17 +1231,21 @@ impl<'a> EncodingObject<'a> {
         objects: &'a impl ReadObjects,
         font: &'a Dictionary,
     ) -> Option<EncodingObject<'a>> {
-        Some(match direct(objects, font.get(b"Encoding").ok()?)? {
-            Object::Name(n) => EncodingObject::Name(n),
-            Object::Dictionary(d) => {
-                let base = match d.get(b"BaseEncoding").ok().and_then(|b| direct(objects, b)) {
-                    Some(Object::Name(n) | Object::String(n, _)) => n.as_slice(),
+        Some(match direct(objects, font.get(b"Encoding")?)?.value() {
+            Value::Name(n) => EncodingObject::Name(n.as_bytes()),
+            Value::Dict(d) => {
+                let base = match d
+                    .get(b"BaseEncoding")
+                    .and_then(|b| direct(objects, b))
+                    .map(Object::value)
+                {
+                    Some(Value::Name(n)) => n.as_bytes(),
+                    Some(Value::String(n, _)) => n.as_bytes().unwrap_or(b""),
                     _ => b"",
                 };
                 let differences = d
                     .get(b"Differences")
-                    .ok()
-                    .and_then(|o| direct(objects, o)?.as_array().ok());
+                    .and_then(|o| direct(objects, o)?.as_array());
                 EncodingObject::Dictionary {
                     base,
                     differences: differences
@@ -1439,15 +1443,15 @@ fn pdfium_differences<'a>(
     let mut names = [None; 256];
     let mut code: i64 = 0;
     for item in items.iter().filter_map(|i| direct(objects, i)) {
-        match item {
-            Object::Name(n) => {
+        match item.value() {
+            Value::Name(n) => {
                 if let Some(slot) = usize::try_from(code).ok().and_then(|c| names.get_mut(c)) {
-                    *slot = Some(n.as_slice());
+                    *slot = Some(n.as_bytes());
                 }
                 code = code.saturating_add(1);
             }
-            Object::Integer(n) => code = *n,
-            Object::Real(n) => code = n.trunc() as i64,
+            Value::Integer(n) => code = *n,
+            Value::Real(n) => code = n.trunc() as i64,
             _ => code = 0,
         }
     }

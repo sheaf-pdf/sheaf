@@ -15,7 +15,9 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
+use crate::pdf::{
+    Dictionary, Document as Pdf, Object, ObjectId, Stream, Value, dictionary, literal,
+};
 use in_progress::NoProgress;
 use sheaf_edit::{Op, Z};
 
@@ -75,17 +77,21 @@ pub(crate) const UNREAD: &[u8] = b"0 0 1 rg 10 10 50 50 re f EMC";
 pub(crate) fn acrobat_file(streams: &[&[&[u8]]]) -> Vec<u8> {
     file_of(streams, |pdf, font| {
         let piece = dictionary! { "ADBE_CompoundType" => dictionary! {
-            "DocSettings" => dictionary! {}, "Private" => "Watermark",
+            "DocSettings" => dictionary! {}, "Private" => Object::name("Watermark"),
         } };
         let form = pdf.add_object(Stream::new(
             dictionary! {
-                "Type" => "XObject", "Subtype" => "Form", "PieceInfo" => piece,
+                "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"), "PieceInfo" => piece,
                 "BBox" => vec![0.into(), 0.into(), 300.into(), 60.into()],
                 "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
             },
             b"BT /F1 40 Tf 2 10 Td (ACROBAT) Tj ET".to_vec(),
         ));
-        let gs = pdf.add_object(dictionary! { "Type" => "ExtGState", "ca" => 0.5, "CA" => 0.5 });
+        let gs = pdf.add_object(dictionary! {
+            "Type" => Object::name("ExtGState"),
+            "ca" => 0.5,
+            "CA" => 0.5,
+        });
         dictionary! {
             "Font" => dictionary! { "F1" => font },
             "XObject" => dictionary! { "Fm0" => form },
@@ -104,7 +110,9 @@ fn file_of(
     let mut pdf = Pdf::with_version("1.7");
     let root = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     });
     let resources = resources(&mut pdf, font);
     let mut made: Vec<(&[&[u8]], Object)> = Vec::new();
@@ -119,24 +127,29 @@ fn file_of(
                             .into()
                     })
                     .collect();
-                let entries = Object::Array(entries);
+                let entries = Object::from(entries);
                 made.push((page, entries.clone()));
                 entries
             }
         };
-        let page = dictionary! { "Type" => "Page", "Parent" => root, "Contents" => entries };
-        kids.push(Object::Reference(pdf.add_object(page)));
+        let page = dictionary! {
+            "Type" => Object::name("Page"),
+            "Parent" => root,
+            "Contents" => entries,
+        };
+        kids.push(Object::from(pdf.add_object(page)));
     }
     let resources = pdf.add_object(resources);
     let count = kids.len() as i64;
     pdf.objects.insert(
         root,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => kids, "Count" => count, "Resources" => resources,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => kids, "Count" => count, "Resources" => resources,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => root });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
@@ -154,8 +167,8 @@ fn names(pdf: &Pdf, page: ObjectId) -> Vec<(String, Vec<String>)> {
     let mut at = pdf.get_dictionary(page).unwrap();
     let resources = loop {
         match at.get(b"Resources") {
-            Ok(r) => break pdf.dereference(r).unwrap().1.as_dict().unwrap().clone(),
-            Err(_) => {
+            Some(r) => break pdf.dereference(r).unwrap().1.as_dict().unwrap().clone(),
+            None => {
                 at = pdf
                     .get_dictionary(at.get(b"Parent").unwrap().as_reference().unwrap())
                     .unwrap()
@@ -165,7 +178,10 @@ fn names(pdf: &Pdf, page: ObjectId) -> Vec<(String, Vec<String>)> {
     let name = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
     (resources.iter())
         .filter_map(|(kind, category)| {
-            let category: &Dictionary = pdf.dereference(category).ok()?.1.as_dict().ok()?;
+            let category: &Dictionary = match pdf.dereference(category).ok()?.1.value() {
+                Value::Dict(d) => d,
+                _ => return None,
+            };
             Some((name(kind), category.iter().map(|(n, _)| name(n)).collect()))
         })
         .collect()
@@ -180,7 +196,7 @@ fn bound(pdf: &Pdf, page: ObjectId, kind: &str) -> Vec<String> {
 
 /// Whether `pdf` holds a form Acrobat drew a pagination artifact in.
 fn holds_acrobat_s(pdf: &Pdf) -> bool {
-    (pdf.objects.values()).any(|o| matches!(o, Object::Stream(s) if s.dict.has(b"PieceInfo")))
+    (pdf.objects.values()).any(|o| o.as_stream().is_some_and(|s| s.dict.has(b"PieceInfo")))
 }
 
 /// Acrobat's watermark on a page, under one of the document's: replaced,
@@ -596,8 +612,8 @@ fn what_a_named_list_cant_lose_stays_and_is_counted() {
     let named: &[u8] = b"/Artifact /P0 BDC q BT /F1 60 Tf 100 300 Td (NAMED) Tj ET Q EMC";
     let file = file_of(&[&[BODY, named]], |_, font| {
         let list = dictionary! {
-            "Type" => "Pagination", "Subtype" => "Watermark",
-            "SHEF_Gen" => Object::string_literal("g1a"),
+            "Type" => Object::name("Pagination"), "Subtype" => Object::name("Watermark"),
+            "SHEF_Gen" => literal("g1a"),
         };
         dictionary! {
             "Font" => dictionary! { "F1" => font },

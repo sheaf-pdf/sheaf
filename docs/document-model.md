@@ -12,10 +12,11 @@ Three things want to look at "the document" and they disagree about what it is:
 - **PDFium** (rendering, text, search) sees a *file*: bytes it parsed once.
   Reparsing is cheap for small files and ~100 ms for a 7,000-page one, so we
   don't want every edit to reserialize.
-- **lopdf** sees an *object graph*: dictionaries and streams with
+- **The PDF object layer (`sheaf_doc::pdf`, over `pdf-objects` and `pdf-structure`)** sees an *object graph*: dictionaries and streams with
   numbers. It's what a file is read as (lazily, a source at a time: M10.5
-  slice 3) and what sheaf's own serializer writes (slice 7; lopdf's
-  writer writes nothing outside tests from slice 20), but it is a
+  slice 3, moved from `lopdf` onto `pdf-structure` and `pdf-objects` in M18
+  slices 8–13) and what sheaf's serializer writes (slice 7; `pdf-structure`
+  and `pdf-objects` from M18 slice 12), but it is a
   terrible structure to edit interactively: nothing has stable identity,
   and inverse operations are hard to get right.
 - **The user** sees a *sequence of pages* with bookmarks and markup, and
@@ -35,7 +36,8 @@ Blob                 { id: BlobId { hash, len },   // compared byte for byte too
                        bytes: Arc<[u8]>,           // shared with PDFium
                        kind: Pdf { password, origin: File(path) | Memory(Library | Recovered) } }
 
-Src = Arc<Source>    a Blob parsed lazily (lopdf's LazyPdf), under one Limits,
+Src = Arc<Source>    a Blob parsed lazily (LazyPdf over pdf-structure), under
+                     one Limits,
                      with the facts read from it once: the page table (each
                      page's Geom, inherited /Resources, /Contents, /Annots),
                      XrefFacts, conformance. Immutable.
@@ -161,7 +163,7 @@ Snapshot             { version: VersionId, state: DocState, primary: Src, name,
                      file's record.
 ```
 
-**Editing never touches a source or a lopdf object.** An edit is an op
+**Editing never touches a source or a PDF object.** An edit is an op
 lowered in a transaction (M10.5 slice 11; see Ops and transactions): a
 pure function of the state, the sources' facts and the host's attributes
 that builds a new snapshot sharing everything it didn't change. Reordering 7,000 pages puts one new order, an
@@ -207,7 +209,7 @@ blob, and a source parses the blob in place:
   holds, as pages naming one `/Annots` array share it. The table ends at
   the root's `/Count` when PDFium counts by it, since PDFium loads no
   page past it.
-- **One `Limits`** caps every reader of a source: lopdf's (256 MiB a
+- **One `Limits`** caps every reader of a source: `LazyPdf`'s (256 MiB a
   stream decompressed, 1,024 sections, 8,388,607 objects and twice as
   many cross-reference stream entries, references 64 deep), the page
   tree's (1,024 levels, fewer than 0xFFFFF pages), the form reader's and,
@@ -1974,34 +1976,27 @@ recovery sidecars reach their bytes through `serialize/` (§11.7 of
   its key, and gets a second. An encrypted file without one (only
   AES-256 can open without it) gets the hash for both; a plain one
   without one gets none.
-- **Encryption** (`crypt`, bug 4 and proposal 23): an encrypted source
-  keeps how it's encrypted (`Source::crypt()`: the decryption its
-  password opened, the `/Encrypt` dictionary as stored, its number, and
-  `/ID[0]`). A save encrypts each object it writes on its own, under the
-  number it's written as, or an object stream's members with it (the
-  container encrypted once, as a stream, under its own number, so no
-  member's string is encrypted on its own), through vendored lopdf's
-  `encrypt_object_with` (`vendor/lopdf/SHEAF.md`): strings in stream
-  dictionaries too, an embedded file by `/EFF`'s filter, and the
-  `/Encrypt` dictionary, cross-reference streams, metadata when
-  `/EncryptMetadata` is false and a signature's `/Contents` left as they
-  are. An AES IV is the first 16 bytes of HMAC-SHA256, under the file
-  key, of the object's `ObjKey` (`ObjKey::bytes`, see Saves are outputs)
-  and what it encrypts (`Crypt::encrypt_as`, slice 9), so a save is
-  deterministic, an object keeps its IV whatever number it's written at,
-  and no IV serves two plaintexts, an update's section's too
-  (`indirect_as`, slice 10; the number-keyed `serialize::indirect` and
-  `Crypt::encrypt` went). An encrypted string keeps its format, a
-  literal escaped as any is, so it takes about its own length, not twice
-  it. The `/Encrypt` dictionary, its `/P` with it, is written as stored
+- **Encryption** (`crypt`, bug 4 and proposal 23; M18 slice 12): an encrypted
+  source keeps how it's encrypted (`Source::crypt()`, wrapping
+  `pdf_structure::write::Encryptor`: its `pdf-crypt` handler with zeroized
+  keys, the `/Encrypt` dictionary as stored, its number, and `/ID[0]`). A save
+  encrypts each object it writes on its own under the number it's written as,
+  or an object stream's members with it (the container encrypted once, as a
+  stream, under its own number), through `pdf_objects::serialize::indirect_with`
+  and `pdf_structure::write::Encrypting`: strings in stream dictionaries too,
+  an embedded file by `/EFF`'s filter, and the `/Encrypt` dictionary,
+  cross-reference streams, metadata when `/EncryptMetadata` is false and a
+  signature's `/Contents` left as they are. Per ISO 32000-2 §7.6.3.2 &
+  §7.6.3.3, production AES writes draw fresh 16-byte OS CSPRNG IVs
+  (`pdf_crypt::Ivs::new()`), so no IV serves two plaintexts across saves
+  (tests that pin exact bytes use `pdf-crypt`'s `insecure-test-writer`
+  feature, which CI bars from shipped builds). An encrypted string keeps its
+  format, a literal escaped as any is, so it takes about its own length, not
+  twice it. The `/Encrypt` dictionary, its `/P` with it, is written as stored
   and `/ID[0]` kept, so the file opens with the same passwords and
   permissions: a Rewrite with stable numbers keeps the dictionary at its
-  number, an export numbered from 1 writes it as a new object, and an
-  update repeats the base's reference. lopdf opens an encrypted file
-  only when its trailer refers to the dictionary, never when it's
-  direct. lopdf's eager reader still takes `/Encrypt` out of the
-  document it loads, so the writers take it from the source; sheaf's
-  loads no longer strip it.
+  number, an export numbered from 1 writes it as a new object, and an update
+  repeats the base's reference.
 - **Which outputs stay encrypted** (proposal 10): saves, Save As,
   extract and split, Clean Copy, Export Flattened and Combine keep the
   primary's encryption; print, page images and the comment summary are
@@ -5593,9 +5588,9 @@ into the pages:
   a library stamp never saved pastes into another window, which saves it.
 - **Lint bans** (the plan's Lint ledgers). sheaf-doc's, sheaf-ops',
   sheaf-render's and sheaf-app's `clippy.toml` disallow
-  `lopdf::content::Content::{decode, encode}`,
-  `lopdf::Document::{get_page_content, change_page_content,
-  add_page_contents}` and `std::env::temp_dir`, each with its reason.
+  `sheaf_doc::pdf::content::Content::{decode, encode}`,
+  `sheaf_doc::pdf::Document::get_page_content` and `std::env::temp_dir`,
+  each with its reason (updated from `lopdf::*` in M18 slice 13).
   Test code is allowed them (`#![cfg_attr(test, allow(
   clippy::disallowed_methods))]` at each crate root); so are
   `forms/fixture.rs`, built for other crates' tests under the `fixtures`
@@ -6065,9 +6060,9 @@ and 352 pages/s, the scanned's one-mark Append 30.0 ms, and the Rewrite
   content stream becomes another per-`PageId` persistent map entry and
   rendering of that page goes through a scratch PDF; the history model is
   unchanged.
-- Making lopdf's object graph the live model. It stays what sources are
-  read through and the objects sheaf's serializer writes; a Rewrite's
-  graph is the one document still loaded whole (backlog F15).
+- Making the PDF object graph (`sheaf_doc::pdf`) the live model. It stays
+  what sources are read through and the objects sheaf's serializer writes; a
+  Rewrite's graph is the one document still loaded whole (backlog F15).
 
 ## Decisions (2026-10-11)
 

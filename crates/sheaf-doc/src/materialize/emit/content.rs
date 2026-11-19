@@ -116,7 +116,9 @@ use std::borrow::Cow;
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::pdf::{Dictionary, Object, ObjectId, Stream, StringFormat, dictionary};
+use crate::pdf::{
+    Data, Dictionary, Object, ObjectId, Stream, StreamExt, Value, dictionary, literal,
+};
 
 use super::{Cx, Deferred, PdfVersion};
 use crate::content::sink::{self, Sink as _};
@@ -214,11 +216,11 @@ pub(crate) fn page(
         .collect();
     stack(cx, (id, pos), def, geom, (&layers, draws), page);
     // The page's own resources, when it still names them.
-    if let Ok(&Object::Reference(r)) = page.get(b"Resources")
+    if let Some(r) = page.get(b"Resources").and_then(Object::as_reference)
         && let Some(key @ ObjKey::PageRes { .. }) = cx.syms.key(r)
     {
         cx.push_once(key, |cx| {
-            Object::Dictionary(cx.page_res.get(&key).cloned().unwrap_or_default())
+            Object::from(cx.page_res.get(&key).cloned().unwrap_or_default())
         });
     }
 }
@@ -579,7 +581,7 @@ fn wrapped(
     }
     contents.extend(over);
     contents.extend(flats);
-    page.set("Contents", Object::Array(contents));
+    page.set("Contents", Object::from(contents));
     page_res(
         cx,
         (src, index),
@@ -830,11 +832,11 @@ fn rebuilt(
             Cow::Owned(bytes) => Some(bytes.clone()),
             Cow::Borrowed(_) => None,
         });
-        let marked = || (dicts[i].iter()).any(|(k, _)| private::STREAM_KEYS.contains(&&k[..]));
+        let marked = || (dicts[i].iter()).any(|(k, _)| private::STREAM_KEYS.contains(&k));
         let copy = changed.or_else(|| (unmarked && marked()).then(|| concat.stream(i).to_vec()));
         match copy {
             Some(bytes) => filtered_copy(cx, src.id(), ids[i], bytes),
-            None => cx.sym(&Object::Reference(ids[i]), &scope),
+            None => cx.sym(&Object::from(ids[i]), &scope),
         }
     };
     let mut base = Vec::new();
@@ -898,7 +900,7 @@ fn rebuilt(
             contents
         }
     };
-    page.set("Contents", Object::Array(contents));
+    page.set("Contents", Object::from(contents));
     // A name dropped that a block drawn anew names the same resource by
     // stays as the page's resources bind it.
     let (mut dropped, mut added) = (kept.dropped, ResourceNeeds::default());
@@ -956,25 +958,25 @@ fn marked_ranges(filters: &[Filter], blocks: Option<&PageBlocks>) -> Vec<SpanAcr
 
 /// What `resources` binds `name` to in `kind`, as written.
 fn binding(cx: &mut Cx, resources: &Dictionary, kind: ResKind, name: &[u8]) -> Option<Object> {
-    let category = match resources.get(kind.key()).ok()? {
-        Object::Reference(r) => cx.dict(*r)?,
-        Object::Dictionary(d) => d.clone(),
+    let category = match resources.get(kind.key())?.value() {
+        Value::Ref(r) => cx.dict(*r)?,
+        Value::Dict(d) => d.clone(),
         _ => return None,
     };
-    category.get(name).ok().cloned()
+    category.get(name).cloned()
 }
 
 /// Whether `bound`, what a page's resources bind a name to, is `res`: the
 /// object it's written as, or one whose content is `res`'s one object.
 fn alike(cx: &Cx, bound: &Object, res: &Res) -> bool {
-    let Object::Reference(r) = bound else {
+    let Some(r) = bound.as_reference() else {
         return ResId::of(std::slice::from_ref(bound)) == res.id;
     };
     match &res.body {
-        ResBody::Written(written) => written == r,
+        ResBody::Written(written) => *written == r,
         ResBody::Objects(objects) => {
             objects.len() == 1
-                && (cx.read(*r))
+                && (cx.read(r))
                     .is_some_and(|(o, ..)| ResId::of(std::slice::from_ref(&*o)) == res.id)
         }
     }
@@ -1014,15 +1016,15 @@ fn drawn(
     reserved.take(&drawn.res);
     add_needs(needs, drawn.res.clone());
     let mut marker = dictionary! {
-        "K" => "Gen",
-        "G" => Object::String(g.id.to_string().into_bytes(), StringFormat::Literal),
+        "K" => Object::name("Gen"),
+        "G" => literal(g.id.to_string()),
         "L" => digest_string(drawn.layout_digest),
         "R" => digest_string(recipe),
     };
     // Its Bates number, in decimal, which an open reads the numbers back
     // from.
     if let Some(n) = ctx.bates {
-        marker.set("N", Object::string_literal(n.to_string()));
+        marker.set("N", literal(n.to_string()));
     }
     let (block, key) = block(cx, marker, drawn.ops.to_vec());
     let layout = drawn.layout_digest;
@@ -1116,7 +1118,7 @@ fn reserved(cx: &mut Cx, src: &Src, index: u32, page: &Dictionary, dropped: &Nam
     if let Some(reserved) = cx.reserved_of.get(&key) {
         return reserved.clone();
     }
-    let mut reserved = cx.reserved(page.get(b"Resources").ok());
+    let mut reserved = cx.reserved(page.get(b"Resources"));
     for (kind, name) in dropped.iter() {
         reserved.forget(kind, name);
     }
@@ -1168,9 +1170,9 @@ fn page_res(
             if names.peek().is_none() && !lists {
                 continue;
             }
-            let mut category = match resources.get(kind.key()) {
-                Ok(Object::Reference(r)) => cx.dict(*r).unwrap_or_default(),
-                Ok(Object::Dictionary(d)) => d.clone(),
+            let mut category = match resources.get(kind.key()).map(Object::value) {
+                Some(Value::Ref(r)) => cx.dict(*r).unwrap_or_default(),
+                Some(Value::Dict(d)) => d.clone(),
                 _ => continue,
             };
             for name in names {
@@ -1199,10 +1201,10 @@ fn filtered_copy(cx: &mut Cx, blob: BlobId, obj: ObjectId, bytes: Vec<u8>) -> Ob
     };
     let id = cx.push_once(key, |_| {
         let mut stream = Stream::new(Dictionary::new(), bytes);
-        let _ = stream.compress();
-        Object::Stream(stream)
+        stream.compress();
+        Object::from(stream)
     });
-    Object::Reference(id)
+    Object::from(id)
 }
 
 /// `n`, as many `q`s or `Q`s as a stream holds: a page's content counts
@@ -1219,7 +1221,8 @@ fn resources_identity(blob: BlobId, res: Option<&Object>) -> u128 {
     bytes.extend(blob.len.to_be_bytes());
     match res {
         None => bytes.push(0),
-        Some(Object::Reference((number, generation))) => {
+        Some(r) if r.as_reference().is_some() => {
+            let ObjectId { number, generation } = r.as_reference().unwrap();
             bytes.push(1);
             bytes.extend(number.to_be_bytes());
             bytes.extend(generation.to_be_bytes());
@@ -1236,17 +1239,17 @@ fn resources_identity(blob: BlobId, res: Option<&Object>) -> u128 {
 /// written without [`private::LIST_KEYS`]: a list that has them, written
 /// there in place of the one it named.
 fn strip_lists(cx: &mut Cx, category: &mut Dictionary) {
-    let names: Vec<Vec<u8>> = category.iter().map(|(name, _)| name.clone()).collect();
+    let names: Vec<Vec<u8>> = category.iter().map(|(name, _)| name.to_vec()).collect();
     for name in names {
-        let list = match category.get(&name) {
-            Ok(Object::Dictionary(d)) => Some(d.clone()),
-            Ok(&Object::Reference(r)) => cx.dict(r),
+        let list = match category.get(&name).map(Object::value) {
+            Some(Value::Dict(d)) => Some(d.clone()),
+            Some(&Value::Ref(r)) => cx.dict(r),
             _ => None,
         };
         let Some(mut list) = list else {
             continue;
         };
-        if !(list.iter()).any(|(k, _)| private::LIST_KEYS.contains(&&k[..])) {
+        if !(list.iter()).any(|(k, _)| private::LIST_KEYS.contains(&k)) {
             continue;
         }
         for key in private::LIST_KEYS {
@@ -1307,16 +1310,16 @@ fn marked(cx: &Cx, marker: Dictionary) -> Dictionary {
 /// ([`marked`]), as a stream of its own, once a file: where it is, and its
 /// key.
 fn block(cx: &mut Cx, marker: Dictionary, ops: Vec<u8>) -> (Object, ObjKey) {
-    let stream = Object::Stream(Stream::new(marked(cx, marker), ops));
+    let stream = Object::from(Stream::new(marked(cx, marker), ops));
     let key = ObjKey::Block(ResId::of(std::slice::from_ref(&stream)).0);
     let id = cx.push_once(key, |_| {
         let mut stream = stream;
-        if let Object::Stream(s) = &mut stream {
-            let _ = s.compress();
+        if let Some(s) = stream.as_stream_mut() {
+            s.compress();
         }
         stream
     });
-    (Object::Reference(id), key)
+    (Object::from(id), key)
 }
 
 /// Layer `l` drawn on a page, its names clear of `reserved` and kept
@@ -1332,17 +1335,18 @@ fn layer(cx: &mut Cx, l: &Layer, reserved: &mut Reserved, needs: &mut ResourceNe
 /// ([`marked`]), as a stream of its own, once a file, its data deflated as
 /// it's written ([`Deferred`]): where it is. Keyed as [`block`] keys it.
 fn deferred_block(cx: &mut Cx, marker: Dictionary, ops: Vec<u8>) -> Object {
-    let stream = Object::Stream(Stream::new(marked(cx, marker), ops));
+    let stream = Object::from(Stream::new(marked(cx, marker), ops));
     let key = ObjKey::Block(ResId::of(std::slice::from_ref(&stream)).0);
-    let Object::Stream(Stream {
-        mut dict, content, ..
-    }) = stream
-    else {
+    let Value::Stream(stream) = stream.into_value() else {
         unreachable!("made a stream");
+    };
+    let Stream { mut dict, data, .. } = *stream;
+    let Data::Bytes(content) = data else {
+        unreachable!("made a stream with bytes");
     };
     let id = cx.push_deferred(key, |_| {
         dict.remove(b"Length");
-        dict.set("Filter", "FlateDecode");
+        dict.set("Filter", Object::name("FlateDecode"));
         let ops: Arc<[u8]> = content.into();
         let data = move || super::deflated(&ops);
         Deferred {
@@ -1350,7 +1354,7 @@ fn deferred_block(cx: &mut Cx, marker: Dictionary, ops: Vec<u8>) -> Object {
             data: Arc::new(data),
         }
     });
-    Object::Reference(id)
+    Object::from(id)
 }
 
 /// Recognized text `text`, its layer `id`'s, drawn on a page, its names
@@ -1366,7 +1370,7 @@ fn recognized(
     let (ops, res) = crate::text_layer::block(text, id, reserved, cx.private);
     reserved.take(&res);
     add_needs(needs, res);
-    let marker = dictionary! { "K" => "Ocr", "B" => Object::string_literal(id.to_string()) };
+    let marker = dictionary! { "K" => Object::name("Ocr"), "B" => literal(id.to_string()) };
     block(cx, marker, ops).0
 }
 
@@ -1391,7 +1395,7 @@ fn flattened(
         // A source's is the copy of it the page's content reaches, its box
         // unread: the placement's matrix was worked out from it.
         let at = match &p.form {
-            FormRef::Base(at) => placed_form(cx, at).as_reference().ok(),
+            FormRef::Base(at) => placed_form(cx, at).as_reference(),
             form => cx.form_of(form, said).map(|f| f.id),
         };
         let Some(at) = at else {
@@ -1417,13 +1421,13 @@ fn flattened(
     let (ops, res) = w.finish(reserved);
     reserved.take(&res);
     add_needs(needs, res);
-    let marker = dictionary! { "K" => "Flat", "B" => Object::string_literal(id.to_string()) };
+    let marker = dictionary! { "K" => Object::name("Flat"), "B" => literal(id.to_string()) };
     deferred_block(cx, marker, ops)
 }
 
 /// A digest as a block writes it: a string of its 16 bytes, big-endian.
 fn digest_string(digest: u128) -> Object {
-    Object::String(digest.to_be_bytes().to_vec(), StringFormat::Hexadecimal)
+    Object::hex(digest.to_be_bytes())
 }
 
 /// One of the shared streams that isolate a page's content, marked
@@ -1434,12 +1438,12 @@ fn isolation(cx: &mut Cx, shared: Shared) -> Object {
             Shared::QOpen(n) => (b"q\n", n),
             Shared::QClose(n) => (b"Q\n", n),
         };
-        let marker = marked(cx, dictionary! { "K" => "Isolate" });
+        let marker = marked(cx, dictionary! { "K" => Object::name("Isolate") });
         let mut stream = Stream::new(marker, op.repeat(n as usize));
-        let _ = stream.compress();
-        Object::Stream(stream)
+        stream.compress();
+        Object::from(stream)
     });
-    Object::Reference(id)
+    Object::from(id)
 }
 
 /// What watermark `content` draws that isn't its own, as the file being
@@ -1568,7 +1572,7 @@ fn image_of(bytes: &[u8]) -> anyhow::Result<Art> {
     .ok_or_else(|| anyhow::anyhow!("the file holds no image"))?;
     let stream = crate::images::image_stream(&image)?;
     Ok(Art::Image {
-        res: Res::of([Object::Stream(stream)]),
+        res: Res::of([Object::from(stream)]),
         width: image.width,
         height: image.height,
         turns: (image.rotate % 4) as u8,
@@ -1588,5 +1592,5 @@ fn placed_form(cx: &mut Cx, at: &ObjRef) -> Object {
         src: &at.src,
         copy: 0,
     };
-    cx.sym(&Object::Reference(at.id), &scope)
+    cx.sym(&Object::from(at.id), &scope)
 }

@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use std::ops::Range;
 use std::sync::Arc;
 
-use crate::pdf::{Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
+use crate::pdf::{Document as Pdf, LazyPdf, Object, ObjectId, Stream, Value, dictionary, literal};
 use proptest::prelude::*;
 
 use super::*;
@@ -130,36 +130,34 @@ fn names_decode_their_escapes() {
 
 #[test]
 fn operands_read_as_objects() {
-    use crate::pdf::StringFormat::{Hexadecimal, Literal};
     let o = |s: &[u8]| object(s, 8);
-    assert_eq!(o(b"12"), Some(Object::Integer(12)));
-    assert_eq!(o(b"-.5"), Some(Object::Real(-0.5)));
-    assert_eq!(o(b"72."), Some(Object::Real(72.0)));
-    assert_eq!(o(b"true"), Some(Object::Boolean(true)));
-    assert_eq!(o(b"null"), Some(Object::Null));
-    assert_eq!(o(b"/A#20B"), Some(Object::Name(b"A B".to_vec())));
+    assert_eq!(o(b"12"), Some(Object::from(12)));
+    assert_eq!(o(b"-.5"), Some(Object::from(-0.5)));
+    assert_eq!(o(b"72."), Some(Object::from(72.0)));
+    assert_eq!(o(b"true"), Some(Object::from(true)));
+    assert_eq!(o(b"null"), Some(Object::null()));
+    assert_eq!(o(b"/A#20B"), Some(Object::name(b"A B")));
     // Escapes, octal codes, a line continued, and an end of line.
     assert_eq!(
         o(b"(a\\(b\\)\\101\\0533\\\nc\r\nd)"),
-        Some(Object::String(b"a(b)A+3c\nd".to_vec(), Literal))
+        Some(literal(&b"a(b)A+3c\nd"[..]))
     );
-    assert_eq!(
-        o(b"<48 65 6>"),
-        Some(Object::String(b"He`".to_vec(), Hexadecimal))
-    );
+    assert_eq!(o(b"<48 65 6>"), Some(Object::hex(b"He`".to_vec())));
     assert_eq!(
         o(b"[1 /N (s) [2]]"),
-        Some(Object::Array(vec![
+        Some(Object::from(vec![
             1.into(),
-            Object::Name(b"N".to_vec()),
-            Object::string_literal("s"),
-            Object::Array(vec![2.into()]),
+            Object::name(b"N"),
+            literal("s"),
+            Object::from(vec![2.into()]),
         ]))
     );
     // A key that isn't a name is passed over.
     assert_eq!(
         o(b"<</A 1 2 /B /C>>"),
-        Some(Object::Dictionary(dictionary! { "A" => 1, "B" => "C" }))
+        Some(Object::from(
+            dictionary! { "A" => 1, "B" => Object::name("C") }
+        ))
     );
     for not in [&b"--5"[..], b")", b"Tj", b"1.2.3"] {
         assert_eq!(o(not), None, "{}", String::from_utf8_lossy(not));
@@ -168,9 +166,9 @@ fn operands_read_as_objects() {
     // doesn't end, is no object.
     assert_eq!(
         o(b"[1 >> <</A 2 ]>>]"),
-        Some(Object::Array(vec![
+        Some(Object::from(vec![
             1.into(),
-            Object::Dictionary(dictionary! { "A" => 2 }),
+            Object::from(dictionary! { "A" => 2 }),
         ]))
     );
     assert_eq!(object(b"[[[1]]]", 2), None);
@@ -191,12 +189,12 @@ fn deep_operands_read_in_one_pass() {
     let mut o = object(&s, Limits::DEFAULT.content.depth).unwrap();
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
     for _ in 0..500 {
-        let Object::Array(mut inner) = o else {
+        let Value::Array(mut inner) = o.into_value() else {
             panic!("an array")
         };
         o = inner.pop().unwrap();
     }
-    assert!(matches!(o, Object::String(bytes, _) if bytes.len() == 4 << 20));
+    assert!(matches!(o.as_bytes(), Some(bytes) if bytes.len() == 4 << 20));
 }
 
 /// `s`'s one inline image: where the token is, and its data.
@@ -474,25 +472,32 @@ fn page_with(contents: impl FnOnce(&mut Pdf) -> Object) -> (Pdf, ObjectId) {
     let contents = contents(&mut pdf);
     let pages = pdf.new_object_id();
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page", "Parent" => pages, "Contents" => contents,
+        "Type" => Object::name("Page"),
+        "Parent" => pages,
+        "Contents" => contents,
         "MediaBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
     });
     pdf.objects.insert(
         pages,
-        dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        dictionary! {
+            "Type" => Object::name("Pages"),
+            "Kids" => vec![page.into()],
+            "Count" => 1,
+        }
+        .into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    let catalog = pdf.add_object(dictionary! {
+        "Type" => Object::name("Catalog"),
+        "Pages" => pages,
+    });
     pdf.trailer.set("Root", catalog);
     (pdf, page)
 }
 
 fn flate(data: &[u8]) -> Stream {
-    use std::io::Write as _;
-    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-    z.write_all(data).unwrap();
     Stream::new(
-        dictionary! { "Filter" => "FlateDecode" },
-        z.finish().unwrap(),
+        dictionary! { "Filter" => Object::name("FlateDecode") },
+        crate::pdf::deflate(data),
     )
 }
 
@@ -513,14 +518,17 @@ fn a_pages_streams_read_as_one() {
         let first = pdf.add_object(flate(b"q 1 0 0 rg"));
         let second = pdf.add_object(Stream::new(dictionary! {}, b"0 0 9 9 re f Q".to_vec()));
         // A missing object draws nothing.
-        vec![first.into(), (90, 0).into(), second.into()].into()
+        vec![first.into(), ObjectId::new(90, 0).into(), second.into()].into()
     });
     let content = read(&pdf, &page_dict(&pdf, page)).unwrap();
     assert_eq!(content.concat().bytes(), b"q 1 0 0 rg 0 0 9 9 re f Q");
-    assert_eq!(content.ids(), &[(1, 0), (2, 0)]);
+    assert_eq!(content.ids(), &[ObjectId::new(1, 0), ObjectId::new(2, 0)]);
 
     // Through a reference to an array, from a source.
-    let array = pdf.add_object(Object::Array(vec![(2, 0).into(), (1, 0).into()]));
+    let array = pdf.add_object(Object::from(vec![
+        ObjectId::new(2, 0).into(),
+        ObjectId::new(1, 0).into(),
+    ]));
     pdf.get_dictionary_mut(page).unwrap().set("Contents", array);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
@@ -528,7 +536,11 @@ fn a_pages_streams_read_as_one() {
     let content = read(&lazy, &page_dict(&pdf, page)).unwrap();
     assert_eq!(content.concat().bytes(), b"0 0 9 9 re f Q q 1 0 0 rg");
     // Read, not kept.
-    assert!(!lazy.is_read((1, 0)) && !lazy.is_read((2, 0)) && !lazy.is_read(array));
+    assert!(
+        !lazy.is_read(ObjectId::new(1, 0))
+            && !lazy.is_read(ObjectId::new(2, 0))
+            && !lazy.is_read(array)
+    );
     assert_eq!(content.into_bytes(), b"0 0 9 9 re f Q q 1 0 0 rg");
 }
 
@@ -537,14 +549,23 @@ fn a_stream_that_wont_decode_is_a_fault() {
     let (pdf, page) = page_with(|pdf| {
         let first = pdf.add_object(Stream::new(dictionary! {}, b"q".to_vec()));
         let bad = pdf.add_object(Stream::new(
-            dictionary! { "Filter" => "JBIG2Decode" },
+            dictionary! { "Filter" => Object::name("JBIG2Decode") },
             b"Q".to_vec(),
         ));
         vec![first.into(), bad.into()].into()
     });
     let fault = read(&pdf, &page_dict(&pdf, page)).unwrap_err();
     assert!(
-        matches!(fault, ContentFault::Stream { stream: (2, 0), .. }),
+        matches!(
+            fault,
+            ContentFault::Stream {
+                stream: ObjectId {
+                    number: 2,
+                    generation: 0
+                },
+                ..
+            }
+        ),
         "{fault}"
     );
     assert!(
@@ -606,14 +627,23 @@ fn a_lex_error_names_its_stream() {
 fn color_spaces_count_their_components() {
     let mut pdf = Pdf::with_version("1.7");
     let icc = pdf.add_object(Stream::new(dictionary! { "N" => 4 }, Vec::new()));
-    let gray = pdf.add_object(Object::Name(b"DeviceGray".to_vec()));
+    let gray = pdf.add_object(Object::name(b"DeviceGray"));
     let spaces = pdf.add_object(dictionary! {
-        "Icc" => vec!["ICCBased".into(), icc.into()],
-        "Cmyk" => "DeviceCMYK",
+        "Icc" => vec![Object::name("ICCBased"), icc.into()],
+        "Cmyk" => Object::name("DeviceCMYK"),
         "Gray" => gray,
-        "Idx" => vec!["Indexed".into(), "DeviceRGB".into(), 1.into(), Object::string_literal("abcdef")],
-        "N2" => vec!["DeviceN".into(), vec!["a".into(), "b".into()].into(), "DeviceRGB".into()],
-        "Lab" => vec!["Lab".into(), dictionary! {}.into()],
+        "Idx" => vec![
+            Object::name("Indexed"),
+            Object::name("DeviceRGB"),
+            1.into(),
+            literal("abcdef"),
+        ],
+        "N2" => vec![
+            Object::name("DeviceN"),
+            vec![Object::name("a"), Object::name("b")].into(),
+            Object::name("DeviceRGB"),
+        ],
+        "Lab" => vec![Object::name("Lab"), dictionary! {}.into()],
         "Odd" => 7,
     });
     let resources: Object = dictionary! { "ColorSpace" => spaces }.into();

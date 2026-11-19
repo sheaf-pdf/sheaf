@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use crate::pdf::{Dictionary, Object, ObjectId};
+use crate::pdf::{Dictionary, Object, ObjectId, Value};
 use serde::{Deserialize, Serialize};
 
 use crate::attachments::{Objects, once, resolve};
@@ -27,15 +27,13 @@ pub struct LabelRange {
 pub fn label_ranges<P: Objects + ?Sized>(pdf: &P) -> Option<Vec<LabelRange>> {
     let catalog = pdf.catalog().ok()?;
     let mut seen = HashSet::new();
-    let tree = once(pdf, &mut seen, catalog.get(b"PageLabels").ok()?)?
-        .as_dict()
-        .ok()?;
+    let tree = once(pdf, &mut seen, catalog.get(b"PageLabels")?)?.as_dict()?;
     let mut nums = Vec::new();
     collect_nums(pdf, tree, &mut nums, 0, &mut seen);
     let mut ranges: Vec<LabelRange> = nums
         .into_iter()
         .filter_map(|(start, o)| {
-            let d = resolve(pdf, o)?.as_dict().ok()?;
+            let d = resolve(pdf, o)?.as_dict()?;
             Some(range_from(pdf, start, d))
         })
         .collect();
@@ -234,7 +232,7 @@ pub fn number_tree(ranges: &[LabelRange]) -> Dictionary {
             Style::None => None,
         };
         if let Some(s) = s {
-            d.set("S", Object::Name(s.to_vec()));
+            d.set("S", Object::name(s));
         }
         if !r.prefix.is_empty() {
             d.set("P", crate::save::text_string(&r.prefix));
@@ -242,8 +240,8 @@ pub fn number_tree(ranges: &[LabelRange]) -> Dictionary {
         if r.first != 1 {
             d.set("St", r.first as i64);
         }
-        nums.push(Object::Integer(r.start as i64));
-        nums.push(Object::Dictionary(d));
+        nums.push(Object::from(r.start as i64));
+        nums.push(Object::from(d));
     }
     let mut tree = Dictionary::new();
     tree.set("Nums", nums);
@@ -265,28 +263,27 @@ pub fn format_label(r: &LabelRange, offset: u32) -> String {
 }
 
 fn range_from<P: Objects + ?Sized>(pdf: &P, start: u32, d: &Dictionary) -> LabelRange {
-    let style = match d.get(b"S").ok().and_then(|o| resolve(pdf, o)) {
-        Some(Object::Name(n)) => match n.as_slice() {
-            b"D" => Style::Decimal,
-            b"R" => Style::UpperRoman,
-            b"r" => Style::LowerRoman,
-            b"A" => Style::UpperLetters,
-            b"a" => Style::LowerLetters,
-            _ => Style::None,
-        },
+    let style = match d
+        .get(b"S")
+        .and_then(|o| resolve(pdf, o))
+        .and_then(Object::as_name)
+    {
+        Some(b"D") => Style::Decimal,
+        Some(b"R") => Style::UpperRoman,
+        Some(b"r") => Style::LowerRoman,
+        Some(b"A") => Style::UpperLetters,
+        Some(b"a") => Style::LowerLetters,
         _ => Style::None,
     };
     let prefix = d
         .get(b"P")
-        .ok()
         .and_then(|o| resolve(pdf, o))
         .map(crate::file::pdf_text)
         .unwrap_or_default();
     let first = d
         .get(b"St")
-        .ok()
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_i64().ok())
+        .and_then(Object::as_integer)
         .filter(|&n| n >= 1)
         .map_or(1, |n| n.min(u32::MAX as i64) as u32);
     LabelRange {
@@ -309,18 +306,26 @@ fn collect_nums<'a, P: Objects + ?Sized>(
     if depth > 32 {
         return;
     }
-    if let Some(Object::Array(nums)) = node.get(b"Nums").ok().and_then(|o| once(pdf, seen, o)) {
+    if let Some(Value::Array(nums)) = node
+        .get(b"Nums")
+        .and_then(|o| once(pdf, seen, o))
+        .map(Object::value)
+    {
         for pair in nums.as_chunks::<2>().0 {
-            if let Some(k) = resolve(pdf, &pair[0]).and_then(|o| o.as_i64().ok())
+            if let Some(k) = resolve(pdf, &pair[0]).and_then(Object::as_integer)
                 && (0..=u32::MAX as i64).contains(&k)
             {
                 out.push((k as u32, &pair[1]));
             }
         }
     }
-    if let Some(Object::Array(kids)) = node.get(b"Kids").ok().and_then(|o| once(pdf, seen, o)) {
+    if let Some(Value::Array(kids)) = node
+        .get(b"Kids")
+        .and_then(|o| once(pdf, seen, o))
+        .map(Object::value)
+    {
         for kid in kids {
-            if let Some(Ok(d)) = once(pdf, seen, kid).map(Object::as_dict) {
+            if let Some(d) = once(pdf, seen, kid).and_then(Object::as_dict) {
                 collect_nums(pdf, d, out, depth + 1, seen);
             }
         }
@@ -406,20 +411,20 @@ mod tests {
     fn reads_a_number_tree_with_kids() {
         let mut pdf = Pdf::with_version("1.7");
         let leaf_a = pdf.add_object(dictionary! {
-            "Nums" => vec![0.into(), dictionary! { "S" => "r" }.into()],
+            "Nums" => vec![0.into(), dictionary! { "S" => Object::name("r") }.into()],
         });
         let roman_style = pdf.add_object(
-            dictionary! { "S" => "D", "St" => 5, "P" => Object::string_literal("Tab ") },
+            dictionary! { "S" => Object::name("D"), "St" => 5, "P" => crate::pdf::literal("Tab ") },
         );
         let leaf_b = pdf.add_object(dictionary! {
             "Nums" => vec![2.into(), roman_style.into()],
         });
         let tree = pdf.add_object(dictionary! { "Kids" => vec![leaf_a.into(), leaf_b.into()] });
         let pages = pdf.add_object(
-            dictionary! { "Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => 0 },
+            dictionary! { "Type" => Object::name("Pages"), "Kids" => Vec::<Object>::new(), "Count" => 0 },
         );
         let catalog = pdf.add_object(dictionary! {
-            "Type" => "Catalog",
+            "Type" => Object::name("Catalog"),
             "Pages" => pages,
             "PageLabels" => tree,
         });
@@ -434,7 +439,7 @@ mod tests {
     #[test]
     fn no_labels_is_none() {
         let mut pdf = Pdf::with_version("1.7");
-        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog" });
+        let catalog = pdf.add_object(dictionary! { "Type" => Object::name("Catalog") });
         pdf.trailer.set("Root", catalog);
         assert!(label_ranges(&pdf).is_none());
     }
@@ -500,8 +505,9 @@ mod edit_tests {
         let tree = number_tree(&ranges);
         let mut pdf = Pdf::with_version("1.7");
         let tree_id = pdf.add_object(tree);
-        let catalog = pdf
-            .add_object(crate::pdf::dictionary! { "Type" => "Catalog", "PageLabels" => tree_id });
+        let catalog = pdf.add_object(
+            crate::pdf::dictionary! { "Type" => Object::name("Catalog"), "PageLabels" => tree_id },
+        );
         pdf.trailer.set("Root", catalog);
         assert_eq!(label_ranges(&pdf).unwrap(), ranges);
     }

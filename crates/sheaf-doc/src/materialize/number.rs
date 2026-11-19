@@ -61,7 +61,9 @@ impl Numbers {
     /// neither emits nor refers to.
     pub fn get(&self, key: &ObjKey) -> Option<ObjectId> {
         match *key {
-            ObjKey::Base { blob, obj, copy: 0 } if blob == self.identity && obj.0 < NUMBERS => {
+            ObjKey::Base { blob, obj, copy: 0 }
+                if blob == self.identity && obj.number < NUMBERS =>
+            {
                 Some(obj)
             }
             _ => self.by_key.get(key).copied(),
@@ -96,7 +98,7 @@ pub fn stable(
     };
     let keys: BTreeSet<ObjKey> = (e.objects.iter().map(|(key, _)| *key))
         .chain(e.syms.keys().iter().copied().filter(|k| match *k {
-            ObjKey::Base { blob, obj, copy: 0 } if blob == identity && obj.0 >= NUMBERS => {
+            ObjKey::Base { blob, obj, copy: 0 } if blob == identity && obj.number >= NUMBERS => {
                 loaded.objects.contains_key(&obj)
             }
             _ => true,
@@ -104,14 +106,16 @@ pub fn stable(
         .chain(beyond(loaded).map(base))
         .collect();
     let own = |key: &ObjKey| match *key {
-        ObjKey::Base { blob, obj, copy: 0 } if blob == identity && obj.0 < NUMBERS => Some(obj),
+        ObjKey::Base { blob, obj, copy: 0 } if blob == identity && obj.number < NUMBERS => {
+            Some(obj)
+        }
         _ => None,
     };
-    let mut taken: HashSet<u32> = keys.iter().filter_map(own).map(|(n, _)| n).collect();
+    let mut taken: HashSet<u32> = keys.iter().filter_map(own).map(|id| id.number).collect();
     let mut by_key = HashMap::new();
     for (key, &at) in &e.owned {
-        if keys.contains(key) && at.0 < NUMBERS {
-            taken.insert(at.0);
+        if keys.contains(key) && at.number < NUMBERS {
+            taken.insert(at.number);
             by_key.insert(*key, at);
         }
     }
@@ -122,9 +126,9 @@ pub fn stable(
         if own(key).is_none()
             && !by_key.contains_key(key)
             && let Some(&at) = prev.keys.get(key)
-            && at.0 < NUMBERS
-            && (key.is_root() || !in_use.contains(&at.0))
-            && taken.insert(at.0)
+            && at.number < NUMBERS
+            && (key.is_root() || !in_use.contains(&at.number))
+            && taken.insert(at.number)
         {
             by_key.insert(*key, at);
         }
@@ -150,8 +154,11 @@ pub fn stable(
     // stays one; and, while that leaves the numbers this save needs, past
     // the primary's `/Size` and its cross-reference stream, which nothing
     // names but an update after it.
-    let usable = |id: &ObjectId| id.0 < NUMBERS;
-    let below = loaded.objects.range(..(NUMBERS, 0)).next_back();
+    let usable = |id: &ObjectId| id.number < NUMBERS;
+    let below = loaded
+        .objects
+        .range(..ObjectId::new(NUMBERS, 0))
+        .next_back();
     let named = taken.iter().map(|&n| n.saturating_add(1)).max();
     let used = [
         1,
@@ -177,7 +184,7 @@ pub fn stable(
     let start = reserved;
     for (key, next) in fresh.into_iter().zip(start..) {
         debug_assert!(!taken.contains(&next), "{next} is taken");
-        by_key.insert(key, (next, 0));
+        by_key.insert(key, ObjectId::new(next, 0));
     }
     Ok(Numbers {
         identity,
@@ -236,13 +243,13 @@ pub fn appended(
     let owners: HashMap<u32, &ObjKey> = (others.iter().chain(&widgets))
         .filter_map(|&key| {
             let own = e.owned.get(key)?;
-            (number(key) == Some(*own)).then_some((own.0, key))
+            (number(key) == Some(*own)).then_some((own.number, key))
         })
         .collect();
     for key in others.into_iter().chain(widgets) {
-        let at = number(key).filter(|at| owners.get(&at.0).is_none_or(|&k| k == key));
+        let at = number(key).filter(|at| owners.get(&at.number).is_none_or(|&k| k == key));
         match at {
-            Some(at) if taken.insert(at.0) => {
+            Some(at) if taken.insert(at.number) => {
                 by_key.insert(*key, at);
             }
             // Emitted in order.
@@ -276,7 +283,7 @@ pub fn appended(
         key => e.owned.get(&key).copied(),
     };
     let keys = (e.objects.iter().map(|(key, _)| key)).chain(e.syms.keys());
-    let named = past((keys.filter_map(own).chain(raw)).filter(|id| id.0 < NUMBERS));
+    let named = past((keys.filter_map(own).chain(raw)).filter(|id| id.number < NUMBERS));
     let start = used.max(named);
     if u64::from(start) + needed > u64::from(NUMBERS) {
         let why = "too few object numbers are left past those its objects name";
@@ -284,7 +291,7 @@ pub fn appended(
     }
     let mut next = start;
     for key in pages.into_iter().chain(fresh) {
-        by_key.insert(key, (next, 0));
+        by_key.insert(key, ObjectId::new(next, 0));
         next += 1;
     }
     Ok(Appended {
@@ -299,14 +306,14 @@ pub fn appended(
 /// reader takes from an object stream that the cross-reference table
 /// doesn't place, which the lazy reader never reads.
 pub fn beyond(loaded: &Pdf) -> impl Iterator<Item = ObjectId> + '_ {
-    (loaded.objects.range((NUMBERS, 0)..))
+    (loaded.objects.range(ObjectId::new(NUMBERS, 0)..))
         .filter(|(_, obj)| !crate::serialize::full::left_out(obj))
         .map(|(&id, _)| id)
 }
 
 /// The number past the largest of `ids`', or 0.
 fn past(ids: impl Iterator<Item = ObjectId>) -> u32 {
-    ids.map(|id| id.0.saturating_add(1)).max().unwrap_or(0)
+    ids.map(|id| id.number.saturating_add(1)).max().unwrap_or(0)
 }
 
 /// Dense numbers for a finished file's `objects`: from 1, in the order of
@@ -319,14 +326,14 @@ pub fn dense(
 ) -> BTreeMap<ObjectId, ObjectId> {
     let written = |obj: &Object| {
         let mut out = Vec::new();
-        crate::serialize::object::write(&mut out, obj).ok()?;
+        crate::serialize::object::indirect(&mut out, ObjectId::new(1, 0), obj).ok()?;
         Some(out)
     };
     let mut out = BTreeMap::new();
     let mut streams: HashMap<u128, Vec<ObjectId>> = HashMap::new();
     let mut next = 1;
     for (&id, obj) in objects {
-        if matches!(obj, Object::Stream(_))
+        if obj.as_stream().is_some()
             && !apart(id)
             && let Some(bytes) = written(obj)
         {
@@ -339,7 +346,7 @@ pub fn dense(
             }
             like.push(id);
         }
-        out.insert(id, (next, 0));
+        out.insert(id, ObjectId::new(next, 0));
         next += 1;
     }
     out
@@ -355,28 +362,28 @@ mod tests {
     /// data alike, sharing its number, but for one kept apart.
     #[test]
     fn dense_numbers_write_alike_streams_once() {
-        let stream = |data: &[u8]| Object::Stream(Stream::new(dictionary! {}, data.to_vec()));
+        let stream = |data: &[u8]| Object::from(Stream::new(dictionary! {}, data.to_vec()));
         let objects = BTreeMap::from([
-            ((4, 0), Object::Integer(1)),
-            ((7, 2), stream(b"abc")),
-            ((9, 0), stream(b"xyz")),
-            ((12, 0), stream(b"abc")),
+            (ObjectId::new(4, 0), Object::from(1)),
+            (ObjectId::new(7, 2), stream(b"abc")),
+            (ObjectId::new(9, 0), stream(b"xyz")),
+            (ObjectId::new(12, 0), stream(b"abc")),
             (
-                (13, 0),
-                Object::Stream(Stream::new(dictionary! { "A" => 1 }, b"abc".to_vec())),
+                ObjectId::new(13, 0),
+                Object::from(Stream::new(dictionary! { "A" => 1 }, b"abc".to_vec())),
             ),
-            ((20, 0), stream(b"abc")),
-            ((21, 0), Object::Integer(1)),
+            (ObjectId::new(20, 0), stream(b"abc")),
+            (ObjectId::new(21, 0), Object::from(1)),
         ]);
-        let numbers = dense(&objects, |id| id == (20, 0));
+        let numbers = dense(&objects, |id| id == ObjectId::new(20, 0));
         let want = [
-            ((4, 0), (1, 0)),
-            ((7, 2), (2, 0)),
-            ((9, 0), (3, 0)),
-            ((12, 0), (2, 0)),
-            ((13, 0), (4, 0)),
-            ((20, 0), (5, 0)),
-            ((21, 0), (6, 0)),
+            (ObjectId::new(4, 0), ObjectId::new(1, 0)),
+            (ObjectId::new(7, 2), ObjectId::new(2, 0)),
+            (ObjectId::new(9, 0), ObjectId::new(3, 0)),
+            (ObjectId::new(12, 0), ObjectId::new(2, 0)),
+            (ObjectId::new(13, 0), ObjectId::new(4, 0)),
+            (ObjectId::new(20, 0), ObjectId::new(5, 0)),
+            (ObjectId::new(21, 0), ObjectId::new(6, 0)),
         ];
         assert_eq!(numbers, BTreeMap::from(want));
     }

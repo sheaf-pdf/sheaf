@@ -33,4 +33,4 @@ sheaf-doc = { workspace = true, features = ["fixtures"] }
 # Codes drawn on synthetic pages, scanned badly (`codes::fixture`).
 sheaf-image = { workspace = true, features = ["fixtures"] }
 # The corpus's pool inventory is gzipped (realize_corpus's sample).
-flate2 = "1"
+flate2.workspace = true

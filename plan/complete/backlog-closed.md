@@ -687,3 +687,29 @@ Entries move here when they close, saying where they went. IDs are never reused.
 - **What:** decide, on merit, how `just tier-arlington` checks a save of
   a damaged form whose `startxref` names no cross-reference.
 - **Overlap:** the [pdf-lint item](pdf-lint.md); B46.
+
+
+### B26: The Flate backend depends on which crates are in the build
+
+- **Closed:** 2026-11-18. Fixed in M18 slice 12: workspace `Cargo.toml`
+  declares `flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }`,
+  `sheaf-doc` dropped its direct `flate2` dependency, and every PDF stream
+  compression and decompression call goes through `pdf-filters` with
+  `Backend::ZlibRs` (D4).
+- **Found:** 2026-10-23, the build-or-adopt audit
+- **Where:** `flate2` feature unification: `crates/sheaf-app/Cargo.toml:38`
+  (`zip` with `deflate-flate2-zlib-rs`) against `flate2 = "1"` everywhere
+  else
+- **Severity:** annoyance (output differs between builds)
+
+## F19: Wipe file keys, not only passwords
+
+- **Closed:** 2026-11-18. Done in M18 slices 12–13: `lopdf::EncryptionState`
+  and `serialize::crypt`'s raw `Hmac<Sha256>` are gone; `pdf_crypt::Handler`
+  keeps file encryption keys, password buffers, and cipher states in
+  `Zeroizing` memory wiped on drop, and compares keys via constant-time
+  `KeyCheck`.
+- **Found:** 2026-10-23, the build-or-adopt audit
+- **What:** keep an encrypted file's key in `Zeroizing` memory from
+  derivation to drop.
+- **Overlap:** F13; M12.

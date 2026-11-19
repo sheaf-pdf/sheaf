@@ -11,14 +11,14 @@ use super::{Hold, Made};
 use sheaf_doc::materialize::key::{ObjKey, Part};
 use sheaf_doc::materialize::record::ObjMap;
 use sheaf_doc::model::{AnnotBody, DocState};
-use sheaf_doc::pdf::{LazyPdf, Object, ObjectId, Stream, XrefKind};
+use sheaf_doc::pdf::{LazyPdf, Object, ObjectId, StreamExt, Value, XrefKind};
 use sheaf_doc::serialize::objstm;
 use sheaf_doc::source::Limits;
 use sheaf_doc::store::{BlobId, BlobKind, MemoryKind, Origin, Store};
 
 /// How deeply [`each_reference`] goes into the direct objects an indirect
-/// one nests. lopdf's parser nests them up to 100 deep, keeping its cap to
-/// itself; a real file nests a few.
+/// one nests. A PDF parser nests them up to its depth limit; a real file
+/// nests a few.
 const NESTING: usize = 64;
 
 /// The objects a save of `st` wrote in `pdf`, the file it made, as
@@ -147,7 +147,7 @@ fn table_rows(section: &[u8]) -> Option<Vec<ObjectId>> {
         for n in first..first.checked_add(count)? {
             let (_offset, generation, kind) = (words.next()?, words.next()?, words.next()?);
             match kind {
-                b"n" => ids.push((n, u16::try_from(number(generation)?).ok()?)),
+                b"n" => ids.push(ObjectId::new(n, u16::try_from(number(generation)?).ok()?)),
                 b"f" => {}
                 _ => return None,
             }
@@ -159,12 +159,10 @@ fn table_rows(section: &[u8]) -> Option<Vec<ObjectId>> {
 /// lists in use: its entries of type 1 (at an offset) and 2 (in an object
 /// stream), as its `/W` and `/Index` lay them out.
 fn stream_entries(pdf: &LazyPdf, section: &[u8]) -> Option<Vec<ObjectId>> {
-    let Object::Stream(stream) = pdf.get(object_header(section)?).ok()? else {
-        return None;
-    };
-    let number = |o: &Object| usize::try_from(o.as_i64().ok()?).ok();
+    let stream = pdf.get(object_header(section)?).ok()?.as_stream()?;
+    let number = |o: &Object| usize::try_from(o.as_integer()?).ok();
     let numbers = |key: &[u8]| -> Option<Vec<usize>> {
-        let array = stream.dict.get(key).ok()?.as_array().ok()?;
+        let array = stream.dict.get(key)?.as_array()?;
         array.iter().map(number).collect()
     };
     let [w0, w1, w2] = numbers(b"W")?[..] else {
@@ -175,10 +173,10 @@ fn stream_entries(pdf: &LazyPdf, section: &[u8]) -> Option<Vec<ObjectId>> {
     }
     let index = match stream.dict.has(b"Index") {
         true => numbers(b"Index")?,
-        false => vec![0, number(stream.dict.get(b"Size").ok()?)?],
+        false => vec![0, number(stream.dict.get(b"Size")?)?],
     };
     let limit = Limits::DEFAULT.reader.max_decompressed;
-    let data = stream.get_plain_content_with_limit(limit).ok()?;
+    let data = stream.decompressed_content_with_limit(limit).ok()?;
     let field = |bytes: &[u8]| bytes.iter().fold(0u64, |n, &b| n << 8 | u64::from(b));
     let mut rows = data.chunks_exact(w0 + w1 + w2);
     let mut ids = Vec::new();
@@ -192,8 +190,11 @@ fn stream_entries(pdf: &LazyPdf, section: &[u8]) -> Option<Vec<ObjectId>> {
             let kind = if w0 == 0 { 1 } else { field(&row[..w0]) };
             let n = u32::try_from(n).ok()?;
             match kind {
-                1 => ids.push((n, u16::try_from(field(&row[w0 + w1..])).ok()?)),
-                2 => ids.push((n, 0)),
+                1 => ids.push(ObjectId::new(
+                    n,
+                    u16::try_from(field(&row[w0 + w1..])).ok()?,
+                )),
+                2 => ids.push(ObjectId::new(n, 0)),
                 _ => {}
             }
         }
@@ -287,8 +288,10 @@ fn page_pictures(store: &Store, blob: BlobId) -> HashSet<ObjectId> {
     };
     let pdf = src.pdf();
     let form = |id: &ObjectId| {
-        matches!(pdf.get(*id), Ok(Object::Stream(s))
-            if s.dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Form"))
+        pdf.get(*id)
+            .ok()
+            .and_then(Object::as_stream)
+            .is_some_and(|s| s.dict.get(b"Subtype").and_then(Object::as_name) == Some(b"Form"))
     };
     let mut queue: Vec<ObjectId> = pdf.ids().filter(form).collect();
     let mut pictures: HashSet<ObjectId> = queue.iter().copied().collect();
@@ -326,7 +329,7 @@ fn object_header(bytes: &[u8]) -> Option<ObjectId> {
     words
         .next()?
         .starts_with("obj")
-        .then_some((number, generation))
+        .then_some(ObjectId::new(number, generation))
 }
 
 /// Each reference in `o`, and in the direct objects it holds, no deeper
@@ -334,13 +337,12 @@ fn object_header(bytes: &[u8]) -> Option<ObjectId> {
 fn each_reference(o: &Object, mut f: impl FnMut(ObjectId)) {
     let mut stack = vec![(o, 0)];
     while let Some((o, depth)) = stack.pop() {
-        match o {
-            Object::Reference(id) => f(*id),
+        match o.value() {
+            Value::Ref(id) => f(*id),
             _ if depth >= NESTING => {}
-            Object::Array(a) => stack.extend(a.iter().map(|e| (e, depth + 1))),
-            Object::Dictionary(d) | Object::Stream(Stream { dict: d, .. }) => {
-                stack.extend(d.iter().map(|(_, v)| (v, depth + 1)))
-            }
+            Value::Array(a) => stack.extend(a.iter().map(|e| (e, depth + 1))),
+            Value::Dict(d) => stack.extend(d.iter().map(|(_, v)| (v, depth + 1))),
+            Value::Stream(s) => stack.extend(s.dict.iter().map(|(_, v)| (v, depth + 1))),
             _ => {}
         }
     }
@@ -374,7 +376,7 @@ mod tests {
 
     /// A two-page form, `a.pdf`, with a square marked on its first page,
     /// and the one-page form `b.pdf`'s page inserted at the end, both
-    /// written in `dir`: the document, and `b.pdf`'s blob. lopdf writes
+    /// written in `dir`: the document, and `b.pdf`'s blob. `Form` writes
     /// their cross-references as a stream, so a Rewrite packs.
     fn marked_and_inserted(dir: &Path) -> (Document, BlobId) {
         let a = common::write(dir, "a.pdf", &mut Form::new(2));
@@ -482,11 +484,9 @@ mod tests {
         let offset = |at: usize| at - facts.header_offset;
         bytes.extend_from_slice(
             format!(
-                "xref\n9999 1\n{:010} 00000 n \ntrailer\n<< /Size 10000 /Root {} {} R /Prev {} >>\n\
+                "xref\n9999 1\n{:010} 00000 n \ntrailer\n<< /Size 10000 /Root {root} R /Prev {} >>\n\
                  startxref\n{}\n%%EOF\n",
                 offset(from + 1),
-                root.0,
-                root.1,
                 facts.start,
                 offset(section)
             )
@@ -497,13 +497,17 @@ mod tests {
         let hold = written(map, d.state(), d.store(), &pdf, Some((&bytes, from)));
         assert_eq!(
             hold,
-            Hold::Only(BTreeMap::from([((9999, 0), Made::Merged)]))
+            Hold::Only(BTreeMap::from([(ObjectId::new(9999, 0), Made::Merged)]))
         );
         let report = check(&read("an Append", &bytes, None), &hold, &options());
         let found: Vec<_> = (report.findings.iter())
             .map(|f| (f.object, f.rule))
             .collect();
-        assert_eq!(found, [(Some((9999, 0)), Rule::Unresolved)], "{report}");
+        assert_eq!(
+            found,
+            [(Some(ObjectId::new(9999, 0)), Rule::Unresolved)],
+            "{report}"
+        );
     }
 
     /// A Rewrite holds the objects it derived, the root objects and pages

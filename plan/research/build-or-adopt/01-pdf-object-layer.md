@@ -89,3 +89,9 @@ Area: Cross-cutting: the PDF object layer, writing, and Flate · Part of [build 
     written by a human"), so sheaf couldn't send fixes upstream.
   - Every in-housed reader piece gets its fuzz body before it lands, as
     `source::fuzz` does now (entry 99).
+- **Status (M18 slices 1–13, 2026-11-18):** **Done.** Built as the
+  `pdf-objects` + `pdf-structure` + `pdf-filters` + `pdf-crypt` crate family
+  in `sheaf-pdf/pdf-lint` (`MIT OR Apache-2.0`) and adopted behind
+  `sheaf_doc::pdf`; `lopdf` and `vendor/lopdf/` are gone, first-parse byte
+  spans and object-stream member copies eliminated the second parse, and
+  `pdf-lint` 0.2.0-rc.1 runs as a standalone CLI oracle.

@@ -109,7 +109,7 @@ zlib-rs, named once in the workspace, in every sheaf build, for speed.
 pdf-filters supports both backends, the caller naming one, and pdf-lint
 keeps miniz_oxide (M18, slice 6); sheaf names zlib-rs at every call
 once it compresses through pdf-filters (M18 slice 12). The check on
-memory sources goes with [B26](../../backlog/B26.md)'s fix.
+memory sources goes with [B26](../../complete/backlog-closed.md#b26-the-flate-backend-depends-on-which-crates-are-in-the-build)'s fix.
 
 ### D5: M11's image decoding (slice 6)
 

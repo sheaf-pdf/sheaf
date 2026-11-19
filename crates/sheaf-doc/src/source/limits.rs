@@ -4,7 +4,7 @@
 /// The caps on reading a source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
-    /// lopdf's, on reading its objects: what an object stream or a
+    /// The PDF reader's, on reading its objects: what an object stream or a
     /// cross-reference stream may decompress to, the sections in the
     /// `/Prev` chain, object numbers, and the depth of a resolution path
     /// or a chain of references.

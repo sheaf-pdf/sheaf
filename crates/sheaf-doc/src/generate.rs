@@ -36,7 +36,7 @@
 
 use std::sync::Arc;
 
-use crate::pdf::{Dictionary, Object, StringFormat, dictionary};
+use crate::pdf::{Dictionary, Object, dictionary, literal};
 use serde::{Deserialize, Serialize};
 use sheaf_edit::{FontChoice, GridPos, HeaderFooterSpec, Z};
 
@@ -150,12 +150,11 @@ fn write<R>(
 /// page's `/Properties`, it says whose it is, unless `private` strips that.
 fn list(g: &Generator, kind: PaginationKind, private: Private) -> Dictionary {
     let mut list = dictionary! {
-        "Type" => "Pagination",
-        "Subtype" => Object::Name(kind.name().to_vec()),
+        "Type" => Object::name("Pagination"),
+        "Subtype" => Object::name(kind.name()),
     };
     if private == Private::Keep {
-        let id = Object::String(g.id.to_string().into_bytes(), StringFormat::Literal);
-        list.set("SHEF_Gen", id);
+        list.set("SHEF_Gen", literal(g.id.to_string()));
     }
     list
 }
@@ -333,10 +332,10 @@ pub(crate) fn placed_art(placed: &Placed, image: bool, body: ResBody) -> Option<
         let (bbox, matrix) = crate::stamp_lib::form_frame(pdf, placed.at.id)?;
         return Some(Art::Form { res, bbox, matrix });
     }
-    let dict = &pdf.get(placed.at.id).ok()?.as_stream().ok()?.dict;
+    let dict = &pdf.get(placed.at.id).ok()?.as_stream()?.dict;
     let size = |key: &[u8]| -> Option<u32> {
-        let (_, n) = pdf.dereference(dict.get(key).ok()?).ok()?;
-        u32::try_from(n.as_i64().ok()?).ok()
+        let (_, n) = pdf.dereference(dict.get(key)?).ok()?;
+        u32::try_from(n.as_integer()?).ok()
     };
     Some(Art::Image {
         res,

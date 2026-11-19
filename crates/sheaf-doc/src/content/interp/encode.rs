@@ -57,7 +57,7 @@ pub enum EncodeError {
     Interp(#[from] InterpError),
     /// What the operator at `at` in form `form`'s content, or in the
     /// content encoded, does can't be written so it reads back the same.
-    #[error("{why}, at byte {at}{}", .form.map_or(String::new(), |f| format!(" in form {} {} R", f.0, f.1)))]
+    #[error("{why}, at byte {at}{}", .form.map_or(String::new(), |f| format!(" in form {} {} R", f.number, f.generation)))]
     Unwritable {
         form: Option<ObjectId>,
         at: usize,

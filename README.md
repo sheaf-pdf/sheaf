@@ -238,8 +238,10 @@ Dual-licensed under MIT or Apache-2.0, at your option. Third-party engines:
 PDFium (BSD-3), Tesseract and its glyphless `pdf.ttf` (Apache-2.0),
 Leptonica (BSD-2), ONNX Runtime (MIT), PaddleOCR models and `oar-ocr`
 (Apache-2.0); see `packaging/licenses/`. Barcodes are read and QR codes made
-with rxing (Apache-2.0). MuPDF is deliberately not used (AGPL). lopdf (MIT)
-is vendored with a patch in `vendor/lopdf`. sheaf's tests check what it
+with rxing (Apache-2.0). MuPDF is deliberately not used (AGPL). PDF objects,
+structure, filters (`zlib-rs`) and standard-handler encryption are provided by
+the `pdf-*` crate family (`sheaf-pdf/pdf-lint`, MIT OR Apache-2.0). sheaf's
+tests check what it
 writes with the `pdf-lint` CLI binary (Apache-2.0; run as a separate process
 in tests only, never linked or shipped),
 which embeds the PDF Association's Arlington PDF Model (Apache-2.0). Text in

@@ -51,7 +51,7 @@ fn blank_pdf(path: &Path, rotate: i64) {
     let pages_id = pdf.new_object_id();
     let content = pdf.add_object(Stream::new(dictionary! {}, Vec::new()));
     let mut page = dictionary! {
-        "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+        "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
     };
     if rotate != 0 {
@@ -60,11 +60,12 @@ fn blank_pdf(path: &Path, rotate: i64) {
     let page_id = pdf.add_object(page);
     pdf.objects.insert(
         pages_id,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => vec![Object::Reference(page_id)], "Count" => 1,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![Object::from(page_id)], "Count" => 1,
         }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
     pdf.save(path).unwrap();
 }
@@ -104,16 +105,17 @@ fn red_stamp(model: &Document) -> Blob {
         b"1 0 0 rg 0 0 100 50 re f".to_vec(),
     ));
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+        "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
         "MediaBox" => vec![0.into(), 0.into(), 100.into(), 50.into()],
     });
     pdf.objects.insert(
         pages_id,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => vec![Object::Reference(page)], "Count" => 1,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![Object::from(page)], "Count" => 1,
         }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
@@ -339,32 +341,33 @@ fn a_hidden_comment_is_left_out_of_the_screen_s_realization() {
     // A filled square, its look drawn by its appearance stream.
     let ap = pdf.add_object(Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Form",
+            "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"),
             "BBox" => vec![100.into(), 100.into(), 200.into(), 200.into()],
         },
         b"1 0 0 rg 100 100 100 100 re f".to_vec(),
     ));
     let link = pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Link",
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"),
         "Rect" => vec![0.into(), 0.into(), 10.into(), 10.into()],
     });
     let square = pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Square",
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Square"),
         "Rect" => vec![100.into(), 100.into(), 200.into(), 200.into()],
         "AP" => dictionary! { "N" => ap },
     });
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+        "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
-        "Annots" => vec![Object::Reference(link), Object::Reference(square)],
+        "Annots" => vec![Object::from(link), Object::from(square)],
     });
     pdf.objects.insert(
         pages_id,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => vec![Object::Reference(page)], "Count" => 1,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![Object::from(page)], "Count" => 1,
         }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
     pdf.save(&path).unwrap();
 

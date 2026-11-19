@@ -1,4 +1,4 @@
-//! lopdf's lazy reader on any bytes: every object it lists, and its span.
+//! `LazyPdf` on any bytes: every object it lists, and its span.
 
 #![no_main]
 

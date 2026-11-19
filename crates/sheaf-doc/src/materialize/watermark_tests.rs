@@ -6,7 +6,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, XrefKind, dictionary};
+use crate::pdf::{
+    Dictionary, Document as Pdf, Object, ObjectId, Stream, StreamExt, Value, XrefKind, dictionary,
+};
 use sheaf_edit::{BlobSel, GridPos, Turn, WatermarkContent, WatermarkSpec, Z};
 
 use super::append_tests::{appended_in_place, file, keys_at, planned_in_place, written};
@@ -35,7 +37,9 @@ fn pages_file(contents: &[&[u8]], split: usize) -> Vec<u8> {
     let mut pdf = Pdf::with_version("1.7");
     let root = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     });
     let groups: Vec<&[&[u8]]> = match split < contents.len() {
         true => vec![&contents[..split], &contents[split..]],
@@ -46,34 +50,38 @@ fn pages_file(contents: &[&[u8]], split: usize) -> Vec<u8> {
         let node = pdf.new_object_id();
         let resources = pdf.add_object(dictionary! {
             "Font" => dictionary! { "F1" => font },
-            "ProcSet" => vec![Object::Name(b"PDF".to_vec()), Object::Integer(g as i64)],
+            "ProcSet" => vec![Object::name("PDF"), Object::from(g as i64)],
         });
         let kids: Vec<Object> = (group.iter())
             .map(|content| {
                 let content = pdf.add_object(Stream::new(dictionary! {}, content.to_vec()));
-                let page =
-                    dictionary! { "Type" => "Page", "Parent" => node, "Contents" => content };
+                let page = dictionary! {
+                    "Type" => Object::name("Page"),
+                    "Parent" => node,
+                    "Contents" => content,
+                };
                 pdf.add_object(page).into()
             })
             .collect();
         let count = kids.len() as i64;
         pdf.objects.insert(
             node,
-            Object::Dictionary(dictionary! {
-                "Type" => "Pages", "Parent" => root, "Kids" => kids, "Count" => count,
+            Object::from(dictionary! {
+                "Type" => Object::name("Pages"), "Parent" => root, "Kids" => kids, "Count" => count,
                 "Resources" => resources,
             }),
         );
-        nodes.push(Object::Reference(node));
+        nodes.push(Object::from(node));
     }
     pdf.objects.insert(
         root,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => nodes, "Count" => contents.len() as i64,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => nodes, "Count" => contents.len() as i64,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => root });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
@@ -83,11 +91,11 @@ fn pages_file(contents: &[&[u8]], split: usize) -> Vec<u8> {
 /// What a page of `pdf` names in its `/Contents`, in order.
 fn contents(pdf: &Pdf, page: ObjectId) -> Vec<ObjectId> {
     let page = pdf.get_dictionary(page).unwrap();
-    let entries = match page.get(b"Contents").unwrap() {
-        Object::Array(a) => a.clone(),
-        Object::Reference(r) => match pdf.get_object(*r).unwrap() {
-            Object::Array(a) => a.clone(),
-            _ => vec![Object::Reference(*r)],
+    let entries = match page.get(b"Contents").unwrap().value() {
+        Value::Array(a) => a.to_vec(),
+        Value::Ref(r) => match pdf.get_object(*r).unwrap().as_array() {
+            Some(a) => a.to_vec(),
+            None => vec![Object::from(*r)],
         },
         other => panic!("contents {other:?}"),
     };
@@ -99,7 +107,7 @@ fn stream(pdf: &Pdf, id: ObjectId) -> (Dictionary, Vec<u8>) {
     let s = pdf.get_object(id).unwrap().as_stream().unwrap();
     let data = s
         .decompressed_content()
-        .unwrap_or_else(|_| s.content.clone());
+        .unwrap_or_else(|_| s.raw_bytes().to_vec());
     (s.dict.clone(), data)
 }
 
@@ -109,11 +117,11 @@ type Strings = BTreeMap<Vec<u8>, Vec<u8>>;
 /// What `/SHEF_Block` marks stream `id` as: its `/K`, and the rest by key.
 fn marker(pdf: &Pdf, id: ObjectId) -> Option<(Vec<u8>, Strings)> {
     let (dict, _) = stream(pdf, id);
-    let marker = dict.get(b"SHEF_Block").ok()?.as_dict().ok()?;
+    let marker = dict.get(b"SHEF_Block")?.as_dict()?;
     let kind = marker.get(b"K").unwrap().as_name().unwrap().to_vec();
     let strings = (marker.iter())
-        .filter(|(k, _)| k.as_slice() != b"K")
-        .map(|(k, v)| (k.clone(), v.as_str().expect("a string").to_vec()))
+        .filter(|(k, _)| *k != b"K")
+        .map(|(k, v)| (k.to_vec(), v.as_bytes().expect("a string").to_vec()))
         .collect();
     Some((kind, strings))
 }
@@ -126,9 +134,9 @@ fn pages(pdf: &Pdf) -> Vec<ObjectId> {
 /// The page's resources, as written: what it names, followed.
 fn resources(pdf: &Pdf, page: ObjectId) -> (Option<ObjectId>, Dictionary) {
     let page = pdf.get_dictionary(page).unwrap();
-    match page.get(b"Resources").unwrap() {
-        Object::Reference(r) => (Some(*r), pdf.get_dictionary(*r).unwrap().clone()),
-        Object::Dictionary(d) => (None, d.clone()),
+    match page.get(b"Resources").unwrap().value() {
+        Value::Ref(r) => (Some(*r), pdf.get_dictionary(*r).unwrap().clone()),
+        Value::Dict(d) => (None, d.clone()),
         other => panic!("resources {other:?}"),
     }
 }
@@ -192,7 +200,7 @@ fn markers(how: How) {
             list.get(b"Subtype").unwrap().as_name().unwrap(),
             b"Watermark"
         );
-        let gen_id = list.get(b"SHEF_Gen").unwrap().as_str().unwrap();
+        let gen_id = list.get(b"SHEF_Gen").unwrap().as_bytes().unwrap();
         assert_eq!(GenId::parse(gen_id), Some(id));
         assert!(res.get(b"Font").unwrap().as_dict().unwrap().has(b"F1"));
     }
@@ -203,7 +211,7 @@ fn markers(how: How) {
         .unwrap()
         .as_reference()
         .unwrap();
-    let json = pdf.get_object(json).unwrap().as_str().unwrap();
+    let json = pdf.get_object(json).unwrap().as_bytes().unwrap();
     let json: serde_json::Value = serde_json::from_slice(json).unwrap();
     assert_eq!(json["generators"][0]["id"], id.to_string());
     assert_eq!(json["generators"][0]["spec"]["content"]["text"], "DRAFT");
@@ -238,21 +246,21 @@ fn census(how: How) {
         assert!(own.iter().all(Option::is_some));
         let count = |test: &dyn Fn(&Dictionary) -> bool| {
             (pdf.objects.values())
-                .filter(|o| match o {
-                    Object::Dictionary(d) => test(d),
-                    Object::Stream(s) => test(&s.dict),
+                .filter(|o| match o.value() {
+                    Value::Dict(d) => test(d),
+                    Value::Stream(s) => test(&s.dict),
                     _ => false,
                 })
                 .count()
         };
         let bold = |d: &Dictionary| {
-            d.get(b"BaseFont").and_then(Object::as_name).ok() == Some(b"Helvetica-Bold")
+            d.get(b"BaseFont").and_then(Object::as_name) == Some(b"Helvetica-Bold")
         };
         assert_eq!(count(&bold), 1, "{how:?}: {split}");
         assert_eq!(count(&|d| d.has(b"ca")), 1, "{how:?}: {split}");
         let block = |d: &Dictionary| {
             (d.get(b"SHEF_Block").and_then(Object::as_dict))
-                .is_ok_and(|m| m.get(b"K").and_then(Object::as_name).ok() == Some(b"Gen"))
+                .is_some_and(|m| m.get(b"K").and_then(Object::as_name) == Some(b"Gen"))
         };
         assert_eq!(count(&block), 1, "{how:?}: {split}");
     }
@@ -301,9 +309,8 @@ fn one_image(how: How) {
     assert_eq!(pdf.get_pages().len(), PAGES);
     let images = (pdf.objects.values())
         .filter(|o| {
-            (o.as_stream()).is_ok_and(|s| {
-                s.dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Image")
-            })
+            (o.as_stream())
+                .is_some_and(|s| s.dict.get(b"Subtype").and_then(Object::as_name) == Some(b"Image"))
         })
         .count();
     assert_eq!(images, 1, "{how:?}");
@@ -657,7 +664,13 @@ fn encrypted(how: How) {
     let pdf =
         crate::pdf::LazyPdf::open(std::sync::Arc::<[u8]>::from(out), Some(USER), lim).unwrap();
     let json = pdf.catalog().unwrap().get(b"SHEF_Generators").unwrap();
-    let json = pdf.dereference(json).unwrap().1.as_str().unwrap().to_vec();
+    let json = pdf
+        .dereference(json)
+        .unwrap()
+        .1
+        .as_bytes()
+        .unwrap()
+        .to_vec();
     assert!(
         String::from_utf8(json).unwrap().contains("MARKSECRET"),
         "{how:?}"
@@ -686,7 +699,7 @@ fn encrypted(how: How) {
         .unwrap();
     let marker = block.dict.get(b"SHEF_Block").unwrap().as_dict().unwrap();
     assert_eq!(
-        GenId::parse(marker.get(b"G").unwrap().as_str().unwrap()),
+        GenId::parse(marker.get(b"G").unwrap().as_bytes().unwrap()),
         Some(id)
     );
 }
@@ -761,9 +774,8 @@ fn page_form(how: How) {
     let pdf = Pdf::load_mem(&bytes).unwrap();
     let forms: Vec<ObjectId> = (pdf.objects.iter())
         .filter(|(_, o)| {
-            (o.as_stream()).is_ok_and(|s| {
-                s.dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Form")
-            })
+            (o.as_stream())
+                .is_some_and(|s| s.dict.get(b"Subtype").and_then(Object::as_name) == Some(b"Form"))
         })
         .map(|(&id, _)| id)
         .collect();
@@ -791,12 +803,12 @@ crate::both_ways!(
 /// streams' data decoded (an object stream's objects are read out).
 fn reads(pdf: &Pdf, text: &[u8]) -> bool {
     fn within(o: &Object, text: &[u8]) -> bool {
-        match o {
-            Object::String(s, _) => holds(s, text),
-            Object::Array(items) => items.iter().any(|o| within(o, text)),
-            Object::Dictionary(d) => d.iter().any(|(_, o)| within(o, text)),
-            Object::Stream(s) => {
-                let data = (s.decompressed_content()).unwrap_or_else(|_| s.content.clone());
+        match o.value() {
+            Value::String(s, _) => holds(s.as_bytes().unwrap_or(b""), text),
+            Value::Array(items) => items.iter().any(|o| within(o, text)),
+            Value::Dict(d) => d.iter().any(|(_, o)| within(o, text)),
+            Value::Stream(s) => {
+                let data = (s.decompressed_content()).unwrap_or_else(|_| s.raw_bytes().to_vec());
                 holds(&data, text) || s.dict.iter().any(|(_, o)| within(o, text))
             }
             _ => false,
@@ -846,16 +858,12 @@ fn a_watermark_taken_off_isn_t_kept_by_a_field_s_stray_kid() {
     assert!(!reads(&pdf, b"SHEAFSTRAYKID"));
     let catalogs = |kids: &Object| {
         (kids.as_array().into_iter().flatten())
-            .filter_map(|k| pdf.get_dictionary(k.as_reference().ok()?).ok())
-            .filter(|d| {
-                d.get(b"Type")
-                    .and_then(Object::as_name)
-                    .is_ok_and(|t| t == b"Catalog")
-            })
+            .filter_map(|k| pdf.get_dictionary(k.as_reference()?).ok())
+            .filter(|d| d.has_type(b"Catalog"))
             .count()
     };
     for o in pdf.objects.values() {
-        if let Ok(kids) = o.as_dict().and_then(|d| d.get(b"Kids")) {
+        if let Some(kids) = o.as_dict().and_then(|d| d.get(b"Kids")) {
             assert_eq!(catalogs(kids), 0, "a field's kid is a catalog");
         }
     }

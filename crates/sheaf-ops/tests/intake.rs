@@ -655,7 +655,7 @@ fn a_multi_page_tiff_scans_page_by_page() {
         .map(|&id| {
             let page = pdf.get_dictionary(id).unwrap();
             let media = page.get(b"MediaBox").unwrap().as_array().unwrap();
-            let n = |i: usize| media[i].as_float().unwrap().round() as i64;
+            let n = |i: usize| media[i].as_number().unwrap().round() as i64;
             (n(2), n(3))
         })
         .collect();

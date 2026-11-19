@@ -144,7 +144,7 @@ fn private_lists(src: &Src, index: u32) -> bool {
         return false;
     };
     let lists = PropertiesDict::read(src.pdf(), facts.resources.as_deref());
-    (lists.lists()).any(|l| (l.iter()).any(|(k, _)| private::LIST_KEYS.contains(&&k[..])))
+    (lists.lists()).any(|l| (l.iter()).any(|(k, _)| private::LIST_KEYS.contains(&k)))
 }
 
 /// Nothing when a save can cut `spans`, ranges of page `index` of `src`,

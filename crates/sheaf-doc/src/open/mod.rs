@@ -13,7 +13,7 @@
 //! backgrounds sheaf drew into it, its [`form`](Source::form),
 //! attachments, portfolio schema and layers, and its bookmarks
 //! ([`outline`]). All of it is read from the source alone, its
-//! [`LazyPdf`](lopdf::LazyPdf) and page table, with no eager load of the
+//! [`LazyPdf`](crate::pdf::LazyPdf) and page table, with no eager load of the
 //! file. Nothing in it lexes a page's content: of a page it reads its
 //! dictionary and annotations, and, of a file whose catalog says sheaf
 //! drew generators on it, its content streams' dictionaries

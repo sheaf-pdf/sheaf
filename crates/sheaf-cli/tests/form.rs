@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use sheaf_doc::forms::fixture::Form;
-use sheaf_doc::pdf::Object;
+use sheaf_doc::pdf::literal;
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("sheaf-cli-form-{name}-{}", std::process::id()));
@@ -32,8 +32,7 @@ fn check_prints_the_form_and_its_problems() {
     std::fs::write(&clean, form.bytes()).unwrap();
 
     let arial = form.text("arial", 0, [72.0, 620.0, 272.0, 640.0]);
-    form.dict(arial)
-        .set("DA", Object::string_literal("/ArialMT 9 Tf 0 g"));
+    form.dict(arial).set("DA", literal("/ArialMT 9 Tf 0 g"));
     // The check box leaves /Fields.
     form.set_fields(&[name, arial]);
     let broken = dir.join("broken.pdf");

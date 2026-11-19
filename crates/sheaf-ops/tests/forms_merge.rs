@@ -16,7 +16,7 @@ use sheaf_doc::forms::check;
 use sheaf_doc::forms::fixture::Form;
 use sheaf_doc::materialize::StrategyKind;
 use sheaf_doc::model::ScriptState;
-use sheaf_doc::pdf::{Document as Pdf, Object, ObjectId, dictionary};
+use sheaf_doc::pdf::{Document as Pdf, Object, ObjectId, dictionary, literal};
 use sheaf_doc::tx::fixture::{duplicate, replace, rotate};
 use sheaf_doc::{Commit, Document, Notice, PageId};
 use sheaf_edit::{Margins, Turn};
@@ -72,9 +72,9 @@ fn shared_field(f: &mut Form, name: &str) -> ObjectId {
     }
     let parent = f.group(name, &[w1, w2]);
     let d = f.dict(parent);
-    d.set("FT", "Tx");
-    d.set("V", Object::string_literal("Both"));
-    d.set("DA", Object::string_literal("/Helv 10 Tf 0 g"));
+    d.set("FT", Object::name("Tx"));
+    d.set("V", literal("Both"));
+    d.set("DA", literal("/Helv 10 Tf 0 g"));
     parent
 }
 
@@ -93,7 +93,9 @@ fn form_b() -> Form {
     let b1 = blue(&mut f, "b1", 0, 0, "Beta");
     shared_field(&mut f, "both");
     let times = f.pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Times-Roman",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Times-Roman"),
     });
     let form = f.acroform;
     let dr = f.dict(form).get(b"DR").unwrap().as_dict().unwrap().clone();
@@ -102,9 +104,8 @@ fn form_b() -> Form {
     let mut dr = dr;
     dr.set("Font", fonts);
     f.dict(form).set("DR", dr);
-    f.dict(form).set("CO", vec![Object::Reference(b1)]);
-    f.dict(b1)
-        .set("DA", Object::string_literal("/TiRo 10 Tf 0 g"));
+    f.dict(form).set("CO", vec![Object::from(b1)]);
+    f.dict(b1).set("DA", literal("/TiRo 10 Tf 0 g"));
     f
 }
 
@@ -283,7 +284,7 @@ fn a_font_of_the_same_name_comes_in_renamed_by(how: How) {
     let mut b = Form::new(1);
     blue(&mut b, "b", 0, 0, "Beta");
     let helv = b.helv;
-    b.dict(helv).set("BaseFont", "Times-Roman");
+    b.dict(helv).set("BaseFont", Object::name("Times-Roman"));
     let pa = write(&dir, "a.pdf", &mut form_a());
     let pb = write(&dir, "b.pdf", &mut b);
     let mut doc = open(&pa);
@@ -520,10 +521,10 @@ fn document_script(f: &mut Form, scripts: &[(&str, &str)]) {
     let mut pairs = Vec::new();
     for (name, js) in scripts {
         let action = f.pdf.add_object(dictionary! {
-            "S" => "JavaScript", "JS" => Object::string_literal(*js),
+            "S" => Object::name("JavaScript"), "JS" => literal(*js),
         });
-        pairs.push(Object::string_literal(*name));
-        pairs.push(Object::Reference(action));
+        pairs.push(literal(*name));
+        pairs.push(Object::from(action));
     }
     let catalog = f.catalog;
     f.dict(catalog).set(
@@ -548,7 +549,7 @@ fn script_names(bytes: &[u8]) -> Vec<String> {
         .as_array()
         .unwrap()
         .chunks(2)
-        .map(|c| String::from_utf8_lossy(c[0].as_str().unwrap()).to_string())
+        .map(|c| String::from_utf8_lossy(c[0].as_bytes().unwrap()).to_string())
         .collect()
 }
 
@@ -565,7 +566,12 @@ fn scripts_from_two_forms_are_off_and_kept_apart_by(how: How) {
     let first = a.fields()[0];
     a.dict(first).set(
         "AA",
-        dictionary! { "K" => dictionary! { "S" => "JavaScript", "JS" => Object::string_literal("AFNumber_Keystroke(2,0,0,0,\"\",true);") } },
+        dictionary! {
+            "K" => dictionary! {
+                "S" => Object::name("JavaScript"),
+                "JS" => literal("AFNumber_Keystroke(2,0,0,0,\"\",true);"),
+            },
+        },
     );
     document_script(
         &mut a,
@@ -633,8 +639,8 @@ fn a_files_pages_in_runs_join_one_form() {
         }
     }
     let parent = b.group("both", &[w1, w3]);
-    b.dict(parent).set("FT", "Tx");
-    b.dict(parent).set("V", Object::string_literal("Both"));
+    b.dict(parent).set("FT", Object::name("Tx"));
+    b.dict(parent).set("V", literal("Both"));
     blue(&mut b, "middle", 1, 0, "MIDDLE");
     let pa = write(&dir, "a.pdf", &mut form_a());
     let pb = write(&dir, "b.pdf", &mut b);

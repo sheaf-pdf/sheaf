@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, Value};
 
 use super::{Limits, ObjRef, Source};
 use crate::geom::{Affine, Rect};
@@ -27,13 +27,16 @@ impl Shows {
     pub(crate) fn read(at: &ObjRef) -> Option<Shows> {
         let pdf = at.src.pdf();
         let (_, obj) = unkept(pdf, at.id)?;
-        Some(Shows::of(pdf, obj.as_dict().ok()?))
+        let Value::Dict(dict) = obj.value() else {
+            return None;
+        };
+        Some(Shows::of(pdf, dict))
     }
 
     /// What the annotation in slot `slot` of page `index`'s `/Annots` says,
     /// written there as a dictionary: None when it isn't one.
     pub(crate) fn in_slot(src: &Source, index: u32, slot: usize) -> Option<Shows> {
-        let Object::Dictionary(dict) = src.page(index)?.annots.get(slot)? else {
+        let Value::Dict(dict) = src.page(index)?.annots.get(slot)?.value() else {
             return None;
         };
         Some(Shows::of(src.pdf(), dict))
@@ -43,29 +46,39 @@ impl Shows {
     /// name, or a string, as PDFium reads either; an empty one is none.
     fn of(pdf: &LazyPdf, dict: &Dictionary) -> Shows {
         let read = |dict: &Dictionary, key: &[u8]| -> Option<Object> {
-            match dict.get(key).ok()? {
-                Object::Reference(r) => Some((*unkept(pdf, *r)?.1).clone()),
-                direct => Some(direct.clone()),
+            let entry = dict.get(key)?;
+            match entry.as_reference() {
+                Some(r) => Some((*unkept(pdf, r)?.1).clone()),
+                None => Some(entry.clone()),
             }
         };
         let value = |key: &[u8]| read(dict, key);
         let named = |o: Object| -> Option<Vec<u8>> {
-            let name = match o {
-                Object::Name(n) | Object::String(n, _) => n,
+            let bytes = match o.value() {
+                Value::Name(n) => n.as_bytes(),
+                Value::String(s, _) => s.as_bytes()?,
                 _ => return None,
             };
-            (!name.is_empty()).then_some(name)
+            (!bytes.is_empty()).then(|| bytes.to_vec())
         };
-        let flags = value(b"F").and_then(|f| f.as_i64().ok()).unwrap_or(0);
+        let flags = value(b"F").and_then(|f| f.as_integer()).unwrap_or(0);
         let parent = || {
             let parent = value(b"Parent")?;
-            read(parent.as_dict().ok()?, b"V").and_then(named)
+            let Value::Dict(dict) = parent.value() else {
+                return None;
+            };
+            read(dict, b"V").and_then(named)
         };
         // `/N` alone, the appearance dictionary read in place.
-        let n = |ap: &Object| ap.as_dict().ok()?.get(b"N").ok().cloned();
-        let normal = match dict.get(b"AP").ok() {
-            Some(Object::Reference(r)) => unkept(pdf, *r).and_then(|(_, ap)| n(&ap)),
-            Some(direct) => n(direct),
+        let n = |ap: &Object| match ap.value() {
+            Value::Dict(d) => d.get(b"N").cloned(),
+            _ => None,
+        };
+        let normal = match dict.get(b"AP") {
+            Some(ap) => match ap.as_reference() {
+                Some(r) => unkept(pdf, r).and_then(|(_, ap)| n(&ap)),
+                None => n(ap),
+            },
             None => None,
         };
         Shows {
@@ -91,16 +104,19 @@ impl Shows {
         };
         // A dictionary of states, read in place.
         let held;
-        let states = match self.normal.as_ref()? {
-            Object::Reference(r) => {
+        let states = match self.normal.as_ref()?.value() {
+            Value::Ref(r) => {
                 let (id, obj) = unkept(pdf, *r)?;
-                if obj.as_stream().is_ok() {
+                if obj.as_stream().is_some() {
                     return Some(at(id));
                 }
                 held = obj;
-                held.as_dict().ok()?
+                match held.value() {
+                    Value::Dict(d) => d,
+                    _ => return None,
+                }
             }
-            Object::Dictionary(states) => states,
+            Value::Dict(states) => states,
             _ => return None,
         };
         let state = match state {
@@ -111,9 +127,9 @@ impl Shows {
             },
             None => return None,
         };
-        let id = states.get(state).ok()?.as_reference().ok()?;
+        let id = states.get(state)?.as_reference()?;
         let (id, obj) = unkept(pdf, id)?;
-        obj.as_stream().is_ok().then(|| at(id))
+        obj.as_stream().is_some().then(|| at(id))
     }
 }
 
@@ -122,14 +138,15 @@ impl Shows {
 pub(crate) fn frame(form: &ObjRef) -> Option<(Rect, Affine)> {
     let pdf = form.src.pdf();
     let (_, obj) = unkept(pdf, form.id)?;
-    let dict = &obj.as_stream().ok()?.dict;
+    let dict = &obj.as_stream()?.dict;
     let numbers = |key: &[u8], n: usize| -> Option<Vec<f32>> {
-        let array = match dict.get(key).ok()? {
-            Object::Reference(r) => (*unkept(pdf, *r)?.1).clone(),
-            direct => direct.clone(),
+        let entry = dict.get(key)?;
+        let array = match entry.as_reference() {
+            Some(r) => (*unkept(pdf, r)?.1).clone(),
+            None => entry.clone(),
         };
-        let values: Vec<f32> = (array.as_array().ok()?.iter())
-            .map(|v| v.as_float().unwrap_or(0.0) as f32)
+        let values: Vec<f32> = (array.as_array()?.iter())
+            .map(|v| v.as_number().unwrap_or(0.0) as f32)
             .collect();
         (values.len() == n).then_some(values)
     };
@@ -147,9 +164,9 @@ fn unkept(pdf: &LazyPdf, id: ObjectId) -> Option<(ObjectId, Arc<Object>)> {
     let mut at = id;
     for _ in 0..Limits::DEFAULT.reader.max_depth {
         let obj = pdf.object_unkept(at).ok()?;
-        match *obj {
-            Object::Reference(next) => at = next,
-            _ => return Some((at, obj)),
+        match obj.as_reference() {
+            Some(next) => at = next,
+            None => return Some((at, obj)),
         }
     }
     None

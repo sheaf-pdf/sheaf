@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use crate::pdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId};
+use crate::pdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, StreamExt, Value};
 use anyhow::{Context, Result, bail};
 
 use crate::annot::AnnotId;
@@ -54,7 +54,7 @@ pub fn attachments_in<P: Objects + ?Sized>(
     let mut out = Vec::new();
     let folders = crate::portfolio::folder_paths(pdf);
     for (key, spec) in name_tree(pdf, b"EmbeddedFiles") {
-        if let Some(d) = resolve(pdf, spec).and_then(|o| o.as_dict().ok()) {
+        if let Some(d) = resolve(pdf, spec).and_then(Object::as_dict) {
             let mut a = describe(pdf, AttachmentRef::Named(key.clone()), d);
             // Portfolio files are keyed "<folder id>name".
             if let Some((id, rest)) = folder_key(&key)
@@ -75,10 +75,10 @@ pub fn attachments_in<P: Objects + ?Sized>(
         let mut n = 0;
         let entries = page_entries(pdf, page_id);
         for entry in entries {
-            let Some(annot) = resolve(pdf, entry).and_then(|o| o.as_dict().ok()) else {
+            let Some(annot) = resolve(pdf, entry).and_then(Object::as_dict) else {
                 continue;
             };
-            if annot.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"FileAttachment") {
+            if annot.get(b"Subtype").and_then(Object::as_name) != Some(b"FileAttachment") {
                 continue;
             }
             let at = AttachmentRef::Annot {
@@ -93,9 +93,8 @@ pub fn attachments_in<P: Objects + ?Sized>(
             }
             let Some(fs) = annot
                 .get(b"FS")
-                .ok()
                 .and_then(|o| resolve(pdf, o))
-                .and_then(|o| o.as_dict().ok())
+                .and_then(Object::as_dict)
             else {
                 continue;
             };
@@ -134,7 +133,7 @@ pub fn attachment_bytes<P: Objects + ?Sized>(
             .into_iter()
             .find(|(k, _)| k == key)
             .and_then(|(_, o)| resolve(pdf, o))
-            .and_then(|o| o.as_dict().ok())
+            .and_then(Object::as_dict)
             .with_context(|| format!("no embedded file named {key:?}"))?,
         AttachmentRef::Mark(_) => bail!("one of sheaf's is read from its mark"),
         AttachmentRef::Annot { page, n } => {
@@ -144,27 +143,24 @@ pub fn attachment_bytes<P: Objects + ?Sized>(
                 .with_context(|| format!("no page {}", page + 1))?;
             page_annots(pdf, page_id)
                 .into_iter()
-                .filter(|a| {
-                    a.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"FileAttachment")
-                })
+                .filter(|a| a.get(b"Subtype").and_then(Object::as_name) == Some(b"FileAttachment"))
                 .nth(*n as usize)
-                .and_then(|a| a.get(b"FS").ok())
+                .and_then(|a| a.get(b"FS"))
                 .and_then(|o| resolve(pdf, o))
-                .and_then(|o| o.as_dict().ok())
+                .and_then(Object::as_dict)
                 .context("attachment annotation missing")?
         }
     };
     let ef = spec
         .get(b"EF")
-        .ok()
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_dict().ok())
+        .and_then(Object::as_dict)
         .context("the attachment has no embedded file (it may be a link to an outside file)")?;
     let stream = [b"UF".as_slice(), b"F"]
         .iter()
-        .find_map(|k| ef.get(k).ok())
+        .find_map(|k| ef.get(k))
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_stream().ok())
+        .and_then(Object::as_stream)
         .context("embedded file stream missing")?;
     file_bytes(stream)
 }
@@ -194,7 +190,6 @@ fn decoded(stream: &crate::pdf::Stream, limit: Option<usize>) -> Result<Vec<u8>>
 fn describe<P: Objects + ?Sized>(pdf: &P, at: AttachmentRef, fs: &Dictionary) -> Attachment {
     let text = |d: &Dictionary, k: &[u8]| {
         d.get(k)
-            .ok()
             .and_then(|o| resolve(pdf, o))
             .map(pdf_text)
             .unwrap_or_default()
@@ -212,28 +207,26 @@ fn describe<P: Objects + ?Sized>(pdf: &P, at: AttachmentRef, fs: &Dictionary) ->
         .to_string();
     let params = fs
         .get(b"EF")
-        .ok()
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_dict().ok())
-        .and_then(|ef| [b"UF".as_slice(), b"F"].iter().find_map(|k| ef.get(k).ok()))
+        .and_then(Object::as_dict)
+        .and_then(|ef| [b"UF".as_slice(), b"F"].iter().find_map(|k| ef.get(k)))
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_stream().ok())
-        .and_then(|s| s.dict.get(b"Params").ok())
+        .and_then(Object::as_stream)
+        .and_then(|s| s.dict.get(b"Params"))
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_dict().ok());
+        .and_then(Object::as_dict);
     let size = params
-        .and_then(|p| p.get(b"Size").ok())
+        .and_then(|p| p.get(b"Size"))
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_i64().ok())
+        .and_then(Object::as_integer)
         .and_then(|n| u64::try_from(n).ok());
     let fields = fs
         .get(b"CI")
-        .ok()
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_dict().ok())
+        .and_then(Object::as_dict)
         .map(|ci| {
             ci.iter()
-                .filter(|(k, _)| k.as_slice() != b"Type")
+                .filter(|(k, _)| *k != b"Type")
                 .map(|(k, v)| {
                     (
                         String::from_utf8_lossy(k).into_owned(),
@@ -267,12 +260,12 @@ pub(crate) fn name_tree<'a, P: Objects + ?Sized>(
     let tree = pdf
         .catalog()
         .ok()
-        .and_then(|c| c.get(b"Names").ok())
+        .and_then(|c| c.get(b"Names"))
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_dict().ok())
-        .and_then(|n| n.get(tree).ok())
+        .and_then(Object::as_dict)
+        .and_then(|n| n.get(tree))
         .and_then(|o| once(pdf, &mut seen, o))
-        .and_then(|o| o.as_dict().ok());
+        .and_then(Object::as_dict);
     if let Some(t) = tree {
         walk_names(pdf, t, &mut out, 0, &mut seen);
     }
@@ -289,16 +282,24 @@ fn walk_names<'a, P: Objects + ?Sized>(
     if depth > 32 {
         return;
     }
-    if let Some(Object::Array(names)) = node.get(b"Names").ok().and_then(|o| once(pdf, seen, o)) {
+    if let Some(Value::Array(names)) = node
+        .get(b"Names")
+        .and_then(|o| once(pdf, seen, o))
+        .map(Object::value)
+    {
         for pair in names.as_chunks::<2>().0 {
-            if let Some(k) = resolve(pdf, &pair[0]).filter(|o| o.as_str().is_ok()) {
+            if let Some(k) = resolve(pdf, &pair[0]).filter(|o| o.as_bytes().is_some()) {
                 out.push((pdf_text(k), &pair[1]));
             }
         }
     }
-    if let Some(Object::Array(kids)) = node.get(b"Kids").ok().and_then(|o| once(pdf, seen, o)) {
+    if let Some(Value::Array(kids)) = node
+        .get(b"Kids")
+        .and_then(|o| once(pdf, seen, o))
+        .map(Object::value)
+    {
         for kid in kids {
-            if let Some(Ok(d)) = once(pdf, seen, kid).map(Object::as_dict) {
+            if let Some(d) = once(pdf, seen, kid).and_then(Object::as_dict) {
                 walk_names(pdf, d, out, depth + 1, seen);
             }
         }
@@ -308,7 +309,7 @@ fn walk_names<'a, P: Objects + ?Sized>(
 fn page_annots<P: Objects + ?Sized>(pdf: &P, page: ObjectId) -> Vec<&Dictionary> {
     page_entries(pdf, page)
         .iter()
-        .filter_map(|o| resolve(pdf, o).and_then(|o| o.as_dict().ok()))
+        .filter_map(|o| resolve(pdf, o).and_then(Object::as_dict))
         .collect()
 }
 
@@ -316,10 +317,10 @@ fn page_annots<P: Objects + ?Sized>(pdf: &P, page: ObjectId) -> Vec<&Dictionary>
 fn page_entries<P: Objects + ?Sized>(pdf: &P, page: ObjectId) -> &[Object] {
     pdf.get_dictionary(page)
         .ok()
-        .and_then(|p| p.get(b"Annots").ok())
+        .and_then(|p| p.get(b"Annots"))
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_array().ok())
-        .map_or(&[], Vec::as_slice)
+        .and_then(Object::as_array)
+        .unwrap_or(&[])
 }
 
 /// A portfolio key "<12>Report.pdf" as (12, "Report.pdf").
@@ -330,8 +331,8 @@ fn folder_key(key: &str) -> Option<(i64, &str)> {
 }
 
 /// What objects are read from: a source's [`LazyPdf`], or a document
-/// loaded whole, so the readers serve both. Its reads are lopdf's, by
-/// their names, so a reader's body reads the same over either. Every file
+/// loaded whole, so the readers serve both. Its reads match `crate::pdf`'s,
+/// by their names, so a reader's body reads the same over either. Every file
 /// a document reads, and every PDF sheaf builds in memory, is read as a
 /// source; what's loaded whole is a Rewrite's graph (`materialize`'s
 /// records of it and `keep_only`, until a Rewrite needn't load the file
@@ -358,7 +359,7 @@ pub trait Objects {
     }
 
     fn dictionary(&self, id: ObjectId) -> Option<&Dictionary> {
-        self.object(id)?.as_dict().ok()
+        self.get_dictionary(id).ok()
     }
 }
 
@@ -405,9 +406,9 @@ impl Objects for LazyPdf {
 }
 
 pub(crate) fn resolve<'a, P: Objects + ?Sized>(pdf: &'a P, o: &'a Object) -> Option<&'a Object> {
-    match o {
-        Object::Reference(id) => pdf.object(*id),
-        o => Some(o),
+    match o.as_reference() {
+        Some(id) => pdf.object(id),
+        None => Some(o),
     }
 }
 
@@ -419,7 +420,7 @@ pub(crate) fn once<'a, P: Objects + ?Sized>(
     seen: &mut HashSet<ObjectId>,
     o: &'a Object,
 ) -> Option<&'a Object> {
-    if let Ok(id) = o.as_reference()
+    if let Some(id) = o.as_reference()
         && !seen.insert(id)
     {
         return None;
@@ -430,61 +431,61 @@ pub(crate) fn once<'a, P: Objects + ?Sized>(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::pdf::{Stream, dictionary};
+    use crate::pdf::{Stream, dictionary, literal};
 
     /// A one-page file with a named attachment, a compressed one and a
     /// file-attachment annotation.
     pub(crate) fn sample() -> Pdf {
         let mut pdf = Pdf::with_version("1.7");
         let plain = pdf.add_object(Stream::new(
-            dictionary! { "Type" => "EmbeddedFile", "Params" => dictionary! { "Size" => 5, "ModDate" => Object::string_literal("D:20240102030405Z") } },
+            dictionary! { "Type" => Object::name("EmbeddedFile"), "Params" => dictionary! { "Size" => 5, "ModDate" => literal("D:20240102030405Z") } },
             b"hello".to_vec(),
         ));
         let mut packed = Stream::new(
-            dictionary! { "Type" => "EmbeddedFile" },
+            dictionary! { "Type" => Object::name("EmbeddedFile") },
             b"%PDF-1.4 tiny".to_vec(),
         );
-        packed.compress().unwrap();
+        packed.compress();
         let packed = pdf.add_object(packed);
         let spec_a = pdf.add_object(dictionary! {
-            "Type" => "Filespec",
-            "F" => Object::string_literal("notes.txt"),
-            "Desc" => Object::string_literal("Client notes"),
+            "Type" => Object::name("Filespec"),
+            "F" => literal("notes.txt"),
+            "Desc" => literal("Client notes"),
             "EF" => dictionary! { "F" => plain },
         });
         let spec_b = dictionary! {
-            "Type" => "Filespec",
-            "UF" => Object::string_literal("sub/dir/w2.pdf"),
+            "Type" => Object::name("Filespec"),
+            "UF" => literal("sub/dir/w2.pdf"),
             "EF" => dictionary! { "F" => packed },
         };
         let annot_stream = pdf.add_object(Stream::new(dictionary! {}, b"annot bytes".to_vec()));
         let annot = pdf.add_object(dictionary! {
-            "Type" => "Annot",
-            "Subtype" => "FileAttachment",
+            "Type" => Object::name("Annot"),
+            "Subtype" => Object::name("FileAttachment"),
             "Rect" => vec![0.into(), 0.into(), 10.into(), 10.into()],
-            "Contents" => Object::string_literal("Support"),
-            "FS" => dictionary! { "Type" => "Filespec", "F" => Object::string_literal("support.xlsx"), "EF" => dictionary! { "F" => annot_stream } },
+            "Contents" => literal("Support"),
+            "FS" => dictionary! { "Type" => Object::name("Filespec"), "F" => literal("support.xlsx"), "EF" => dictionary! { "F" => annot_stream } },
         });
         let pages_id = pdf.new_object_id();
         let page = pdf.add_object(dictionary! {
-            "Type" => "Page",
+            "Type" => Object::name("Page"),
             "Parent" => pages_id,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "Annots" => vec![annot.into()],
         });
         pdf.objects.insert(
             pages_id,
-            dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+            dictionary! { "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1 }.into(),
         );
         let catalog = pdf.add_object(dictionary! {
-            "Type" => "Catalog",
+            "Type" => Object::name("Catalog"),
             "Pages" => pages_id,
             "Names" => dictionary! {
                 "EmbeddedFiles" => dictionary! {
                     "Kids" => vec![dictionary! {
                         "Names" => vec![
-                            Object::string_literal("notes.txt"), spec_a.into(),
-                            Object::string_literal("w2"), spec_b.into(),
+                            literal("notes.txt"), spec_a.into(),
+                            literal("w2"), spec_b.into(),
                         ],
                     }.into()],
                 },

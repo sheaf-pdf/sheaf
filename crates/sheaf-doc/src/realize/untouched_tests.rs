@@ -272,9 +272,9 @@ fn the_predicate_agrees_with_the_emission_in_every_case() {
     let mut f = theirs();
     let last = f.pages[2];
     let link = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Link",
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"),
         "Rect" => vec![200.into(), 200.into(), 300.into(), 220.into()],
-        "Dest" => vec![last.into(), Object::Name(b"Fit".to_vec())],
+        "Dest" => vec![last.into(), Object::name("Fit")],
         "Border" => vec![0.into(), 0.into(), 2.into()],
     });
     let mut annots = f.annots(0);

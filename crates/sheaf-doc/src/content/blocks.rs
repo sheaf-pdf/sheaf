@@ -12,7 +12,7 @@ use std::fmt;
 use std::ops::Range;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::pdf::{Dictionary, Object, ObjectId};
+use crate::pdf::{Dictionary, Object, ObjectId, StreamExt, Value};
 
 use super::balance::Balance;
 use super::lex::{self, LexError, ResCx, Step, Tok};
@@ -417,7 +417,7 @@ impl PageBlocks {
             sheaf: sheaf.into(),
             isolation,
             sheaf_marked: (content.dicts().iter())
-                .any(|d| (d.iter()).any(|(k, _)| crate::private::STREAM_KEYS.contains(&&k[..]))),
+                .any(|d| (d.iter()).any(|(k, _)| crate::private::STREAM_KEYS.contains(&k))),
             balance,
             nested_in_forms,
         })
@@ -456,21 +456,21 @@ enum StreamMark {
 
 impl StreamMark {
     fn of(dict: &Dictionary) -> StreamMark {
-        let Ok(Object::Dictionary(block)) = dict.get(b"SHEF_Block") else {
+        let Some(Value::Dict(block)) = dict.get(b"SHEF_Block").map(Object::value) else {
             return StreamMark::Plain;
         };
-        let string = |key: &[u8]| block.get(key).ok()?.as_str().ok();
+        let string = |key: &[u8]| block.get(key)?.as_bytes();
         let mark = match block.get(b"K").and_then(Object::as_name) {
-            Ok(b"Gen") => string(b"G")
+            Some(b"Gen") => string(b"G")
                 .and_then(GenId::parse)
                 .map(|g| StreamMark::Block(SheafBlock::Gen(g))),
-            Ok(b"Ocr") => string(b"B")
+            Some(b"Ocr") => string(b"B")
                 .and_then(BlockId::parse)
                 .map(|b| StreamMark::Block(SheafBlock::Ocr(b))),
-            Ok(b"Flat") => string(b"B")
+            Some(b"Flat") => string(b"B")
                 .and_then(BlockId::parse)
                 .map(|b| StreamMark::Block(SheafBlock::Flat(b))),
-            Ok(b"Isolate") => Some(StreamMark::Isolate),
+            Some(b"Isolate") => Some(StreamMark::Isolate),
             _ => None,
         };
         mark.unwrap_or(StreamMark::Plain)
@@ -505,8 +505,8 @@ impl Marker {
     pub fn of(dict: &Dictionary) -> Option<Marker> {
         match StreamMark::of(dict) {
             StreamMark::Block(SheafBlock::Gen(id)) => {
-                let block = dict.get(b"SHEF_Block").and_then(Object::as_dict).ok();
-                let string = |key: &[u8]| block?.get(key).ok()?.as_str().ok();
+                let block = dict.get(b"SHEF_Block").and_then(Object::as_dict);
+                let string = |key: &[u8]| block?.get(key)?.as_bytes();
                 let digest = |key: &[u8]| Some(u128::from_be_bytes(string(key)?.try_into().ok()?));
                 let number = string(b"N")
                     .filter(|n| (1..=20).contains(&n.len()) && n.iter().all(u8::is_ascii_digit))
@@ -552,7 +552,7 @@ pub fn isolates(stream: &[u8]) -> Option<(u8, u32)> {
 /// generator's, `/SHEF_OcrBlock` on an OCR layer's.
 fn marked_block(m: &Marked) -> Option<SheafBlock> {
     let list = m.props.as_ref()?.dict()?;
-    let string = |key: &[u8]| list.get(key).ok()?.as_str().ok();
+    let string = |key: &[u8]| list.get(key)?.as_bytes();
     string(b"SHEF_Gen")
         .and_then(GenId::parse)
         .map(SheafBlock::Gen)
@@ -569,7 +569,7 @@ fn pagination(m: &Marked) -> Option<PaginationKind> {
         return None;
     }
     let list = m.props.as_ref()?.dict()?;
-    PaginationKind::from_name(list.get(b"Subtype").ok()?.as_name().ok()?)
+    PaginationKind::from_name(list.get(b"Subtype")?.as_name()?)
 }
 
 /// A pagination artifact being lexed, outside any other: what it draws.
@@ -687,9 +687,9 @@ fn xobject(
     resources: Option<&Object>,
     name: &[u8],
 ) -> Option<ObjectId> {
-    let resources = direct(objects, resources?)?.as_dict().ok()?;
-    let xobjects = direct(objects, resources.get(b"XObject").ok()?)?;
-    xobjects.as_dict().ok()?.get(name).ok()?.as_reference().ok()
+    let resources = direct(objects, resources?)?.as_dict()?;
+    let xobjects = direct(objects, resources.get(b"XObject")?)?;
+    xobjects.as_dict()?.get(name)?.as_reference()
 }
 
 /// What's known of the XObjects pages draw, by object, so each is read
@@ -713,12 +713,12 @@ impl DrawnForms {
             return known;
         }
         let kind = objects.read(id, |form| {
-            let dict = &form.as_stream().ok()?.dict;
-            let get = |d: &Dictionary, key: &[u8]| direct(objects, d.get(key).ok()?).cloned();
+            let dict = &form.as_stream()?.dict;
+            let get = |d: &Dictionary, key: &[u8]| direct(objects, d.get(key)?).cloned();
             let piece = get(dict, b"PieceInfo")?;
-            let compound = get(piece.as_dict().ok()?, b"ADBE_CompoundType")?;
-            let private = get(compound.as_dict().ok()?, b"Private")?;
-            PaginationKind::from_name(private.as_name().ok()?)
+            let compound = get(piece.as_dict()?, b"ADBE_CompoundType")?;
+            let private = get(compound.as_dict()?, b"Private")?;
+            PaginationKind::from_name(private.as_name()?)
         });
         let acrobat = matches!(kind, Ok(Some(_)));
         lock(&self.acrobat).insert(id, acrobat);
@@ -744,17 +744,15 @@ impl DrawnForms {
             return true;
         }
         let read = objects.read(id, |form| {
-            let form = form.as_stream().ok()?;
-            if form.dict.get(b"Subtype").and_then(Object::as_name).ok()? != b"Form" {
+            let form = form.as_stream()?;
+            if form.dict.get(b"Subtype").and_then(Object::as_name)? != b"Form" {
                 return None;
             }
-            let own = form.dict.get(b"Resources").ok().cloned();
+            let own = form.dict.get(b"Resources").cloned();
             Some(
                 match form.decompressed_content_with_limit(lim.content.decompressed) {
                     Ok(data) => Ok((data, own)),
-                    Err(crate::pdf::Error::Decompress(
-                        crate::pdf::DecompressError::MemoryLimitExceeded { .. },
-                    )) => Err(true),
+                    Err(crate::pdf::Error::Limit(crate::pdf::Limit::Decompressed)) => Err(true),
                     Err(_) => Err(false),
                 },
             )

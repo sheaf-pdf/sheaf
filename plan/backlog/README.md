@@ -78,7 +78,6 @@ Status: open
 | [B23](B23.md) | A fuzz test's wall-clock budget fails when the machine is busy | annoyance | 2026-10-23, the instance-handoff migration's workspace run |
 | [B24](B24.md) | G4 encoding truncates images wider than 65,535 pixels | wrong output | 2026-10-23, the build-or-adopt audit |
 | [B25](B25.md) | Fax TIFFs (CCITT Group 3, Modified Huffman) are refused | annoyance | 2026-10-23, the build-or-adopt audit |
-| [B26](B26.md) | The Flate backend depends on which crates are in the build | annoyance | 2026-10-23, the build-or-adopt audit |
 | [B27](B27.md) | Nothing checks dependencies for advisories or licenses | annoyance | 2026-10-23, the build-or-adopt audit |
 | [B28](B28.md) | Printing may not work in the Flatpak build | annoyance | 2026-10-23, the build-or-adopt audit |
 | [B29](B29.md) | Search misses ligatures, compatibility forms and NFD text | wrong output | 2026-10-23, the build-or-adopt audit |
@@ -101,7 +100,7 @@ Status: open
 | [B47](B47.md) | A form that draws itself is refused at once; PDFium draws it 40 deep | wrong output | 2026-10-23, M11 slice 3 |
 | [B48](B48.md) | An inline image's end depends on what follows it when `/L` runs past the content | wrong output | 2026-10-23, M11 slice 3 |
 | [B49](B49.md) | Text and inline images in a form may draw otherwise once written again | wrong output | 2026-10-23, M11 slice 3 |
-| [B50](B50.md) | An XObject lopdf can't read stops the pages that draw it (0221018's `14 0 R`) | annoyance | 2026-10-23, M11 slice 3 |
+| [B50](B50.md) | An XObject pdf-objects refuses under ISO rules stops the pages that draw it (0221018's `14 0 R`) | annoyance | 2026-10-23, M11 slice 3 |
 | [B51](B51.md) | An embedded CMap with no mappings may give PDFium each code as its CID | wrong output | 2026-10-23, M11 slice 3 |
 | [B52](B52.md) | Codes a `/ToUnicode` lacks don't fall back to their CID's text | wrong output | 2026-10-24, the content interpreter's wrap-up |
 | [B53](B53.md) | A font without `/Widths` takes no widths from its embedded program | wrong output | 2026-10-24, the content interpreter's wrap-up |
@@ -138,7 +137,6 @@ Status: open
 | [F16](F16.md) | Turn QR codes into links | feature | 2026-10-23, M10.5 |
 | [F17](F17.md) | hayro-interpret as a second corpus oracle beside PDFium | feature | 2026-10-24, the content interpreter's wrap-up |
 | [F18](F18.md) | Notices for the data and code sheaf ships | feature | 2026-10-23, the build-or-adopt audit |
-| [F19](F19.md) | Wipe file keys, not only passwords | feature | 2026-10-23, the build-or-adopt audit |
 | [F20](F20.md) | Upstream: cms `CertificateChoices` alternatives for attribute certificates | upstream | 2026-10-23, the build-or-adopt audit |
 | [F21](F21.md) | Try PP-OCRv6 in the PaddleOCR engine | feature | 2026-10-23, the build-or-adopt audit |
 | [F23](F23.md) | hayro-syntax as a second reader in the lazy-reader corpus test | feature | 2026-10-23, the build-or-adopt audit |

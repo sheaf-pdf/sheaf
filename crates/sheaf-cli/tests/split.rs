@@ -18,13 +18,13 @@ fn heavy_pdf(dir: &Path, n: usize) -> PathBuf {
                 char::from(b'a' + ((seed >> 16) % 26) as u8)
             })
             .collect();
-        let content = pdf.add_object(
-            Stream::new(dictionary! {}, format!("% {noise}\n").into_bytes())
-                .with_compression(false),
-        );
+        let content = pdf.add_object(Stream::new(
+            dictionary! {},
+            format!("% {noise}\n").into_bytes(),
+        ));
         kids.push(
             pdf.add_object(dictionary! {
-                "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+                "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
                 "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             })
             .into(),
@@ -32,9 +32,10 @@ fn heavy_pdf(dir: &Path, n: usize) -> PathBuf {
     }
     pdf.objects.insert(
         pages_id,
-        dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => n as i64 }.into(),
+        dictionary! { "Type" => Object::name("Pages"), "Kids" => kids, "Count" => n as i64 }.into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
     let path = dir.join("big.pdf");
     pdf.save(&path).unwrap();

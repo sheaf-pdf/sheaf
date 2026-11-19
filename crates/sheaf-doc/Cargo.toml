@@ -9,7 +9,7 @@ publish = false
 # Forms and encrypted files built in code, and the lookup for Greg's
 # corpus of real ones (`forms::fixture`, `serialize::fixture`,
 # `forms::corpus`), for other crates' tests.
-fixtures = []
+fixtures = ["pdf-crypt/insecure-test-writer", "pdf-structure/insecure-test-writer"]
 
 [dependencies]
 # Random mark ids, so copies of a file never hand out the same one, and
@@ -21,7 +21,6 @@ sheaf-util.workspace = true
 sheaf-edit.workspace = true
 # How far an open has read (M10.5 §14.2).
 in-progress.workspace = true
-lopdf.workspace = true
 pdf-objects.workspace = true
 pdf-filters.workspace = true
 pdf-crypt.workspace = true
@@ -33,17 +32,15 @@ im.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 regex.workspace = true
-# Image pages: decoding and G4 come from sheaf-image; Flate is ours.
+# Image pages: decoding and G4 come from sheaf-image; Flate is pdf-filters'
+# zlib-rs backend (D4).
 sheaf-image.workspace = true
-flate2 = "1"
 # Stamps from images keep their transparency (a soft mask).
 image.workspace = true
 # XFDF, comments as XML (M9 slice 18); XMP's conformance claims.
 quick-xml = "0.41"
 # A file's password is wiped from memory when its blob goes.
 zeroize = "1.9"
-# AES IVs a save writes are keyed hashes of what they encrypt (M10.5 §11.7).
-hmac = "0.13"
 sha2 = "0.11"
 # Whether a signature still signs the file's bytes (B5): its CMS read as
 # BER, which real files need (cms 0.2's DER rules refuse a quarter of the
@@ -89,4 +86,6 @@ proptest = { version = "1", default-features = false, features = ["std"] }
 # and says where each hit is.
 syn = { version = "2", features = ["full", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
+pdf-crypt = { workspace = true, features = ["insecure-test-writer"] }
+pdf-structure = { workspace = true, features = ["insecure-test-writer"] }
 pdf-content-streams.workspace = true

@@ -12,7 +12,7 @@ use std::path::Path;
 
 use common::{open, scratch};
 use sheaf_doc::export::Export;
-use sheaf_doc::pdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
+use sheaf_doc::pdf::{Dictionary, Document as Pdf, Object, Stream, dictionary, literal};
 use sheaf_doc::text_layer::fixture as saved;
 use sheaf_image::raster::{PixelFormat, Raster};
 use sheaf_render::pdfium::PdfiumEngine;
@@ -45,7 +45,9 @@ fn bytes_of(pdf: &mut Pdf) -> Vec<u8> {
 /// `resources`, Helvetica as `/F1` added to them.
 fn one_page(pdf: &mut Pdf, contents: &[&[u8]], mut resources: Dictionary) -> Dictionary {
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     });
     let mut fonts = (resources.get(b"Font").and_then(Object::as_dict).cloned()).unwrap_or_default();
     fonts.set("F1", font);
@@ -57,7 +59,7 @@ fn one_page(pdf: &mut Pdf, contents: &[&[u8]], mut resources: Dictionary) -> Dic
         })
         .collect();
     dictionary! {
-        "Type" => "Page", "Contents" => contents, "Resources" => resources,
+        "Type" => Object::name("Page"), "Contents" => contents, "Resources" => resources,
         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
     }
 }
@@ -69,11 +71,14 @@ fn finished(mut pdf: Pdf, mut page: Dictionary, catalog: Dictionary) -> Vec<u8> 
     let page = pdf.add_object(page);
     pdf.objects.insert(
         pages,
-        dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1,
+        }
+        .into(),
     );
-    let mut root = dictionary! { "Type" => "Catalog", "Pages" => pages };
+    let mut root = dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages };
     for (key, value) in catalog.iter() {
-        root.set(key.clone(), value.clone());
+        root.set(key, value.clone());
     }
     let root = pdf.add_object(root);
     pdf.trailer.set("Root", root);
@@ -130,8 +135,8 @@ fn a_generator_s_named_list() {
     let dir = scratch("private-named");
     let mut pdf = Pdf::with_version("1.7");
     let list = dictionary! {
-        "Type" => "Pagination", "Subtype" => "Watermark",
-        "SHEF_Gen" => Object::string_literal("g1a"),
+        "Type" => Object::name("Pagination"), "Subtype" => Object::name("Watermark"),
+        "SHEF_Gen" => literal("g1a"),
     };
     let resources = dictionary! { "Properties" => dictionary! { "P0" => list } };
     let mark: &[u8] = b"/Artifact /P0 BDC q 1 0 0 rg 100 100 200 50 re f Q EMC";
@@ -146,7 +151,9 @@ fn a_generator_s_named_list() {
     let lists = res.as_dict().unwrap().get(b"Properties").unwrap();
     let lists = pdf.dereference(lists).unwrap().1.as_dict().unwrap();
     let p0 = pdf.dereference(lists.get(b"P0").unwrap()).unwrap().1;
-    let want = dictionary! { "Type" => "Pagination", "Subtype" => "Watermark" };
-    assert_eq!(p0.as_dict().unwrap(), &want);
+    let want = dictionary! {
+        "Type" => Object::name("Pagination"), "Subtype" => Object::name("Watermark"),
+    };
+    assert!(p0.eq_value(&Object::from(want)), "{p0:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

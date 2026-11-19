@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use crate::pdf::{Dictionary, Object, ObjectId, StringFormat, dictionary};
+use crate::pdf::{Dictionary, Object, ObjectId, dictionary, literal};
 use sheaf_edit::DestView;
 
 use super::*;
@@ -15,7 +15,7 @@ use crate::model::Document;
 use crate::store::{BlobKind, Store};
 
 fn text(s: &str) -> Object {
-    Object::string_literal(s)
+    literal(s)
 }
 
 /// An item titled `title` going to `dest`.
@@ -27,15 +27,15 @@ fn to(title: &str, dest: Object) -> Dictionary {
 fn dest(page: impl Into<Object>, rest: Vec<Object>) -> Object {
     let mut d = vec![page.into()];
     d.extend(rest);
-    Object::Array(d)
+    Object::from(d)
 }
 
 fn fit(page: ObjectId) -> Object {
-    dest(page, vec!["Fit".into()])
+    dest(page, vec![Object::name("Fit")])
 }
 
 fn xyz(page: impl Into<Object>, left: Object, top: Object, zoom: Object) -> Object {
-    dest(page, vec!["XYZ".into(), left, top, zoom])
+    dest(page, vec![Object::name("XYZ"), left, top, zoom])
 }
 
 fn pages(items: &[FlatOutlineItem]) -> Vec<Option<u32>> {
@@ -100,7 +100,7 @@ fn an_explicit_dest_names_its_page() {
         vec![
             (0, to("Second", fit(p[1]))),
             (0, to("Third, by reference", indirect.into())),
-            (0, to("No such page", fit((999, 0)))),
+            (0, to("No such page", fit(ObjectId::new(999, 0)))),
             (0, dictionary! { "Title" => text("Nowhere") }),
         ],
     );
@@ -138,7 +138,7 @@ fn named_destinations_are_looked_up() {
         "Dests",
         dictionary! { "Old" => fit(p[3]), "New" => fit(p[0]) },
     );
-    let name = |n: &str| Object::Name(n.into());
+    let name = |n: &str| Object::name(n);
     outline_tree(
         &mut f,
         vec![
@@ -159,7 +159,7 @@ fn a_goto_action_is_followed() {
     let p = f.pages.clone();
     let action = f
         .pdf
-        .add_object(dictionary! { "S" => "GoTo", "D" => fit(p[2]) });
+        .add_object(dictionary! { "S" => Object::name("GoTo"), "D" => fit(p[2]) });
     outline_tree(
         &mut f,
         vec![
@@ -167,7 +167,7 @@ fn a_goto_action_is_followed() {
                 0,
                 dictionary! {
                     "Title" => text("Go to"),
-                    "A" => dictionary! { "S" => "GoTo", "D" => fit(p[1]) },
+                    "A" => dictionary! { "S" => Object::name("GoTo"), "D" => fit(p[1]) },
                 },
             ),
             (
@@ -178,15 +178,15 @@ fn a_goto_action_is_followed() {
                 0,
                 dictionary! {
                     "Title" => text("A link"),
-                    "A" => dictionary! { "S" => "URI", "URI" => text("https://example.com") },
+                    "A" => dictionary! { "S" => Object::name("URI"), "URI" => text("https://example.com") },
                 },
             ),
             (
                 0,
                 dictionary! {
                     "Title" => text("A dest that names nothing, then an action"),
-                    "Dest" => Object::Name(b"Missing".to_vec()),
-                    "A" => dictionary! { "S" => "GoTo", "D" => fit(p[0]) },
+                    "Dest" => Object::name("Missing"),
+                    "A" => dictionary! { "S" => Object::name("GoTo"), "D" => fit(p[0]) },
                 },
             ),
         ],
@@ -204,10 +204,13 @@ fn an_integer_is_a_page_index() {
     outline_tree(
         &mut f,
         vec![
-            (0, to("Second", dest(1, vec!["Fit".into()]))),
-            (0, to("Past the end", dest(3, vec!["Fit".into()]))),
-            (0, to("Negative", dest(-1, vec!["Fit".into()]))),
-            (0, to("Placed", xyz(0, 72.into(), 720.into(), Object::Null))),
+            (0, to("Second", dest(1, vec![Object::name("Fit")]))),
+            (0, to("Past the end", dest(3, vec![Object::name("Fit")]))),
+            (0, to("Negative", dest(-1, vec![Object::name("Fit")]))),
+            (
+                0,
+                to("Placed", xyz(0, 72.into(), 720.into(), Object::null())),
+            ),
         ],
     );
     let got = outline(&f.source());
@@ -261,26 +264,29 @@ fn positions_are_in_page_space() {
                 0,
                 to(
                     "Top only",
-                    xyz(p[0], Object::Null, 500.into(), Object::Null),
+                    xyz(p[0], Object::null(), 500.into(), Object::null()),
                 ),
             ),
             (
                 0,
                 to(
                     "Zoom only",
-                    xyz(p[0], Object::Null, Object::Null, 1.5.into()),
+                    xyz(p[0], Object::null(), Object::null(), 1.5.into()),
                 ),
             ),
             (
                 0,
                 to(
                     "Nothing set",
-                    xyz(p[0], Object::Null, Object::Null, Object::Null),
+                    xyz(p[0], Object::null(), Object::null(), Object::null()),
                 ),
             ),
             (
                 0,
-                to("Too short", dest(p[0], vec!["XYZ".into(), 10.into()])),
+                to(
+                    "Too short",
+                    dest(p[0], vec![Object::name("XYZ"), 10.into()]),
+                ),
             ),
         ],
     );
@@ -351,7 +357,7 @@ fn every_fit_kind_keeps_its_numbers() {
         ("Fit", vec![1.into()]),
         ("FitB", vec![]),
         ("FitH", vec![500.into()]),
-        ("FitV", vec![Object::Null]),
+        ("FitV", vec![Object::null()]),
         ("FitBH", vec![]),
         ("FitBV", vec![7.5.into(), 8.into()]),
         ("FitR", vec![1.into(), 2.into(), 3.into(), 4.into()]),
@@ -363,7 +369,7 @@ fn every_fit_kind_keeps_its_numbers() {
         kinds
             .iter()
             .map(|(kind, params)| {
-                let mut rest = vec![Object::Name(kind.as_bytes().to_vec())];
+                let mut rest = vec![Object::name(*kind)];
                 rest.extend(params.iter().cloned());
                 (0, to(kind, dest(p, rest)))
             })
@@ -411,7 +417,7 @@ fn colors_styles_and_titles() {
     let utf16: Vec<u8> = [0xFE, 0xFF, 0x00, b'P', 0x00, 0xE9, 0x00, b'n']
         .into_iter()
         .collect();
-    let two_lines = Object::String(b"Two\r\nlines".to_vec(), StringFormat::Literal);
+    let two_lines = literal(b"Two\r\nlines");
     outline_tree(
         &mut f,
         vec![
@@ -419,10 +425,7 @@ fn colors_styles_and_titles() {
             styled("Black", rgb(0.0, 0.0, 0.0), Some(1)),
             styled("Clamped", rgb(2.0, -1.0, 0.5), Some(2)),
             styled("Short", Some(vec![1.into(), 0.into()]), Some(3)),
-            (
-                0,
-                dictionary! { "Title" => Object::String(utf16, StringFormat::Hexadecimal) },
-            ),
+            (0, dictionary! { "Title" => Object::hex(utf16) }),
             (0, dictionary! { "Title" => two_lines }),
             (0, dictionary! {}),
         ],

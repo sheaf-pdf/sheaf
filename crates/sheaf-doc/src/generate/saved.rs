@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::pdf::{LazyPdf, Object, ObjectId};
+use crate::pdf::{LazyPdf, Object, ObjectId, StreamExt, Value};
 use serde::Deserialize;
 use sheaf_edit::Z;
 
@@ -394,16 +394,23 @@ struct Block {
     digests: Option<(u128, u128)>,
 }
 
+fn plain_dict(obj: &Object) -> Option<&crate::pdf::Dictionary> {
+    match obj.value() {
+        Value::Dict(d) => Some(d),
+        _ => None,
+    }
+}
+
 /// Whether page `index` of `src` names a list of sheaf's generators' in
 /// its resources' `/Properties`: where a block another tool merged into a
 /// stream of its own may be.
 fn names_a_list(src: &Source, index: u32) -> bool {
     let pdf = src.pdf();
-    let dict = |obj| pdf.dereference(obj).ok()?.1.as_dict().ok();
+    let dict = |obj| plain_dict(pdf.dereference(obj).ok()?.1);
     let Some(resources) = src.page(index).and_then(|f| f.resources.as_deref()) else {
         return false;
     };
-    let lists = dict(resources).and_then(|res| dict(res.get(b"Properties").ok()?));
+    let lists = dict(resources).and_then(|res| dict(res.get(b"Properties")?));
     lists.is_some_and(|lists| {
         (lists.iter()).any(|(_, list)| dict(list).is_some_and(|l| l.has(b"SHEF_Gen")))
     })
@@ -427,10 +434,8 @@ fn merged(src: &Source, index: u32) -> Vec<GenId> {
 /// The catalog's `/SHEF_Generators` string, when it has one.
 fn stored_json(pdf: &LazyPdf) -> Option<Vec<u8>> {
     let catalog = pdf.catalog().ok()?;
-    let (_, json) = pdf
-        .dereference(catalog.get(GENERATORS.as_bytes()).ok()?)
-        .ok()?;
-    Some(json.as_str().ok()?.to_vec())
+    let (_, json) = pdf.dereference(catalog.get(GENERATORS.as_bytes())?).ok()?;
+    Some(json.as_bytes()?.to_vec())
 }
 
 /// The XObject the first of `blocks` that draws one draws, when its page's
@@ -440,7 +445,7 @@ fn rebind(src: &Source, blocks: &[Block], subtype: &[u8]) -> Option<ObjectId> {
     let pdf = src.pdf();
     blocks.iter().find_map(|&Block { index, stream, .. }| {
         let stream = pdf.object_unkept(stream).ok()?;
-        let data = (stream.as_stream().ok()?)
+        let data = (stream.as_stream()?)
             .decompressed_content_with_limit(lim.content.decompressed)
             .ok()?;
         let mut operand = None;
@@ -457,16 +462,10 @@ fn rebind(src: &Source, blocks: &[Block], subtype: &[u8]) -> Option<ObjectId> {
         }
         let name = name?;
         let resources = src.page(index)?.resources.as_deref()?;
-        let resources = pdf.dereference(resources).ok()?.1.as_dict().ok()?;
-        let xobjects = pdf.dereference(resources.get(b"XObject").ok()?).ok()?.1;
-        let id = xobjects
-            .as_dict()
-            .ok()?
-            .get(&name)
-            .ok()?
-            .as_reference()
-            .ok()?;
-        let dict = &pdf.get(id).ok()?.as_stream().ok()?.dict;
-        (dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(subtype)).then_some(id)
+        let resources = plain_dict(pdf.dereference(resources).ok()?.1)?;
+        let xobjects = pdf.dereference(resources.get(b"XObject")?).ok()?.1;
+        let id = plain_dict(xobjects)?.get(&name)?.as_reference()?;
+        let dict = &pdf.get(id).ok()?.as_stream()?.dict;
+        (dict.get(b"Subtype").and_then(Object::as_name) == Some(subtype)).then_some(id)
     })
 }

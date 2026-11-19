@@ -82,7 +82,7 @@ use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::fixture::{Form, every_kind, every_mark_kind, mark_blobs, note};
 use sheaf_doc::labels::LabelSpec;
 use sheaf_doc::materialize::{Encryption, ObjKey};
-use sheaf_doc::pdf::{LazyPdf, Object, ObjectId, XrefKind, dictionary};
+use sheaf_doc::pdf::{LazyPdf, Object, ObjectId, Value, XrefKind, dictionary, literal};
 use sheaf_doc::serialize::fixture as crypt;
 use sheaf_doc::source::OpenError;
 use sheaf_doc::store::{BlobKind, Origin};
@@ -604,17 +604,17 @@ fn pages(how: How) {
     let mut f = Form::new(3);
     let comment = f.pdf.new_object_id();
     let popup = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Popup", "Parent" => comment,
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Popup"), "Parent" => comment,
         "Rect" => vec![300.into(), 600.into(), 500.into(), 700.into()],
     });
     let page = f.pages[0];
     f.pdf.objects.insert(
         comment,
         dictionary! {
-            "Type" => "Annot", "Subtype" => "Text", "P" => page, "Popup" => popup,
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "P" => page, "Popup" => popup,
             "Rect" => vec![72.into(), 600.into(), 92.into(), 620.into()],
-            "Contents" => Object::string_literal("Theirs"),
-            "NM" => Object::string_literal("theirs"),
+            "Contents" => literal("Theirs"),
+            "NM" => literal("theirs"),
         }
         .into(),
     );
@@ -739,7 +739,7 @@ fn apart(mut f: Form, to: &str) -> Form {
             let widget = f.pdf.add_object(widget);
             let field = f.dict(*at);
             field.set("Kids", vec![widget.into()]);
-            let button = field.get(b"FT").and_then(Object::as_name).ok() == Some(b"Btn");
+            let button = field.get(b"FT").and_then(Object::as_name) == Some(b"Btn");
             if button && !field.has(b"Ff") {
                 field.set("Ff", 2);
             }
@@ -748,7 +748,7 @@ fn apart(mut f: Form, to: &str) -> Form {
         f.set_annots(page, &annots);
     }
     let top = f.fields()[0];
-    f.dict(top).set("T", Object::string_literal(to));
+    f.dict(top).set("T", literal(to));
     f
 }
 
@@ -924,7 +924,7 @@ fn every_allowance_names_an_open_backlog_entry() {
 #[test]
 fn a_merged_objects_finding_is_carried_from_any_object_of_a_source() {
     let missing = |n: u32, made: Made| Finding {
-        object: Some((n, 0)),
+        object: Some(ObjectId::new(n, 0)),
         made,
         path: format!("Root/Pages/Kids[{n}]"),
         table: "PageObject".to_string(),
@@ -1066,14 +1066,16 @@ fn the_fonts_widths_are_allowed_only_where_pdf_2_0_asks_for_them() {
         let mut pdf = sheaf_doc::pdf::Document::with_version(version);
         let pages = pdf.new_object_id();
         let font = pdf.add_object(dictionary! {
-            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => base_font,
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name(base_font),
         });
         let content = pdf.add_object(sheaf_doc::pdf::Stream::new(
             dictionary! {},
             b"BT /F1 12 Tf (A) Tj ET".to_vec(),
         ));
         let page = pdf.add_object(dictionary! {
-            "Type" => "Page",
+            "Type" => Object::name("Page"),
             "Parent" => pages,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
@@ -1081,11 +1083,12 @@ fn the_fonts_widths_are_allowed_only_where_pdf_2_0_asks_for_them() {
         });
         pdf.objects.insert(
             pages,
-            Object::Dictionary(dictionary! {
-                "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1,
+            Object::from(dictionary! {
+                "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1,
             }),
         );
-        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        let catalog =
+            pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages });
         pdf.trailer.set("Root", catalog);
         let mut bytes = Vec::new();
         pdf.save_to(&mut bytes).unwrap();
@@ -1328,11 +1331,13 @@ fn summary_held(summary: &Document, layout: Layout) {
         panic!("a save holds the objects it wrote");
     };
     let named = |id: &ObjectId, key: &[u8], value: &[u8]| {
-        let dict = match pdf.get(*id) {
-            Ok(Object::Dictionary(d) | Object::Stream(sheaf_doc::pdf::Stream { dict: d, .. })) => d,
-            _ => return false,
+        let Ok(obj) = pdf.get(*id) else {
+            return false;
         };
-        dict.get(key).and_then(Object::as_name).ok() == Some(value)
+        let Some(dict) = obj.as_dict() else {
+            return false;
+        };
+        dict.get(key).and_then(Object::as_name) == Some(value)
     };
     let forms: Vec<ObjectId> = pdf
         .ids()
@@ -1351,12 +1356,9 @@ fn summary_held(summary: &Document, layout: Layout) {
         .get(&ObjKey::Page(summary.page(0).unwrap()))
         .unwrap();
     let contents = pdf.get_dictionary(page).unwrap().get(b"Contents").unwrap();
-    let mut own: Vec<ObjectId> = match contents {
-        Object::Reference(id) => vec![*id],
-        Object::Array(streams) => streams
-            .iter()
-            .filter_map(|s| s.as_reference().ok())
-            .collect(),
+    let mut own: Vec<ObjectId> = match contents.value() {
+        Value::Ref(id) => vec![*id],
+        Value::Array(streams) => streams.iter().filter_map(Object::as_reference).collect(),
         other => panic!("the page's content is {other:?}"),
     };
     if layout == Layout::CommentsOnly {

@@ -17,7 +17,7 @@ references rewritten in place.
   it.
 
 The milestone's end doesn't wait for this slice: lopdf is gone after
-[slice 13](s13-lopdf-gone.md). It's planned because it's one of the
+[slice 13](../../complete/m18-pdf-layer/s13-lopdf-gone.md). It's planned because it's one of the
 reasons the layer keeps spans.
 
 **Where:** pdf-structure's writer; `materialize/mod.rs`'s raw rule.

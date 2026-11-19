@@ -7,7 +7,7 @@
 
 use std::ops::{ControlFlow, Range};
 
-use crate::pdf::{Document as Pdf, Object, Stream, dictionary};
+use crate::pdf::{Document as Pdf, Object, Stream, StreamExt, dictionary};
 use proptest::prelude::*;
 
 use super::state::number;
@@ -224,18 +224,18 @@ fn each_operator_places_its_glyphs() {
 fn a_width_guessed_moves_what_follows_it() {
     let mut pdf = Pdf::with_version("1.7");
     let helvetica = pdf.add_object(dictionary! {
-        "Type" => "Font",
-        "Subtype" => "Type1",
-        "BaseFont" => "Helvetica",
-        "Encoding" => "WinAnsiEncoding",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
+        "Encoding" => Object::name("WinAnsiEncoding"),
     });
     let unknown = pdf.add_object(dictionary! {
-        "Type" => "Font",
-        "Subtype" => "TrueType",
-        "BaseFont" => "Nonesuch",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("TrueType"),
+        "BaseFont" => Object::name("Nonesuch"),
     });
     let fonts = dictionary! { "F1" => helvetica, "F2" => unknown };
-    let resources = Object::Dictionary(dictionary! { "Font" => fonts });
+    let resources = Object::from(dictionary! { "Font" => fonts });
     let content = b"BT /F1 10 Tf 12 TL (A\\200B) Tj (C) Tj q 0 -12 Td (D) Tj Q (E) Tj \
         T* (F) Tj (\\200) Tj (G) ' (\\200) Tj 1 0 0 1 0 0 Tm (H) Tj (\\200) Tj ET \
         BT /F1 10 Tf (I) Tj /F2 10 Tf (J) Tj /F1 10 Tf (K) Tj 0 -12 Td (L) Tj ET";
@@ -548,8 +548,8 @@ fn forms_are_drawn_per_use() {
         .unwrap()
         .as_stream()
         .unwrap()
-        .content
-        .clone();
+        .raw_bytes()
+        .to_vec();
     let dos = |s: &[u8]| -> Vec<u32> {
         (s.windows(2).enumerate())
             .filter(|(_, w)| w == b"Do")
@@ -688,9 +688,9 @@ fn each_cap_is_held_to() {
     let f = fixture::forms();
     let form = |name: &[u8]| -> usize {
         let id = f.pdf.objects.iter().find_map(|(&id, o)| {
-            let s = o.as_stream().ok()?;
-            (s.dict.get(b"Subtype").ok()?.as_name().ok()? == b"Form"
-                && s.content.windows(name.len()).any(|w| w == name))
+            let s = o.as_stream()?;
+            (s.dict.get(b"Subtype")?.as_name()? == b"Form"
+                && s.raw_bytes().windows(name.len()).any(|w| w == name))
             .then_some(id)
         });
         f.pdf
@@ -698,15 +698,15 @@ fn each_cap_is_held_to() {
             .unwrap()
             .as_stream()
             .unwrap()
-            .content
+            .raw_bytes()
             .len()
     };
     // The Type3 font's CharProcs, each read once.
     let char_procs: usize = (f.pdf.objects.values())
-        .filter_map(|o| o.as_dict().ok()?.get(b"CharProcs").ok()?.as_dict().ok())
+        .filter_map(|o| o.as_dict()?.get(b"CharProcs")?.as_dict())
         .flat_map(|procs| procs.iter())
         .map(|(_, id)| f.pdf.get_object(id.as_reference().unwrap()).unwrap())
-        .map(|proc| proc.as_stream().unwrap().content.len())
+        .map(|proc| proc.as_stream().unwrap().raw_bytes().len())
         .sum();
     let content = f.content().concat().bytes().len();
     let all = content + form(b"(a)") + form(b"(b)") + char_procs;
@@ -809,25 +809,25 @@ fn decompressed_counts_each_font_s_program() {
 fn fonts_sharing_a_heavy_program_end_within_the_budget() {
     let mut pdf = Pdf::with_version("1.7");
     let program = pdf.add_object(Stream::new(
-        dictionary! { "Subtype" => "Type1C" },
+        dictionary! { "Subtype" => Object::name("Type1C") },
         fixture::heavy_cff_program(10),
     ));
     let descriptor = pdf.add_object(dictionary! {
-        "Type" => "FontDescriptor", "Flags" => 32, "Ascent" => 750, "Descent" => 0,
+        "Type" => Object::name("FontDescriptor"), "Flags" => 32, "Ascent" => 750, "Descent" => 0,
         "FontBBox" => vec![0.into(), 0.into(), 600.into(), 750.into()], "FontFile3" => program,
     });
     let simple = dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Heavy",
+        "Type" => Object::name("Font"), "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Heavy"),
         "FirstChar" => 65, "LastChar" => 65, "Widths" => vec![600.into()],
-        "Encoding" => "WinAnsiEncoding", "FontDescriptor" => descriptor,
+        "Encoding" => Object::name("WinAnsiEncoding"), "FontDescriptor" => descriptor,
     };
     let cid_font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "CIDFontType0", "BaseFont" => "Heavy",
+        "Type" => Object::name("Font"), "Subtype" => Object::name("CIDFontType0"), "BaseFont" => Object::name("Heavy"),
         "FontDescriptor" => descriptor,
     });
     let composite = dictionary! {
-        "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "Heavy",
-        "Encoding" => "Identity-H", "DescendantFonts" => vec![cid_font.into()],
+        "Type" => Object::name("Font"), "Subtype" => Object::name("Type0"), "BaseFont" => Object::name("Heavy"),
+        "Encoding" => Object::name("Identity-H"), "DescendantFonts" => vec![cid_font.into()],
     };
     for (font, shown) in [(simple, "(A)"), (composite, "<0002>")] {
         let mut fonts = crate::pdf::Dictionary::new();
@@ -860,7 +860,7 @@ fn a_form_of_whitespace_costs_its_length_each_use() {
     let form = |content: Vec<u8>, xobjects: crate::pdf::Dictionary| {
         Stream::new(
             dictionary! {
-                "Type" => "XObject", "Subtype" => "Form",
+                "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"),
                 "Resources" => dictionary! { "XObject" => xobjects },
             },
             content,
@@ -885,28 +885,26 @@ fn a_form_of_whitespace_costs_its_length_each_use() {
 /// gigabyte each.
 #[test]
 fn fonts_decompress_within_the_page_s_budget() {
-    use std::io::Write;
     let mut pdf = Pdf::with_version("1.7");
     let mut program = b"100 0 0 0 100 100 d1 ".to_vec();
     program.resize(4 << 20, b' ');
-    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
-    z.write_all(&program).unwrap();
     let bomb = Stream::new(
-        dictionary! { "Filter" => "FlateDecode" },
-        z.finish().unwrap(),
+        dictionary! { "Filter" => Object::name("FlateDecode") },
+        crate::pdf::deflate_best(&program),
     );
     let bomb = pdf.add_object(bomb);
     let font = || {
         dictionary! {
-            "Type" => "Font", "Subtype" => "Type3",
+            "Type" => Object::name("Font"), "Subtype" => Object::name("Type3"),
             "FontMatrix" => vec![0.001.into(), 0.into(), 0.into(), 0.001.into(), 0.into(), 0.into()],
-            "Encoding" => dictionary! { "Differences" => vec![97.into(), "a".into()] },
+            "Encoding" => dictionary! { "Differences" => vec![97.into(), Object::name("a")] },
             "CharProcs" => dictionary! { "a" => bomb },
         }
     };
-    let fonts: crate::pdf::Dictionary = (0..1000)
-        .map(|i| (format!("F{i}"), font().into()))
-        .collect();
+    let mut fonts = crate::pdf::Dictionary::new();
+    for i in 0..1000 {
+        fonts.set(format!("F{i}"), font());
+    }
     let resources: Object = dictionary! { "Font" => fonts }.into();
     let content: String = (0..1000).map(|i| format!("/F{i} 1 Tf ")).collect();
     let started = std::time::Instant::now();
@@ -938,17 +936,21 @@ fn fonts_decompress_within_the_page_s_budget() {
 #[test]
 fn geometry_past_an_f32_fails() {
     let mut pdf = Pdf::with_version("1.7");
-    let e20 = Object::Real(1e20);
+    let e20 = Object::from(1e20);
     let form = pdf.add_object(Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Form",
+            "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"),
             "Matrix" => vec![e20.clone(), 0.into(), 0.into(), e20, 0.into(), 0.into()],
         },
         b"0 0 m 1 1 l S".to_vec(),
     ));
     let resources: Object = dictionary! {
         "Font" => dictionary! {
-            "F" => dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" },
+            "F" => dictionary! {
+                "Type" => Object::name("Font"),
+                "Subtype" => Object::name("Type1"),
+                "BaseFont" => Object::name("Helvetica"),
+            },
         },
         "XObject" => dictionary! { "Fm" => form },
     }
@@ -1017,7 +1019,7 @@ fn a_q_with_nothing_saved_is_passed_over() {
     let squares = squares.as_dict().unwrap().get(b"T3").unwrap().clone();
     let mut pdf = f.pdf;
     let form = pdf.add_object(Stream::new(
-        dictionary! { "Subtype" => "Form", "BBox" => vec![0.into(), 0.into(), 612.into(), 792.into()] },
+        dictionary! { "Subtype" => Object::name("Form"), "BBox" => vec![0.into(), 0.into(), 612.into(), 792.into()] },
         b"Q BT 10 10 Td (a) Tj ET".to_vec(),
     ));
     let resources: Object = dictionary! {
@@ -1158,13 +1160,16 @@ fn the_visitor_can_stop_it() {
 fn faults_say_where() {
     let mut pdf = Pdf::with_version("1.7");
     let broken = pdf.add_object(Stream::new(
-        dictionary! { "Subtype" => "Form" },
+        dictionary! { "Subtype" => Object::name("Form") },
         b"BT (no end".to_vec(),
     ));
-    // A filter lopdf can't decode, which a content stream has no business
-    // being in.
-    let mut unreadable = Stream::new(dictionary! { "Subtype" => "Form" }, b"BT ET".to_vec());
-    unreadable.dict.set("Filter", "JPXDecode");
+    // A filter the stream decoder can't decode, which a content stream has no
+    // business being in.
+    let mut unreadable = Stream::new(
+        dictionary! { "Subtype" => Object::name("Form") },
+        b"BT ET".to_vec(),
+    );
+    unreadable.dict.set("Filter", Object::name("JPXDecode"));
     let unreadable = pdf.add_object(unreadable);
     let resources: Object = dictionary! {
         "XObject" => dictionary! { "B" => broken, "U" => unreadable },
@@ -1988,10 +1993,7 @@ fn marked_content_is_read_as_pdfium_reads_it() {
     ]);
     let resources = f.resources().unwrap().as_dict().unwrap();
     let properties = resources.get(b"Properties").unwrap().as_dict().unwrap();
-    assert_eq!(
-        marks[2].oc,
-        properties.get(b"MC0").unwrap().as_reference().ok()
-    );
+    assert_eq!(marks[2].oc, properties.get(b"MC0").unwrap().as_reference());
     assert!(form_oc.is_some() && form_oc != marks[2].oc);
     assert_eq!(marks[3].stream.as_ref().map(UseId::depth), Some(1));
     assert!(matches!(&marks[7].props, Some(Props::Named(name, Some(_))) if name == b"P1"));
@@ -2036,7 +2038,7 @@ proptest! {
     ) {
         let pdf = Pdf::with_version("1.7");
         let font = dictionary! {
-            "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "ABCDEF+Some",
+            "Type" => Object::name("Font"), "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("ABCDEF+Some"),
             "FirstChar" => 0, "LastChar" => 255,
             "Widths" => widths.iter().map(|&w| w.into()).collect::<Vec<Object>>(),
         };

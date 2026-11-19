@@ -17,9 +17,9 @@
 //! Most draw in [`SQUARES`]: a Type3 font whose `a` is a square an em
 //! wide and `b` half one, from 0.2 em below the baseline to 0.8 above.
 
-use std::io::Write;
-
-use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
+use crate::pdf::{
+    Dictionary, Document as Pdf, Object, ObjectId, Stream, StreamExt, dictionary, literal,
+};
 use image::{Rgb, RgbImage};
 
 use super::interp::Encoded;
@@ -46,7 +46,7 @@ impl Fixture {
 
     /// Its page's `/Resources`, as written.
     pub fn resources(&self) -> Option<&Object> {
-        self.page().get(b"Resources").ok()
+        self.page().get(b"Resources")
     }
 
     /// It, as a file.
@@ -66,7 +66,7 @@ impl Fixture {
         let page = pdf.page_iter().next().expect("one page");
         (pdf.get_dictionary_mut(page).expect("its page")).set("Contents", content);
         for (id, data) in &encoded.forms {
-            let form = pdf.get_object_mut(*id).and_then(Object::as_stream_mut);
+            let form = pdf.get_object_mut(*id).ok().and_then(Object::as_stream_mut);
             form.expect("a form").set_plain_content(data.clone());
         }
         Fixture { pdf }
@@ -114,12 +114,14 @@ pub const SQUARES: &[u8] = b"T3";
 pub fn operators() -> Fixture {
     let mut pdf = Pdf::with_version("1.7");
     let squares = squares(&mut pdf, 1000.0);
-    let by_name = pdf.add_object(dictionary! { "Type" => "ExtGState", "Font" => vec![
-        Object::Name(SQUARES.to_vec()), 20.into(),
-    ] });
-    let by_ref = pdf.add_object(dictionary! { "Type" => "ExtGState", "Font" => vec![
-        squares.into(), 10.into(),
-    ] });
+    let by_name = pdf.add_object(dictionary! {
+        "Type" => Object::name("ExtGState"),
+        "Font" => vec![Object::name(SQUARES), 20.into()],
+    });
+    let by_ref = pdf.add_object(dictionary! {
+        "Type" => Object::name("ExtGState"),
+        "Font" => vec![squares.into(), 10.into()],
+    });
     let resources = dictionary! {
         "Font" => dictionary! { "T3" => squares },
         "ExtGState" => dictionary! { "GS1" => by_name, "GS2" => by_ref },
@@ -214,12 +216,14 @@ pub fn fonts() -> Fixture {
 /// laid out the same wherever PDFium draws it.
 pub fn standard_14(subtype: &str, name: &str) -> Dictionary {
     let mut font = dictionary! {
-        "Type" => "Font", "Subtype" => subtype, "BaseFont" => name,
-        "Encoding" => "WinAnsiEncoding",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name(subtype),
+        "BaseFont" => Object::name(name),
+        "Encoding" => Object::name("WinAnsiEncoding"),
     };
     let read = Foreign::read(&Pdf::new(), &font, &Limits::DEFAULT, &mut 0);
     let afm = read.expect("a font by name alone has no stream to decompress");
-    let widths = (32..=255).map(|code| Object::Integer(afm.width(code) as i64));
+    let widths = (32..=255).map(|code| Object::from(afm.width(code) as i64));
     font.set("FirstChar", 32);
     font.set("LastChar", 255);
     font.set("Widths", widths.collect::<Vec<_>>());
@@ -237,52 +241,77 @@ fn font_kinds(pdf: &mut Pdf) -> Dictionary {
     let program = embedded(pdf);
     let descriptor = |pdf: &mut Pdf, ascent: i64, descent: i64| -> Object {
         pdf.add_object(dictionary! {
-            "Type" => "FontDescriptor", "FontName" => "GlyphLessFont", "Flags" => 32,
+            "Type" => Object::name("FontDescriptor"),
+            "FontName" => Object::name("GlyphLessFont"),
+            "Flags" => 32,
             "FontBBox" => vec![0.into(), descent.into(), 1000.into(), ascent.into()],
-            "Ascent" => ascent, "Descent" => descent, "CapHeight" => ascent,
-            "ItalicAngle" => 0, "StemV" => 80, "FontFile2" => program.clone(),
+            "Ascent" => ascent,
+            "Descent" => descent,
+            "CapHeight" => ascent,
+            "ItalicAngle" => 0,
+            "StemV" => 80,
+            "FontFile2" => program.clone(),
         })
         .into()
     };
     let tt_descriptor = descriptor(pdf, 900, -100);
     let tt = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "GlyphLessFont",
-        "FirstChar" => 65, "LastChar" => 66, "Widths" => vec![500.into(), 600.into()],
-        "Encoding" => "WinAnsiEncoding", "FontDescriptor" => tt_descriptor,
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("TrueType"),
+        "BaseFont" => Object::name("GlyphLessFont"),
+        "FirstChar" => 65,
+        "LastChar" => 66,
+        "Widths" => vec![500.into(), 600.into()],
+        "Encoding" => Object::name("WinAnsiEncoding"),
+        "FontDescriptor" => tt_descriptor,
     });
     let cid_descriptor = descriptor(pdf, 800, -200);
-    let w = |entries: Vec<Object>| Object::Array(entries);
+    let w = |entries: Vec<Object>| Object::from(entries);
     let type0 = |pdf: &mut Pdf, encoding: Object, cid: Dictionary| -> Object {
         let mut cid_font = dictionary! {
-            "Type" => "Font", "BaseFont" => "GlyphLessFont", "FontDescriptor" => cid_descriptor.clone(),
+            "Type" => Object::name("Font"),
+            "BaseFont" => Object::name("GlyphLessFont"),
+            "FontDescriptor" => cid_descriptor.clone(),
             "CIDSystemInfo" => dictionary! {
-                "Registry" => Object::string_literal("Adobe"),
-                "Ordering" => Object::string_literal("Identity"), "Supplement" => 0,
+                "Registry" => literal("Adobe"),
+                "Ordering" => literal("Identity"),
+                "Supplement" => 0,
             },
         };
-        cid_font.extend(&cid);
+        for (k, v) in &cid {
+            cid_font.set(k, v.clone());
+        }
         let descendant = pdf.add_object(cid_font);
         pdf.add_object(dictionary! {
-            "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "GlyphLessFont",
-            "Encoding" => encoding, "DescendantFonts" => vec![descendant.into()],
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type0"),
+            "BaseFont" => Object::name("GlyphLessFont"),
+            "Encoding" => encoding,
+            "DescendantFonts" => vec![descendant.into()],
         })
         .into()
     };
     let i2 = type0(
         pdf,
-        "Identity-H".into(),
+        Object::name("Identity-H"),
         dictionary! {
-            "Subtype" => "CIDFontType2",
+            "Subtype" => Object::name("CIDFontType2"),
             "W" => w(vec![1.into(), w(vec![400.into(), 500.into()]), 10.into(), 20.into(), 700.into()]),
         },
     );
     let i0 = type0(
         pdf,
-        "Identity-H".into(),
-        dictionary! { "Subtype" => "CIDFontType0", "W" => w(vec![1.into(), w(vec![450.into()])]) },
+        Object::name("Identity-H"),
+        dictionary! {
+            "Subtype" => Object::name("CIDFontType0"),
+            "W" => w(vec![1.into(), w(vec![450.into()])]),
+        },
     );
     let cmap = pdf.add_object(Stream::new(
-        dictionary! { "Type" => "CMap", "CMapName" => "OneByte" },
+        dictionary! {
+            "Type" => Object::name("CMap"),
+            "CMapName" => Object::name("OneByte"),
+        },
         b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
           /CMapName /OneByte def\n\
           1 begincodespacerange <00> <FF> endcodespacerange\n\
@@ -294,15 +323,15 @@ fn font_kinds(pdf: &mut Pdf) -> Dictionary {
         pdf,
         cmap.into(),
         dictionary! {
-            "Subtype" => "CIDFontType2",
+            "Subtype" => Object::name("CIDFontType2"),
             "W" => w(vec![1.into(), w(vec![300.into()]), 34.into(), w(vec![800.into()])]),
         },
     );
     let v = type0(
         pdf,
-        "Identity-V".into(),
+        Object::name("Identity-V"),
         dictionary! {
-            "Subtype" => "CIDFontType2",
+            "Subtype" => Object::name("CIDFontType2"),
             "W" => w(vec![1.into(), w(vec![500.into(), 600.into()])]),
             "W2" => w(vec![1.into(), w(vec![(-1000).into(), 250.into(), 880.into()])]),
             "DW2" => w(vec![880.into(), (-1000).into()]),
@@ -348,24 +377,38 @@ pub fn predefined() -> Fixture {
 fn predefined_fonts(pdf: &mut Pdf) -> Dictionary {
     let program = embedded(pdf);
     let descriptor = pdf.add_object(dictionary! {
-        "Type" => "FontDescriptor", "FontName" => "GlyphLessFont", "Flags" => 4,
+        "Type" => Object::name("FontDescriptor"),
+        "FontName" => Object::name("GlyphLessFont"),
+        "Flags" => 4,
         "FontBBox" => vec![0.into(), (-200).into(), 1000.into(), 800.into()],
-        "Ascent" => 800, "Descent" => -200, "CapHeight" => 800,
-        "ItalicAngle" => 0, "StemV" => 80, "FontFile2" => program,
+        "Ascent" => 800,
+        "Descent" => -200,
+        "CapHeight" => 800,
+        "ItalicAngle" => 0,
+        "StemV" => 80,
+        "FontFile2" => program,
     });
     let mut type0 = |encoding: &str, w: Vec<i64>| -> Object {
-        let w = (w.chunks(2)).flat_map(|p| [p[0].into(), Object::Array(vec![p[1].into()])]);
+        let w = (w.chunks(2)).flat_map(|p| [p[0].into(), Object::from(vec![p[1].into()])]);
         let descendant = pdf.add_object(dictionary! {
-            "Type" => "Font", "Subtype" => "CIDFontType2", "BaseFont" => "GlyphLessFont",
-            "FontDescriptor" => descriptor, "DW" => 600, "W" => w.collect::<Vec<_>>(),
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("CIDFontType2"),
+            "BaseFont" => Object::name("GlyphLessFont"),
+            "FontDescriptor" => descriptor,
+            "DW" => 600,
+            "W" => w.collect::<Vec<_>>(),
             "CIDSystemInfo" => dictionary! {
-                "Registry" => Object::string_literal("Adobe"),
-                "Ordering" => Object::string_literal("Japan1"), "Supplement" => 6,
+                "Registry" => literal("Adobe"),
+                "Ordering" => literal("Japan1"),
+                "Supplement" => 6,
             },
         });
         pdf.add_object(dictionary! {
-            "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "GlyphLessFont",
-            "Encoding" => encoding, "DescendantFonts" => vec![descendant.into()],
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type0"),
+            "BaseFont" => Object::name("GlyphLessFont"),
+            "Encoding" => Object::name(encoding),
+            "DescendantFonts" => vec![descendant.into()],
         })
         .into()
     };
@@ -423,7 +466,11 @@ pub fn programs() -> Fixture {
 /// [`programs`]' fonts, by the names it gives them.
 fn program_fonts(pdf: &mut Pdf) -> Dictionary {
     let truetype = program_stream(pdf, truetype_program(), dictionary! {});
-    let cff = program_stream(pdf, cff_program(), dictionary! { "Subtype" => "Type1C" });
+    let cff = program_stream(
+        pdf,
+        cff_program(),
+        dictionary! { "Subtype" => Object::name("Type1C") },
+    );
     let type1 = type1_program();
     let clear = type1
         .windows(6)
@@ -435,9 +482,9 @@ fn program_fonts(pdf: &mut Pdf) -> Dictionary {
         dictionary! { "Length1" => clear as i64, "Length2" => (type1.len() - clear) as i64, "Length3" => 0 },
     );
     let widths = |pairs: &[(u8, i64)]| {
-        let mut widths = vec![Object::Integer(0); 72];
+        let mut widths = vec![Object::from(0_i64); 72];
         for &(code, width) in pairs {
-            widths[usize::from(code - 32)] = Object::Integer(width);
+            widths[usize::from(code - 32)] = Object::from(width);
         }
         widths
     };
@@ -454,18 +501,29 @@ fn program_fonts(pdf: &mut Pdf) -> Dictionary {
         |pdf: &mut Pdf, subtype: &str, widths: &[Object], descriptor: Dictionary| -> Object {
             let descriptor = pdf.add_object(descriptor);
             pdf.add_object(dictionary! {
-                "Type" => "Font", "Subtype" => subtype, "BaseFont" => "Fix",
-                "FirstChar" => 32, "LastChar" => 103, "Widths" => widths.to_vec(),
-                "Encoding" => "WinAnsiEncoding", "FontDescriptor" => descriptor,
+                "Type" => Object::name("Font"),
+                "Subtype" => Object::name(subtype),
+                "BaseFont" => Object::name("Fix"),
+                "FirstChar" => 32,
+                "LastChar" => 103,
+                "Widths" => widths.to_vec(),
+                "Encoding" => Object::name("WinAnsiEncoding"),
+                "FontDescriptor" => descriptor,
             })
             .into()
         };
     let descriptor = |file: &str, program: &Object, bbox: [i64; 4], ascent: i64, descent: i64| {
         dictionary! {
-            "Type" => "FontDescriptor", "FontName" => "Fix", "Flags" => 32,
-            "FontBBox" => bbox.iter().map(|&n| Object::Integer(n)).collect::<Vec<_>>(),
-            "Ascent" => ascent, "Descent" => descent, "CapHeight" => 750,
-            "ItalicAngle" => 0, "StemV" => 80, file => program.clone(),
+            "Type" => Object::name("FontDescriptor"),
+            "FontName" => Object::name("Fix"),
+            "Flags" => 32,
+            "FontBBox" => bbox.iter().map(|&n| Object::from(n)).collect::<Vec<_>>(),
+            "Ascent" => ascent,
+            "Descent" => descent,
+            "CapHeight" => 750,
+            "ItalicAngle" => 0,
+            "StemV" => 80,
+            file => program.clone(),
         }
     };
     let pt = simple(
@@ -495,9 +553,9 @@ fn program_fonts(pdf: &mut Pdf) -> Dictionary {
         &tt_widths,
         descriptor("FontFile2", &truetype, [0, -300, 1000, 1000], 0, 0),
     );
-    let mut short = vec![Object::Integer(0); 103];
+    let mut short = vec![Object::from(0_i64); 103];
     for (code, width) in [(1, 400), (b'A', 300), (b'g', 500)] {
-        short[usize::from(code - 1)] = Object::Integer(width);
+        short[usize::from(code - 1)] = Object::from(width);
     }
     let short_descriptor = pdf.add_object(descriptor(
         "FontFile3",
@@ -507,9 +565,14 @@ fn program_fonts(pdf: &mut Pdf) -> Dictionary {
         -100,
     ));
     let ps = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Fix",
-        "FirstChar" => 1, "LastChar" => 103, "Widths" => short,
-        "Encoding" => "WinAnsiEncoding", "FontDescriptor" => short_descriptor,
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Fix"),
+        "FirstChar" => 1,
+        "LastChar" => 103,
+        "Widths" => short,
+        "Encoding" => Object::name("WinAnsiEncoding"),
+        "FontDescriptor" => short_descriptor,
     });
     let cid_descriptor = pdf.add_object(descriptor(
         "FontFile2",
@@ -519,17 +582,24 @@ fn program_fonts(pdf: &mut Pdf) -> Dictionary {
         -200,
     ));
     let descendant = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "CIDFontType2", "BaseFont" => "Fix",
-        "FontDescriptor" => cid_descriptor, "CIDToGIDMap" => "Identity",
-        "W" => vec![1.into(), [600, 500, 250, 450, 700].map(Object::Integer).to_vec().into()],
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("CIDFontType2"),
+        "BaseFont" => Object::name("Fix"),
+        "FontDescriptor" => cid_descriptor,
+        "CIDToGIDMap" => Object::name("Identity"),
+        "W" => vec![1.into(), [600_i64, 500, 250, 450, 700].map(Object::from).to_vec().into()],
         "CIDSystemInfo" => dictionary! {
-            "Registry" => Object::string_literal("Adobe"),
-            "Ordering" => Object::string_literal("Identity"), "Supplement" => 0,
+            "Registry" => literal("Adobe"),
+            "Ordering" => literal("Identity"),
+            "Supplement" => 0,
         },
     });
     let pi = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "Fix",
-        "Encoding" => "Identity-H", "DescendantFonts" => vec![descendant.into()],
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type0"),
+        "BaseFont" => Object::name("Fix"),
+        "Encoding" => Object::name("Identity-H"),
+        "DescendantFonts" => vec![descendant.into()],
     });
     dictionary! {
         "PT" => pt, "PC" => pc, "P1" => p1, "PI" => pi, "PN" => pn, "PZ" => pz, "PS" => ps,
@@ -1058,7 +1128,8 @@ pub fn forms() -> Fixture {
 fn nested(pdf: &mut Pdf, squares: ObjectId) -> ObjectId {
     let inner = pdf.add_object(Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Form",
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
             "Matrix" => numbers(&[2.0, 0.0, 0.0, 2.0, 0.0, 0.0]),
             "BBox" => numbers(&[0.0, 0.0, 50.0, 50.0]),
         },
@@ -1066,7 +1137,8 @@ fn nested(pdf: &mut Pdf, squares: ObjectId) -> ObjectId {
     ));
     pdf.add_object(Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Form",
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
             "Matrix" => numbers(&[1.0, 0.0, 0.0, 1.0, 10.0, 20.0]),
             "BBox" => numbers(&[0.0, 0.0, 200.0, 100.0]),
             "Resources" => dictionary! {
@@ -1164,20 +1236,28 @@ pub fn images() -> Fixture {
     let mut pdf = Pdf::with_version("1.7");
     let gray = |w: i64| {
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Image", "Width" => w, "Height" => 2,
-            "ColorSpace" => "DeviceGray", "BitsPerComponent" => 8,
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Image"),
+            "Width" => w,
+            "Height" => 2,
+            "ColorSpace" => Object::name("DeviceGray"),
+            "BitsPerComponent" => 8,
         }
     };
     let stencil = || {
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Image", "Width" => 2, "Height" => 2,
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Image"),
+            "Width" => 2,
+            "Height" => 2,
             "ImageMask" => true,
         }
     };
     let samples = vec![0, 255, 0, 255];
     let smask = pdf.add_object(Stream::new(gray(2), vec![255, 128, 64, 0]));
     let ocg = pdf.add_object(dictionary! {
-        "Type" => "OCG", "Name" => Object::string_literal("Layer"),
+        "Type" => Object::name("OCG"),
+        "Name" => literal("Layer"),
     });
     let mut im = gray(2);
     im.set("SMask", smask);
@@ -1193,21 +1273,21 @@ pub fn images() -> Fixture {
     let ck = pdf.add_object(Stream::new(ck, samples.clone()));
     let fm = pdf.add_object(Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Form",
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
             "Matrix" => numbers(&[1.0, 0.0, 0.0, 1.0, 10.0, 0.0]),
             "BBox" => numbers(&[0.0, 0.0, 100.0, 100.0]),
         },
         b"q 40 0 10 40 0 0 cm /Im Do Q".to_vec(),
     ));
     let ps = pdf.add_object(Stream::new(
-        dictionary! { "Type" => "XObject", "Subtype" => "PS" },
+        dictionary! {
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("PS"),
+        },
         b"% PostScript, which PDFium doesn't draw".to_vec(),
     ));
-    let flate = {
-        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-        z.write_all(&samples).expect("compressing in memory");
-        z.finish().expect("compressing in memory")
-    };
+    let flate = crate::pdf::deflate(&samples);
     let jpeg = sheaf_image::encode::jpeg(&RgbImage::from_pixel(2, 2, Rgb([200, 50, 50])), 90, 72)
         .expect("a JPEG of 2 × 2");
     let dict = |more: &str| format!("/W 2 /H 2 /BPC 8 {more}");
@@ -1287,8 +1367,10 @@ pub fn clips() -> Fixture {
     };
     let axial = |bbox: Option<[f64; 4]>| {
         let mut shading = dictionary! {
-            "ShadingType" => 2, "ColorSpace" => "DeviceGray",
-            "Coords" => numbers(&[100.0, 400.0, 300.0, 400.0]), "Function" => function.clone(),
+            "ShadingType" => 2,
+            "ColorSpace" => Object::name("DeviceGray"),
+            "Coords" => numbers(&[100.0, 400.0, 300.0, 400.0]),
+            "Function" => function.clone(),
         };
         if let Some(bbox) = bbox {
             shading.set("BBox", numbers(&bbox));
@@ -1299,7 +1381,8 @@ pub fn clips() -> Fixture {
     let sh2 = pdf.add_object(axial(None));
     let fm = pdf.add_object(Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Form",
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
             "Matrix" => numbers(&[2.0, 0.0, 0.0, 2.0, 0.0, 0.0]),
             "BBox" => numbers(&[0.0, 0.0, 100.0, 50.0]),
         },
@@ -1354,13 +1437,18 @@ pub fn marked() -> Fixture {
     let mut pdf = Pdf::with_version("1.7");
     let squares = squares(&mut pdf, 1000.0);
     let ocg = |pdf: &mut Pdf, name: &str| {
-        pdf.add_object(dictionary! { "Type" => "OCG", "Name" => Object::string_literal(name) })
+        pdf.add_object(dictionary! {
+            "Type" => Object::name("OCG"),
+            "Name" => literal(name),
+        })
     };
     let layer = ocg(&mut pdf, "Layer");
     let form_layer = ocg(&mut pdf, "Form layer");
     let fm = pdf.add_object(Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Form", "OC" => form_layer,
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
+            "OC" => form_layer,
             "BBox" => numbers(&[0.0, 0.0, 612.0, 792.0]),
         },
         b"EMC /Span << /ActualText (inside) /MCID 7 >> BDC \
@@ -1401,7 +1489,8 @@ pub fn inherited() -> Fixture {
     content.extend(b" EI Q");
     let fm = pdf.add_object(Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Form",
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
             "BBox" => numbers(&[0.0, 0.0, 612.0, 792.0]),
             "Resources" => dictionary! { "XObject" => dictionary! {} },
         },
@@ -1409,7 +1498,7 @@ pub fn inherited() -> Fixture {
     ));
     let resources = dictionary! {
         "Font" => dictionary! { "T3" => squares },
-        "ColorSpace" => dictionary! { "CS3" => "DeviceRGB" },
+        "ColorSpace" => dictionary! { "CS3" => Object::name("DeviceRGB") },
         "Properties" => dictionary! { "P0" => dictionary! { "MCID" => 3 } },
         "XObject" => dictionary! { "Fm" => fm },
     };
@@ -1449,10 +1538,14 @@ pub fn fuzz_page() -> Fixture {
     let mut pdf = Pdf::with_version("1.7");
     let squares = squares(&mut pdf, 1000.0);
     let mut fonts = font_kinds(&mut pdf);
-    fonts.extend(&predefined_fonts(&mut pdf));
+    for (k, v) in &predefined_fonts(&mut pdf) {
+        fonts.set(k, v.clone());
+    }
     fonts.set("T3", squares);
     let helvetica = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     });
     fonts.set("F1", helvetica);
     let own = pdf.new_object_id();
@@ -1472,19 +1565,24 @@ pub fn fuzz_page() -> Fixture {
     );
     let chain = pdf.add_object(chain);
     let layer = pdf.add_object(dictionary! {
-        "Type" => "OCG", "Name" => Object::string_literal("Layer"),
+        "Type" => Object::name("OCG"),
+        "Name" => literal("Layer"),
     });
     let resources = dictionary! {
         "Font" => fonts,
         "ColorSpace" => dictionary! {
-            "CS1" => "DeviceGray", "CS3" => "DeviceRGB", "CS4" => "DeviceCMYK",
+            "CS1" => Object::name("DeviceGray"),
+            "CS3" => Object::name("DeviceRGB"),
+            "CS4" => Object::name("DeviceCMYK"),
         },
         "Properties" => dictionary! {
-            "P0" => dictionary! { "ActualText" => Object::string_literal("a"), "MCID" => 0 },
+            "P0" => dictionary! { "ActualText" => literal("a"), "MCID" => 0 },
             "OC0" => layer,
         },
         "ExtGState" => dictionary! { "GS1" => dictionary! {
-            "Type" => "ExtGState", "LW" => 2, "Font" => vec![Object::Name(SQUARES.to_vec()), 20.into()],
+            "Type" => Object::name("ExtGState"),
+            "LW" => 2,
+            "Font" => vec![Object::name(SQUARES), 20.into()],
         } },
         "XObject" => dictionary! { "X0" => own, "X1" => chain, "Fm1" => nested(&mut pdf, squares) },
     };
@@ -1496,7 +1594,8 @@ pub fn fuzz_page() -> Fixture {
 fn form(squares: ObjectId, content: &[u8], xobjects: Dictionary) -> Stream {
     Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Form",
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
             "BBox" => numbers(&[0.0, 0.0, 612.0, 792.0]),
             "Resources" => dictionary! {
                 "Font" => dictionary! { "T3" => squares }, "XObject" => xobjects,
@@ -1523,17 +1622,26 @@ fn squares(pdf: &mut Pdf, units: f64) -> ObjectId {
         format!("{} 0 d0", u(250.0)).into_bytes(),
     ));
     // Codes 32 to 98: the space, nothing, `a` and `b`.
-    let mut widths = vec![Object::Real(u(250.0)); 1];
-    widths.extend(std::iter::repeat_n(Object::Integer(0), 97 - 33));
-    widths.extend([Object::Real(u(1000.0)), Object::Real(u(500.0))]);
+    let mut widths = vec![Object::from(u(250.0)); 1];
+    widths.extend(std::iter::repeat_n(Object::from(0_i64), 97 - 33));
+    widths.extend([Object::from(u(1000.0)), Object::from(u(500.0))]);
     pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type3",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type3"),
         "FontMatrix" => numbers(&[1.0 / units, 0.0, 0.0, 1.0 / units, 0.0, 0.0]),
         "FontBBox" => numbers(&[0.0, u(-200.0), u(1000.0), u(800.0)]),
-        "FirstChar" => 32, "LastChar" => 98, "Widths" => widths,
+        "FirstChar" => 32,
+        "LastChar" => 98,
+        "Widths" => widths,
         "Encoding" => dictionary! {
-            "Type" => "Encoding",
-            "Differences" => vec![32.into(), "space".into(), 97.into(), "a".into(), "b".into()],
+            "Type" => Object::name("Encoding"),
+            "Differences" => vec![
+                32.into(),
+                Object::name("space"),
+                97.into(),
+                Object::name("a"),
+                Object::name("b"),
+            ],
         },
         "CharProcs" => dictionary! { "space" => space, "a" => a, "b" => b },
         "Resources" => dictionary! {},
@@ -1551,7 +1659,7 @@ fn embedded(pdf: &mut Pdf) -> Object {
 }
 
 fn numbers(n: &[f64]) -> Object {
-    Object::Array(n.iter().map(|&n| Object::Real(n)).collect())
+    Object::from(n.iter().map(|&n| Object::from(n)).collect::<Vec<_>>())
 }
 
 /// `pdf` with one Letter page drawing `content` with `resources`.
@@ -1559,16 +1667,24 @@ fn one_page(mut pdf: Pdf, content: &[u8], resources: Dictionary) -> Fixture {
     let content = pdf.add_object(Stream::new(dictionary! {}, content.to_vec()));
     let pages = pdf.new_object_id();
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page", "Parent" => pages, "Contents" => content, "Resources" => resources,
+        "Type" => Object::name("Page"),
+        "Parent" => pages,
+        "Contents" => content,
+        "Resources" => resources,
     });
     pdf.objects.insert(
         pages,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"),
+            "Kids" => vec![page.into()],
+            "Count" => 1,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    let catalog = pdf.add_object(dictionary! {
+        "Type" => Object::name("Catalog"),
+        "Pages" => pages,
+    });
     pdf.trailer.set("Root", catalog);
     Fixture { pdf }
 }

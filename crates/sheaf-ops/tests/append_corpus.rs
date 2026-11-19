@@ -83,7 +83,7 @@ use sheaf_doc::materialize::{
     write_file,
 };
 use sheaf_doc::model::Scope;
-use sheaf_doc::pdf::{Document as Pdf, Object, ObjectId};
+use sheaf_doc::pdf::{Document as Pdf, Object, ObjectId, StreamExt, Value};
 use sheaf_doc::text_layer::from_engine;
 use sheaf_doc::tx::fixture::{
     add, bookmark, clear_ocr, crop, delete, delete_annots, delete_bookmark, header as fx_header,
@@ -1409,12 +1409,12 @@ fn readable(bytes: &[u8], forms: &[Vec<u8>]) -> bool {
 /// Whether `found` finds what it looks for in `o`: in its strings, and its
 /// stream's data decoded.
 fn holds_in(o: &Object, found: &dyn Fn(&[u8]) -> bool) -> bool {
-    match o {
-        Object::String(s, _) => found(s),
-        Object::Array(items) => items.iter().any(|o| holds_in(o, found)),
-        Object::Dictionary(d) => d.iter().any(|(_, o)| holds_in(o, found)),
-        Object::Stream(s) => {
-            let data = (s.decompressed_content()).unwrap_or_else(|_| s.content.clone());
+    match o.value() {
+        Value::String(s, _) => s.as_bytes().is_some_and(found),
+        Value::Array(items) => items.iter().any(|o| holds_in(o, found)),
+        Value::Dict(d) => d.iter().any(|(_, o)| holds_in(o, found)),
+        Value::Stream(s) => {
+            let data = (s.decompressed_content()).unwrap_or_else(|_| s.raw_bytes().to_vec());
             found(&data) || s.dict.iter().any(|(_, o)| holds_in(o, found))
         }
         _ => false,
@@ -1427,9 +1427,9 @@ fn holds_in(o: &Object, found: &dyn Fn(&[u8]) -> bool) -> bool {
 fn page_probe(bytes: &[u8], index: usize) -> Option<Vec<u8>> {
     let pdf = Pdf::load_mem(bytes).ok()?;
     let page = *pdf.get_pages().get(&(u32::try_from(index).ok()? + 1))?;
-    let first = match pdf.get_dictionary(page).ok()?.get(b"Contents").ok()? {
-        Object::Reference(id) => *id,
-        Object::Array(items) => items.first()?.as_reference().ok()?,
+    let first = match pdf.get_dictionary(page).ok()?.get(b"Contents")?.value() {
+        Value::Ref(id) => *id,
+        Value::Array(items) => items.first()?.as_reference()?,
         _ => return None,
     };
     let mut referred: HashMap<ObjectId, usize> = HashMap::new();
@@ -1439,7 +1439,7 @@ fn page_probe(bytes: &[u8], index: usize) -> Option<Vec<u8>> {
     if referred.get(&first) != Some(&1) {
         return None;
     }
-    let data = pdf.get_object(first).ok()?.as_stream().ok()?;
+    let data = pdf.get_object(first).ok()?.as_stream()?;
     let data = data.decompressed_content().ok()?;
     let window = data.get(data.len() / 2..data.len() / 2 + 48)?.to_vec();
     let found = |hay: &[u8]| hay.windows(window.len()).any(|w| w == &window[..]);
@@ -1449,11 +1449,11 @@ fn page_probe(bytes: &[u8], index: usize) -> Option<Vec<u8>> {
 
 /// Adds each reference `obj` holds to `counts`.
 fn count_refs(obj: &Object, counts: &mut HashMap<ObjectId, usize>) {
-    match obj {
-        Object::Reference(id) => *counts.entry(*id).or_default() += 1,
-        Object::Array(items) => items.iter().for_each(|o| count_refs(o, counts)),
-        Object::Dictionary(d) => d.iter().for_each(|(_, o)| count_refs(o, counts)),
-        Object::Stream(s) => s.dict.iter().for_each(|(_, o)| count_refs(o, counts)),
+    match obj.value() {
+        Value::Ref(id) => *counts.entry(*id).or_default() += 1,
+        Value::Array(items) => items.iter().for_each(|o| count_refs(o, counts)),
+        Value::Dict(d) => d.iter().for_each(|(_, o)| count_refs(o, counts)),
+        Value::Stream(s) => s.dict.iter().for_each(|(_, o)| count_refs(o, counts)),
         _ => {}
     }
 }
@@ -1534,12 +1534,16 @@ fn own_objects(pdf: &Pdf, at: ObjectId) -> Vec<ObjectId> {
     };
     own.extend(annot.get(b"Popup").and_then(Object::as_reference));
     let mut refs = HashMap::new();
-    if let Ok(ap) = annot.get(b"AP") {
+    if let Some(ap) = annot.get(b"AP") {
         let ap = pdf.dereference(ap).map_or(ap, |(_, o)| o);
         count_refs(ap, &mut refs);
         for &id in refs.clone().keys() {
-            if let Ok(Object::Dictionary(states)) = pdf.get_object(id) {
-                count_refs(&Object::Dictionary(states.clone()), &mut refs);
+            if let Ok(obj) = pdf.get_object(id)
+                && let Value::Dict(states) = obj.value()
+            {
+                for (_, o) in states.iter() {
+                    count_refs(o, &mut refs);
+                }
             }
         }
     }
@@ -1912,10 +1916,13 @@ const SIGNED: [(&str, Allows); 9] = [
 fn byte_ranges(bytes: &[u8]) -> Vec<[usize; 4]> {
     let pdf = Pdf::load_mem(bytes).unwrap();
     let mut out: Vec<[usize; 4]> = (pdf.objects.values())
-        .filter_map(|o| o.as_dict().ok()?.get(b"ByteRange").ok()?.as_array().ok())
+        .filter_map(|o| match o.value() {
+            Value::Dict(d) => d.get(b"ByteRange")?.as_array(),
+            _ => None,
+        })
         .filter_map(|range| {
             let n: Vec<usize> = (range.iter())
-                .filter_map(|n| usize::try_from(n.as_i64().ok()?).ok())
+                .filter_map(|n| usize::try_from(n.as_integer()?).ok())
                 .collect();
             n.try_into().ok()
         })

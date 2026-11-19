@@ -1,8 +1,7 @@
-//! lopdf's `LazyPdf` (vendor/lopdf/SHEAF.md), whose tests live here:
-//! what it reads equals lopdf's eager load, from memory and from a file;
-//! an encrypted file decrypts object by object, as it was before it was
-//! encrypted; and a hostile file is a typed error within the caps, and
-//! quickly.
+//! [`LazyPdf`], whose tests live here: what it reads equals [`Pdf::load_mem`]'s
+//! eager load, from memory and from a file; an encrypted file decrypts object
+//! by object, as it was before it was encrypted; and a hostile file is a typed
+//! error within the caps, and quickly.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -12,10 +11,10 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::pdf::encryption::DecryptionError;
 use crate::pdf::{
-    ByteSource, Document as Pdf, Error, FileBytes, LazyPdf, Limit, Object, ObjectId, ReadLimits,
-    Stream, StringFormat, XrefKind, dictionary,
+    ByteSource, DecryptionError, Document as Pdf, Error, FileBytes, LazyPdf, Limit, Object,
+    ObjectId, ReadLimits, Stream, StreamExt, XrefKind, deflate_best, deflate_fast, dictionary,
+    literal,
 };
 
 use super::Limits;
@@ -48,16 +47,10 @@ fn open_file(bytes: &[u8], password: Option<&str>) -> LazyPdf {
     pdf
 }
 
-/// Whether the two readers read the same object. A stream's position in
-/// the bytes aside: they count it from different places.
+/// Whether the two readers read the same object. Source byte spans aside:
+/// they may count them from different places or build them in memory.
 pub(crate) fn same(a: &Object, b: &Object) -> bool {
-    match (a, b) {
-        (Object::Stream(a), Object::Stream(b)) => {
-            (&a.dict, &a.content, a.allows_compression)
-                == (&b.dict, &b.content, b.allows_compression)
-        }
-        _ => a == b,
-    }
+    a.eq_value(b)
 }
 
 /// How `LazyPdf` reads an object otherwise than the eager load.
@@ -85,8 +78,7 @@ fn differences(eager: &Pdf, lazy: &LazyPdf) -> Vec<(ObjectId, Difference)> {
     let encrypt = lazy
         .trailer()
         .get(b"Encrypt")
-        .and_then(Object::as_reference)
-        .ok();
+        .and_then(Object::as_reference);
     let only_lazy = lazy
         .ids()
         .filter(|&id| Some(id) != encrypt && !eager.objects.contains_key(&id))
@@ -194,7 +186,9 @@ fn a_file_with_a_100_byte_prefix_reads_identically() {
             if let Some(span) = span {
                 spans += 1;
                 let text = &bytes[span];
-                assert!(text.starts_with(format!("{} {} obj", id.0, id.1).as_bytes()));
+                assert!(
+                    text.starts_with(format!("{} {} obj", id.number, id.generation).as_bytes())
+                );
                 assert!(text.ends_with(b"endobj"), "{id:?}");
             }
         }
@@ -341,9 +335,7 @@ fn pages() -> (u32, Vec<u8>) {
 
 /// `n` zero bytes, deflated.
 fn deflated_zeros(n: usize) -> Vec<u8> {
-    let mut deflated = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
-    deflated.write_all(&vec![0; n]).unwrap();
-    deflated.finish().unwrap()
+    deflate_best(&vec![0; n])
 }
 
 /// A stream object's body: `dict` and `data`.
@@ -420,14 +412,14 @@ fn an_objstm_bomb_is_a_typed_error() {
     let bytes = with_stream(&[catalog(), (3, objstm)], &[(2, 3)], "", None);
     let started = Instant::now();
     let pdf = LazyPdf::open(Arc::<[u8]>::from(bytes), None, &limits).unwrap();
-    assert!(pdf.get((1, 0)).is_ok());
+    assert!(pdf.get(ObjectId::new(1, 0)).is_ok());
     for _ in 0..2 {
         assert!(matches!(
-            pdf.get((2, 0)),
+            pdf.get(ObjectId::new(2, 0)),
             Err(Error::Limit(Limit::Decompressed))
         ));
         assert!(matches!(
-            pdf.get_dictionary((2, 0)),
+            pdf.get_dictionary(ObjectId::new(2, 0)),
             Err(Error::Limit(Limit::Decompressed))
         ));
     }
@@ -461,18 +453,9 @@ fn an_objstm_bomb_is_a_typed_error() {
 }
 
 /// `entries` cross-reference stream entries, each `[1 0 0]` under
-/// `/W [1 1 1]`, deflated as they're written.
+/// `/W [1 1 1]`, deflated.
 fn xref_entries(entries: usize) -> Vec<u8> {
-    const CHUNK: usize = 1 << 16;
-    let chunk = [1, 0, 0].repeat(CHUNK);
-    let mut deflated = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
-    let mut left = entries;
-    while left > 0 {
-        let n = left.min(CHUNK);
-        deflated.write_all(&chunk[..3 * n]).unwrap();
-        left -= n;
-    }
-    deflated.finish().unwrap()
+    deflate_fast(&[1, 0, 0].repeat(entries))
 }
 
 /// A file whose cross-reference sections are `sections` streams chained by
@@ -643,19 +626,22 @@ fn a_10000_deep_reference_chain_is_a_typed_error() {
     let pdf = open(&with_table(&objects));
     let started = Instant::now();
     assert!(matches!(
-        pdf.get_object((3, 0)),
+        pdf.get_object(ObjectId::new(3, 0)),
         Err(Error::Limit(Limit::Depth))
     ));
     assert!(matches!(
-        pdf.dereference(&Object::Reference((3, 0))),
+        pdf.dereference(&Object::from(ObjectId::new(3, 0))),
         Err(Error::Limit(Limit::Depth))
     ));
-    assert_eq!(pdf.get_object((10_002, 0)).unwrap(), &Object::Integer(42));
+    assert!(same(
+        pdf.get_object(ObjectId::new(10_002, 0)).unwrap(),
+        &Object::from(42)
+    ));
     assert!(started.elapsed() < QUICK);
 
     // Streams from 3 on, each with the next as its /Length: ISO 32000-2
-    // §7.3.8.2 allows at most one indirect hop to an integer, so
-    // pdf-structure scans to `endstream` in O(1) rather than chasing a
+    // §7.3.8.2 allows at most one indirect hop to an integer, so the
+    // reader scans to `endstream` in O(1) rather than chasing a
     // 10,000-deep chain.
     let mut objects = vec![catalog(), pages()];
     for n in 3..10_003 {
@@ -666,15 +652,15 @@ fn a_10000_deep_reference_chain_is_a_typed_error() {
     let started = Instant::now();
     for _ in 0..2 {
         assert!(
-            pdf.get((3, 0))
+            pdf.get(ObjectId::new(3, 0))
                 .unwrap()
                 .as_stream()
                 .unwrap()
-                .content
+                .raw_bytes()
                 .is_empty()
         );
     }
-    assert!(pdf.get((10_000, 0)).is_ok());
+    assert!(pdf.get(ObjectId::new(10_000, 0)).is_ok());
     assert!(started.elapsed() < QUICK);
 }
 
@@ -694,10 +680,14 @@ fn a_stream_whose_length_the_parser_cant_read_spans_to_endobj() {
         (7, b"3".to_vec()),
     ]);
     for pdf in [open(&bytes), open_file(&bytes, None)] {
-        for id in [(3, 0), (4, 0), (5, 0)] {
-            assert_eq!(pdf.get(id).unwrap().as_stream().unwrap().content, b"abc");
+        for n in [3, 4, 5] {
+            let id = ObjectId::new(n, 0);
+            assert_eq!(
+                pdf.get(id).unwrap().as_stream().unwrap().raw_bytes(),
+                b"abc"
+            );
             let text = &bytes[pdf.raw_span(id).unwrap()];
-            assert!(text.starts_with(format!("{} 0 obj", id.0).as_bytes()));
+            assert!(text.starts_with(format!("{n} 0 obj").as_bytes()));
             assert!(text.ends_with(b"abc\nendstream\nendobj"), "{id:?}");
             assert_eq!(pdf.raw_span_whole(id), None, "{id:?}");
         }
@@ -717,19 +707,23 @@ fn an_unkept_read_keeps_only_what_it_met() {
         (6, b"<< /Broken".to_vec()),
     ]);
     let pdf = open(&bytes);
-    let unkept = pdf.object_unkept((3, 0)).unwrap();
-    assert_eq!(unkept.as_stream().unwrap().content, b"abc");
-    assert!(!pdf.is_read((3, 0)) && !pdf.is_read((4, 0)));
-    assert_eq!(*unkept, *pdf.object((3, 0)).unwrap());
-    let kept = pdf.object((5, 0)).unwrap();
-    assert!(Arc::ptr_eq(&kept, &pdf.object_unkept((5, 0)).unwrap()));
+    let s3 = ObjectId::new(3, 0);
+    let s4 = ObjectId::new(4, 0);
+    let s5 = ObjectId::new(5, 0);
+    let s6 = ObjectId::new(6, 0);
+    let unkept = pdf.object_unkept(s3).unwrap();
+    assert_eq!(unkept.as_stream().unwrap().raw_bytes(), b"abc");
+    assert!(!pdf.is_read(s3) && !pdf.is_read(s4));
+    assert_eq!(*unkept, *pdf.object(s3).unwrap());
+    let kept = pdf.object(s5).unwrap();
+    assert!(Arc::ptr_eq(&kept, &pdf.object_unkept(s5).unwrap()));
     // An unkept failure isn't kept; a kept `get` failure is.
-    assert!(pdf.object_unkept((6, 0)).is_err());
-    assert!(!pdf.is_read((6, 0)));
-    assert!(pdf.get((6, 0)).is_err());
-    assert!(pdf.is_read((6, 0)));
+    assert!(pdf.object_unkept(s6).is_err());
+    assert!(!pdf.is_read(s6));
+    assert!(pdf.get(s6).is_err());
+    assert!(pdf.is_read(s6));
     assert!(matches!(
-        pdf.object_unkept((9, 0)),
+        pdf.object_unkept(ObjectId::new(9, 0)),
         Err(Error::MissingXrefEntry)
     ));
 }
@@ -746,9 +740,10 @@ fn a_raw_span_keeps_nothing_it_read() {
         (4, b"3".to_vec()),
     ]);
     let pdf = open(&bytes);
-    let span = pdf.raw_span((3, 0)).unwrap();
+    let s3 = ObjectId::new(3, 0);
+    let span = pdf.raw_span(s3).unwrap();
     assert!(bytes[span].starts_with(b"3 0 obj"));
-    assert!(!pdf.is_read((3, 0)) && !pdf.is_read((4, 0)));
+    assert!(!pdf.is_read(s3) && !pdf.is_read(ObjectId::new(4, 0)));
 }
 
 #[test]
@@ -781,7 +776,11 @@ fn a_length_cycle_is_a_typed_error() {
             let pdf = &pdf;
             s.spawn(move || {
                 assert_eq!(
-                    pdf.get((n, 0)).unwrap().as_stream().unwrap().content,
+                    pdf.get(ObjectId::new(n, 0))
+                        .unwrap()
+                        .as_stream()
+                        .unwrap()
+                        .raw_bytes(),
                     b"abc"
                 );
             });
@@ -790,7 +789,7 @@ fn a_length_cycle_is_a_typed_error() {
             let pdf = &pdf;
             s.spawn(move || {
                 assert!(matches!(
-                    pdf.get_object((n, 0)),
+                    pdf.get_object(ObjectId::new(n, 0)),
                     Err(Error::Limit(Limit::Depth))
                 ));
             });
@@ -798,23 +797,31 @@ fn a_length_cycle_is_a_typed_error() {
     });
     for _ in 0..2 {
         assert_eq!(
-            pdf.get((3, 0)).unwrap().as_stream().unwrap().content,
+            pdf.get(ObjectId::new(3, 0))
+                .unwrap()
+                .as_stream()
+                .unwrap()
+                .raw_bytes(),
             b"abc"
         );
         assert_eq!(
-            pdf.get((5, 0)).unwrap().as_stream().unwrap().content,
+            pdf.get(ObjectId::new(5, 0))
+                .unwrap()
+                .as_stream()
+                .unwrap()
+                .raw_bytes(),
             b"abc"
         );
         assert!(matches!(
-            pdf.get_object((67, 0)),
+            pdf.get_object(ObjectId::new(67, 0)),
             Err(Error::Limit(Limit::Depth))
         ));
         assert!(matches!(
-            pdf.get_object((69, 0)),
+            pdf.get_object(ObjectId::new(69, 0)),
             Err(Error::Limit(Limit::Depth))
         ));
     }
-    assert!(pdf.get((1, 0)).is_ok());
+    assert!(pdf.get(ObjectId::new(1, 0)).is_ok());
     assert!(started.elapsed() < QUICK);
 }
 
@@ -832,7 +839,7 @@ fn a_broken_xref_falls_back_to_an_eager_load() {
         assert_eq!(lazy.xref().start, 0);
         assert_same(&eager, &lazy, "rebuilt");
         for member in [5, 6, 7] {
-            assert!(lazy.get((member, 0)).is_ok(), "{member}");
+            assert!(lazy.get(ObjectId::new(member, 0)).is_ok(), "{member}");
         }
     }
 
@@ -921,87 +928,91 @@ pub(crate) const SECRETS: [&[u8]; 7] = [
 pub(crate) fn plaintext() -> Pdf {
     let piece = |private: &[u8]| {
         dictionary! { "Sheaf" => dictionary! {
-            "LastModified" => Object::string_literal("D:20261016120000Z"),
-            "Private" => Object::string_literal(private),
+            "LastModified" => literal("D:20261016120000Z"),
+            "Private" => literal(private),
         } }
     };
     let mut pdf = Pdf::with_version("1.7");
     let pages = pdf.new_object_id();
     let form = pdf.add_object(Stream::new(
         dictionary! {
-            "Type" => "XObject",
-            "Subtype" => "Form",
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
             "BBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
             "PieceInfo" => piece(FORM_STRING),
-            "LastModified" => Object::string_literal("D:20261016120000Z"),
+            "LastModified" => literal("D:20261016120000Z"),
         },
         b"0 0 100 100 re f".to_vec(),
     ));
     let content = pdf.add_object(Stream::new(dictionary! {}, CONTENT.to_vec()));
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page",
+        "Type" => Object::name("Page"),
         "Parent" => pages,
         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         "Resources" => dictionary! { "XObject" => dictionary! { "Fx" => form } },
         "Contents" => content,
         "PieceInfo" => piece(PAGE_STRING),
-        "LastModified" => Object::string_literal("D:20261016120000Z"),
+        "LastModified" => literal("D:20261016120000Z"),
     });
-    let kids = dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 };
+    let kids = dictionary! {
+        "Type" => Object::name("Pages"),
+        "Kids" => vec![page.into()],
+        "Count" => 1,
+    };
     pdf.objects.insert(pages, kids.into());
     let metadata = pdf.add_object(Stream::new(
-        dictionary! { "Type" => "Metadata", "Subtype" => "XML" },
+        dictionary! { "Type" => Object::name("Metadata"), "Subtype" => Object::name("XML") },
         XMP.to_vec(),
     ));
     let attachment = pdf.add_object(Stream::new(
         dictionary! {
-            "Type" => "EmbeddedFile",
-            "Subtype" => "text/plain",
+            "Type" => Object::name("EmbeddedFile"),
+            "Subtype" => Object::name("text/plain"),
             "Params" => dictionary! {
                 "Size" => ATTACHMENT.len() as i64,
-                "ModDate" => Object::string_literal("D:20261016120000Z"),
-                "CheckSum" => Object::String(vec![0x5a; 16], StringFormat::Hexadecimal),
+                "ModDate" => literal("D:20261016120000Z"),
+                "CheckSum" => Object::hex(vec![0x5a; 16]),
             },
         },
         ATTACHMENT.to_vec(),
     ));
     let spec = pdf.add_object(dictionary! {
-        "Type" => "Filespec",
-        "F" => Object::string_literal("notes.txt"),
+        "Type" => Object::name("Filespec"),
+        "F" => literal("notes.txt"),
         "EF" => dictionary! { "F" => attachment },
     });
     let signature = pdf.add_object(dictionary! {
-        "Type" => "Sig",
-        "Filter" => "Adobe.PPKLite",
-        "SubFilter" => "adbe.pkcs7.detached",
+        "Type" => Object::name("Sig"),
+        "Filter" => Object::name("Adobe.PPKLite"),
+        "SubFilter" => Object::name("adbe.pkcs7.detached"),
         "ByteRange" => vec![0.into(), 10.into(), 20.into(), 30.into()],
-        "Contents" => Object::String(SIGNATURE.to_vec(), StringFormat::Hexadecimal),
-        "M" => Object::string_literal("D:20261016120000Z"),
+        "Contents" => Object::hex(SIGNATURE),
+        "M" => literal("D:20261016120000Z"),
     });
     let field = pdf.add_object(dictionary! {
-        "FT" => "Sig",
-        "T" => Object::string_literal(FIELD_NAME),
+        "FT" => Object::name("Sig"),
+        "T" => literal(FIELD_NAME),
         "V" => signature,
     });
     let untyped = pdf.add_object(dictionary! {
-        "Filter" => "Adobe.PPKLite",
+        "Filter" => Object::name("Adobe.PPKLite"),
         "ByteRange" => vec![0.into(), 10.into(), 20.into(), 30.into()],
-        "Contents" => Object::String(UNTYPED_SIGNATURE.to_vec(), StringFormat::Hexadecimal),
+        "Contents" => Object::hex(UNTYPED_SIGNATURE),
     });
-    let untyped_field = pdf.add_object(dictionary! { "FT" => "Sig", "V" => untyped });
+    let untyped_field = pdf.add_object(dictionary! { "FT" => Object::name("Sig"), "V" => untyped });
     let catalog = pdf.add_object(dictionary! {
-        "Type" => "Catalog",
+        "Type" => Object::name("Catalog"),
         "Pages" => pages,
         "Metadata" => metadata,
         "Names" => dictionary! { "EmbeddedFiles" => dictionary! {
-            "Names" => vec![Object::string_literal("notes.txt"), spec.into()],
+            "Names" => vec![literal("notes.txt"), spec.into()],
         } },
         "AcroForm" => dictionary! { "Fields" => vec![field.into(), untyped_field.into()] },
     });
-    let info = pdf.add_object(dictionary! { "Title" => Object::string_literal(TITLE) });
+    let info = pdf.add_object(dictionary! { "Title" => literal(TITLE) });
     pdf.trailer.set("Root", catalog);
     pdf.trailer.set("Info", info);
-    let id = Object::String(b"0123456789abcdef".to_vec(), StringFormat::Hexadecimal);
+    let id = Object::hex(b"0123456789abcdef");
     pdf.trailer.set("ID", vec![id.clone(), id]);
     pdf
 }
@@ -1029,9 +1040,8 @@ pub(crate) fn assert_decrypts_to(plain: &Pdf, bytes: &[u8], name: &str) -> LazyP
             for xref in [object, lazy.get(id).unwrap()] {
                 let dict = &xref.as_stream().unwrap().dict;
                 assert!(dict.has_type(b"XRef"), "{name}: {id:?}");
-                assert_eq!(
-                    dict.get(b"ID").ok(),
-                    plain.trailer.get(b"ID").ok(),
+                assert!(
+                    same(dict.get(b"ID").unwrap(), plain.trailer.get(b"ID").unwrap()),
                     "{name}"
                 );
             }
@@ -1088,30 +1098,29 @@ fn an_attachment_only_eff_file_decrypts_its_attachment() {
             .unwrap();
         let encrypt = encrypt.as_dict().unwrap();
         for (key, name) in [("StmF", "Identity"), ("StrF", "Identity"), ("EFF", "StdCF")] {
-            assert_eq!(
-                encrypt.get(key.as_bytes()).unwrap(),
-                &Object::from(name),
+            assert!(
+                same(encrypt.get(key.as_bytes()).unwrap(), &Object::name(name)),
                 "{key}"
             );
         }
         // The attachment, found as a reader finds it.
-        let file = lazy
-            .catalog()
-            .and_then(|catalog| catalog.get(b"Names"))
+        let catalog = lazy.catalog().unwrap();
+        let file = catalog
+            .get(b"Names")
             .and_then(Object::as_dict)
             .and_then(|names| names.get(b"EmbeddedFiles"))
             .and_then(Object::as_dict)
             .and_then(|tree| tree.get(b"Names"))
             .and_then(Object::as_array)
-            .and_then(|tree| lazy.get_dictionary(tree[1].as_reference()?))
+            .and_then(|tree| lazy.get_dictionary(tree[1].as_reference()?).ok())
             .and_then(|spec| spec.get(b"EF"))
             .and_then(Object::as_dict)
             .and_then(|files| files.get(b"F"))
             .and_then(Object::as_reference)
-            .and_then(|file| lazy.get(file))
+            .and_then(|file| lazy.get(file).ok())
             .and_then(Object::as_stream)
             .unwrap();
-        assert_eq!(file.content, ATTACHMENT);
+        assert_eq!(file.raw_bytes(), ATTACHMENT);
     }
 }
 
@@ -1122,7 +1131,9 @@ fn an_undefined_crypt_filter_is_a_typed_error() {
     let plain = plaintext();
     let state = attachment_only(&plain);
     for key in ["StmF", "StrF", "EFF"] {
-        let [bytes, _] = encrypted(&plain, &state, |encrypt| encrypt.set(key, "Undefined"));
+        let [bytes, _] = encrypted(&plain, &state, |encrypt| {
+            encrypt.set(key, Object::name("Undefined"))
+        });
         let bytes = Arc::<[u8]>::from(bytes);
         let Err(Error::Decryption(DecryptionError::UndefinedCryptFilter(name))) =
             LazyPdf::open(bytes.clone(), Some(USER), &Limits::DEFAULT.reader)
@@ -1166,7 +1177,7 @@ impl Explained {
 const EXPLAINED: &[(&str, Explained, usize)] =
     &[("forms/safedocs/0169467.pdf", Explained::Undecryptable, 1)];
 
-/// Every manifest file lopdf loads (with the empty password, as
+/// Every manifest file [`Pdf::load_mem`] loads (with the empty password, as
 /// `load_mem` does) reads lazily as it loads, from memory and from the
 /// file: each object but `/Encrypt`, which the eager load drops, both
 /// ways. The differences are [`EXPLAINED`]'s, as many as it says, and
@@ -1188,64 +1199,49 @@ fn corpus_objects_read_lazily_equal_the_eager_load() {
     }
     let counts = Mutex::new(Counts::default());
     let differ = Mutex::new(BTreeMap::new());
-    let queue = Mutex::new(entries.iter());
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(16));
-    std::thread::scope(|s| {
-        for _ in 0..threads {
-            s.spawn(|| {
-                loop {
-                    let Some(entry) = queue.lock().unwrap().next() else {
-                        break;
-                    };
-                    let path = corpus.path(entry);
-                    let bytes = std::fs::read(&path).unwrap();
-                    let Ok(eager) = Pdf::load_mem(&bytes) else {
-                        counts.lock().unwrap().unloadable += 1;
-                        continue;
-                    };
-                    // Still encrypted: the empty password didn't work.
-                    if eager
-                        .trailer
-                        .get(b"Encrypt")
-                        .is_ok_and(|e| *e != Object::Null)
-                    {
-                        counts.lock().unwrap().needs_password += 1;
-                        continue;
-                    }
-                    let file = FileBytes::new(std::fs::File::open(&path).unwrap()).unwrap();
-                    let opened = [
-                        LazyPdf::open(Arc::<[u8]>::from(bytes), None, &Limits::DEFAULT.reader),
-                        LazyPdf::open(file, None, &Limits::DEFAULT.reader),
-                    ];
-                    let mut found = Vec::new();
-                    let mut rebuilt = false;
-                    for lazy in opened {
-                        match lazy {
-                            Ok(lazy) => {
-                                rebuilt |= !lazy.base_sound();
-                                found.extend(differences(&eager, &lazy));
-                            }
-                            Err(e) => found.push(((0, 0), Difference::Fails(e))),
-                        }
-                    }
-                    let mut c = counts.lock().unwrap();
-                    c.files += 1;
-                    c.objects += eager.objects.len();
-                    c.encrypted += usize::from(eager.was_decrypted());
-                    c.rebuilt += usize::from(rebuilt);
-                    drop(c);
-                    if !found.is_empty() {
-                        differ.lock().unwrap().insert(entry.path.clone(), found);
-                    }
+    crate::forms::corpus::each_entry(&entries, |entry| {
+        let path = corpus.path(entry);
+        let bytes = std::fs::read(&path).unwrap();
+        let Ok(eager) = Pdf::load_mem(&bytes) else {
+            counts.lock().unwrap().unloadable += 1;
+            return;
+        };
+        // Still encrypted: the empty password didn't work.
+        if eager.trailer.get(b"Encrypt").is_some_and(|e| !e.is_null()) {
+            counts.lock().unwrap().needs_password += 1;
+            return;
+        }
+        let file = FileBytes::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let opened = [
+            LazyPdf::open(Arc::<[u8]>::from(bytes), None, &Limits::DEFAULT.reader),
+            LazyPdf::open(file, None, &Limits::DEFAULT.reader),
+        ];
+        let mut found = Vec::new();
+        let mut rebuilt = false;
+        for lazy in opened {
+            match lazy {
+                Ok(lazy) => {
+                    rebuilt |= !lazy.base_sound();
+                    found.extend(differences(&eager, &lazy));
                 }
-            });
+                Err(e) => found.push((ObjectId::new(0, 0), Difference::Fails(e))),
+            }
+        }
+        let mut c = counts.lock().unwrap();
+        c.files += 1;
+        c.objects += eager.objects.len();
+        c.encrypted += usize::from(eager.was_decrypted());
+        c.rebuilt += usize::from(rebuilt);
+        drop(c);
+        if !found.is_empty() {
+            differ.lock().unwrap().insert(entry.path.clone(), found);
         }
     });
     let c = counts.into_inner().unwrap();
     let differ = differ.into_inner().unwrap();
     eprintln!(
         "{} files, {} objects, each read lazily from memory and from the file; {} decrypted, \
-         {} with their tables rebuilt; {} need a password, {} lopdf can't load; {} differ",
+         {} with their tables rebuilt; {} need a password, {} eager load can't load; {} differ",
         c.files,
         c.objects,
         c.encrypted,

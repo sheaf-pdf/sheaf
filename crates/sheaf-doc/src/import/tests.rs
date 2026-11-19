@@ -1,5 +1,5 @@
 use super::*;
-use crate::pdf::{Document as Pdf, Stream, dictionary};
+use crate::pdf::{Document as Pdf, Stream, dictionary, literal};
 use sheaf_edit::Rotation;
 
 fn mark(kind: AnnotKind) -> Annot {
@@ -182,11 +182,11 @@ fn our_own_marks_read_back_as_themselves() {
 fn free_text_takes_its_color_from_its_appearance_string() {
     let pdf = Pdf::with_version("1.7");
     let dict = dictionary! {
-        "Subtype" => "FreeText",
+        "Subtype" => Object::name("FreeText"),
         "Rect" => vec![100.into(), 600.into(), 300.into(), 640.into()],
-        "DA" => Object::string_literal("/Helv 9 Tf 0 0 1 rg"),
+        "DA" => literal("/Helv 9 Tf 0 0 1 rg"),
         "C" => vec![1.into(), 1.into(), 0.into()],
-        "Contents" => Object::string_literal("Tick and tie"),
+        "Contents" => literal("Tick and tie"),
     };
     let a = convert(&pdf, &dict, Rotation::R0, Options::default()).unwrap();
     assert_eq!(a.color, [0, 0, 255]);
@@ -209,28 +209,28 @@ fn replies_statuses_and_replacements_keep_their_threads() {
     let mut pdf = Pdf::with_version("1.7");
     let r = || vec![100.into(), 100.into(), 110.into(), 112.into()];
     let caret = pdf.add_object(dictionary! {
-        "Subtype" => "Caret", "Rect" => r(), "NM" => Object::string_literal("c1"),
-        "Contents" => Object::string_literal("the"),
+        "Subtype" => Object::name("Caret"), "Rect" => r(), "NM" => literal("c1"),
+        "Contents" => literal("the"),
     });
     let strike = dictionary! {
-        "Subtype" => "StrikeOut", "Rect" => r(), "IRT" => caret, "RT" => "Group",
+        "Subtype" => Object::name("StrikeOut"), "Rect" => r(), "IRT" => caret, "RT" => Object::name("Group"),
         "QuadPoints" => vec![110.into(), 112.into(), 140.into(), 112.into(), 110.into(), 100.into(), 140.into(), 100.into()],
     };
     let reply = dictionary! {
-        "Subtype" => "Text", "Rect" => r(), "IRT" => caret,
-        "Contents" => Object::string_literal("Agreed"),
+        "Subtype" => Object::name("Text"), "Rect" => r(), "IRT" => caret,
+        "Contents" => literal("Agreed"),
     };
     let status = dictionary! {
-        "Subtype" => "Text", "Rect" => r(), "IRT" => caret,
-        "State" => Object::string_literal("Accepted"),
+        "Subtype" => Object::name("Text"), "Rect" => r(), "IRT" => caret,
+        "State" => literal("Accepted"),
     };
     // As XFDF gives it: the name itself.
     let by_name = dictionary! {
-        "Subtype" => "Text", "Rect" => r(), "IRT" => Object::string_literal("c1"),
-        "StateModel" => Object::string_literal("Marked"), "State" => Object::string_literal("Marked"),
+        "Subtype" => Object::name("Text"), "Rect" => r(), "IRT" => literal("c1"),
+        "StateModel" => literal("Marked"), "State" => literal("Marked"),
     };
-    let popup = dictionary! { "Subtype" => "Popup", "Rect" => r() };
-    let sound = dictionary! { "Subtype" => "Sound", "Rect" => r() };
+    let popup = dictionary! { "Subtype" => Object::name("Popup"), "Rect" => r() };
+    let sound = dictionary! { "Subtype" => Object::name("Sound"), "Rect" => r() };
     let caret_dict = pdf.get_dictionary(caret).unwrap().clone();
     let all = [
         &caret_dict,
@@ -285,13 +285,13 @@ fn a_stamp_keeps_its_appearance() {
     let mut pdf = Pdf::with_version("1.7");
     let form = pdf.add_object(Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Form",
+            "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"),
             "BBox" => vec![0.into(), 0.into(), 100.into(), 40.into()],
         },
         format!("0 0 1 rg 0 0 100 40 re f % {}", fastrand::u64(..)).into_bytes(),
     ));
     let dict = dictionary! {
-        "Subtype" => "Stamp", "Name" => "SBApproved",
+        "Subtype" => Object::name("Stamp"), "Name" => Object::name("SBApproved"),
         "Rect" => vec![100.into(), 600.into(), 200.into(), 640.into()],
         "AP" => dictionary! { "N" => form },
     };

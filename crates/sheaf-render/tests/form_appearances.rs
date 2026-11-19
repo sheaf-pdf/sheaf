@@ -7,7 +7,7 @@
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
 use sheaf_doc::forms::fixture::{Form, Rect};
-use sheaf_doc::pdf::{Object, Stream, dictionary};
+use sheaf_doc::pdf::{Object, Stream, dictionary, literal};
 use sheaf_edit::Rotation;
 use sheaf_image::raster::{PixelFormat, Raster};
 use sheaf_render::PageIndex;
@@ -22,11 +22,11 @@ fn row(i: usize) -> Rect {
 /// A text field drawn as a solid red box, with annotation flags `f`.
 fn red(form: &mut Form, name: &str, i: usize, f: i64) {
     let id = form.text(name, 0, row(i));
-    form.dict(id).set("V", Object::string_literal(name));
+    form.dict(id).set("V", literal(name));
     form.dict(id).set("F", f);
     let ap = form.pdf.add_object(Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Form",
+            "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"),
             "BBox" => vec![0.into(), 0.into(), 200.into(), 30.into()],
         },
         b"1 0 0 rg 0 0 200 30 re f".to_vec(),
@@ -58,10 +58,8 @@ fn appearances_only() {
     let mut form = Form::new(1);
     red(&mut form, "drawn", 0, 4);
     let bare = form.text("bare", 0, row(1));
-    form.dict(bare)
-        .set("V", Object::string_literal("HELLO WORLD"));
-    form.dict(bare)
-        .set("DA", Object::string_literal("/Helv 20 Tf 0 g"));
+    form.dict(bare).set("V", literal("HELLO WORLD"));
+    form.dict(bare).set("DA", literal("/Helv 20 Tf 0 g"));
     form.check_box("on", 0, row(2), true);
     form.check_box("off", 0, row(3), false);
     red(&mut form, "hidden", 4, 4 | 2);

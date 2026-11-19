@@ -288,7 +288,7 @@ fn rewrite(
     let stable = target.profile.numbering == Numbering::Stable;
     let raw = stable && src.base_sound() && same_crypt(crypt.as_ref(), src.crypt());
     let (loaded, mut raw_copies) = graph::eager_with_raw(src, raw)?;
-    let in_use: HashSet<u32> = src.pdf().ids().map(|id| id.0).collect();
+    let in_use: HashSet<u32> = src.pdf().ids().map(|id| id.number).collect();
     let numbers = number::stable(&e, &input.target, src, &loaded, &in_use, prev)?;
     let owned = std::mem::take(&mut e.owned);
     // A source that used object streams writes them again (a hybrid's
@@ -305,8 +305,8 @@ fn rewrite(
     // containers take first, once nothing else has them.
     let mut reuse: Vec<u32> = match pack && stable {
         true => (loaded.objects.iter())
-            .filter(|(id, obj)| id.0 < crate::serialize::NUMBERS && objstm::is_container(obj))
-            .map(|(id, _)| id.0)
+            .filter(|(id, obj)| id.number < crate::serialize::NUMBERS && objstm::is_container(obj))
+            .map(|(id, _)| id.number)
             .collect(),
         false => Vec::new(),
     };
@@ -314,7 +314,7 @@ fn rewrite(
     if kind == XrefKind::Stream {
         version = version.max(PdfVersion::XREF_STREAMS);
     }
-    if crypt.as_deref().is_some_and(is_aes) {
+    if crypt.as_deref().is_some_and(Crypt::is_aes) {
         version = version.max(PdfVersion::AES);
     }
     let mut notes = std::mem::take(&mut e.notes);
@@ -327,7 +327,7 @@ fn rewrite(
     // The annotations the pages left out, where the graph has them: one
     // numbered past what a file may use moves.
     let removed: Vec<ObjectId> = (e.removed_annots.iter())
-        .filter_map(|r| match r.id.0 < crate::serialize::NUMBERS {
+        .filter_map(|r| match r.id.number < crate::serialize::NUMBERS {
             true => Some(r.id),
             false => numbers.get(&ObjKey::Base {
                 blob,
@@ -352,9 +352,12 @@ fn rewrite(
     // A container something still names keeps its number, so the
     // reference doesn't come to name a new one.
     reuse.retain(|&n| {
-        (graph.pdf.objects.range((n, 0)..=(n, u16::MAX)))
-            .next()
-            .is_none()
+        (graph
+            .pdf
+            .objects
+            .range(ObjectId::new(n, 0)..=ObjectId::new(n, u16::MAX)))
+        .next()
+        .is_none()
     });
     let encrypt = src.crypt().map(|c| c.at());
     let reads = |id| src.pdf().object_unkept(id).is_ok();
@@ -418,8 +421,8 @@ fn rewrite(
         let key = graph.key(id, blob);
         if let Some(d) = graph.deferred.get(&id) {
             let dict = (obj.as_stream().map(|s| s.dict.clone())).unwrap_or_default();
-            let data = (d.data)().with_context(|| format!("making object {} {}", id.0, id.1))?;
-            let made = Object::Stream(Stream::new(dict, data));
+            let data = (d.data)().with_context(|| format!("making object {id}"))?;
+            let made = Object::from(Stream::new(dict, data));
             return Ok((id, Body::Object(Cow::Owned(made), key)));
         }
         if let Some(span) = raw_copies.spans.get(&id) {
@@ -430,10 +433,10 @@ fn rewrite(
         }
         Ok((id, Body::Object(Cow::Borrowed(obj), key)))
     });
-    let past = written().map(|(id, _)| id.0 + 1).max().unwrap_or(1);
+    let past = written().map(|(id, _)| id.number + 1).max().unwrap_or(1);
     let encrypt_at = match &crypt {
-        Some(c) if stable && c.at().0 < crate::serialize::NUMBERS => c.at(),
-        _ => (past, 0),
+        Some(c) if stable && c.at().number < crate::serialize::NUMBERS => c.at(),
+        _ => ObjectId::new(past, 0),
     };
     let layout = Layout {
         trailer: &graph.pdf.trailer,
@@ -464,7 +467,7 @@ fn rewrite(
     verify::output(&checked, graph, &inputs)?;
 
     let present: BitSet = if stable {
-        (written().map(|(id, _)| id.0))
+        (written().map(|(id, _)| id.number))
             .filter(|n| in_use.contains(n))
             .collect()
     } else {
@@ -506,8 +509,7 @@ fn rewrite(
                 .pdf
                 .trailer
                 .get(b"Info")
-                .and_then(Object::as_reference)
-                .ok(),
+                .and_then(Object::as_reference),
             ..RootValues::of(&graph.pdf)
         }),
         tree: Arc::new(shape),
@@ -543,15 +545,4 @@ fn same_crypt(a: Option<&Arc<Crypt>>, b: Option<&Arc<Crypt>>) -> bool {
         (Some(a), Some(b)) => Arc::ptr_eq(a, b),
         _ => false,
     }
-}
-
-/// Whether `crypt` encrypts with AES, which PDF 1.6 brought.
-fn is_aes(crypt: &Crypt) -> bool {
-    let filters = crypt.dict().get(b"CF").and_then(Object::as_dict);
-    (filters.iter().flat_map(|f| f.iter())).any(|(_, filter)| {
-        (filter.as_dict().ok())
-            .and_then(|f| f.get(b"CFM").ok())
-            .and_then(|m| m.as_name().ok())
-            .is_some_and(|m| m == b"AESV2" || m == b"AESV3")
-    })
 }

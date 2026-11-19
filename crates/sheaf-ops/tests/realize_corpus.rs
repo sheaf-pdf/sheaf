@@ -118,12 +118,23 @@ fn inventory(corpus: &Corpus) -> Vec<(String, bool)> {
 /// How `crypt` encrypts: its version and revision, and its streams'
 /// method (`V2` is RC4, `AESV2` AES-128, `AESV3` AES-256).
 fn algorithm(crypt: &Crypt) -> String {
-    let get = |key: &[u8]| crypt.dict().get(key).and_then(Object::as_i64).unwrap_or(0);
-    let method = crypt
-        .state()
-        .get_stream_filter()
-        .map(|filter| String::from_utf8_lossy(filter.method()).into_owned())
-        .unwrap_or_default();
+    let dict = crypt.dict();
+    let get = |key: &[u8]| dict.get(key).and_then(Object::as_integer).unwrap_or(0);
+    let stm_f = dict.get(b"StmF").and_then(Object::as_name);
+    let method = match stm_f {
+        Some(b"Identity") => "None".to_string(),
+        Some(name) => dict
+            .get(b"CF")
+            .and_then(Object::as_dict)
+            .and_then(|cf| cf.get(name))
+            .and_then(Object::as_dict)
+            .and_then(|f| f.get(b"CFM"))
+            .and_then(Object::as_name)
+            .map(|m| String::from_utf8_lossy(m).into_owned())
+            .unwrap_or_default(),
+        None if get(b"V") <= 2 => "V2".to_string(),
+        None => String::new(),
+    };
     let bits = get(b"Length");
     format!("V{} R{} {method} {bits}", get(b"V"), get(b"R"))
 }

@@ -65,14 +65,14 @@ weighed for the family: [scope](scope.md).
 
 ## Where it stands
 
-Status: **in progress** (2026-10-27). Greg: "we're going to start on
-m18 immediately but probably with slice 2 in the pdf-lint agent."
-Planned from the memo of 2026-10-26
-(now [sheaf.md](sheaf.md)), Greg's "PDF Linter & Sheaf: Crate
-Architecture Notes" and pdf-lint's `0.2.0` branch (a104227), in which
-pdf-crypt is built and pdf-lint reads without qpdf. Slice 2 goes
-first, by pdf-lint's agent; sheaf's slices start when Greg says.
-Nothing waits on Greg but sheaf's start.
+Status: **in progress** (slices 1–13, 16, 18 and 20 done as of 2026-11-18).
+`sheaf` now reads and writes PDFs through `pdf-objects`, `pdf-structure`,
+`pdf-filters` (`Backend::ZlibRs`) and `pdf-crypt` behind `sheaf_doc::pdf`,
+copies outer-file spans and object-stream members from the first parse,
+runs `pdf-lint` 0.2.0-rc.1 as a standalone CLI oracle, and has deleted
+`lopdf` and `vendor/lopdf/`. Remaining slices: `s14` (copies under
+renumbering), `s17` and `s19` (`sheaf`'s `content/` on
+`pdf-content-streams`), `s21` (`pdf-semantics`), and `s15` (final wrap-up).
 
 Two tracks ([scope](scope.md#two-tracks)): the crate slices in
 pdf-lint's workspace, by pdf-lint's agent, which touch nothing of
@@ -96,9 +96,9 @@ oracles, the Arlington tests and the 7k gate.
 | [8](../complete/m18-pdf-layer/s08-sheaf-reads-through-pdf-structure.md) | sheaf reads through pdf-structure | done | 1, 5 | sheaf |
 | [9](../complete/m18-pdf-layer/s09-copies-without-a-second-parse.md) | Copies without a second parse, and object-stream members copied | done | 8 | sheaf |
 | [10](../complete/m18-pdf-layer/s10-an-in-memory-document-of-sheaf-s-own.md) | An in-memory document of sheaf's own | done | 1, 8; F15 (soft) | sheaf |
-| [11](slices/s11-pdf-objects-types-through-sheaf.md) | pdf-objects' types through sheaf | open | 3, 10 | sheaf |
-| [12](slices/s12-sheaf-writes-through-pdf-structure.md) | sheaf writes through pdf-structure | open | 7, 11 | sheaf |
-| [13](slices/s13-lopdf-gone.md) | lopdf gone | open | 12 | sheaf |
+| [11](../complete/m18-pdf-layer/s11-pdf-objects-types-through-sheaf.md) | pdf-objects' types through sheaf | done | 3, 10 | sheaf |
+| [12](../complete/m18-pdf-layer/s12-sheaf-writes-through-pdf-structure.md) | sheaf writes through pdf-structure | done | 7, 11 | sheaf |
+| [13](../complete/m18-pdf-layer/s13-lopdf-gone.md) | lopdf gone | done | 12 | sheaf |
 | [14](slices/s14-copies-under-renumbering.md) | Copies under renumbering | open | 9, 12 | sheaf, pdf-lint |
 | [15](slices/s15-wrap-up.md) | Wrap-up | open | 1–14, 16–21 | sheaf |
 | [16](../complete/m18-pdf-layer/s16-pdf-content-streams-operators.md) | pdf-content-streams: operators | done | 3 | pdf-lint |
