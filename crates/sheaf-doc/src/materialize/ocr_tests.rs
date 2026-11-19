@@ -81,12 +81,7 @@ fn stream_text(pdf: &Pdf, entry: &Object) -> String {
 
 /// The fonts page `page` of `pdf` binds.
 pub(crate) fn fonts_of(pdf: &Pdf, page: ObjectId) -> Dictionary {
-    // Inline on the page, or referenced (possibly inherited).
-    let (res, ids) = pdf.get_page_resources(page).unwrap();
-    let res: Dictionary = match res {
-        Some(d) => d.clone(),
-        None => pdf.get_dictionary(ids[0]).unwrap().clone(),
-    };
+    let res = pdf.resources_of_page(page).unwrap();
     pdf.dereference(res.get(b"Font").unwrap())
         .unwrap()
         .1

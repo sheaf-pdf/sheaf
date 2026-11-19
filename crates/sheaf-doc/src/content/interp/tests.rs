@@ -1089,7 +1089,11 @@ impl ReadObjects for Unreadable<'_> {
 #[test]
 fn a_form_that_cant_be_read_stops_only_what_draws_it() {
     let f = fixture::forms();
-    let xobjects = f.page().get_deref(b"Resources", &f.pdf).unwrap();
+    let xobjects = f
+        .pdf
+        .dereference(f.page().get(b"Resources").unwrap())
+        .unwrap()
+        .1;
     let xobjects = xobjects.as_dict().unwrap().get(b"XObject").unwrap();
     let fm1 = xobjects.as_dict().unwrap().get(b"Fm1").unwrap();
     let fm1 = fm1.as_reference().unwrap();

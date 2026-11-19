@@ -607,7 +607,7 @@ fn an_xref_stream_is_appended_to() {
 /// `path`'s bytes, written with a cross-reference table and a trailer.
 fn classic(path: &Path) -> Vec<u8> {
     let mut pdf = Pdf::load(path).unwrap();
-    pdf.reference_table.cross_reference_type = crate::pdf::xref::XrefType::CrossReferenceTable;
+    pdf.xref_kind = crate::pdf::XrefKind::Table;
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
     bytes

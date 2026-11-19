@@ -685,8 +685,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crate::pdf::encryption::crypt_filters::{Aes128CryptFilter, CryptFilter};
-    use crate::pdf::xref::XrefType;
-    use crate::pdf::{EncryptionState, EncryptionVersion, Permissions};
+    use crate::pdf::{EncryptionState, EncryptionVersion, Permissions, XrefKind};
 
     use crate::pdf::{Document as Pdf, Object, ObjectId};
 
@@ -959,7 +958,7 @@ mod tests {
         let mut streams = Vec::new();
         modern.pdf.save_modern(&mut streams).unwrap();
         let mut classic = every_kind();
-        classic.pdf.reference_table.cross_reference_type = XrefType::CrossReferenceTable;
+        classic.pdf.xref_kind = XrefKind::Table;
         let std_cf = BTreeMap::from([(
             b"StdCF".to_vec(),
             std::sync::Arc::new(Aes128CryptFilter) as std::sync::Arc<dyn CryptFilter>,
@@ -1104,7 +1103,7 @@ mod tests {
             resources.has(b"XObject").then(|| s.clone())
         };
         let mut out = Pdf::with_version("1.7");
-        out.reference_table.cross_reference_type = XrefType::CrossReferenceTable;
+        out.xref_kind = XrefKind::Table;
         let mut next = 4 + entries.len() as u32;
         for id in &entries {
             let mut d = f.pdf.get_dictionary(*id).unwrap().clone();

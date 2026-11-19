@@ -6,10 +6,10 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
+use super::Document;
 use lopdf::encryption::DecryptionError;
 use lopdf::{
-    Dictionary, Document, EncryptionState, Error, Limit, Object, ObjectId, Result, Stream,
-    StringFormat,
+    Dictionary, EncryptionState, Error, Limit, Object, ObjectId, Result, Stream, StringFormat,
 };
 use pdf_crypt::Password;
 use pdf_filters::Backend;
@@ -138,6 +138,16 @@ impl LazyPdf {
         password: Option<&str>,
         limits: &ReadLimits,
     ) -> Result<LazyPdf> {
+        let mut pdf = Self::open_unauthenticated(bytes, password, limits)?;
+        pdf.authenticate(password)?;
+        Ok(pdf)
+    }
+
+    fn open_unauthenticated(
+        bytes: impl ByteSource + 'static,
+        password: Option<&str>,
+        limits: &ReadLimits,
+    ) -> Result<LazyPdf> {
         let mut struct_limits = pdf_structure::Limits::DEFAULT;
         struct_limits.sections = limits.max_sections;
         struct_limits.stream = limits.max_decompressed;
@@ -247,7 +257,7 @@ impl LazyPdf {
             crypt: None,
             slots,
         };
-        pdf.authenticate(password)?;
+        let _ = &mut pdf;
         Ok(pdf)
     }
 
@@ -404,6 +414,9 @@ impl LazyPdf {
         })?;
         let encrypt_id = self.crypt.as_ref().map(|(_, at)| *at);
         let mut out = Document::with_version(self.version.clone());
+        out.xref_kind = self.facts.kind;
+        out.xref_start = self.facts.start;
+        out.decrypted = self.crypt.is_some();
         let mut trailer = self.trailer.clone();
         if self.crypt.is_some() {
             trailer.remove(b"Encrypt");
@@ -634,7 +647,7 @@ impl LazyPdf {
         let Ok(encrypt_id) = encrypt_entry.as_reference() else {
             return Err(Error::InvalidPassword);
         };
-        let mut doc = Document::new();
+        let mut doc = lopdf::Document::new();
         doc.trailer = self.trailer.clone();
         if let Ok(enc_obj) = self.get(encrypt_id) {
             doc.objects.insert(encrypt_id, enc_obj.clone());
@@ -1008,7 +1021,70 @@ fn precheck_xref_stream_caps(
     Ok(blank_ranges)
 }
 
-fn decode_lopdf_encryption(doc: &Document, password: Option<&str>) -> Result<EncryptionState> {
+pub(super) fn load_document(
+    bytes: impl ByteSource + 'static,
+    password: Option<&str>,
+    limits: &ReadLimits,
+) -> Result<Document> {
+    let mut pdf = LazyPdf::open_unauthenticated(bytes, password, limits)?;
+    if password.is_none()
+        && matches!(
+            pdf.reading.encryption(),
+            Encryption::Locked | Encryption::Plain
+        )
+    {
+        return pdf.to_locked_document();
+    }
+    pdf.authenticate(password)?;
+    pdf.to_document()
+}
+
+impl LazyPdf {
+    fn to_locked_document(&self) -> Result<Document> {
+        let pdoc = self.reading.to_document().map_err(|e| match e {
+            pdf_structure::Error::Io(io) => Error::IO(io),
+            other => Error::Syntax(other.to_string()),
+        })?;
+        let mut out = Document::with_version(self.version.clone());
+        out.xref_kind = self.facts.kind;
+        out.xref_start = self.facts.start;
+        out.trailer = self.trailer.clone();
+        for (oid, obj) in pdoc.objects() {
+            let id = (oid.number, oid.generation);
+            let converted = match obj.value() {
+                Value::Stream(s) => {
+                    let data = match &s.data {
+                        Data::Bytes(b) => b.as_slice().to_vec(),
+                        Data::At(span) => self
+                            .reading
+                            .source()
+                            .read_at(span.range())
+                            .map_err(Error::IO)?
+                            .into_owned(),
+                        _ => Vec::new(),
+                    };
+                    let mut dict = convert_dict(&s.dict);
+                    dict.set("Length", data.len() as i64);
+                    Object::Stream(Stream {
+                        dict,
+                        content: data,
+                        allows_compression: true,
+                        start_position: s.data.at().map(|sp| sp.start()),
+                    })
+                }
+                _ => convert_value(obj),
+            };
+            out.max_id = out.max_id.max(id.0);
+            out.objects.insert(id, converted);
+        }
+        Ok(out)
+    }
+}
+
+fn decode_lopdf_encryption(
+    doc: &lopdf::Document,
+    password: Option<&str>,
+) -> Result<EncryptionState> {
     if doc.authenticate_password("").is_ok() {
         return EncryptionState::decode(doc, b"");
     }
@@ -1029,7 +1105,7 @@ fn decode_lopdf_encryption(doc: &Document, password: Option<&str>) -> Result<Enc
 }
 
 fn decode_lopdf_encryption_opened(
-    doc: &Document,
+    doc: &lopdf::Document,
     password: Option<&str>,
     by: Option<(usize, pdf_crypt::Encoding)>,
 ) -> Result<EncryptionState> {

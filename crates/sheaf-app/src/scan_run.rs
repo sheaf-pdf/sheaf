@@ -1082,8 +1082,30 @@ mod tests {
         let pdf = sheaf_doc::pdf::Document::load(path).unwrap();
         (pdf.get_pages().into_values())
             .map(|page| {
-                let images = pdf.get_page_images(page).unwrap();
-                images.iter().map(|image| image.content.to_vec()).collect()
+                let Some(res) = pdf.resources_of_page(page) else {
+                    return Vec::new();
+                };
+                let Ok((_, sheaf_doc::pdf::Object::Dictionary(xobjects))) =
+                    res.get(b"XObject").and_then(|o| pdf.dereference(o))
+                else {
+                    return Vec::new();
+                };
+                xobjects
+                    .iter()
+                    .filter_map(|(_, obj)| {
+                        let (_, sheaf_doc::pdf::Object::Stream(stream)) =
+                            pdf.dereference(obj).ok()?
+                        else {
+                            return None;
+                        };
+                        let subtype = stream
+                            .dict
+                            .get(b"Subtype")
+                            .and_then(sheaf_doc::pdf::Object::as_name)
+                            .ok()?;
+                        (subtype == b"Image").then(|| stream.content.clone())
+                    })
+                    .collect()
             })
             .collect()
     }

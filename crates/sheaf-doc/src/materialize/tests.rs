@@ -89,7 +89,7 @@ fn text(text: &str) -> Vec<u8> {
 /// `pdf` as lopdf writes it, with a cross-reference table.
 pub(crate) fn bytes(pdf: &Pdf) -> Vec<u8> {
     let mut pdf = pdf.clone();
-    pdf.reference_table.cross_reference_type = crate::pdf::xref::XrefType::CrossReferenceTable;
+    pdf.xref_kind = crate::pdf::XrefKind::Table;
     let mut out = Vec::new();
     pdf.save_to(&mut out).unwrap();
     out
@@ -473,7 +473,22 @@ fn profile_none_turns_raw_passthrough_off() {
 
     // A plain file's streams are copied as they were: written anew, their
     // dictionaries and `stream` keywords would be laid out otherwise.
-    let before = bytes(&file("A", 1, false));
+    let body = text("A 0");
+    let spaced = [
+        format!("<<   /Length {}   >>stream\n", body.len()).as_bytes(),
+        &body,
+        b"\nendstream",
+    ]
+    .concat();
+    let before = by_hand(&[
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>".to_vec(),
+        ),
+        (4, spaced),
+    ]);
     let out = rewrite(&open(&before, None), unencrypted);
     let (was, now) = (lazy(&before, None), lazy(&out.bytes, None));
     let contents = source(&before, None).pages()[0].contents[0];

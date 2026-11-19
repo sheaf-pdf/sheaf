@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 use crate::pdf::encryption::crypt_filters::{Aes128CryptFilter, CryptFilter};
 use crate::pdf::{
-    Dictionary, Document as Pdf, EncryptionState, EncryptionVersion, LazyPdf, LoadOptions, Object,
-    ObjectId, Permissions, Stream, StringFormat, XrefKind, dictionary,
+    Dictionary, Document as Pdf, EncryptionState, EncryptionVersion, LazyPdf, Object, ObjectId,
+    Permissions, Stream, StringFormat, XrefKind, dictionary,
 };
 use in_progress::NoProgress;
 use sheaf_edit::Rotation;
@@ -748,10 +748,35 @@ fn a_container_lists_each_member_where_it_is() {
         data.len(),
         first + bytes.iter().map(|(_, b)| b.len() + 1).sum::<usize>()
     );
-    let read = crate::pdf::ObjectStream::new(&stream).unwrap();
-    assert_eq!(read.objects.len(), 7);
-    for (num, obj) in &members {
-        assert_eq!(&read.objects[&(*num, 0)], obj, "object {num}");
+    {
+        let mut pdf_bytes = b"%PDF-1.5\n".to_vec();
+        let mut sec = Section::full(21);
+        let cpos =
+            object::indirect(&mut pdf_bytes, (20, 0), &Object::Stream(stream.clone())).unwrap();
+        sec.insert(
+            20,
+            Entry::InUse {
+                pos: cpos,
+                generation: 0,
+            },
+        );
+        for (index, &(num, _)) in members.iter().enumerate() {
+            sec.insert(
+                num,
+                Entry::Packed {
+                    container: 20,
+                    index: index as u16,
+                },
+            );
+        }
+        let xpos = pdf_bytes.len();
+        sec.stream(&mut pdf_bytes, 21, dictionary! { "Root" => (7, 0) }, xpos)
+            .unwrap();
+        let read = open(&pdf_bytes);
+        assert_eq!(read.ids().count(), 9);
+        for (num, obj) in &members {
+            assert_eq!(read.get((*num, 0)).unwrap(), obj, "object {num}");
+        }
     }
 
     let mut out = Vec::new();
@@ -1381,7 +1406,7 @@ fn an_encrypted_object_stream_base_rewrites() {
         assert!(!object_streams_of(&pdf).is_empty(), "{name}");
         assert!(pdf.base_sound(), "{name}");
         assert_eq!(pdf.xref().kind, XrefKind::Stream, "{name}");
-        let eager = Pdf::load_mem_with_options(&base, LoadOptions::with_password(USER)).unwrap();
+        let eager = Pdf::load_mem_with_password(&base, USER).unwrap();
         for (id, obj) in &plain.objects {
             assert!(same(pdf.get(*id).unwrap(), obj), "{name}: {id:?}");
             assert!(same(&eager.objects[id], obj), "{name}, eagerly: {id:?}");
@@ -1670,7 +1695,7 @@ fn containers_encrypt_once_as_the_reader_decrypts() {
         assert!(pdf.base_sound(), "{name}");
         let xref = pdf.xref().max_stream.unwrap();
         let (_, _, got) = rows(&pdf, (xref, 0));
-        let eager = Pdf::load_mem_with_options(&bytes, LoadOptions::with_password(USER)).unwrap();
+        let eager = Pdf::load_mem_with_password(&bytes, USER).unwrap();
         let mut packed = 0;
         for (&id, obj) in &plain.objects {
             assert!(same(pdf.get(id).unwrap(), obj), "{name}: {id:?}");
@@ -1957,13 +1982,8 @@ fn in_object_streams(pages: usize, per: usize, junk: Option<u32>) -> Vec<u8> {
         let at = (pdf.max_id + 1 + junk, 0);
         pdf.catalog_mut().unwrap().set("Junk", at);
     }
-    let options = crate::pdf::SaveOptions::builder()
-        .use_object_streams(true)
-        .use_xref_streams(true)
-        .max_objects_per_stream(per)
-        .build();
     let mut out = Vec::new();
-    pdf.save_with_options(&mut out, options).unwrap();
+    pdf.save_packed(&mut out, per).unwrap();
     out
 }
 
@@ -2414,8 +2434,7 @@ fn encrypted_files_append_encrypted() {
                 assert_eq!(pdf.xref().sections, 2, "{name}");
                 assert_eq!(rewritten(&pdf), as_written(), "{name}");
                 assert_eq!(notes(&pdf), [NOTE], "{name}");
-                let eager =
-                    Pdf::load_mem_with_options(&bytes, LoadOptions::with_password(USER)).unwrap();
+                let eager = Pdf::load_mem_with_password(&bytes, USER).unwrap();
                 assert_same(&eager, &pdf, &name);
                 // Its /Encrypt where it was, as stored, /P and all; /ID[0]
                 // kept and /ID[1] new.

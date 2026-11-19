@@ -314,33 +314,39 @@ impl AnnotsInFile {
 
 /// [`load_pdf`] for a file in memory.
 pub fn load_pdf_mem(bytes: &[u8], password: Option<&str>) -> Result<crate::pdf::Document> {
-    let mut pdf = crate::pdf::Document::load_mem(bytes)?;
-    if pdf.is_encrypted() {
-        let options = crate::pdf::LoadOptions::with_password(password.unwrap_or(""));
-        pdf = crate::pdf::Document::load_mem_with_options(bytes, options)
+    match password {
+        Some(pw) => crate::pdf::Document::load_mem_with_password(bytes, pw)
             .map_err(|e| anyhow::anyhow!("{e}"))
-            .context("decrypting")?;
+            .context("decrypting"),
+        None => {
+            let pdf = crate::pdf::Document::load_mem(bytes)?;
+            if pdf.is_encrypted() {
+                anyhow::bail!("encrypted PDF requires a password");
+            }
+            Ok(pdf)
+        }
     }
-    Ok(pdf)
 }
 
-/// Load a file with lopdf and, if it's encrypted, decrypt it in memory with
-/// `password` (or the empty user password many files use): strings and
-/// streams readable, lopdf's `EncryptionState` kept. lopdf's reader takes
-/// the `/Encrypt` dictionary out, so lopdf's own writer would write the
-/// file unencrypted; sheaf's writers take the encryption from the source
-/// instead ([`Source::crypt`](crate::source::Source::crypt)), and keep it.
+/// Load a file into memory through `pdf-structure` and, if it's encrypted,
+/// decrypt it with `password` (or the empty user password many files use).
+/// Decrypted documents omit `/Encrypt` from their trailer; sheaf's writers
+/// take the encryption from the source instead
+/// ([`Source::crypt`](crate::source::Source::crypt)), and keep it.
 pub fn load_pdf(path: &Path, password: Option<&str>) -> Result<crate::pdf::Document> {
-    let mut pdf =
-        crate::pdf::Document::load(path).with_context(|| format!("loading {}", path.display()))?;
-    if pdf.is_encrypted() {
-        // lopdf only parses an encrypted file's objects when it has the
-        // password at load time, so load again with it.
-        pdf = crate::pdf::Document::load_with_password(path, password.unwrap_or(""))
+    match password {
+        Some(pw) => crate::pdf::Document::load_with_password(path, pw)
             .map_err(|e| anyhow::anyhow!("{e}"))
-            .with_context(|| format!("decrypting {}", path.display()))?;
+            .with_context(|| format!("decrypting {}", path.display())),
+        None => {
+            let pdf = crate::pdf::Document::load(path)
+                .with_context(|| format!("loading {}", path.display()))?;
+            if pdf.is_encrypted() {
+                anyhow::bail!("decrypting {}: password required", path.display());
+            }
+            Ok(pdf)
+        }
     }
-    Ok(pdf)
 }
 
 /// A text string's text, as PDFium decodes one: UTF-16 (a last odd byte

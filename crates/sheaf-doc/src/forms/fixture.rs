@@ -1598,15 +1598,40 @@ pub fn every_mark_kind() -> Vec<Annot> {
 /// `bytes` with an incremental update appended: `change` edits a copy of
 /// each object in `ids` (and anything it adds) in the new revision.
 pub fn append_revision(bytes: &[u8], ids: &[ObjectId], change: impl FnOnce(&mut Pdf)) -> Vec<u8> {
+    let src = source(bytes.to_vec());
+    let mut base = crate::serialize::append::Base::over(&src).expect("the previous revision");
     let prev = Pdf::load_mem(bytes).expect("the previous revision");
-    let mut doc = crate::pdf::IncrementalDocument::create_from(bytes.to_vec(), prev);
+    let mut next = Pdf::with_version(prev.version.clone());
+    next.trailer = prev.trailer.clone();
+    next.max_id = base.size.saturating_sub(1);
     for &id in ids {
-        doc.opt_clone_object_to_new_document(id)
-            .expect("an object in the previous revision");
+        let obj = prev
+            .objects
+            .get(&id)
+            .expect("an object in the previous revision")
+            .clone();
+        next.objects.insert(id, obj);
     }
-    change(&mut doc.new_document);
-    let mut out = Vec::new();
-    doc.save_to(&mut out).expect("writing the update");
+    change(&mut next);
+    if let Ok(root) = next.trailer.get(b"Root").and_then(Object::as_reference) {
+        base.root = root;
+    }
+    let objects: BTreeMap<ObjectId, (crate::materialize::ObjKey, Object)> = next
+        .objects
+        .into_iter()
+        .map(|(id, obj)| (id, (crate::materialize::ObjKey::Built(id), obj)))
+        .collect();
+    let xref_number = objects
+        .keys()
+        .last()
+        .map_or(base.size, |id| id.0.saturating_add(1).max(base.size));
+    let Some(update) = crate::serialize::append::section(&base, &objects, xref_number, None)
+        .expect("writing the update")
+    else {
+        return bytes.to_vec();
+    };
+    let mut out = bytes.to_vec();
+    out.extend_from_slice(&update.bytes);
     out
 }
 

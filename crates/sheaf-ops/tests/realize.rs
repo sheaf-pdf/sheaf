@@ -34,9 +34,9 @@ use sheaf_doc::export::{Export, print_preview};
 use sheaf_doc::forms::fixture::{Form, every_mark_kind, write_marks};
 use sheaf_doc::layers::LayerId;
 use sheaf_doc::model::Mark;
-use sheaf_doc::pdf::xref::XrefType;
 use sheaf_doc::pdf::{
-    Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, ReadLimits, Stream, dictionary,
+    Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, ReadLimits, Stream, XrefKind,
+    dictionary,
 };
 use sheaf_doc::realize::{EngineKey, GROUP, OcgOverride, PageView, Realization, ViewInputs};
 use sheaf_doc::serialize::fixture::{
@@ -170,7 +170,7 @@ fn numbered(section: &[u8]) -> Vec<u32> {
 /// from the base as they are.
 #[test]
 fn two_edited_pages_sharing_a_font_and_a_duplicate_render_as_saved() {
-    let mut d = opened(file(4, XrefType::CrossReferenceTable), "a.pdf", None);
+    let mut d = opened(file(4, XrefKind::Table), "a.pdf", None);
     let [p0, p1, p2, p3] = [0, 1, 2, 3].map(|i| d.page(i).unwrap());
     let header = fx::set_header(fx::header("Draft <<1>>"), Some(&[p0, p2]));
     d.commit_ops(vec![header, fx::duplicate(&[p0])], "Edit")
@@ -226,7 +226,7 @@ fn two_edited_pages_sharing_a_font_and_a_duplicate_render_as_saved() {
 #[test]
 fn group_engines_count_against_the_screen_s_six() {
     let n = 7 * GROUP as usize;
-    let mut d = opened(file(n, XrefType::CrossReferenceTable), "a.pdf", None);
+    let mut d = opened(file(n, XrefKind::Table), "a.pdf", None);
     let edited: Vec<PageId> = (0..7)
         .map(|g| d.page(g * GROUP as usize).unwrap())
         .collect();
@@ -278,7 +278,7 @@ fn encrypted_bases_render() {
 /// turned by the job, and as the Rewrite's page, turned there.
 #[test]
 fn a_page_turned_with_unsaved_ocr_renders_once_turned() {
-    let mut d = opened(file(2, XrefType::CrossReferenceTable), "a.pdf", None);
+    let mut d = opened(file(2, XrefKind::Table), "a.pdf", None);
     let p0 = d.page(0).unwrap();
     let word = sheaf_doc::OcrWord {
         text: "word".into(),
@@ -316,7 +316,7 @@ fn a_page_turned_with_unsaved_ocr_renders_once_turned() {
 /// it, and turns it further with its pane.
 #[test]
 fn an_unsaved_header_shows_under_view_rotation() {
-    let mut d = opened(file(2, XrefType::CrossReferenceTable), "a.pdf", None);
+    let mut d = opened(file(2, XrefKind::Table), "a.pdf", None);
     let p1 = d.page(1).unwrap();
     let header = fx::set_header(fx::header("Draft <<1>> of <<n>>"), Some(&[p1]));
     d.commit_ops(vec![header, fx::rotate(&[p1], Turn::Quarter)], "Edit")
@@ -344,7 +344,7 @@ fn an_unsaved_header_shows_under_view_rotation() {
 /// generator, view every page there.
 #[test]
 fn unsaved_watermarks_render_as_saved() {
-    let mut d = opened(file(4, XrefType::CrossReferenceTable), "a.pdf", None);
+    let mut d = opened(file(4, XrefKind::Table), "a.pdf", None);
     let [p0, p1, p2, p3] = [0, 1, 2, 3].map(|i| d.page(i).unwrap());
     let rgb = image::RgbImage::from_fn(8, 4, |x, _| image::Rgb([30 * x as u8, 90, 160]));
     let png = sheaf_image::encode::png(&rgb, 72).unwrap();
@@ -425,7 +425,7 @@ fn a_damaged_base_realizes_standalone() {
     let [(_, rc4), ..] = rc4_aes_128_and_aes_256(&plain);
     let [encrypted_table, _] = encrypted(&plain, &rc4, |_| {});
     let bases = [
-        (damaged(file(2, XrefType::CrossReferenceTable)), None),
+        (damaged(file(2, XrefKind::Table)), None),
         (damaged(encrypted_table), Some(USER)),
     ];
     for (bytes, password) in bases {
@@ -458,7 +458,7 @@ fn a_damaged_base_realizes_standalone() {
 /// it from its first request, told of the failure the pool remembers.
 #[test]
 fn a_base_pdfium_refuses_draws_every_page_from_its_realization() {
-    let bytes = revision_cut_out(file(3, XrefType::CrossReferenceTable));
+    let bytes = revision_cut_out(file(3, XrefKind::Table));
     let refused = PdfiumEngine::open_bytes(bytes.clone().into(), None).err();
     assert!(OpenError::is_refused(&refused.expect("PDFium refuses it")));
     let mut d = opened(bytes.clone(), "refused.pdf", None);
@@ -501,7 +501,7 @@ fn a_base_pdfium_refuses_draws_every_page_from_its_realization() {
 /// anti-aliasing (realize_corpus's allowance, [`ANTI_ALIASING_PX`]).
 #[test]
 fn a_source_pdfium_refuses_prints() {
-    let bytes = revision_cut_out(file(3, XrefType::CrossReferenceTable));
+    let bytes = revision_cut_out(file(3, XrefKind::Table));
     let refused = PdfiumEngine::open_bytes(bytes.clone().into(), None).err();
     assert!(OpenError::is_refused(&refused.expect("PDFium refuses it")));
     let mut d = opened(bytes, "refused.pdf", None);
@@ -591,7 +591,7 @@ fn print_preview_draws_what_prints() {
 /// without: each previewed page draws as the print file's page does.
 #[test]
 fn print_preview_of_pages_from_the_middle_draws_what_prints() {
-    let mut d = opened(file(10, XrefType::CrossReferenceTable), "ten.pdf", None);
+    let mut d = opened(file(10, XrefKind::Table), "ten.pdf", None);
     let (fifth, sixth) = (d.page(4).unwrap(), d.page(5).unwrap());
     let mut spec = fx::header("<<label>>");
     spec.texts[2] = "<<bates>>".into();
@@ -655,7 +655,7 @@ fn behind_junk(bytes: Vec<u8>) -> Vec<u8> {
 /// without opening, and the page draws from its group, the layer off.
 #[test]
 fn a_sound_base_pdfium_refuses_draws_from_its_groups() {
-    let bytes = behind_junk(file(2, XrefType::CrossReferenceTable));
+    let bytes = behind_junk(file(2, XrefKind::Table));
     let refused = PdfiumEngine::open_bytes(bytes.clone().into(), None).err();
     assert!(OpenError::is_refused(&refused.expect("PDFium refuses it")));
     let mut d = opened(bytes, "junk.pdf", None);
@@ -712,7 +712,7 @@ fn a_sound_base_pdfium_refuses_draws_from_its_groups() {
 /// would otherwise read as the stream; the page renders as saved.
 #[test]
 fn allocator_numbers_above_size_and_xref_streams() {
-    let mut d = opened(file(2, XrefType::CrossReferenceStream), "a.pdf", None);
+    let mut d = opened(file(2, XrefKind::Stream), "a.pdf", None);
     let src = d.primary().clone();
     let stream = src.xref().max_stream.unwrap();
     assert!(
@@ -1051,7 +1051,7 @@ fn ocr_reads_a_turned_page_as_it_shows_its_content_alone() {
 #[test]
 fn ocr_skips_a_page_recognized_before_saved_or_not() {
     const TEXT: &str = "Recognized_before_and_long_enough";
-    let mut d = opened(file(1, XrefType::CrossReferenceTable), "a.pdf", None);
+    let mut d = opened(file(1, XrefKind::Table), "a.pdf", None);
     let p0 = d.page(0).unwrap();
     let views = views();
     let before = ViewPages::new(views.clone(), d.snapshot());
@@ -1116,7 +1116,7 @@ fn ocr_skips_a_page_recognized_before_saved_or_not() {
 #[test]
 fn background_ocr_doesn_t_evict_visible_engines() {
     let n = 9 * GROUP as usize;
-    let mut d = opened(file(n, XrefType::CrossReferenceTable), "a.pdf", None);
+    let mut d = opened(file(n, XrefKind::Table), "a.pdf", None);
     let firsts: Vec<PageId> = (0..9)
         .map(|g| d.page(g * GROUP as usize).unwrap())
         .collect();

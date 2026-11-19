@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 use crate::pdf::encryption;
 use crate::pdf::encryption::crypt_filters::{Aes128CryptFilter, Aes256CryptFilter, CryptFilter};
-use crate::pdf::xref::XrefType;
 use crate::pdf::{
     Dictionary, Document as Pdf, EncryptionState, EncryptionVersion, LazyPdf, Object, ObjectId,
     Permissions, Stream, XrefKind, dictionary,
@@ -212,16 +211,11 @@ pub fn encrypted(
     written(&pdf)
 }
 
-/// `pdf` as lopdf writes it, with a cross-reference table and with a
-/// stream.
+/// `pdf` written with a cross-reference table and with a stream.
 pub fn written(pdf: &Pdf) -> [Vec<u8>; 2] {
-    [
-        XrefType::CrossReferenceTable,
-        XrefType::CrossReferenceStream,
-    ]
-    .map(|kind| {
+    [XrefKind::Table, XrefKind::Stream].map(|kind| {
         let mut pdf = pdf.clone();
-        pdf.reference_table.cross_reference_type = kind;
+        pdf.xref_kind = kind;
         let mut bytes = Vec::new();
         pdf.save_to(&mut bytes).unwrap();
         bytes
@@ -403,7 +397,7 @@ pub fn blank_table(count: usize) -> Vec<u8> {
     pdf.objects.insert(pages, tree.into());
     let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
     pdf.trailer.set("Root", catalog);
-    pdf.reference_table.cross_reference_type = XrefType::CrossReferenceTable;
+    pdf.xref_kind = XrefKind::Table;
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
     bytes

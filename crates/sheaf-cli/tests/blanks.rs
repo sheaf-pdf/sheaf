@@ -118,14 +118,13 @@ fn removes_blanks_and_keeps_the_rejects() {
         String::from_utf8_lossy(&run.stderr)
     );
     assert_eq!(Pdf::load(&kept).unwrap().get_pages().len(), 3);
-    let rej = Pdf::load(&rejects).unwrap();
-    assert_eq!(rej.get_pages().len(), 3);
+    let rej = sheaf_doc::open::file(&rejects, None).unwrap().doc;
+    assert_eq!(rej.page_count(), 3);
     let titles: Vec<String> = rej
-        .get_toc()
-        .unwrap()
-        .toc
-        .into_iter()
-        .map(|t| t.title)
+        .state()
+        .outline_roots()
+        .iter()
+        .map(|id| rej.state().bookmark(*id).unwrap().title.to_string())
         .collect();
     assert_eq!(
         titles,

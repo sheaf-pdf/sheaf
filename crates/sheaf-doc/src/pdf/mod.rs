@@ -2,12 +2,13 @@
 //! `sheaf-doc` and every other crate in the workspace reaches the PDF
 //! object, structure, filter and encryption types through here.
 
+mod document;
 mod reader;
 
+pub use document::{Document, EncryptionVersion};
 pub use lopdf::{
-    DecompressError, Dictionary, Document, EncryptionState, EncryptionVersion, Error,
-    IncrementalDocument, Limit, LoadOptions, Object, ObjectId, ObjectStream, Permissions, Result,
-    SaveOptions, Stream, StringFormat, content, decode_text_string, encryption, xref,
+    DecompressError, Dictionary, EncryptionState, Error, Limit, Object, ObjectId, Permissions,
+    Result, Stream, StringFormat, content, encryption,
 };
 pub use pdf_structure::{ByteSource, FileBytes};
 pub use reader::{LazyPdf, RawCopies, ReadLimits, XrefFacts, XrefKind};

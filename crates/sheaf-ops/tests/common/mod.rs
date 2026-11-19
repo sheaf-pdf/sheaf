@@ -28,8 +28,7 @@ use sheaf_doc::forms::fixture::{Form, Rect, source};
 use sheaf_doc::forms::{FileForm, Finding, Report, Value, check};
 use sheaf_doc::geom::Geom;
 pub use sheaf_doc::materialize::{How, StrategyKind};
-use sheaf_doc::pdf::xref::XrefType;
-use sheaf_doc::pdf::{Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
+use sheaf_doc::pdf::{Document as Pdf, LazyPdf, Object, ObjectId, Stream, XrefKind, dictionary};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture as fx;
 use sheaf_doc::{
@@ -639,7 +638,7 @@ pub fn ready(store: Arc<Store>, primary: Src, name: &str) -> anyhow::Result<Docu
 /// A file of `n` Letter pages as lopdf writes it in `kind`, each drawing
 /// a few shapes and "page i" in Helvetica, which their parent node gives
 /// them.
-pub fn file(n: usize, kind: XrefType) -> Vec<u8> {
+pub fn file(n: usize, kind: XrefKind) -> Vec<u8> {
     let mut pdf = Pdf::with_version("1.7");
     let root = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
@@ -667,7 +666,7 @@ pub fn file(n: usize, kind: XrefType) -> Vec<u8> {
     );
     let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
     pdf.trailer.set("Root", catalog);
-    pdf.reference_table.cross_reference_type = kind;
+    pdf.xref_kind = kind;
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
     bytes

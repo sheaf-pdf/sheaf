@@ -6,8 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::pdf::xref::XrefType;
-use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, XrefKind, dictionary};
 use sheaf_edit::{BlobSel, GridPos, Turn, WatermarkContent, WatermarkSpec, Z};
 
 use super::append_tests::{appended_in_place, file, keys_at, planned_in_place, written};
@@ -520,7 +519,7 @@ fn a_watermark_appends_what_it_draws_and_a_turn_its_page_and_block() {
 #[test]
 fn a_watermark_raises_the_version_to_1_4() {
     let dir = scratch();
-    let bytes = file(&[2], XrefType::CrossReferenceTable, "1.3");
+    let bytes = file(&[2], XrefKind::Table, "1.3");
     let (path, mut doc) = opened(&dir, "a.pdf", &bytes);
     assert!(!needs_after(doc.state(), PdfVersion::new(1, 3)));
     doc.commit_ops(vec![watermark("DRAFT", None)], "watermark")

@@ -92,7 +92,11 @@ fn synth_pdf(path: &std::path::Path) -> Result<()> {
         "Type" => "Catalog", "Pages" => pages_id, "Outlines" => outlines_id, "PageMode" => "UseOutlines",
     });
     doc.trailer.set("Root", catalog_id);
-    doc.compress();
+    for obj in doc.objects.values_mut() {
+        if let Object::Stream(s) = obj {
+            let _ = s.compress();
+        }
+    }
     doc.save(path)?;
     Ok(())
 }

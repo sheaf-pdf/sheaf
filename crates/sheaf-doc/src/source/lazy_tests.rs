@@ -13,10 +13,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::pdf::encryption::DecryptionError;
-use crate::pdf::xref::XrefType;
 use crate::pdf::{
-    ByteSource, Document as Pdf, Error, FileBytes, LazyPdf, Limit, LoadOptions, Object, ObjectId,
-    ReadLimits, Stream, StringFormat, XrefKind, dictionary,
+    ByteSource, Document as Pdf, Error, FileBytes, LazyPdf, Limit, Object, ObjectId, ReadLimits,
+    Stream, StringFormat, XrefKind, dictionary,
 };
 
 use super::Limits;
@@ -107,7 +106,7 @@ fn written(classic: bool) -> Vec<u8> {
     let mut form = every_kind();
     let mut bytes = Vec::new();
     if classic {
-        form.pdf.reference_table.cross_reference_type = XrefType::CrossReferenceTable;
+        form.pdf.xref_kind = XrefKind::Table;
         form.pdf.save_to(&mut bytes).unwrap();
     } else {
         form.pdf.save_modern(&mut bytes).unwrap();
@@ -1011,7 +1010,7 @@ pub(crate) fn plaintext() -> Pdf {
 /// eagerly, and lazily as eagerly, from memory and from a file. Returns
 /// the lazy read from memory.
 pub(crate) fn assert_decrypts_to(plain: &Pdf, bytes: &[u8], name: &str) -> LazyPdf {
-    let eager = Pdf::load_mem_with_options(bytes, LoadOptions::with_password(USER)).unwrap();
+    let eager = Pdf::load_mem_with_password(bytes, USER).unwrap();
     let lazy = LazyPdf::open(
         Arc::<[u8]>::from(bytes),
         Some(USER),
@@ -1133,7 +1132,7 @@ fn an_undefined_crypt_filter_is_a_typed_error() {
         assert_eq!(name, b"Undefined");
         assert!(
             matches!(
-                Pdf::load_mem_with_options(&bytes, LoadOptions::with_password(USER)),
+                Pdf::load_mem_with_password(&bytes, USER),
                 Err(Error::Decryption(DecryptionError::UndefinedCryptFilter(_)))
             ),
             "{key}"
@@ -1141,134 +1140,31 @@ fn an_undefined_crypt_filter_is_a_typed_error() {
     }
 }
 
-/// Why a corpus file's objects read otherwise lazily than eagerly, where
-/// lopdf's eager load is what's wrong, or the file is.
+/// Why a corpus file's objects read otherwise lazily than eagerly.
 #[derive(Debug, Clone, Copy)]
 enum Explained {
-    /// The eager load keeps an object stream's members that the
-    /// cross-reference table doesn't list in use, or objects a later
-    /// section freed (`type 0`): lazily they aren't there.
-    Unlisted,
     /// A stream doesn't decrypt (AES padding): an XMP stream stored in the
-    /// clear though `/EncryptMetadata` is true.
+    /// clear though `/EncryptMetadata` is true (`to_document` retains raw
+    /// fallback bytes so a Rewrite can re-encrypt it cleanly, while lazy
+    /// `get` reports the decryption failure).
     Undecryptable,
-    /// lopdf's eager load differs from PDFium / qpdf / pdf-structure:
-    /// leaving non-catalog `/Type /Metadata` streams encrypted under
-    /// `/EncryptMetadata false`, appending extra whitespace before
-    /// `endstream` to `/Length`, skipping orphaned `/Encrypt`-shaped
-    /// dictionaries, or aborting dictionary decryption on `/DigestValue`.
-    Eager,
-    /// Damaged cross-reference tables rebuilt differently by lopdf's
-    /// header scan than by pdf-structure / PDFium.
-    Rebuilt,
-    /// Truncated damaged file with no `startxref`.
-    Damaged,
 }
 
 impl Explained {
     /// Whether it explains an object reading as `difference`.
     fn covers(self, difference: &Difference) -> bool {
         match self {
-            Explained::Unlisted => matches!(difference, Difference::Fails(Error::MissingXrefEntry)),
             Explained::Undecryptable => {
                 matches!(difference, Difference::Fails(Error::Decryption(_)))
             }
-            Explained::Eager => matches!(difference, Difference::Differs),
-            Explained::Rebuilt => matches!(
-                difference,
-                Difference::Differs | Difference::Fails(Error::MissingXrefEntry)
-            ),
-            Explained::Damaged => matches!(difference, Difference::OnlyLazy),
         }
     }
 }
 
 /// The corpus files whose objects read otherwise lazily, why, and how
-/// many objects do (removed in slice 13 when eager loading moves off lopdf).
-const EXPLAINED: &[(&str, Explained, usize)] = &[
-    ("forms/safedocs/0015233.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0028292.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0036552.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0039917.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0054508.pdf", Explained::Eager, 3),
-    ("forms/safedocs/0078699.pdf", Explained::Eager, 3),
-    ("forms/safedocs/0085863.pdf", Explained::Unlisted, 2),
-    ("forms/safedocs/0110753.pdf", Explained::Unlisted, 2),
-    ("forms/safedocs/0112378.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0113045.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0120961.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0121600.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0128397.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0132631.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0148363.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0150632.pdf", Explained::Unlisted, 1),
-    ("forms/safedocs/0155165.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0160718.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0169467.pdf", Explained::Undecryptable, 1),
-    ("forms/safedocs/0187215.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0192444.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0205717.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0207918.pdf", Explained::Unlisted, 1),
-    ("forms/safedocs/0210819.pdf", Explained::Unlisted, 45),
-    ("forms/safedocs/0215118.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0236299.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0270097.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0270171.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0272165.pdf", Explained::Unlisted, 56),
-    ("forms/safedocs/0284632.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0294933.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0311422.pdf", Explained::Eager, 3),
-    ("forms/safedocs/0344358.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0351829.pdf", Explained::Unlisted, 6),
-    ("forms/safedocs/0356744.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0357569.pdf", Explained::Unlisted, 15),
-    ("forms/safedocs/0359716.pdf", Explained::Eager, 34),
-    ("forms/safedocs/0382153.pdf", Explained::Unlisted, 1),
-    ("forms/safedocs/0392041.pdf", Explained::Eager, 10),
-    ("forms/safedocs/0483480.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0517363.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0555069.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0567218.pdf", Explained::Unlisted, 4),
-    ("forms/safedocs/0622462.pdf", Explained::Unlisted, 1),
-    ("forms/safedocs/0626002.pdf", Explained::Eager, 10),
-    ("forms/safedocs/0630899.pdf", Explained::Damaged, 1),
-    ("forms/safedocs/0756200.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0786722.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0845477.pdf", Explained::Unlisted, 70),
-    ("forms/safedocs/0861734.pdf", Explained::Eager, 3),
-    ("forms/safedocs/0899113.pdf", Explained::Eager, 10),
-    ("forms/safedocs/0934470.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0943322.pdf", Explained::Eager, 1),
-    ("forms/safedocs/0990444.pdf", Explained::Unlisted, 4),
-    ("forms/safedocs/1007621.pdf", Explained::Rebuilt, 8),
-    ("forms/safedocs/1060770.pdf", Explained::Eager, 2),
-    ("forms/safedocs/1089796.pdf", Explained::Eager, 2),
-    ("forms/safedocs/1096333.pdf", Explained::Eager, 1),
-    ("forms/safedocs/1156137.pdf", Explained::Unlisted, 1),
-    ("forms/safedocs/1259021.pdf", Explained::Eager, 1),
-    ("forms/safedocs/1263925.pdf", Explained::Eager, 1),
-    ("forms/safedocs/1313824.pdf", Explained::Eager, 1),
-    ("forms/safedocs/1339485.pdf", Explained::Eager, 26),
-    ("forms/safedocs/1346789.pdf", Explained::Eager, 1),
-    ("forms/safedocs/1445804.pdf", Explained::Eager, 1),
-    ("forms/safedocs/1528928.pdf", Explained::Eager, 1),
-    ("forms/safedocs/1530261.pdf", Explained::Unlisted, 86),
-    ("forms/safedocs/1854407.pdf", Explained::Eager, 1),
-    ("forms/safedocs/1883189.pdf", Explained::Eager, 1),
-    ("forms/safedocs/2077793.pdf", Explained::Rebuilt, 8),
-    ("forms/safedocs/2101570.pdf", Explained::Eager, 1),
-    ("forms/safedocs/2280585.pdf", Explained::Unlisted, 80),
-    ("forms/safedocs/2308594.pdf", Explained::Eager, 1),
-    ("forms/safedocs/2709014.pdf", Explained::Eager, 1),
-    ("forms/safedocs/2810782.pdf", Explained::Eager, 1),
-    ("forms/safedocs/2850504.pdf", Explained::Eager, 1),
-    ("forms/safedocs/2893848.pdf", Explained::Eager, 1),
-    ("forms/safedocs/2973686.pdf", Explained::Unlisted, 7),
-    ("forms/safedocs/3146306.pdf", Explained::Eager, 1),
-    ("forms/safedocs/3170869.pdf", Explained::Unlisted, 9),
-    ("forms/safedocs/3401937.pdf", Explained::Unlisted, 6),
-    ("forms/safedocs/7523949.pdf", Explained::Eager, 2),
-];
+/// many objects do.
+const EXPLAINED: &[(&str, Explained, usize)] =
+    &[("forms/safedocs/0169467.pdf", Explained::Undecryptable, 1)];
 
 /// Every manifest file lopdf loads (with the empty password, as
 /// `load_mem` does) reads lazily as it loads, from memory and from the
@@ -1335,7 +1231,7 @@ fn corpus_objects_read_lazily_equal_the_eager_load() {
                     let mut c = counts.lock().unwrap();
                     c.files += 1;
                     c.objects += eager.objects.len();
-                    c.encrypted += usize::from(eager.encryption_state.is_some());
+                    c.encrypted += usize::from(eager.was_decrypted());
                     c.rebuilt += usize::from(rebuilt);
                     drop(c);
                     if !found.is_empty() {

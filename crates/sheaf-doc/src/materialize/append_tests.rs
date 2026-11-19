@@ -8,9 +8,9 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::pdf::xref::XrefType;
 use crate::pdf::{
-    ByteSource, Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary,
+    ByteSource, Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, XrefKind,
+    dictionary,
 };
 use in_progress::NoProgress;
 use sheaf_edit::{Rotation, Turn};
@@ -39,7 +39,7 @@ fn rect(r: [i64; 4]) -> Object {
 /// saying its number, as lopdf writes it in `kind`: the root gives every
 /// page its box and its font, and the first node, of more than one,
 /// turns its pages a quarter on a smaller box.
-pub(super) fn file(nodes: &[usize], kind: XrefType, version: &str) -> Vec<u8> {
+pub(super) fn file(nodes: &[usize], kind: XrefKind, version: &str) -> Vec<u8> {
     let mut pdf = Pdf::with_version(version);
     let root = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
@@ -82,7 +82,7 @@ pub(super) fn file(nodes: &[usize], kind: XrefType, version: &str) -> Vec<u8> {
     );
     let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
     pdf.trailer.set("Root", catalog);
-    pdf.reference_table.cross_reference_type = kind;
+    pdf.xref_kind = kind;
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
     bytes
@@ -197,11 +197,7 @@ fn color_of(path: &Path) -> [u8; 3] {
 #[test]
 fn a_mark_s_color_change_writes_the_mark_alone() {
     let dir = scratch();
-    let (path, mut doc) = opened(
-        &dir,
-        "a.pdf",
-        &file(&[3], XrefType::CrossReferenceTable, "1.7"),
-    );
+    let (path, mut doc) = opened(&dir, "a.pdf", &file(&[3], XrefKind::Table, "1.7"));
     let page = doc.page(0).unwrap();
     let add = fx::add(page, &square(1));
     doc.commit_ops(vec![add], "add").unwrap();
@@ -257,8 +253,8 @@ fn a_mark_s_color_change_writes_the_mark_alone() {
 fn both_kinds_of_cross_reference_reopen_after_an_append() {
     let dir = scratch();
     for (kind, name) in [
-        (XrefType::CrossReferenceTable, "table.pdf"),
-        (XrefType::CrossReferenceStream, "stream.pdf"),
+        (XrefKind::Table, "table.pdf"),
+        (XrefKind::Stream, "stream.pdf"),
     ] {
         let (path, mut doc) = opened(&dir, name, &file(&[2, 3], kind, "1.7"));
         let pages: Vec<PageId> = (0..5).map(|i| doc.page(i).unwrap()).collect();
@@ -334,11 +330,7 @@ fn a_linearized_file_appended_to_is_linearized_no_more() {
 #[test]
 fn a_page_moved_across_nodes_carries_its_parent_and_inherited_keys() {
     let dir = scratch();
-    let (path, mut doc) = opened(
-        &dir,
-        "a.pdf",
-        &file(&[2, 2], XrefType::CrossReferenceTable, "1.7"),
-    );
+    let (path, mut doc) = opened(&dir, "a.pdf", &file(&[2, 2], XrefKind::Table, "1.7"));
     let pages: Vec<PageId> = (0..4).map(|i| doc.page(i).unwrap()).collect();
     let was = doc.geom(pages[0]);
     assert_eq!(was.rotate, Rotation::R90);
@@ -383,7 +375,7 @@ fn a_page_moved_across_nodes_carries_its_parent_and_inherited_keys() {
 /// [`file`]'s pages under two nodes of two, written with a stream, the
 /// first page holding a mark of sheaf's and another tool's comment.
 fn commented() -> Vec<u8> {
-    let bytes = file(&[2, 2], XrefType::CrossReferenceStream, "1.7");
+    let bytes = file(&[2, 2], XrefKind::Stream, "1.7");
     let mut pdf = Pdf::load_mem(&bytes).unwrap();
     let first = pdf.get_pages()[&1];
     let mark = crate::serialize::built::to_pdf(&square(3), &mut pdf).main;
@@ -462,11 +454,7 @@ fn a_crop_appends_only_page_dicts() {
 #[test]
 fn a_split_node_keeps_its_key_through_another_append() {
     let dir = scratch();
-    let (path, mut doc) = opened(
-        &dir,
-        "a.pdf",
-        &file(&[128, 2], XrefType::CrossReferenceStream, "1.7"),
-    );
+    let (path, mut doc) = opened(&dir, "a.pdf", &file(&[128, 2], XrefKind::Stream, "1.7"));
     let first = doc.page(5).unwrap();
     doc.commit_ops(vec![fx::duplicate(&[first])], "duplicate")
         .unwrap();
@@ -510,7 +498,7 @@ fn a_split_node_keeps_its_key_through_another_append() {
 #[test]
 fn new_numbers_start_past_the_size_and_the_cross_reference_stream() {
     let dir = scratch();
-    let bytes = file(&[2], XrefType::CrossReferenceStream, "1.7");
+    let bytes = file(&[2], XrefKind::Stream, "1.7");
     let was = lazy(&bytes);
     let (size, stream) = (was.xref().size, was.xref().max_stream.unwrap());
     assert!(stream + 1 >= size, "lopdf numbers its stream last");
@@ -593,11 +581,7 @@ fn lazy_encrypt(bytes: &[u8]) -> Option<Object> {
 #[test]
 fn a_version_bump_writes_the_catalog_with_its_version() {
     let dir = scratch();
-    let (path, mut doc) = opened(
-        &dir,
-        "a.pdf",
-        &file(&[2], XrefType::CrossReferenceTable, "1.1"),
-    );
+    let (path, mut doc) = opened(&dir, "a.pdf", &file(&[2], XrefKind::Table, "1.1"));
     let catalog = doc.saved_record().unwrap().map.keys[&ObjKey::Catalog];
     let page = doc.page(0).unwrap();
     let add = fx::add(page, &square(1));
@@ -635,11 +619,7 @@ fn a_version_bump_writes_the_catalog_with_its_version() {
 #[test]
 fn what_a_rewrite_pruned_stops_an_append() {
     let dir = scratch();
-    let (path, mut doc) = opened(
-        &dir,
-        "a.pdf",
-        &file(&[3], XrefType::CrossReferenceTable, "1.7"),
-    );
+    let (path, mut doc) = opened(&dir, "a.pdf", &file(&[3], XrefKind::Table, "1.7"));
     let gone = doc.page(1).unwrap();
     doc.commit_ops(vec![fx::delete(&[gone])], "delete").unwrap();
     save_with(
@@ -664,11 +644,7 @@ fn what_a_rewrite_pruned_stops_an_append() {
 #[test]
 fn an_insert_leaves_the_catalog_and_keeps_the_nodes_keys() {
     let dir = scratch();
-    let (path, mut doc) = opened(
-        &dir,
-        "a.pdf",
-        &file(&[2, 2], XrefType::CrossReferenceTable, "1.7"),
-    );
+    let (path, mut doc) = opened(&dir, "a.pdf", &file(&[2, 2], XrefKind::Table, "1.7"));
     let catalog = doc.saved_record().unwrap().map.keys[&ObjKey::Catalog];
     let second = doc.page(1).unwrap();
     doc.commit_ops(vec![fx::duplicate(&[second])], "duplicate")
@@ -708,7 +684,7 @@ fn dangling(page: &[u32], reply: &[u32]) -> (Vec<u8>, u32) {
         "Contents" => Object::string_literal("their reply"),
     });
     f.set_annots(0, &[main, theirs]);
-    f.pdf.reference_table.cross_reference_type = XrefType::CrossReferenceTable;
+    f.pdf.xref_kind = XrefKind::Table;
     let size = f.pdf.max_id + 1;
     let gone = |past: &[u32]| -> Dictionary {
         (past.iter().enumerate())
@@ -745,7 +721,7 @@ fn a_dangling_reference_stays_dangling_past_the_new_numbers() {
     let dir = scratch();
     let (bytes, size) = dangling(&[0, 4], &[]);
     let gone = [((size, 0), false), ((size + 4, 0), false)];
-    let other = file(&[3], XrefType::CrossReferenceTable, "1.7");
+    let other = file(&[3], XrefKind::Table, "1.7");
     let edit = |doc: &mut Document| {
         let add = fx::add(doc.page(0).unwrap(), &square(1));
         doc.commit_ops(vec![add], "add").unwrap();
@@ -806,7 +782,7 @@ fn numbers_named_near_the_last_refuse_the_append() {
     use super::append::Refused;
     use super::plan::Why;
     let dir = scratch();
-    let mut pdf = Pdf::load_mem(&file(&[1], XrefType::CrossReferenceTable, "1.7")).unwrap();
+    let mut pdf = Pdf::load_mem(&file(&[1], XrefKind::Table, "1.7")).unwrap();
     let page = pdf.get_pages()[&1];
     let last = crate::serialize::NUMBERS - 1;
     let gone = dictionary! { "D0" => Object::Reference((last, 0)) };

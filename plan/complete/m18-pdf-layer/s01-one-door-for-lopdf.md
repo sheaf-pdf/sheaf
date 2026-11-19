@@ -19,7 +19,7 @@ Status: done · Part of [M18: the PDF layer](../../m18-pdf-layer/README.md) · i
 - **The inventory:** every method, function and trait sheaf calls on
   lopdf's types, with how many call sites, in this slice's notes. It's
   what [slice 3](s03-pdf-objects-editing-and-writing.md)'s owned form must
-  cover and what [slice 10](../../m18-pdf-layer/slices/s10-an-in-memory-document-of-sheaf-s-own.md)'s
+  cover and what [slice 10](s10-an-in-memory-document-of-sheaf-s-own.md)'s
   document must offer. Calls that a better API would remove are marked
   so, not kept for their own sake.
 

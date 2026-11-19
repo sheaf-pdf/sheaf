@@ -15,8 +15,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use sheaf_doc::pdf::xref::XrefType;
-use sheaf_doc::pdf::{Dictionary, Document as Pdf, LazyPdf, Object, Stream, dictionary};
+use sheaf_doc::pdf::{Dictionary, Document as Pdf, LazyPdf, Object, Stream, XrefKind, dictionary};
 use sheaf_doc::tx::fixture::{move_pages, rotate};
 use sheaf_edit::{Rotation, Turn};
 use sheaf_image::raster::{PixelFormat, Raster};
@@ -33,7 +32,7 @@ fn rect(r: [i64; 4]) -> Object {
 /// cropped holding two pages, then a page of the root's own; each page
 /// draws a blue block at its bottom left and a red one where it says.
 /// Written by lopdf in `kind`.
-fn file(kind: XrefType) -> Vec<u8> {
+fn file(kind: XrefKind) -> Vec<u8> {
     let mut pdf = Pdf::with_version("1.7");
     let root = pdf.new_object_id();
     let node = pdf.new_object_id();
@@ -64,7 +63,7 @@ fn file(kind: XrefType) -> Vec<u8> {
     );
     let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
     pdf.trailer.set("Root", catalog);
-    pdf.reference_table.cross_reference_type = kind;
+    pdf.xref_kind = kind;
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
     bytes
@@ -91,8 +90,8 @@ fn scratch(name: &str) -> PathBuf {
 #[test]
 fn pages_moved_across_nodes_show_as_they_did() {
     for (kind, name) in [
-        (XrefType::CrossReferenceTable, "table.pdf"),
-        (XrefType::CrossReferenceStream, "stream.pdf"),
+        (XrefKind::Table, "table.pdf"),
+        (XrefKind::Stream, "stream.pdf"),
     ] {
         let bytes = file(kind);
         let path = scratch(name);
@@ -147,8 +146,8 @@ fn pages_moved_across_nodes_show_as_they_did() {
 #[test]
 fn three_appends_in_a_row_reopen() {
     for (kind, name) in [
-        (XrefType::CrossReferenceTable, "three-table.pdf"),
-        (XrefType::CrossReferenceStream, "three-stream.pdf"),
+        (XrefKind::Table, "three-table.pdf"),
+        (XrefKind::Stream, "three-stream.pdf"),
     ] {
         let bytes = file(kind);
         let path = scratch(name);

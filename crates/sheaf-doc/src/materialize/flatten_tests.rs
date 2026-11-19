@@ -463,11 +463,7 @@ fn kinds(pdf: &Pdf, page: ObjectId) -> Vec<&'static str> {
 
 /// The XObject page `page` of `pdf` names `name`.
 fn xobject(pdf: &Pdf, page: ObjectId, name: &[u8]) -> ObjectId {
-    let (res, ids) = pdf.get_page_resources(page).unwrap();
-    let res = match res {
-        Some(d) => d.clone(),
-        None => pdf.get_dictionary(ids[0]).unwrap().clone(),
-    };
+    let res = pdf.resources_of_page(page).unwrap();
     let xo = pdf.dereference(res.get(b"XObject").unwrap()).unwrap().1;
     xo.as_dict()
         .unwrap()

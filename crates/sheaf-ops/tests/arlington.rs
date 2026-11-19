@@ -82,7 +82,6 @@ use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::fixture::{Form, every_kind, every_mark_kind, mark_blobs, note};
 use sheaf_doc::labels::LabelSpec;
 use sheaf_doc::materialize::{Encryption, ObjKey};
-use sheaf_doc::pdf::xref::XrefType;
 use sheaf_doc::pdf::{LazyPdf, Object, ObjectId, XrefKind, dictionary};
 use sheaf_doc::serialize::fixture as crypt;
 use sheaf_doc::source::OpenError;
@@ -816,7 +815,7 @@ fn old(name: &str, how: How) -> Checked {
     let dir = scratch(&format!("arlington-{name}"));
     let mut f = Form::new(1);
     f.pdf.version = "1.3".into();
-    f.pdf.reference_table.cross_reference_type = XrefType::CrossReferenceTable;
+    f.pdf.xref_kind = XrefKind::Table;
     let path = common::write(&dir, "old.pdf", &mut f);
     let mut doc = common::open(&path);
     let p0 = doc.page(0).unwrap();
@@ -981,7 +980,7 @@ fn a_fault_in_the_structure_sheaf_writes_is_never_carried() {
     for how in [How::Appended, How::Rewritten] {
         let dir = scratch(&format!("arlington-rows-{how:?}"));
         let mut f = Form::new(1);
-        f.pdf.reference_table.cross_reference_type = XrefType::CrossReferenceTable;
+        f.pdf.xref_kind = XrefKind::Table;
         let path = dir.join("form.pdf");
         std::fs::write(&path, misshapen(&f.bytes(), 0)).unwrap();
         let mut doc = common::open(&path);

@@ -16,7 +16,7 @@ can be compared object by object.
 - Its errors map to what sheaf says today: a password needed, an object
   missing, a stream over its cap.
 - The eager `Document` still loads through lopdf until
-  [slice 10](../../m18-pdf-layer/slices/s10-an-in-memory-document-of-sheaf-s-own.md).
+  [slice 10](s10-an-in-memory-document-of-sheaf-s-own.md).
 
 **Where:** `crates/sheaf-doc/src/source/`, `sheaf_doc::pdf`.
 
