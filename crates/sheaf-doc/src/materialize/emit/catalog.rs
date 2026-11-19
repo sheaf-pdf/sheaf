@@ -25,7 +25,7 @@
 //!
 //! [`RootValues`]: crate::materialize::record::RootValues
 
-use lopdf::{Dictionary, Object};
+use crate::pdf::{Dictionary, Object, Value, literal};
 
 use super::PdfVersion;
 
@@ -45,7 +45,7 @@ pub(crate) fn catalog(cx: &mut Cx) {
     let scripts = super::form::scripts(cx);
     let mut out = Dictionary::new();
     for (key, value) in source.iter() {
-        let value = match key.as_slice() {
+        let value = match key {
             k if CATALOG_OWNED.contains(&k) => continue,
             b"Perms" => match super::form::perms(cx, value) {
                 Some(perms) => perms,
@@ -53,26 +53,29 @@ pub(crate) fn catalog(cx: &mut Cx) {
             },
             b"Names" if scripts.is_some() => {
                 let names = (primary.pdf().dereference(value).ok())
-                    .and_then(|(_, n)| n.as_dict().ok().cloned())
+                    .and_then(|(_, n)| match n.value() {
+                        Value::Dict(d) => Some(d.clone()),
+                        _ => None,
+                    })
                     .unwrap_or_default();
                 let mut out = Dictionary::new();
-                for (k, v) in names.iter().filter(|(k, _)| k.as_slice() != b"JavaScript") {
+                for (k, v) in names.iter().filter(|&(k, _)| k != b"JavaScript") {
                     let v = cx.sym(v, &scope);
-                    out.set(k.clone(), v);
+                    out.set(k, v);
                 }
                 out.set("JavaScript", scripts.clone().expect("scripts"));
-                Object::Dictionary(out)
+                Object::from(out)
             }
             _ => cx.sym(value, &scope),
         };
-        out.set(key.clone(), value);
+        out.set(key, value);
     }
     if let Some(scripts) = scripts.filter(|_| !source.has(b"Names")) {
         let mut names = Dictionary::new();
         names.set("JavaScript", scripts);
         out.set("Names", names);
     }
-    out.set("Type", Object::Name(b"Catalog".to_vec()));
+    out.set("Type", Object::name("Catalog"));
     out.set("Pages", cx.placeholder(ObjKey::PagesNode(0)));
     if let Some(root) = super::outline::outline(cx) {
         out.set("Outlines", root);
@@ -84,7 +87,7 @@ pub(crate) fn catalog(cx: &mut Cx) {
     if let Some(ranges) = st.label_ranges().filter(|r| !r.is_empty()) {
         cx.push(
             ObjKey::Labels,
-            Object::Dictionary(crate::labels::number_tree(&ranges)),
+            Object::from(crate::labels::number_tree(&ranges)),
         );
         out.set("PageLabels", cx.placeholder(ObjKey::Labels));
     }
@@ -95,7 +98,7 @@ pub(crate) fn catalog(cx: &mut Cx) {
         cx.push(ObjKey::Generators, generators(json));
         out.set(GENERATORS, cx.placeholder(ObjKey::Generators));
     }
-    cx.push(ObjKey::Catalog, Object::Dictionary(out));
+    cx.push(ObjKey::Catalog, Object::from(out));
 }
 
 /// The catalog's key for what the document's generators are.
@@ -104,7 +107,7 @@ pub(crate) const GENERATORS: &str = "SHEF_Generators";
 /// `/SHEF_Generators`' object: its JSON, a string of its own
 /// ([`crate::generate::catalog_json`]).
 pub(crate) fn generators(json: Vec<u8>) -> Object {
-    Object::String(json, lopdf::StringFormat::Literal)
+    literal(json)
 }
 
 /// What an Append's catalog names that its emission decided: the page
@@ -135,7 +138,7 @@ pub(crate) fn appended(cx: &mut Cx, parts: Parts) {
     let scripts = parts.scripts.flatten();
     let mut out = Dictionary::new();
     for (key, value) in record.roots.catalog.iter() {
-        let value = match key.as_slice() {
+        let value = match key {
             b"Perms" => match super::form::perms(cx, value) {
                 Some(perms) => perms,
                 None => continue,
@@ -144,28 +147,28 @@ pub(crate) fn appended(cx: &mut Cx, parts: Parts) {
             b"Names" if scripts.is_some() => {
                 let names = record.roots.names.clone().unwrap_or_default();
                 let mut out = Dictionary::new();
-                for (k, v) in names.iter().filter(|(k, _)| k.as_slice() != b"JavaScript") {
+                for (k, v) in names.iter().filter(|&(k, _)| k != b"JavaScript") {
                     let v = cx.sym(v, &scope);
-                    out.set(k.clone(), v);
+                    out.set(k, v);
                 }
                 out.set("JavaScript", scripts.clone().expect("scripts"));
-                Object::Dictionary(out)
+                Object::from(out)
             }
             _ => cx.sym(value, &scope),
         };
-        out.set(key.clone(), value);
+        out.set(key, value);
     }
     if let Some(scripts) = scripts.filter(|_| !record.roots.catalog.has(b"Names")) {
         let mut names = Dictionary::new();
         names.set("JavaScript", scripts);
         out.set("Names", names);
     }
-    let names = (primary.pdf().catalog().ok()).and_then(|c| c.get(b"Names").ok());
+    let names = (primary.pdf().catalog().ok()).and_then(|c| c.get(b"Names"));
     if let Some(names) = names.filter(|_| restore) {
         let names = cx.sym(names, &scope);
         out.set("Names", names);
     }
-    out.set("Type", Object::Name(b"Catalog".to_vec()));
+    out.set("Type", Object::name("Catalog"));
     out.set("Pages", cx.placeholder(parts.root));
     let st = cx.st;
     let outline = match parts.outline {
@@ -189,8 +192,8 @@ pub(crate) fn appended(cx: &mut Cx, parts: Parts) {
         out.set(GENERATORS, cx.placeholder(ObjKey::Generators));
     }
     let version: PdfVersion = cx.version.max(record.pdf_version);
-    out.set("Version", Object::Name(version.to_string().into_bytes()));
-    cx.push(ObjKey::Catalog, Object::Dictionary(out));
+    out.set("Version", Object::name(version.to_string()));
+    cx.push(ObjKey::Catalog, Object::from(out));
 }
 
 /// An overlay's catalog, its source's (whose number it's claimed at), but
@@ -209,12 +212,12 @@ pub(crate) fn overlay(cx: &mut Cx) {
         .and_then(|off| crate::layers::ocg_patch(src, off));
     let mut out = Dictionary::new();
     for (key, value) in source.iter() {
-        match key.as_slice() {
+        match key {
             b"Pages" | b"AcroForm" => {}
             b"OCProperties" if layers.is_some() => {}
             _ => {
                 let value = cx.sym(value, &scope);
-                out.set(key.clone(), value);
+                out.set(key, value);
             }
         }
     }
@@ -226,5 +229,5 @@ pub(crate) fn overlay(cx: &mut Cx) {
         let layers = cx.sym(&layers, &scope);
         out.set("OCProperties", layers);
     }
-    cx.push(ObjKey::Catalog, Object::Dictionary(out));
+    cx.push(ObjKey::Catalog, Object::from(out));
 }

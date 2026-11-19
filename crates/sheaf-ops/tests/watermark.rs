@@ -18,10 +18,10 @@ use common::{
     HALF_A_ROW, blue_in, clean, corpus_form, holds, open, scratch, two_page_form, values, write,
     written,
 };
-use lopdf::{Document as Pdf, Stream, dictionary};
 use sheaf_doc::content::{PagOrigin, PaginationKind};
 use sheaf_doc::export::Export;
 use sheaf_doc::materialize::How;
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::text_layer::fixture as saved;
 use sheaf_doc::tx::fixture as fx;
 use sheaf_doc::{OcrWord, TextLayer};
@@ -35,13 +35,17 @@ use sheaf_render::{PageIndex, Renderer};
 fn pages_pdf(dir: &Path, name: &str, contents: &[&[u8]]) -> PathBuf {
     let mut pdf = Pdf::with_version("1.7");
     let pages = pdf.new_object_id();
-    let font = dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" };
+    let font = dictionary! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
+    };
     let resources = pdf.add_object(dictionary! { "Font" => dictionary! { "F1" => font } });
-    let kids: Vec<lopdf::Object> = (contents.iter())
+    let kids: Vec<Object> = (contents.iter())
         .map(|content| {
             let content = pdf.add_object(Stream::new(dictionary! {}, content.to_vec()));
             let page = dictionary! {
-                "Type" => "Page", "Parent" => pages, "Contents" => content,
+                "Type" => Object::name("Page"), "Parent" => pages, "Contents" => content,
                 "Resources" => resources,
                 "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             };
@@ -51,9 +55,10 @@ fn pages_pdf(dir: &Path, name: &str, contents: &[&[u8]]) -> PathBuf {
     let n = kids.len() as i64;
     pdf.objects.insert(
         pages,
-        dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => n }.into(),
+        dictionary! { "Type" => Object::name("Pages"), "Kids" => kids, "Count" => n }.into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages });
     pdf.trailer.set("Root", catalog);
     let path = dir.join(name);
     pdf.save(&path).unwrap();
@@ -375,27 +380,29 @@ fn acrobat_pdf(dir: &Path, name: &str, streams: &[&[u8]]) -> PathBuf {
     let mut pdf = Pdf::with_version("1.7");
     let pages = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     });
     let piece = dictionary! { "ADBE_CompoundType" => dictionary! {
-        "DocSettings" => dictionary! {}, "Private" => "Watermark",
+        "DocSettings" => dictionary! {}, "Private" => Object::name("Watermark"),
     } };
     let form = pdf.add_object(Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Form", "PieceInfo" => piece,
+            "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"), "PieceInfo" => piece,
             "BBox" => vec![0.into(), 0.into(), 300.into(), 60.into()],
             "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
         },
         b"0 0 1 rg BT /F1 48 Tf 4 12 Td (ACROBAT) Tj ET".to_vec(),
     ));
-    let contents: Vec<lopdf::Object> = (streams.iter())
+    let contents: Vec<Object> = (streams.iter())
         .map(|s| {
             pdf.add_object(Stream::new(dictionary! {}, s.to_vec()))
                 .into()
         })
         .collect();
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page", "Parent" => pages, "Contents" => contents,
+        "Type" => Object::name("Page"), "Parent" => pages, "Contents" => contents,
         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         "Resources" => dictionary! {
             "Font" => dictionary! { "F1" => font },
@@ -404,9 +411,13 @@ fn acrobat_pdf(dir: &Path, name: &str, streams: &[&[u8]]) -> PathBuf {
     });
     pdf.objects.insert(
         pages,
-        dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1,
+        }
+        .into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages });
     pdf.trailer.set("Root", catalog);
     let path = dir.join(name);
     pdf.save(&path).unwrap();
@@ -618,16 +629,26 @@ fn merged_pdf(dir: &Path, name: &str) -> PathBuf {
     let mut pdf = Pdf::with_version("1.7");
     let pages = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     });
     let bold = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica-Bold",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica-Bold"),
     });
-    let gs = pdf.add_object(dictionary! { "Type" => "ExtGState", "ca" => 0.3, "CA" => 0.3 });
+    let gs = pdf.add_object(dictionary! {
+        "Type" => Object::name("ExtGState"), "ca" => 0.3, "CA" => 0.3,
+    });
     let image = pdf.add_object(Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Image", "Width" => 2, "Height" => 2,
-            "ColorSpace" => "DeviceRGB", "BitsPerComponent" => 8,
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Image"),
+            "Width" => 2,
+            "Height" => 2,
+            "ColorSpace" => Object::name("DeviceRGB"),
+            "BitsPerComponent" => 8,
         },
         vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0],
     ));
@@ -644,21 +665,25 @@ fn merged_pdf(dir: &Path, name: &str) -> PathBuf {
           0.7071 0.7071 -0.7071 0.7071 200 300 cm BT 0.784 0.118 0.118 rg /F2 72 Tf 0 0 Td \
           (DRAFT) Tj ET\nQ\nEMC\n",
     ];
-    let contents: Vec<lopdf::Object> = (streams.iter())
+    let contents: Vec<Object> = (streams.iter())
         .map(|s| {
             pdf.add_object(Stream::new(dictionary! {}, s.to_vec()))
                 .into()
         })
         .collect();
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page", "Parent" => pages, "Contents" => contents, "Resources" => resources,
+        "Type" => Object::name("Page"), "Parent" => pages, "Contents" => contents, "Resources" => resources,
         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
     });
     pdf.objects.insert(
         pages,
-        dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1,
+        }
+        .into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages });
     pdf.trailer.set("Root", catalog);
     let path = dir.join(name);
     pdf.save(&path).unwrap();

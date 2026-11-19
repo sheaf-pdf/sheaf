@@ -9,7 +9,7 @@ use std::path::Path;
 
 use anyhow::Context;
 
-use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
+use sheaf_doc::pdf::{Dictionary, Document as Pdf, Object, Stream, StreamExt, dictionary};
 use sheaf_edit::Rotation;
 use sheaf_image::raster::PixelFormat;
 use sheaf_render::PageIndex;
@@ -42,17 +42,17 @@ fn main() -> anyhow::Result<()> {
         let gray = raster.to_gray().context("short render")?.into_raw();
         let mut image = Stream::new(
             dictionary! {
-                "Type" => "XObject",
-                "Subtype" => "Image",
+                "Type" => Object::name("XObject"),
+                "Subtype" => Object::name("Image"),
                 "Width" => raster.width as i64,
                 "Height" => raster.height as i64,
-                "ColorSpace" => "DeviceGray",
+                "ColorSpace" => Object::name("DeviceGray"),
                 "BitsPerComponent" => 8i64,
             },
             gray,
         );
-        image.compress()?;
-        let image_id = pdf.add_object(Object::Stream(image));
+        image.compress();
+        let image_id = pdf.add_object(image);
         let content = format!(
             "q {:.2} 0 0 {:.2} 0 0 cm /Im0 Do Q",
             size.width, size.height
@@ -61,13 +61,13 @@ fn main() -> anyhow::Result<()> {
         let mut resources = Dictionary::new();
         resources.set("XObject", dictionary! { "Im0" => image_id });
         let page_id = pdf.add_object(dictionary! {
-            "Type" => "Page",
+            "Type" => Object::name("Page"),
             "Parent" => pages_id,
             "MediaBox" => vec![0.into(), 0.into(), size.width.into(), size.height.into()],
             "Resources" => resources,
             "Contents" => content_id,
         });
-        kids.push(Object::Reference(page_id));
+        kids.push(Object::from(page_id));
         eprintln!(
             "page {} rendered at {}×{}",
             i + 1,
@@ -78,9 +78,12 @@ fn main() -> anyhow::Result<()> {
     let count = kids.len() as i64;
     pdf.objects.insert(
         pages_id,
-        Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => count }),
+        Object::from(
+            dictionary! { "Type" => Object::name("Pages"), "Kids" => kids, "Count" => count },
+        ),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
     pdf.save(&output)?;
     eprintln!("wrote {output}");

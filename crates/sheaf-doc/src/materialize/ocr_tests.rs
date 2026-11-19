@@ -10,8 +10,8 @@
 
 use std::sync::Arc;
 
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, StreamExt};
 use in_progress::NoProgress;
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
 use sheaf_edit::Turn;
 
 use super::append_tests::{planned_in_place, written};
@@ -63,9 +63,14 @@ pub(crate) fn set_layer(model: &mut Document, page: PageId, text: &str) {
 /// The page's /Contents as an array (a lone reference becomes one entry).
 fn contents_of(pdf: &Pdf, page: ObjectId) -> Vec<Object> {
     let dict = pdf.get_dictionary(page).unwrap();
-    match pdf.dereference(dict.get(b"Contents").unwrap()).unwrap().1 {
-        Object::Array(a) => a.clone(),
-        _ => vec![dict.get(b"Contents").unwrap().clone()],
+    match pdf
+        .dereference(dict.get(b"Contents").unwrap())
+        .unwrap()
+        .1
+        .as_array()
+    {
+        Some(a) => a.to_vec(),
+        None => vec![dict.get(b"Contents").unwrap().clone()],
     }
 }
 
@@ -81,12 +86,7 @@ fn stream_text(pdf: &Pdf, entry: &Object) -> String {
 
 /// The fonts page `page` of `pdf` binds.
 pub(crate) fn fonts_of(pdf: &Pdf, page: ObjectId) -> Dictionary {
-    // Inline on the page, or referenced (possibly inherited).
-    let (res, ids) = pdf.get_page_resources(page).unwrap();
-    let res: Dictionary = match res {
-        Some(d) => d.clone(),
-        None => pdf.get_dictionary(ids[0]).unwrap().clone(),
-    };
+    let res = pdf.resources_of_page(page).unwrap();
     pdf.dereference(res.get(b"Font").unwrap())
         .unwrap()
         .1
@@ -99,7 +99,7 @@ pub(crate) fn fonts_of(pdf: &Pdf, page: ObjectId) -> Dictionary {
 /// draws in.
 pub(crate) fn is_glyphless(pdf: &Pdf, font: &Object) -> bool {
     let font = pdf.dereference(font).unwrap().1.as_dict().unwrap();
-    let name = |key: &[u8]| font.get(key).and_then(Object::as_name).ok();
+    let name = |key: &[u8]| font.get(key).and_then(Object::as_name);
     name(b"Subtype") == Some(b"Type0") && name(b"BaseFont") == Some(b"GlyphLessFont")
 }
 
@@ -107,8 +107,8 @@ pub(crate) fn is_glyphless(pdf: &Pdf, font: &Object) -> bool {
 fn glyphless_fonts(pdf: &Pdf) -> usize {
     (pdf.objects.values())
         .filter(|o| {
-            o.as_dict().is_ok_and(|d| {
-                let name = |key: &[u8]| d.get(key).and_then(Object::as_name).ok();
+            o.as_dict().is_some_and(|d| {
+                let name = |key: &[u8]| d.get(key).and_then(Object::as_name);
                 name(b"Subtype") == Some(b"Type0") && name(b"BaseFont") == Some(b"GlyphLessFont")
             })
         })
@@ -118,9 +118,9 @@ fn glyphless_fonts(pdf: &Pdf) -> usize {
 /// The block `dict`, a stream's dictionary, marks it as recognized text's,
 /// by its layer's id: `/SHEF_Block << /K /Ocr /B (b…) >>`.
 pub(crate) fn ocr_block(dict: &Dictionary) -> Option<BlockId> {
-    let marker = dict.get(b"SHEF_Block").ok()?.as_dict().ok()?;
-    (marker.get(b"K").and_then(Object::as_name).ok() == Some(b"Ocr"))
-        .then(|| BlockId::parse(marker.get(b"B").ok()?.as_str().ok()?))
+    let marker = dict.get(b"SHEF_Block")?.as_dict()?;
+    (marker.get(b"K").and_then(Object::as_name) == Some(b"Ocr"))
+        .then(|| BlockId::parse(marker.get(b"B")?.as_bytes()?))
         .flatten()
 }
 
@@ -139,7 +139,7 @@ pub(crate) const HELLO_HEX: &str = "<00480065006C006C006F>";
 /// in the bag's order.
 fn words(pdf: &Pdf, page: ObjectId) -> Vec<String> {
     let lim = Limits::DEFAULT;
-    let resources = pdf.get_dictionary(page).unwrap().get(b"Resources").ok();
+    let resources = pdf.get_dictionary(page).unwrap().get(b"Resources");
     let fonts = Fonts::for_text();
     (contents(pdf, page).into_iter())
         .flat_map(|c| {
@@ -194,7 +194,7 @@ fn rewrite_writes_invisible_text_layer() {
                 .unwrap(),
         )
         .unwrap();
-    assert_eq!(cid.get(b"DW").unwrap().as_i64().unwrap(), 500);
+    assert_eq!(cid.get(b"DW").unwrap().as_integer().unwrap(), 500);
     assert!(type0.has(b"ToUnicode"));
     let page = pdf.get_dictionary(pages[1]).unwrap();
     let res = pdf.dereference(page.get(b"Resources").unwrap()).unwrap().1;
@@ -202,7 +202,7 @@ fn rewrite_writes_invisible_text_layer() {
     let lists = pdf.dereference(lists).unwrap().1.as_dict().unwrap();
     let said = (lists.iter()).map(|(_, l)| pdf.dereference(l).unwrap().1.as_dict().unwrap());
     let said: Vec<&[u8]> = said
-        .map(|l| l.get(b"SHEF_OcrBlock").unwrap().as_str().unwrap())
+        .map(|l| l.get(b"SHEF_OcrBlock").unwrap().as_bytes().unwrap())
         .collect();
     assert_eq!(said, [id.to_string().as_bytes()]);
     // Other pages are untouched.
@@ -235,7 +235,7 @@ fn an_append_writes_a_layer_in_an_unchanged_order() {
     // resources a dictionary of its own.
     let dict = pdf.get_dictionary(pages[0]).unwrap();
     assert!(dict.has(b"MediaBox"));
-    assert!(dict.get(b"Resources").unwrap().as_reference().is_ok());
+    assert!(dict.get(b"Resources").unwrap().as_reference().is_some());
     let fonts = fonts_of(&pdf, pages[0]);
     assert!(fonts.has(b"F1") && fonts.iter().any(|(_, f)| is_glyphless(&pdf, f)));
     assert!(!pdf.get_dictionary(pages[1]).unwrap().has(b"Resources"));
@@ -308,7 +308,7 @@ fn ocr_pages_share_one_font() {
         let (_, font) = (fonts.iter()).find(|(_, f)| is_glyphless(&pdf, f)).unwrap();
         font.clone()
     };
-    assert!(pages.iter().all(|&p| font(p) == font(pages[0])));
+    assert!(pages.iter().all(|&p| font(p).eq_value(&font(pages[0]))));
     let isolation =
         |at: usize| -> Vec<ObjectId> { (pages.iter()).map(|&p| contents(&pdf, p)[at]).collect() };
     for shared in [isolation(0), isolation(2)] {
@@ -398,7 +398,7 @@ fn ocr_appends_one_block_a_page_and_one_font() {
     let pdf = Pdf::load(&path).unwrap();
     let new = written(was.len(), &section, &path);
     let streams: Vec<Dictionary> = (new.iter())
-        .filter_map(|&id| Some(pdf.get_object(id).ok()?.as_stream().ok()?.dict.clone()))
+        .filter_map(|&id| Some(pdf.get_object(id).ok()?.as_stream()?.dict.clone()))
         .collect();
     let blocks = streams.iter().filter(|d| ocr_block(d).is_some()).count();
     assert_eq!(blocks, 3);
@@ -406,7 +406,7 @@ fn ocr_appends_one_block_a_page_and_one_font() {
         .filter(|&&id| {
             let (dict, _) = stream_of(&pdf, id).unwrap_or_default();
             let marker = dict.get(b"SHEF_Block").and_then(Object::as_dict);
-            marker.is_ok_and(|m| m.get(b"K").and_then(Object::as_name).ok() == Some(b"Isolate"))
+            marker.is_some_and(|m| m.get(b"K").and_then(Object::as_name) == Some(b"Isolate"))
         })
         .map(|&id| stream(&pdf, id).1)
         .collect();
@@ -414,7 +414,7 @@ fn ocr_appends_one_block_a_page_and_one_font() {
     assert!(isolating.contains(&b"q\n".to_vec()) && isolating.contains(&b"Q\n".to_vec()));
     let fonts = (new.iter())
         .filter(|&&id| {
-            let font = Object::Reference(id);
+            let font = Object::from(id);
             pdf.get_dictionary(id).is_ok() && is_glyphless(&pdf, &font)
         })
         .count();
@@ -423,7 +423,7 @@ fn ocr_appends_one_block_a_page_and_one_font() {
 
 /// Stream `id` of `pdf`, if it's one: its dictionary and data decoded.
 fn stream_of(pdf: &Pdf, id: ObjectId) -> Option<(Dictionary, Vec<u8>)> {
-    pdf.get_object(id).ok()?.as_stream().ok()?;
+    pdf.get_object(id).ok()?.as_stream()?;
     Some(stream(pdf, id))
 }
 
@@ -552,7 +552,7 @@ fn clear_removes_a_saved_layer() {
         assert!(!fonts.iter().any(|(_, f)| is_glyphless(&pdf, f)), "{name}");
         let res = pdf.get_dictionary(page).unwrap().get(b"Resources").unwrap();
         let res = pdf.dereference(res).unwrap().1.as_dict().unwrap();
-        let lists = res.get(b"Properties").ok();
+        let lists = res.get(b"Properties");
         let lists = lists.map(|l| pdf.dereference(l).unwrap().1.as_dict().unwrap());
         assert!(lists.is_none_or(|l| !l.has(saved::OCR_LIST)), "{name}");
     }
@@ -590,8 +590,8 @@ fn a_page_that_cant_be_read_is_saved_without_its_text() {
     let page = pdf.get_pages()[&1];
     let content = pdf.get_dictionary(page).unwrap().get(b"Contents").unwrap();
     let content = content.as_reference().unwrap();
-    let bad = lopdf::Stream::new(Dictionary::new(), b"0 0 9 9 re f EMC".to_vec());
-    pdf.objects.insert(content, Object::Stream(bad));
+    let bad = crate::pdf::Stream::new(Dictionary::new(), b"0 0 9 9 re f EMC".to_vec());
+    pdf.objects.insert(content, Object::from(bad));
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
     let dir = scratch();
@@ -805,7 +805,7 @@ fn an_append_over_a_saved_block_vetoes_nothing() {
             .unwrap()
             .clone();
         isolating.dict.remove(b"Filter");
-        isolating.set_content(ops.to_vec());
+        isolating.set_bytes(ops.to_vec());
         pdf.objects.insert(was[at], isolating.into());
     }
     let mut bytes = Vec::new();

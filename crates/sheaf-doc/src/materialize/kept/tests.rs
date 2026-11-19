@@ -3,8 +3,10 @@
 
 use std::path::{Path, PathBuf};
 
-use lopdf::content::{Content, Operation};
-use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
+use crate::pdf::content::{Content, Operation};
+use crate::pdf::{
+    Document as Pdf, Object, ObjectId, Stream, StreamExt, Value, dictionary, literal,
+};
 use sheaf_edit::Rotation;
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Pt};
@@ -41,26 +43,25 @@ fn file(
 ) -> PathBuf {
     let mut pdf = Pdf::with_version("1.5");
     let pages_id = pdf.new_object_id();
-    let font = pdf.add_object(
-        dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" },
-    );
+    let font = pdf.add_object(dictionary! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
+    });
     let mut ids = Vec::new();
     for i in 0..n {
         let content = Content {
             operations: vec![
                 Operation::new("BT", vec![]),
-                Operation::new("Tf", vec!["F1".into(), 24.into()]),
+                Operation::new("Tf", vec![Object::name("F1"), 24.into()]),
                 Operation::new("Td", vec![72.into(), 700.into()]),
-                Operation::new(
-                    "Tj",
-                    vec![Object::string_literal(format!("MARK {tag} {i}"))],
-                ),
+                Operation::new("Tj", vec![literal(format!("MARK {tag} {i}"))]),
                 Operation::new("ET", vec![]),
             ],
         };
         let c = pdf.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
         ids.push(pdf.add_object(dictionary! {
-            "Type" => "Page", "Parent" => pages_id, "Contents" => c,
+            "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => c,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
         }));
@@ -68,12 +69,15 @@ fn file(
     pdf.objects.insert(
         pages_id,
         dictionary! {
-            "Type" => "Pages", "Count" => n as i64,
-            "Kids" => ids.iter().map(|&i| Object::Reference(i)).collect::<Vec<_>>(),
+            "Type" => Object::name("Pages"), "Count" => n as i64,
+            "Kids" => ids.iter().map(|&i| Object::from(i)).collect::<Vec<_>>(),
         }
         .into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog = pdf.add_object(dictionary! {
+        "Type" => Object::name("Catalog"),
+        "Pages" => pages_id,
+    });
     pdf.trailer.set("Root", catalog);
     extra(&mut pdf, &ids);
     let path = dir.join(name);
@@ -84,21 +88,21 @@ fn file(
 /// A link on `from` to `to`.
 fn link(pdf: &mut Pdf, from: ObjectId, to: ObjectId) {
     let l = pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Link",
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"),
         "Rect" => vec![72.into(), 72.into(), 144.into(), 96.into()],
-        "Dest" => vec![to.into(), "Fit".into()],
+        "Dest" => vec![to.into(), Object::name("Fit")],
     });
     let page = pdf.get_dictionary_mut(from).unwrap();
     let mut annots = page
         .get(b"Annots")
-        .and_then(|a| a.as_array())
-        .cloned()
+        .and_then(Object::as_array)
+        .map(<[Object]>::to_vec)
         .unwrap_or_default();
     annots.push(l.into());
     page.set("Annots", annots);
 }
 
-fn catalog(pdf: &mut Pdf) -> &mut lopdf::Dictionary {
+fn catalog(pdf: &mut Pdf) -> &mut crate::pdf::Dictionary {
     let id = pdf.trailer.get(b"Root").unwrap().as_reference().unwrap();
     pdf.get_dictionary_mut(id).unwrap()
 }
@@ -112,14 +116,14 @@ fn opened(path: &Path) -> Document {
 /// Whether any stream in the file says `text`, decompressed.
 fn says(bytes: &[u8], text: &str) -> bool {
     let pdf = Pdf::load_mem(bytes).unwrap();
-    pdf.objects.values().any(|o| match o {
-        Object::Stream(s) => {
+    pdf.objects.values().any(|o| match o.as_stream() {
+        Some(s) => {
             let data = s
                 .decompressed_content()
-                .unwrap_or_else(|_| s.content.clone());
+                .unwrap_or_else(|_| s.raw_bytes().to_vec());
             String::from_utf8_lossy(&data).contains(text)
         }
-        _ => false,
+        None => false,
     })
 }
 
@@ -129,9 +133,8 @@ fn page_annots(bytes: &[u8], page: u32) -> usize {
     pdf.get_dictionary(id)
         .unwrap()
         .get(b"Annots")
-        .ok()
         .and_then(|a| pdf.dereference(a).ok())
-        .and_then(|(_, a)| a.as_array().ok().map(|a| a.len()))
+        .and_then(|(_, a)| a.as_array().map(<[Object]>::len))
         .unwrap_or(0)
 }
 
@@ -173,22 +176,27 @@ fn a_deleted_page_leaves_the_file_whatever_points_at_it() {
             // and the open action.
             link(pdf, p[0], p[2]);
             let names = pdf.add_object(dictionary! {
-                "Names" => vec![Object::string_literal("end"), Object::Array(vec![p[2].into(), "Fit".into()]),
-                                Object::string_literal("start"), Object::Array(vec![p[0].into(), "Fit".into()])],
+                "Names" => vec![
+                    literal("end"),
+                    Object::from(vec![p[2].into(), Object::name("Fit")]),
+                    literal("start"),
+                    Object::from(vec![p[0].into(), Object::name("Fit")]),
+                ],
             });
-            let dests =
-                pdf.add_object(dictionary! { "last" => vec![Object::from(p[2]), "Fit".into()] });
+            let dests = pdf.add_object(dictionary! {
+                "last" => vec![Object::from(p[2]), Object::name("Fit")],
+            });
             let named = pdf.add_object(dictionary! {
-                "Type" => "Annot", "Subtype" => "Link",
+                "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"),
                 "Rect" => vec![72.into(), 200.into(), 144.into(), 220.into()],
-                "Dest" => Object::string_literal("end"),
+                "Dest" => literal("end"),
             });
             let c = catalog(pdf);
             c.set("Names", dictionary! { "Dests" => names });
             c.set("Dests", dests);
-            c.set("OpenAction", vec![Object::from(p[2]), "Fit".into()]);
+            c.set("OpenAction", vec![Object::from(p[2]), Object::name("Fit")]);
             let page = pdf.get_dictionary_mut(p[0]).unwrap();
-            let mut a = page.get(b"Annots").unwrap().as_array().unwrap().clone();
+            let mut a = page.get(b"Annots").unwrap().as_array().unwrap().to_vec();
             a.push(named.into());
             page.set("Annots", a);
         });
@@ -203,7 +211,7 @@ fn a_deleted_page_leaves_the_file_whatever_points_at_it() {
         assert_eq!(page_annots(&bytes, 0), 0, "{way:?}");
         let pdf = Pdf::load_mem(&bytes).unwrap();
         let c = pdf.catalog().unwrap();
-        assert!(c.get(b"OpenAction").is_err(), "{way:?}");
+        assert!(c.get(b"OpenAction").is_none(), "{way:?}");
         let names = pdf
             .dereference(c.get(b"Names").unwrap())
             .unwrap()
@@ -238,17 +246,17 @@ fn a_reply_keeps_no_comment_of_a_deleted_page() {
         let dir = tempdir();
         let path = file(&dir, "a.pdf", "A", 2, |pdf, p| {
             let note = pdf.add_object(dictionary! {
-                "Type" => "Annot", "Subtype" => "Text", "P" => p[1],
+                "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "P" => p[1],
                 "Rect" => vec![72.into(), 72.into(), 96.into(), 96.into()],
-                "Contents" => Object::string_literal("SHEAFLEAK note"),
+                "Contents" => literal("SHEAFLEAK note"),
             });
             pdf.get_dictionary_mut(p[1])
                 .unwrap()
                 .set("Annots", vec![note.into()]);
             let reply = pdf.add_object(dictionary! {
-                "Type" => "Annot", "Subtype" => "Text", "P" => p[0], "IRT" => note,
+                "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "P" => p[0], "IRT" => note,
                 "Rect" => vec![72.into(), 72.into(), 96.into(), 96.into()],
-                "Contents" => Object::string_literal("a reply"),
+                "Contents" => literal("a reply"),
             });
             pdf.get_dictionary_mut(p[0])
                 .unwrap()
@@ -297,7 +305,7 @@ fn inserting_one_page(how: How) {
         .unwrap()
         .as_array()
         .unwrap()
-        .clone();
+        .to_vec();
     assert_eq!(annots.len(), 1, "{how:?}");
     let link = pdf.dereference(&annots[0]).unwrap().1.as_dict().unwrap();
     let to = link.get(b"Dest").unwrap().as_array().unwrap()[0]
@@ -314,21 +322,21 @@ fn fields_tags_and_threads_let_go_of_a_deleted_page() {
         // A field with a widget on pages 1 and 3, and one only on page 3.
         let widget = |pdf: &mut Pdf, page: ObjectId, parent: Option<ObjectId>| {
             let mut w = dictionary! {
-                "Type" => "Annot", "Subtype" => "Widget", "P" => page,
+                "Type" => Object::name("Annot"), "Subtype" => Object::name("Widget"), "P" => page,
                 "Rect" => vec![72.into(), 300.into(), 200.into(), 320.into()],
             };
             if let Some(parent) = parent {
                 w.set("Parent", parent);
             } else {
-                w.set("FT", "Tx");
-                w.set("T", Object::string_literal("only3"));
+                w.set("FT", Object::name("Tx"));
+                w.set("T", literal("only3"));
             }
             let id = pdf.add_object(w);
             let d = pdf.get_dictionary_mut(page).unwrap();
             let mut a = d
                 .get(b"Annots")
-                .and_then(|a| a.as_array())
-                .cloned()
+                .and_then(Object::as_array)
+                .map(<[Object]>::to_vec)
                 .unwrap_or_default();
             a.push(id.into());
             d.set("Annots", a);
@@ -339,27 +347,54 @@ fn fields_tags_and_threads_let_go_of_a_deleted_page() {
         let w2 = widget(pdf, p[2], Some(both));
         pdf.objects.insert(
             both,
-            dictionary! { "FT" => "Tx", "T" => Object::string_literal("both"), "Kids" => vec![w0.into(), w2.into()] }.into(),
+            dictionary! {
+                "FT" => Object::name("Tx"),
+                "T" => literal("both"),
+                "Kids" => vec![w0.into(), w2.into()],
+            }
+            .into(),
         );
         let only = widget(pdf, p[2], None);
         // Tags: a paragraph on each page, under a document element.
         let root = pdf.new_object_id();
         let doc = pdf.new_object_id();
         let para = |pdf: &mut Pdf, page: ObjectId| {
-            pdf.add_object(dictionary! { "Type" => "StructElem", "S" => "P", "P" => doc, "Pg" => page, "K" => 0 })
+            pdf.add_object(dictionary! {
+                "Type" => Object::name("StructElem"),
+                "S" => Object::name("P"),
+                "P" => doc,
+                "Pg" => page,
+                "K" => 0,
+            })
         };
         let e0 = para(pdf, p[0]);
         let e2 = para(pdf, p[2]);
         pdf.objects.insert(
             doc,
-            dictionary! { "Type" => "StructElem", "S" => "Document", "P" => root, "K" => vec![e0.into(), e2.into()] }.into(),
+            dictionary! {
+                "Type" => Object::name("StructElem"),
+                "S" => Object::name("Document"),
+                "P" => root,
+                "K" => vec![e0.into(), e2.into()],
+            }
+            .into(),
         );
         let parents = pdf.add_object(dictionary! {
-            "Nums" => vec![0.into(), Object::Array(vec![e0.into()]), 1.into(), Object::Array(vec![e2.into()])],
+            "Nums" => vec![
+                0.into(),
+                Object::from(vec![e0.into()]),
+                1.into(),
+                Object::from(vec![e2.into()]),
+            ],
         });
         pdf.objects.insert(
             root,
-            dictionary! { "Type" => "StructTreeRoot", "K" => doc, "ParentTree" => parents }.into(),
+            dictionary! {
+                "Type" => Object::name("StructTreeRoot"),
+                "K" => doc,
+                "ParentTree" => parents,
+            }
+            .into(),
         );
         // An article thread through pages 2 and 3.
         let thread = pdf.new_object_id();
@@ -373,8 +408,10 @@ fn fields_tags_and_threads_let_go_of_a_deleted_page() {
             b2,
             dictionary! { "N" => b1, "V" => b1, "P" => p[2], "R" => r() }.into(),
         );
-        pdf.objects
-            .insert(thread, dictionary! { "Type" => "Thread", "F" => b1 }.into());
+        pdf.objects.insert(
+            thread,
+            dictionary! { "Type" => Object::name("Thread"), "F" => b1 }.into(),
+        );
         pdf.get_dictionary_mut(p[1])
             .unwrap()
             .set("B", vec![Object::from(b1)]);
@@ -443,9 +480,9 @@ fn let_go_of_the_third_page(bytes: &[u8]) {
         .unwrap();
     assert_eq!(parents.get(b"Nums").unwrap().as_array().unwrap().len(), 2);
     // The thread through page 3 is dropped, and page 2's bead of it.
-    assert!(c.get(b"Threads").is_err());
+    assert!(c.get(b"Threads").is_none());
     let page2 = pdf.get_dictionary(pdf.get_pages()[&2]).unwrap();
-    assert!(page2.get(b"B").is_err());
+    assert!(page2.get(b"B").is_none());
 }
 
 #[test]
@@ -524,12 +561,12 @@ fn readable(bytes: &[u8], text: &str) -> bool {
 /// Whether `found` finds what it looks for in `o`: in its strings, and its
 /// stream's data decoded.
 fn holds_in(o: &Object, found: &dyn Fn(&[u8]) -> bool) -> bool {
-    match o {
-        Object::String(s, _) => found(s),
-        Object::Array(items) => items.iter().any(|o| holds_in(o, found)),
-        Object::Dictionary(d) => d.iter().any(|(_, o)| holds_in(o, found)),
-        Object::Stream(s) => {
-            let data = (s.decompressed_content()).unwrap_or_else(|_| s.content.clone());
+    match o.value() {
+        Value::String(s, _) => s.as_bytes().is_some_and(found),
+        Value::Array(items) => items.iter().any(|o| holds_in(o, found)),
+        Value::Dict(d) => d.iter().any(|(_, o)| holds_in(o, found)),
+        Value::Stream(s) => {
+            let data = (s.decompressed_content()).unwrap_or_else(|_| s.raw_bytes().to_vec());
             found(&data) || s.dict.iter().any(|(_, o)| holds_in(o, found))
         }
         _ => false,
@@ -673,9 +710,9 @@ fn deleted_theirs_gone(how: How) {
     let dir = tempdir();
     let path = file(&dir, "a.pdf", "A", 1, |pdf, p| {
         let theirs = pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Text", "NM" => Object::string_literal("theirs"),
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "NM" => literal("theirs"),
             "Rect" => vec![72.into(), 72.into(), 96.into(), 96.into()],
-            "Contents" => Object::string_literal("THEIR-SECRET-TEXT"),
+            "Contents" => literal("THEIR-SECRET-TEXT"),
         });
         pdf.get_dictionary_mut(p[0])
             .unwrap()
@@ -760,7 +797,7 @@ fn ocr_layer(text: &str) -> std::sync::Arc<crate::text_layer::TextLayer> {
 /// How many streams of the file `pdf` are an OCR layer's block.
 fn ocr_layers(pdf: &[u8]) -> usize {
     (Pdf::load_mem(pdf).unwrap().objects.values())
-        .filter(|o| (o.as_stream()).is_ok_and(|s| ocr_block(&s.dict).is_some()))
+        .filter(|o| (o.as_stream()).is_some_and(|s| ocr_block(&s.dict).is_some()))
         .count()
 }
 
@@ -831,12 +868,15 @@ fn keep_only_names_what_it_changed() {
         link(pdf, p[0], p[2]);
         let widget = |pdf: &mut Pdf, page: ObjectId, parent: ObjectId| {
             let id = pdf.add_object(dictionary! {
-                "Type" => "Annot", "Subtype" => "Widget", "P" => page, "Parent" => parent,
+                "Type" => Object::name("Annot"),
+                "Subtype" => Object::name("Widget"),
+                "P" => page,
+                "Parent" => parent,
                 "Rect" => vec![72.into(), 300.into(), 200.into(), 320.into()],
             });
             let d = pdf.get_dictionary_mut(page).unwrap();
-            let mut a = (d.get(b"Annots").and_then(|a| a.as_array()))
-                .cloned()
+            let mut a = (d.get(b"Annots").and_then(Object::as_array))
+                .map(<[Object]>::to_vec)
                 .unwrap_or_default();
             a.push(id.into());
             d.set("Annots", a);
@@ -849,31 +889,61 @@ fn keep_only_names_what_it_changed() {
         ];
         pdf.objects.insert(
             both,
-            dictionary! { "FT" => "Tx", "T" => Object::string_literal("both"), "Kids" => kids }
-                .into(),
+            dictionary! {
+                "FT" => Object::name("Tx"),
+                "T" => literal("both"),
+                "Kids" => kids,
+            }
+            .into(),
         );
         let kids = vec![widget(pdf, p[2], only).into()];
         pdf.objects.insert(
             only,
-            dictionary! { "FT" => "Tx", "T" => Object::string_literal("only"), "Kids" => kids }
-                .into(),
+            dictionary! {
+                "FT" => Object::name("Tx"),
+                "T" => literal("only"),
+                "Kids" => kids,
+            }
+            .into(),
         );
         let form = pdf.add_object(dictionary! { "Fields" => vec![both.into(), only.into()] });
         let (root, doc) = (pdf.new_object_id(), pdf.new_object_id());
         let para = |pdf: &mut Pdf, page: ObjectId| {
-            pdf.add_object(dictionary! { "Type" => "StructElem", "S" => "P", "P" => doc, "Pg" => page, "K" => 0 })
+            pdf.add_object(dictionary! {
+                "Type" => Object::name("StructElem"),
+                "S" => Object::name("P"),
+                "P" => doc,
+                "Pg" => page,
+                "K" => 0,
+            })
         };
         let (e0, e2) = (para(pdf, p[0]), para(pdf, p[2]));
         pdf.objects.insert(
             doc,
-            dictionary! { "Type" => "StructElem", "S" => "Document", "P" => root, "K" => vec![e0.into(), e2.into()] }.into(),
+            dictionary! {
+                "Type" => Object::name("StructElem"),
+                "S" => Object::name("Document"),
+                "P" => root,
+                "K" => vec![e0.into(), e2.into()],
+            }
+            .into(),
         );
         let parents = pdf.add_object(dictionary! {
-            "Nums" => vec![0.into(), Object::Array(vec![e0.into()]), 2.into(), Object::Array(vec![e2.into()])],
+            "Nums" => vec![
+                0.into(),
+                Object::from(vec![e0.into()]),
+                2.into(),
+                Object::from(vec![e2.into()]),
+            ],
         });
         pdf.objects.insert(
             root,
-            dictionary! { "Type" => "StructTreeRoot", "K" => doc, "ParentTree" => parents }.into(),
+            dictionary! {
+                "Type" => Object::name("StructTreeRoot"),
+                "K" => doc,
+                "ParentTree" => parents,
+            }
+            .into(),
         );
         let thread = pdf.new_object_id();
         let (b1, b2) = (pdf.new_object_id(), pdf.new_object_id());
@@ -886,21 +956,28 @@ fn keep_only_names_what_it_changed() {
             b2,
             dictionary! { "N" => b1, "V" => b1, "P" => p[2], "R" => r() }.into(),
         );
-        pdf.objects
-            .insert(thread, dictionary! { "Type" => "Thread", "F" => b1 }.into());
+        pdf.objects.insert(
+            thread,
+            dictionary! { "Type" => Object::name("Thread"), "F" => b1 }.into(),
+        );
         for (page, bead) in [(p[1], b1), (p[2], b2)] {
             pdf.get_dictionary_mut(page)
                 .unwrap()
                 .set("B", vec![Object::from(bead)]);
         }
         let stray = pdf.add_object(dictionary! { "Page" => p[2] });
-        let dests = dictionary! { "Names" => vec![Object::string_literal("third"), vec![p[2].into(), "Fit".into()].into()] };
+        let dests = dictionary! {
+            "Names" => vec![
+                literal("third"),
+                vec![p[2].into(), Object::name("Fit")].into(),
+            ],
+        };
         let c = catalog(pdf);
         c.set("AcroForm", form);
         c.set("StructTreeRoot", root);
         c.set("Threads", vec![Object::from(thread)]);
         c.set("Names", dictionary! { "Dests" => dests });
-        c.set("OpenAction", vec![p[2].into(), "Fit".into()]);
+        c.set("OpenAction", vec![p[2].into(), Object::name("Fit")]);
         c.set("Stray", stray);
     });
     let mut pdf = Pdf::load(&path).unwrap();
@@ -918,7 +995,7 @@ fn keep_only_names_what_it_changed() {
     let before = pdf.objects.clone();
     let kept = super::keep_only(&mut pdf, &pages[..2].iter().copied().collect(), &[]);
     let changed: std::collections::BTreeSet<ObjectId> = (pdf.objects.iter())
-        .filter(|(id, o)| before.get(id) != Some(o))
+        .filter(|(id, o)| !before.get(id).is_some_and(|b| b.eq_value(o)))
         .map(|(id, _)| *id)
         .collect();
     assert_eq!(kept.modified, changed);

@@ -360,15 +360,19 @@ fn char_boxes_lie_within_a_sixteenth_of_a_point_of_pdfium_s() {
 /// A Letter page the file turns 90°, its crop box off the origin, with a
 /// line of Helvetica across the page and one drawn up it.
 fn turned_text() -> Vec<u8> {
-    use lopdf::{Document, Stream, dictionary};
+    use sheaf_doc::pdf::{Document, Object, Stream, dictionary};
     let mut pdf = Document::with_version("1.5");
     let pages = pdf.new_object_id();
-    let font = dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" };
+    let font = dictionary! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
+    };
     let content = b"BT /F1 18 Tf 100 500 Td (Across the page) Tj ET \
         BT /F1 12 Tf 0 1 -1 0 300 200 Tm (Up the page) Tj ET";
     let content = pdf.add_object(Stream::new(dictionary! {}, content.to_vec()));
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page",
+        "Type" => Object::name("Page"),
         "Parent" => pages,
         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         "CropBox" => vec![36.into(), 48.5.into(), 560.into(), 740.into()],
@@ -378,9 +382,13 @@ fn turned_text() -> Vec<u8> {
     });
     pdf.objects.insert(
         pages,
-        dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1,
+        }
+        .into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();

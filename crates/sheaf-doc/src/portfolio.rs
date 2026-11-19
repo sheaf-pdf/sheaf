@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use lopdf::{Dictionary, Object, ObjectId};
+use crate::pdf::{Dictionary, Object, ObjectId, Value};
 
 use crate::attachments::{Objects, once, resolve};
 use crate::file::pdf_text;
@@ -50,21 +50,18 @@ pub fn collection<P: Objects + ?Sized>(pdf: &P) -> Option<Collection> {
         .catalog()
         .ok()?
         .get(b"Collection")
-        .ok()
         .and_then(|o| resolve(pdf, o))?
-        .as_dict()
-        .ok()?;
+        .as_dict()?;
     let mut fields: Vec<Field> = c
         .get(b"Schema")
-        .ok()
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_dict().ok())
+        .and_then(Object::as_dict)
         .map(|schema| {
             schema
                 .iter()
-                .filter(|(k, _)| k.as_slice() != b"Type")
+                .filter(|(k, _)| *k != b"Type")
                 .filter_map(|(k, v)| {
-                    let d = resolve(pdf, v)?.as_dict().ok()?;
+                    let d = resolve(pdf, v)?.as_dict()?;
                     Some(field(pdf, String::from_utf8_lossy(k).into_owned(), d))
                 })
                 .filter(|f| f.visible)
@@ -74,7 +71,6 @@ pub fn collection<P: Objects + ?Sized>(pdf: &P) -> Option<Collection> {
     fields.sort_by_key(|f| f.order);
     let initial = c
         .get(b"D")
-        .ok()
         .and_then(|o| resolve(pdf, o))
         .map(pdf_text)
         .filter(|s| !s.is_empty());
@@ -82,7 +78,7 @@ pub fn collection<P: Objects + ?Sized>(pdf: &P) -> Option<Collection> {
 }
 
 fn field<P: Objects + ?Sized>(pdf: &P, key: String, d: &Dictionary) -> Field {
-    let kind = match d.get(b"Subtype").ok().and_then(|o| o.as_name().ok()) {
+    let kind = match d.get(b"Subtype").and_then(Object::as_name) {
         Some(b"D") => FieldKind::Date,
         Some(b"N") => FieldKind::Number,
         Some(b"F") => FieldKind::FileName,
@@ -95,22 +91,19 @@ fn field<P: Objects + ?Sized>(pdf: &P, key: String, d: &Dictionary) -> Field {
     };
     let name = d
         .get(b"N")
-        .ok()
         .and_then(|o| resolve(pdf, o))
         .map(pdf_text)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| key.clone());
     let order = d
         .get(b"O")
-        .ok()
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_i64().ok())
+        .and_then(Object::as_integer)
         .unwrap_or(i64::MAX);
     let visible = d
         .get(b"V")
-        .ok()
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_bool().ok())
+        .and_then(Object::as_bool)
         .unwrap_or(true);
     Field {
         key,
@@ -129,12 +122,12 @@ pub fn folder_paths<P: Objects + ?Sized>(pdf: &P) -> HashMap<i64, String> {
     let root = pdf
         .catalog()
         .ok()
-        .and_then(|c| c.get(b"Collection").ok())
+        .and_then(|c| c.get(b"Collection"))
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_dict().ok())
-        .and_then(|c| c.get(b"Folders").ok())
+        .and_then(Object::as_dict)
+        .and_then(|c| c.get(b"Folders"))
         .and_then(|o| once(pdf, &mut seen, o))
-        .and_then(|o| o.as_dict().ok());
+        .and_then(Object::as_dict);
     if let Some(root) = root {
         if let Some(id) = folder_id(pdf, root) {
             out.insert(id, String::new());
@@ -159,13 +152,11 @@ fn walk_folders<P: Objects + ?Sized>(
     }
     let mut next = parent
         .get(b"Child")
-        .ok()
         .and_then(|o| once(pdf, seen, o))
-        .and_then(|o| o.as_dict().ok());
+        .and_then(Object::as_dict);
     while let Some(f) = next {
         let name = f
             .get(b"Name")
-            .ok()
             .and_then(|o| resolve(pdf, o))
             .map(pdf_text)
             .unwrap_or_default();
@@ -180,17 +171,15 @@ fn walk_folders<P: Objects + ?Sized>(
         walk_folders(pdf, f, &here, out, depth + 1, seen);
         next = f
             .get(b"Next")
-            .ok()
             .and_then(|o| once(pdf, seen, o))
-            .and_then(|o| o.as_dict().ok());
+            .and_then(Object::as_dict);
     }
 }
 
 fn folder_id<P: Objects + ?Sized>(pdf: &P, f: &Dictionary) -> Option<i64> {
     f.get(b"ID")
-        .ok()
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_i64().ok())
+        .and_then(Object::as_integer)
 }
 
 /// A `/CI` value as text: strings, numbers, dates, or a collection
@@ -199,12 +188,12 @@ pub fn field_text<P: Objects + ?Sized>(pdf: &P, v: &Object) -> String {
     let Some(v) = resolve(pdf, v) else {
         return String::new();
     };
-    match v {
-        Object::Integer(n) => n.to_string(),
-        Object::Real(r) => r.to_string(),
-        Object::String(..) => pdf_text(v),
-        Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
-        Object::Dictionary(d) => {
+    match v.value() {
+        Value::Integer(n) => n.to_string(),
+        Value::Real(r) => r.to_string(),
+        Value::String(..) => pdf_text(v),
+        Value::Name(n) => String::from_utf8_lossy(n.as_bytes()).into_owned(),
+        Value::Dict(d) => {
             let prefix = d.get(b"P").map(|o| field_text(pdf, o)).unwrap_or_default();
             let data = d.get(b"D").map(|o| field_text(pdf, o)).unwrap_or_default();
             format!("{prefix}{data}")
@@ -216,24 +205,24 @@ pub fn field_text<P: Objects + ?Sized>(pdf: &P, v: &Object) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lopdf::{Document as Pdf, dictionary};
+    use crate::pdf::{Document as Pdf, dictionary, literal};
 
     #[test]
     fn reads_schema_folders_and_initial_file() {
         let mut pdf = crate::attachments::tests::sample();
         let sub = pdf.add_object(
-            dictionary! { "Type" => "Folder", "ID" => 2, "Name" => Object::string_literal("2024") },
+            dictionary! { "Type" => Object::name("Folder"), "ID" => 2, "Name" => literal("2024") },
         );
-        let tax = pdf.add_object(dictionary! { "Type" => "Folder", "ID" => 1, "Name" => Object::string_literal("Tax"), "Child" => sub });
-        let root = pdf.add_object(dictionary! { "Type" => "Folder", "ID" => 0, "Name" => Object::string_literal("root"), "Child" => tax });
+        let tax = pdf.add_object(dictionary! { "Type" => Object::name("Folder"), "ID" => 1, "Name" => literal("Tax"), "Child" => sub });
+        let root = pdf.add_object(dictionary! { "Type" => Object::name("Folder"), "ID" => 0, "Name" => literal("root"), "Child" => tax });
         let coll = dictionary! {
-            "Type" => "Collection",
-            "D" => Object::string_literal("w2"),
+            "Type" => Object::name("Collection"),
+            "D" => literal("w2"),
             "Folders" => root,
             "Schema" => dictionary! {
-                "client" => dictionary! { "Subtype" => "S", "N" => Object::string_literal("Client"), "O" => 2 },
-                "name" => dictionary! { "Subtype" => "F", "N" => Object::string_literal("Name"), "O" => 1 },
-                "hidden" => dictionary! { "Subtype" => "S", "V" => false },
+                "client" => dictionary! { "Subtype" => Object::name("S"), "N" => literal("Client"), "O" => 2 },
+                "name" => dictionary! { "Subtype" => Object::name("F"), "N" => literal("Name"), "O" => 1 },
+                "hidden" => dictionary! { "Subtype" => Object::name("S"), "V" => false },
             },
         };
         let root_id = pdf.trailer.get(b"Root").unwrap().as_reference().unwrap();
@@ -265,7 +254,7 @@ mod tests {
     #[test]
     fn sub_items_join_prefix_and_data() {
         let pdf = Pdf::with_version("1.7");
-        let v: Object = dictionary! { "D" => 42, "P" => Object::string_literal("#") }.into();
+        let v: Object = dictionary! { "D" => 42, "P" => literal("#") }.into();
         assert_eq!(field_text(&pdf, &v), "#42");
     }
 }

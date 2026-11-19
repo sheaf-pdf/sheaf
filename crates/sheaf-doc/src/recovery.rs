@@ -626,8 +626,8 @@ pub fn discard_untitled(claim: &Claim) {
 pub(crate) mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use crate::pdf::{Document as Pdf, LazyPdf, Object, Stream, dictionary};
     use in_progress::NoProgress;
-    use lopdf::{Document as Pdf, LazyPdf, Object, Stream, dictionary};
     use sheaf_edit::Rotation;
 
     use super::*;
@@ -661,17 +661,20 @@ pub(crate) mod tests {
         for _ in 0..2 {
             let content = pdf.add_object(Stream::new(dictionary! {}, b"".to_vec()));
             let page = pdf.add_object(dictionary! {
-                "Type" => "Page", "Parent" => pages_id,
-                "MediaBox" => Object::Array(vec![0.into(), 0.into(), 612.into(), 792.into()]),
+                "Type" => Object::name("Page"), "Parent" => pages_id,
+                "MediaBox" => Object::from(vec![0.into(), 0.into(), 612.into(), 792.into()]),
                 "Contents" => content,
             });
-            kids.push(Object::Reference(page));
+            kids.push(Object::from(page));
         }
         pdf.objects.insert(
             pages_id,
-            Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => 2 }),
+            Object::from(
+                dictionary! { "Type" => Object::name("Pages"), "Kids" => kids, "Count" => 2 },
+            ),
         );
-        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        let catalog =
+            pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
         pdf.trailer.set("Root", catalog);
         pdf.save(path).unwrap();
     }
@@ -962,8 +965,7 @@ pub(crate) mod tests {
             .unwrap()
             .1
             .as_array()
-            .unwrap()
-            .clone();
+            .unwrap();
         assert_eq!(contents.len(), 4, "isolated, then the block");
         let text = String::from_utf8_lossy(&recovered.get_page_content(pages[&2])).into_owned();
         assert!(
@@ -1048,10 +1050,8 @@ pub(crate) mod tests {
     /// turn and the mark.
     #[test]
     fn an_encrypted_sidecar_holds_no_plaintext() {
-        use std::collections::BTreeMap;
-
-        use lopdf::encryption::crypt_filters::{Aes128CryptFilter, CryptFilter};
-        use lopdf::{EncryptionState, EncryptionVersion, Permissions, XrefKind};
+        use crate::pdf::XrefKind;
+        use crate::pdf::test_crypt::{CipherKind, TestEncryption};
 
         use crate::serialize::fixture::{OWNER, encrypted, whole};
         use crate::serialize::tests::{NOTE, mark, notes};
@@ -1060,20 +1060,7 @@ pub(crate) mod tests {
         let dir = scratch();
         let plain = plaintext();
         // Opened with its empty user password, as such files open.
-        let state = EncryptionState::try_from(EncryptionVersion::V4 {
-            document: &plain,
-            encrypt_metadata: true,
-            crypt_filters: BTreeMap::from([(
-                b"StdCF".to_vec(),
-                Arc::new(Aes128CryptFilter) as Arc<dyn CryptFilter>,
-            )]),
-            stream_filter: b"StdCF".to_vec(),
-            string_filter: b"StdCF".to_vec(),
-            owner_password: OWNER,
-            user_password: "",
-            permissions: Permissions::all(),
-        })
-        .unwrap();
+        let state = TestEncryption::new(CipherKind::Aes128, "", OWNER);
         let [table, _] = encrypted(&plain, &state, |_| {});
         let unencrypted = whole(&plain.objects, &plain.trailer, XrefKind::Table, "1.7", None);
         for (encrypted, bytes) in [(false, unencrypted), (true, table)] {

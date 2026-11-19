@@ -8,7 +8,7 @@
 //! [`WORDS`]. And pages drawing contents of a test's own
 //! ([`pages_drawing`]).
 
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary, literal};
 use sheaf_edit::OcrWord;
 
 use super::TextLayer;
@@ -71,12 +71,12 @@ pub const OCR_LIST: &[u8] = b"ShX256IW";
 /// marked `/SHEF_Block << /K /Ocr /B (b2a) >>`.
 pub fn block_page() -> Pdf {
     let mut pdf = Pdf::with_version("1.7");
-    let isolate = || dictionary! { "SHEF_Block" => dictionary! { "K" => "Isolate" } };
+    let isolate = || dictionary! { "SHEF_Block" => dictionary! { "K" => Object::name("Isolate") } };
     let open = pdf.add_object(Stream::new(isolate(), b"q\n".to_vec()));
     let base = pdf.add_object(Stream::new(dictionary! {}, BASE.to_vec()));
     let close = pdf.add_object(Stream::new(isolate(), b"Q\nQ\n".to_vec()));
     let block = dictionary! {
-        "SHEF_Block" => dictionary! { "K" => "Ocr", "B" => block_id() },
+        "SHEF_Block" => dictionary! { "K" => Object::name("Ocr"), "B" => block_id() },
     };
     let ocr = pdf.add_object(Stream::new(block, OCR_BLOCK.to_vec()));
     let contents = vec![open.into(), base.into(), close.into(), ocr.into()];
@@ -96,7 +96,7 @@ pub fn merged_page() -> Pdf {
 
 /// [`BLOCK_ID`] as a block writes it.
 fn block_id() -> Object {
-    Object::string_literal(format!("b{BLOCK_ID:x}"))
+    literal(format!("b{BLOCK_ID:x}"))
 }
 
 /// The resources [`OCR_BLOCK`] draws with, made in `pdf`: Helvetica as
@@ -116,7 +116,9 @@ fn glyphless(pdf: &mut Pdf) -> ObjectId {
 /// Helvetica, made in `pdf`.
 fn helvetica(pdf: &mut Pdf) -> ObjectId {
     pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     })
 }
 
@@ -145,20 +147,23 @@ fn with_pages(mut pdf: Pdf, pages: Vec<Dictionary>) -> Pdf {
     let parent = pdf.new_object_id();
     let kids: Vec<Object> = (pages.into_iter())
         .map(|page| {
-            let mut dict = dictionary! { "Type" => "Page", "Parent" => parent };
-            dict.extend(&page);
+            let mut dict = dictionary! { "Type" => Object::name("Page"), "Parent" => parent };
+            for (k, v) in page.iter() {
+                dict.set(k, v.clone());
+            }
             pdf.add_object(dict).into()
         })
         .collect();
     let count = kids.len() as i64;
     pdf.objects.insert(
         parent,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => kids, "Count" => count,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => kids, "Count" => count,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => parent });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => parent });
     pdf.trailer.set("Root", catalog);
     pdf
 }

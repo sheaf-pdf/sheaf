@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use lopdf::ObjectId;
+use crate::pdf::ObjectId;
 
 pub use sheaf_edit::FieldId;
 

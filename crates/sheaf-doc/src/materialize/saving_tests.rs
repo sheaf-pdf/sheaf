@@ -9,8 +9,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+use crate::pdf::{Document as Pdf, Object};
 use in_progress::{Level, NoProgress, Progress, Unit};
-use lopdf::{Document as Pdf, Object};
 use sheaf_edit::{Op, Rotation, Turn};
 
 use super::{
@@ -84,15 +84,18 @@ fn pages_of(path: &Path) -> Vec<(i64, bool)> {
     (pdf.get_pages().into_values())
         .map(|id| {
             let page = pdf.get_dictionary(id).unwrap();
-            let rotate = page.get(b"Rotate").and_then(Object::as_i64).unwrap_or(0);
+            let rotate = page
+                .get(b"Rotate")
+                .and_then(Object::as_integer)
+                .unwrap_or(0);
             let contents = pdf.dereference(page.get(b"Contents").unwrap()).unwrap().1;
-            let entries = match contents {
-                Object::Array(a) => a.clone(),
-                _ => vec![page.get(b"Contents").unwrap().clone()],
+            let entries = match contents.as_array() {
+                Some(a) => a.to_vec(),
+                None => vec![page.get(b"Contents").unwrap().clone()],
             };
             let layered = entries.iter().any(|e| {
                 (pdf.dereference(e).ok()).is_some_and(|(_, o)| {
-                    (o.as_stream()).is_ok_and(|s| super::ocr_tests::ocr_block(&s.dict).is_some())
+                    (o.as_stream()).is_some_and(|s| super::ocr_tests::ocr_block(&s.dict).is_some())
                 })
             });
             (rotate, layered)
@@ -548,7 +551,7 @@ fn appends_one_after_another_reopen() {
     }
     let bytes = std::fs::read(&path).unwrap();
     assert!(bytes.starts_with(&original));
-    let lazy = lopdf::LazyPdf::open(
+    let lazy = crate::pdf::LazyPdf::open(
         std::sync::Arc::<[u8]>::from(bytes.as_slice()),
         None,
         &crate::source::Limits::DEFAULT.reader,

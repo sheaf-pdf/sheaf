@@ -9,7 +9,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use lopdf::{Dictionary, Object, ObjectId};
+use crate::pdf::{Dictionary, Object, ObjectId, StreamExt, Value};
 
 use super::text::Quad;
 use crate::content::page::{ReadObjects, direct};
@@ -155,24 +155,24 @@ impl XObject {
         objects: &impl ReadObjects,
         id: ObjectId,
         budget: usize,
-    ) -> Result<XObject, lopdf::Error> {
+    ) -> Result<XObject, crate::pdf::Error> {
         let read = objects.read(id, |object| {
-            let Object::Stream(stream) = object else {
+            let Some(stream) = object.as_stream() else {
                 return Ok(XObject::None);
             };
             let dict = &stream.dict;
-            let reference = |key: &[u8]| dict.get(key).ok()?.as_reference().ok();
-            let subtype = dict.get(b"Subtype").ok().and_then(|s| direct(objects, s));
-            match subtype.and_then(|s| s.as_name().ok()) {
+            let reference = |key: &[u8]| dict.get(key)?.as_reference();
+            let subtype = dict.get(b"Subtype").and_then(|s| direct(objects, s));
+            match subtype.and_then(Object::as_name) {
                 Some(b"Form") => {}
                 Some(b"Image") => return Ok(XObject::Image(image(objects, dict))),
                 _ => return Ok(XObject::Other),
             }
             let data = match stream.decompressed_content_with_limit(budget) {
                 Ok(data) => data,
-                Err(lopdf::Error::Decompress(lopdf::DecompressError::MemoryLimitExceeded {
-                    ..
-                })) => return Ok(XObject::TooLarge),
+                Err(crate::pdf::Error::Limit(crate::pdf::Limit::Decompressed)) => {
+                    return Ok(XObject::TooLarge);
+                }
                 Err(e) => return Err(e),
             };
             Ok(XObject::Form(Form {
@@ -188,8 +188,9 @@ impl XObject {
                 bbox: array(objects, dict, b"BBox", 4).map(|n| Rect::new(n[0], n[1], n[2], n[3])),
                 resources: dict
                     .get(b"Resources")
-                    .ok()
-                    .filter(|r| direct(objects, r).is_some_and(|r| r.as_dict().is_ok()))
+                    .filter(|r| {
+                        direct(objects, r).is_some_and(|r| matches!(r.value(), Value::Dict(_)))
+                    })
                     .cloned(),
                 oc: reference(b"OC"),
             }))
@@ -197,7 +198,7 @@ impl XObject {
         match read {
             Ok(read) => read,
             // An object that isn't there is null, as in PDFium.
-            Err(lopdf::Error::MissingXrefEntry | lopdf::Error::ObjectNotFound(_)) => {
+            Err(crate::pdf::Error::MissingXrefEntry | crate::pdf::Error::ObjectNotFound(_)) => {
                 Ok(XObject::None)
             }
             Err(e) => Err(e),
@@ -208,15 +209,15 @@ impl XObject {
 /// What image XObject `dict` says of itself: a mask whose `/Mask` is no
 /// stream is a color key.
 fn image(objects: &impl ReadObjects, dict: &Dictionary) -> ImageFacts {
-    let reference = |key: &[u8]| dict.get(key).ok()?.as_reference().ok();
-    let stencil = dict.get(b"ImageMask").ok().and_then(|m| direct(objects, m));
+    let reference = |key: &[u8]| dict.get(key)?.as_reference();
+    let stencil = dict.get(b"ImageMask").and_then(|m| direct(objects, m));
     let stream = |id: &ObjectId| {
         objects
-            .read(*id, |o| o.as_stream().is_ok())
+            .read(*id, |o| o.as_stream().is_some())
             .unwrap_or(false)
     };
     ImageFacts {
-        stencil: stencil.and_then(|m| m.as_bool().ok()) == Some(true),
+        stencil: stencil.and_then(Object::as_bool) == Some(true),
         smask: reference(b"SMask"),
         mask: reference(b"Mask").filter(stream),
         oc: reference(b"OC"),
@@ -233,7 +234,7 @@ pub(super) fn array(
     key: &[u8],
     len: usize,
 ) -> Option<Vec<f32>> {
-    let array = direct(objects, dict.get(key).ok()?)?.as_array().ok()?;
+    let array = direct(objects, dict.get(key)?)?.as_array()?;
     if array.len() != len {
         return Some(match len {
             // PDFium's default matrix is the identity.
@@ -246,7 +247,7 @@ pub(super) fn array(
             .iter()
             .map(|n| {
                 direct(objects, n)
-                    .and_then(|n| n.as_float().ok())
+                    .and_then(Object::as_number)
                     .map(|n| n as f32)
                     .filter(|n| n.is_finite())
                     .unwrap_or(0.0)

@@ -40,7 +40,7 @@ from pdf-lint's side; and pdf-lint's `0.2.0` branch at a104227, read
   sheaf's slices find there goes to Greg.
 - **pdf-filters supports both Flate backends,** zlib-rs and
   miniz_oxide: "lint probably uses oxide, sheaf probably uses zlib for
-  speed" (Greg, 2026-10-27). How: [slice 6](slices/s06-pdf-filters-and-pdf-crypt-for-writing.md).
+  speed" (Greg, 2026-10-27). How: [slice 6](../complete/m18-pdf-layer/s06-pdf-filters-and-pdf-crypt-for-writing.md).
 - **No hash in the family** (Greg, 2026-10-27): each tool hashes what
   it needs (sheaf xxh3-128, pdf-lint XXH64); BLAKE3 where a hash leaves
   a tool and must resist tampering. Not the notes' BLAKE3 for both.
@@ -183,7 +183,7 @@ the notes' lazy resolver, all of it §7.5:
 
 Its one typed accessor is `catalog()`. So it's pdf-structure's other
 strategy beside pdf-lint's eager reader: the notes' "one reader, two
-strategies". [Slice 5](slices/s05-pdf-structure-lazy-reads.md) makes them one
+strategies". [Slice 5](../complete/m18-pdf-layer/s05-pdf-structure-lazy-reads.md) makes them one
 reader, pdf-lint's read whole and sheaf's read on demand, with
 `LazyPdf` as the model and the oracle, not code to copy: it's lopdf's
 MIT code, and the crates stay free of its notice that way.
@@ -194,7 +194,7 @@ the page table with its inherited keys, walked as PDFium walks it
 conformance claims (`conformance.rs`), and text strings
 (`lopdf::decode_text_string`). The page table's walk and the
 conformance claims go to pdf-semantics, the walk as a policy, PDFium's
-for sheaf ([slice 20](slices/s20-pdf-semantics-the-common-structures.md));
+for sheaf ([slice 20](../complete/m18-pdf-layer/s20-pdf-semantics-the-common-structures.md));
 the appearances stay sheaf's, as what a flatten reads.
 
 ## Linearization: a crate of its own
@@ -232,7 +232,7 @@ The split:
 - **The direction:** pdf-linearize lays out what pdf-structure writes
   and checks what it reads, so it depends on pdf-structure, never the
   reverse. Its plan, hint tables and dictionary need nothing; until
-  pdf-structure writes ([slice 7](slices/s07-pdf-structure-writing.md)),
+  pdf-structure writes ([slice 7](../complete/m18-pdf-layer/s07-pdf-structure-writing.md)),
   it assembles through the writer its caller gives (sheaf's
   `serialize/`).
 - **sheaf's half** stays sheaf's, between milestones: the Fast Web View

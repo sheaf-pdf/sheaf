@@ -38,7 +38,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use lopdf::{Dictionary, LazyPdf, Object, ObjectId};
+use crate::pdf::{Dictionary, LazyPdf, Limit, Object, ObjectId, StreamExt, Value as PdfValue};
 
 use super::field::{
     Action, Border, BorderStyle, Choice, Color, Field, FieldId, FieldKind, Mk, Trigger, Value,
@@ -237,46 +237,46 @@ pub fn read(src: &Source) -> FileForm {
     let limits = &src.limits().forms;
     let catalog = pdf.catalog().ok();
     let form = catalog
-        .and_then(|c| c.get(b"AcroForm").ok())
+        .and_then(|c| c.get(b"AcroForm"))
         .and_then(|f| resolve(pdf, f))
-        .and_then(|f| f.as_dict().ok());
+        .and_then(Object::as_dict);
     let mut r = Reader::new(pdf, limits);
     let mut facts = FormFacts::default();
     if let Some(form) = form {
         facts.xfa = form
             .get(b"XFA")
-            .ok()
             .and_then(|x| resolve(pdf, x))
-            .is_some_and(|x| matches!(x, Object::Array(_) | Object::Stream(_)));
+            .is_some_and(|x| matches!(x.value(), PdfValue::Array(_) | PdfValue::Stream(_)));
         facts.need_appearances = boolean(pdf, form, b"NeedAppearances");
         facts.sig_flags = number(pdf, form, b"SigFlags").unwrap_or(0);
         facts.da = r.da(form);
         facts.align = align(pdf, form).unwrap_or(0);
         let fonts = form
             .get(b"DR")
-            .ok()
             .and_then(|d| resolve(pdf, d))
-            .and_then(|d| d.as_dict().ok())
-            .and_then(|d| d.get(b"Font").ok())
+            .and_then(Object::as_dict)
+            .and_then(|d| d.get(b"Font"))
             .and_then(|f| resolve(pdf, f))
-            .and_then(|f| f.as_dict().ok());
-        for (name, _) in fonts.into_iter().flatten() {
-            if r.spend(name.len()) {
-                facts.fonts.push(latin1(name));
+            .and_then(Object::as_dict);
+        if let Some(fonts) = fonts {
+            for (name, _) in fonts.iter() {
+                if r.spend(name.len()) {
+                    facts.fonts.push(latin1(name));
+                }
             }
         }
         r.tree(form);
     }
     facts.dynamic = catalog.is_some_and(|c| boolean(pdf, c, b"NeedsRendering"));
     let perms = catalog
-        .and_then(|c| c.get(b"Perms").ok())
+        .and_then(|c| c.get(b"Perms"))
         .and_then(|p| resolve(pdf, p))
-        .and_then(|p| p.as_dict().ok());
+        .and_then(Object::as_dict);
     let perm = |key: &[u8]| {
         perms
-            .and_then(|p| p.get(key).ok())
+            .and_then(|p| p.get(key))
             .and_then(|s| resolve(pdf, s))
-            .is_some_and(|s| s.as_dict().is_ok())
+            .is_some_and(|s| matches!(s.value(), PdfValue::Dict(_)))
     };
     facts.usage_rights = perm(b"UR3") || perm(b"UR");
     facts.certified = perm(b"DocMDP");
@@ -318,14 +318,14 @@ pub fn read(src: &Source) -> FileForm {
     facts.scripts.fields = scripted.len();
     let by_object: HashMap<ObjectId, FieldId> = fields.iter().map(|f| (f.object, f.id)).collect();
     let order = form
-        .and_then(|f| f.get(b"CO").ok())
+        .and_then(|f| f.get(b"CO"))
         .and_then(|c| resolve(pdf, c))
-        .and_then(|c| c.as_array().ok());
+        .and_then(Object::as_array);
     facts.calculation_order = order
         .into_iter()
         .flatten()
         .take(limits.nodes)
-        .filter_map(|o| by_object.get(&o.as_reference().ok()?).copied())
+        .filter_map(|o| by_object.get(&o.as_reference()?).copied())
         .collect();
 
     if let Some(why) = r.damaged {
@@ -460,10 +460,9 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         let pdf = self.pdf;
         let mut roots: Vec<ObjectId> = form
             .get(b"Fields")
-            .ok()
             .and_then(|f| resolve(pdf, f))
-            .and_then(|f| f.as_array().ok())
-            .map(|f| f.iter().filter_map(|o| o.as_reference().ok()).collect())
+            .and_then(Object::as_array)
+            .map(|f| f.iter().filter_map(Object::as_reference).collect())
             .unwrap_or_default();
         match listed_as_kids(pdf, &roots, self.limits.entries) {
             Some(kids) => {
@@ -516,8 +515,8 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         let Some(dict) = pdf.dictionary(id) else {
             return;
         };
-        let part = dict.get(b"T").ok().and_then(|t| resolve(pdf, t));
-        let partial = match part.and_then(|t| t.as_str().ok()) {
+        let part = dict.get(b"T").and_then(|t| resolve(pdf, t));
+        let partial = match part.and_then(Object::as_bytes) {
             Some(t) if t.len() > limits.name => None,
             Some(t) => Some(pdf_text_bytes(t)),
             None => Some(String::new()),
@@ -548,16 +547,16 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         }
 
         let mut here = up;
-        if let Some(ft) = dict.get(b"FT").ok().and_then(|o| o.as_name().ok()) {
+        if let Some(ft) = dict.get(b"FT").and_then(Object::as_name) {
             here.ft = ft;
         }
         if let Some(ff) = number(pdf, dict, b"Ff") {
             here.flags = ff as u32;
         }
-        if let Ok(v) = dict.get(b"V") {
+        if let Some(v) = dict.get(b"V") {
             here.value = self.value(v);
         }
-        if let Ok(v) = dict.get(b"DV") {
+        if let Some(v) = dict.get(b"DV") {
             here.default = self.value(v);
         }
         if let Some(da) = self.da(dict) {
@@ -569,7 +568,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         if let Some(n) = number(pdf, dict, b"MaxLen") {
             here.max_len = u32::try_from(n.max(0)).ok().or(Some(u32::MAX));
         }
-        if let Ok(opt) = dict.get(b"Opt") {
+        if let Some(opt) = dict.get(b"Opt") {
             here.options = Some(self.choices(opt));
         }
         if self.damaged.is_some() {
@@ -579,10 +578,8 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         // `listed_as_kids` has counted these against `limits.entries`.
         let kids = dict
             .get(b"Kids")
-            .ok()
             .and_then(|k| resolve(pdf, k))
-            .and_then(|k| k.as_array().ok())
-            .map(Vec::as_slice)
+            .and_then(Object::as_array)
             .unwrap_or_default();
         let mut widgets = Vec::new();
         if is_widget(dict) {
@@ -590,7 +587,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         }
         let mut field_kids = false;
         self.path.insert(id);
-        for kid in kids.iter().filter_map(|k| k.as_reference().ok()) {
+        for kid in kids.iter().filter_map(Object::as_reference) {
             let Some(k) = pdf.dictionary(kid) else {
                 continue;
             };
@@ -612,7 +609,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         if widgets.is_empty() && field_kids {
             return;
         }
-        let tooltip = match dict.get(b"TU").ok().and_then(|t| resolve(pdf, t)) {
+        let tooltip = match dict.get(b"TU").and_then(|t| resolve(pdf, t)) {
             Some(t) => self.text(t),
             None => None,
         };
@@ -645,14 +642,16 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
 
     /// A `/V` or `/DV`: text, a state, items, or a signature.
     fn value(&mut self, v: &Object) -> Option<Value> {
-        if let Ok(id) = v.as_reference()
+        if let Some(id) = v.as_reference()
             && let Some(value) = self.values.get(&id)
         {
             return value.clone();
         }
-        let value = match resolve(self.pdf, v) {
-            Some(Object::Name(n)) => self.spend(n.len()).then(|| Value::State(latin1(n).into())),
-            Some(Object::Array(items)) => {
+        let value = resolve(self.pdf, v).and_then(|o| match o.value() {
+            PdfValue::Name(n) => self
+                .spend(n.as_bytes().len())
+                .then(|| Value::State(latin1(n.as_bytes()).into())),
+            PdfValue::Array(items) => {
                 if items.len() > self.limits.items {
                     let n = self.limits.items;
                     self.damage(format!("a value has more than {n} items"));
@@ -663,11 +662,10 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
                     Some(Value::Items(items.into()))
                 }
             }
-            Some(Object::Dictionary(d)) => d.has(b"ByteRange").then_some(Value::Signed),
-            Some(o) => self.text(o).map(Value::Text),
-            None => None,
-        };
-        if let Ok(id) = v.as_reference() {
+            PdfValue::Dict(d) => d.has(b"ByteRange").then_some(Value::Signed),
+            _ => self.text(o).map(Value::Text),
+        });
+        if let Some(id) = v.as_reference() {
             self.values.insert(id, value.clone());
         }
         value
@@ -675,21 +673,22 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
 
     /// `/Opt`: each item a string, or an export value and what's shown.
     fn choices(&mut self, opt: &Object) -> Arc<[Choice]> {
-        if let Ok(id) = opt.as_reference()
+        if let Some(id) = opt.as_reference()
             && let Some(choices) = self.options.get(&id)
         {
             return choices.clone();
         }
-        let items = resolve(self.pdf, opt).and_then(|o| o.as_array().ok());
-        let items = items.map(Vec::as_slice).unwrap_or_default();
+        let items = resolve(self.pdf, opt)
+            .and_then(Object::as_array)
+            .unwrap_or_default();
         let mut choices = Vec::new();
         if items.len() > self.limits.items {
             let n = self.limits.items;
             self.damage(format!("an /Opt has more than {n} items"));
         } else {
             for item in items {
-                let pair = resolve(self.pdf, item).and_then(|o| o.as_array().ok());
-                let (export, shown) = match pair.map(Vec::as_slice) {
+                let pair = resolve(self.pdf, item).and_then(Object::as_array);
+                let (export, shown) = match pair {
                     Some([export, shown, ..]) => (self.text(export), self.text(shown)),
                     Some(_) => continue,
                     None => {
@@ -703,7 +702,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             }
         }
         let choices: Arc<[Choice]> = choices.into();
-        if let Ok(id) = opt.as_reference() {
+        if let Some(id) = opt.as_reference() {
             self.options.insert(id, choices.clone());
         }
         choices
@@ -714,13 +713,11 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
     fn text(&mut self, o: &Object) -> Option<Arc<str>> {
         let max = self.limits.text;
         let too_long = || format!("a value or script is longer than {} MiB", max >> 20);
-        let bytes = match resolve(self.pdf, o)? {
-            Object::String(s, _) => std::borrow::Cow::Borrowed(s.as_slice()),
-            Object::Stream(s) => match s.decompressed_content_with_limit(max) {
+        let bytes = match resolve(self.pdf, o)?.value() {
+            PdfValue::String(s, _) => std::borrow::Cow::Borrowed(s.as_bytes()?),
+            PdfValue::Stream(s) => match s.decompressed_content_with_limit(max) {
                 Ok(c) => std::borrow::Cow::Owned(c),
-                Err(lopdf::Error::Decompress(lopdf::DecompressError::MemoryLimitExceeded {
-                    ..
-                })) => {
+                Err(crate::pdf::Error::Limit(Limit::Decompressed)) => {
                     self.damage(too_long());
                     return None;
                 }
@@ -738,7 +735,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
 
     /// A dictionary's `/DA`, unless it's longer than [`FormLimits::da`].
     fn da(&mut self, d: &Dictionary) -> Option<Arc<str>> {
-        let da = resolve(self.pdf, d.get(b"DA").ok()?)?.as_str().ok()?;
+        let da = resolve(self.pdf, d.get(b"DA")?)?.as_bytes()?;
         (da.len() <= self.limits.da && self.spend(da.len())).then(|| latin1(da).into())
     }
 
@@ -752,18 +749,17 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             &Trigger::FIELD
         };
         if widget
-            && let Ok(a) = d.get(b"A")
+            && let Some(a) = d.get(b"A")
             && let Some(action) = self.action(a)
         {
             out.push((Trigger::Activate, action));
         }
         let aa = d
             .get(b"AA")
-            .ok()
             .and_then(|a| resolve(pdf, a))
-            .and_then(|a| a.as_dict().ok());
+            .and_then(Object::as_dict);
         for &(key, trigger) in triggers {
-            if let Some(a) = aa.and_then(|aa| aa.get(key).ok())
+            if let Some(a) = aa.and_then(|aa| aa.get(key))
                 && let Some(action) = self.action(a)
             {
                 out.push((trigger, action));
@@ -775,22 +771,22 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
     /// An action: its `/S`, and a JavaScript action's `/JS`. (`/Next` isn't
     /// followed.)
     fn action(&mut self, a: &Object) -> Option<Action> {
-        if let Ok(id) = a.as_reference()
+        if let Some(id) = a.as_reference()
             && let Some(action) = self.actions.get(&id)
         {
             return action.clone();
         }
-        let d = resolve(self.pdf, a).and_then(|a| a.as_dict().ok());
+        let d = resolve(self.pdf, a).and_then(Object::as_dict);
         let action = d.map(|d| {
-            let kind = d.get(b"S").ok().and_then(|s| s.as_name().ok());
+            let kind = d.get(b"S").and_then(Object::as_name);
             let kind = kind.map(latin1).unwrap_or_default();
             let script = match d.get(b"JS") {
-                Ok(js) if kind == "JavaScript" => self.text(js),
+                Some(js) if kind == "JavaScript" => self.text(js),
                 _ => None,
             };
             Action { kind, script }
         });
-        if let Ok(id) = a.as_reference() {
+        if let Some(id) = a.as_reference() {
             self.actions.insert(id, action.clone());
         }
         action
@@ -814,7 +810,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
                 page.annots
                     .iter()
                     .enumerate()
-                    .filter_map(|(slot, a)| Some((slot, a.as_reference().ok()?)))
+                    .filter_map(|(slot, a)| Some((slot, a.as_reference()?)))
                     .filter(|(_, id)| self.widget_of.contains_key(id))
                     .collect()
             });
@@ -855,22 +851,19 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         kid: bool,
     ) -> Widget {
         let pdf = self.pdf;
-        let get = |key: &[u8]| d.get(key).ok().and_then(|o| resolve(pdf, o));
+        let get = |key: &[u8]| d.get(key).and_then(|o| resolve(pdf, o));
         let rect = get(b"Rect")
-            .and_then(|r| r.as_array().ok())
-            .and_then(|r| <&[Object; 4]>::try_from(r.as_slice()).ok())
+            .and_then(Object::as_array)
+            .and_then(|r| <&[Object; 4]>::try_from(r).ok())
             .map(|r| {
-                let v = |o: &Object| clamp_coord(o.as_float().unwrap_or(0.0) as f32);
+                let v = |o: &Object| clamp_coord(o.as_number().unwrap_or(0.0) as f32);
                 let (x0, y0, x1, y1) = (v(&r[0]), v(&r[1]), v(&r[2]), v(&r[3]));
                 [x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)]
             })
             .unwrap_or_default();
-        let mk = get(b"MK").and_then(|m| m.as_dict().ok());
-        let mk_get = |key: &[u8]| {
-            mk.and_then(|m| m.get(key).ok())
-                .and_then(|o| resolve(pdf, o))
-        };
-        let rotation = mk_get(b"R").and_then(|r| r.as_i64().ok()).unwrap_or(0);
+        let mk = get(b"MK").and_then(Object::as_dict);
+        let mk_get = |key: &[u8]| mk.and_then(|m| m.get(key)).and_then(|o| resolve(pdf, o));
+        let rotation = mk_get(b"R").and_then(Object::as_integer).unwrap_or(0);
         let caption = match mk_get(b"CA") {
             Some(ca) => self.text(ca),
             None => None,
@@ -884,15 +877,17 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             },
             caption: caption.map(|c| c.to_string()),
         };
-        let border = match (get(b"BS").and_then(|b| b.as_dict().ok()), get(b"Border")) {
+        let border = match (
+            get(b"BS").and_then(Object::as_dict),
+            get(b"Border").and_then(Object::as_array),
+        ) {
             (Some(bs), _) => Some(Border {
                 width: bs
                     .get(b"W")
-                    .ok()
                     .and_then(|w| resolve(pdf, w))
-                    .and_then(|w| w.as_float().ok())
+                    .and_then(Object::as_number)
                     .map_or(1.0, |w| clamp_width(w as f32)),
-                style: match bs.get(b"S").ok().and_then(|s| s.as_name().ok()) {
+                style: match bs.get(b"S").and_then(Object::as_name) {
                     Some(b"D") => BorderStyle::Dashed,
                     Some(b"B") => BorderStyle::Beveled,
                     Some(b"I") => BorderStyle::Inset,
@@ -900,32 +895,30 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
                     _ => BorderStyle::Solid,
                 },
             }),
-            (None, Some(Object::Array(b))) => {
-                b.get(2).and_then(|w| w.as_float().ok()).map(|w| Border {
-                    width: clamp_width(w as f32),
-                    style: BorderStyle::Solid,
-                })
-            }
+            (None, Some(b)) => b.get(2).and_then(Object::as_number).map(|w| Border {
+                width: clamp_width(w as f32),
+                style: BorderStyle::Solid,
+            }),
             _ => None,
         };
-        let state = d.get(b"AS").ok().and_then(|s| s.as_name().ok());
+        let state = d.get(b"AS").and_then(Object::as_name);
         let state = state.filter(|s| self.spend(s.len())).map(latin1);
         let normal = get(b"AP")
-            .and_then(|ap| ap.as_dict().ok())
-            .and_then(|ap| ap.get(b"N").ok())
+            .and_then(Object::as_dict)
+            .and_then(|ap| ap.get(b"N"))
             .and_then(|n| resolve(pdf, n));
         let mut states = Vec::new();
-        if let Some(Object::Dictionary(n)) = normal {
-            for (name, _) in n {
+        if let Some(PdfValue::Dict(n)) = normal.map(Object::value) {
+            for (name, _) in n.iter() {
                 if !self.spend(name.len()) {
                     break;
                 }
                 states.push(latin1(name));
             }
         }
-        let has_appearance = match normal {
-            Some(Object::Stream(_)) => true,
-            Some(Object::Dictionary(_)) => !states.is_empty(),
+        let has_appearance = match normal.map(Object::value) {
+            Some(PdfValue::Stream(_)) => true,
+            Some(PdfValue::Dict(_)) => !states.is_empty(),
             _ => false,
         };
         let da = if kid { self.da(d) } else { None };
@@ -987,13 +980,12 @@ fn listed_as_kids<P: Objects + ?Sized>(
         }
         let kids = pdf
             .dictionary(id)
-            .and_then(|d| d.get(b"Kids").ok())
+            .and_then(|d| d.get(b"Kids"))
             .and_then(|k| resolve(pdf, k))
-            .and_then(|k| k.as_array().ok())
-            .map(Vec::as_slice)
+            .and_then(Object::as_array)
             .unwrap_or_default();
         entries += kids.len();
-        for kid in kids.iter().filter_map(|k| k.as_reference().ok()) {
+        for kid in kids.iter().filter_map(Object::as_reference) {
             out.insert(kid);
             todo.push(kid);
         }
@@ -1003,8 +995,7 @@ fn listed_as_kids<P: Objects + ?Sized>(
 
 fn is_widget(d: &Dictionary) -> bool {
     d.get(b"Subtype")
-        .ok()
-        .and_then(|s| s.as_name().ok())
+        .and_then(Object::as_name)
         .is_some_and(|s| s == b"Widget")
 }
 
@@ -1014,14 +1005,13 @@ fn latin1(bytes: &[u8]) -> String {
 }
 
 fn number<P: Objects + ?Sized>(pdf: &P, d: &Dictionary, key: &[u8]) -> Option<i64> {
-    resolve(pdf, d.get(key).ok()?)?.as_i64().ok()
+    resolve(pdf, d.get(key)?)?.as_integer()
 }
 
 fn boolean<P: Objects + ?Sized>(pdf: &P, d: &Dictionary, key: &[u8]) -> bool {
     d.get(key)
-        .ok()
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_bool().ok())
+        .and_then(Object::as_bool)
         .unwrap_or(false)
 }
 
@@ -1052,11 +1042,10 @@ fn clamp_width(w: f32) -> f32 {
 /// wrong length.
 fn color(o: &Object) -> Option<Color> {
     let parts: Vec<f32> = o
-        .as_array()
-        .ok()?
+        .as_array()?
         .iter()
-        .map(|p| match p.as_float() {
-            Ok(v) if v.is_finite() => v.clamp(0.0, 1.0) as f32,
+        .map(|p| match p.as_number() {
+            Some(v) if (v as f32).is_finite() => (v as f32).clamp(0.0, 1.0),
             _ => 0.0,
         })
         .collect();
@@ -1076,10 +1065,10 @@ fn document_scripts(pdf: &LazyPdf, limits: &FormLimits) -> (usize, usize) {
     let tree = pdf
         .catalog()
         .ok()
-        .and_then(|c| c.get(b"Names").ok())
+        .and_then(|c| c.get(b"Names"))
         .and_then(|n| resolve(pdf, n))
-        .and_then(|n| n.as_dict().ok())
-        .and_then(|n| n.get(b"JavaScript").ok());
+        .and_then(Object::as_dict)
+        .and_then(|n| n.get(b"JavaScript"));
     let mut todo: Vec<&Object> = tree.into_iter().collect();
     let mut seen = HashSet::new();
     let (mut entries, mut scripts, mut checks) = (0, 0, 0);
@@ -1087,13 +1076,10 @@ fn document_scripts(pdf: &LazyPdf, limits: &FormLimits) -> (usize, usize) {
         if entries > limits.scripts {
             break;
         }
-        let Some(d) = once(pdf, &mut seen, node).and_then(|n| n.as_dict().ok()) else {
+        let Some(d) = once(pdf, &mut seen, node).and_then(Object::as_dict) else {
             continue;
         };
-        let mut array = |key: &[u8]| {
-            let a = once(pdf, &mut seen, d.get(key).ok()?)?;
-            a.as_array().ok().map(Vec::as_slice)
-        };
+        let mut array = |key: &[u8]| once(pdf, &mut seen, d.get(key)?)?.as_array();
         let kids = array(b"Kids").unwrap_or_default();
         let names = array(b"Names").unwrap_or_default();
         entries += kids.len();
@@ -1104,7 +1090,7 @@ fn document_scripts(pdf: &LazyPdf, limits: &FormLimits) -> (usize, usize) {
             if entries > limits.scripts {
                 break 'walk;
             }
-            let name = resolve(pdf, name).and_then(|n| n.as_str().ok());
+            let name = resolve(pdf, name).and_then(Object::as_bytes);
             if name.is_some_and(|n| n.starts_with(b"!ADBE::")) {
                 checks += 1;
             } else {

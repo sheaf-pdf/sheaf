@@ -20,8 +20,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::pdf::{Object, ObjectId, dictionary, literal};
 use in_progress::NoProgress;
-use lopdf::{Object, ObjectId, dictionary};
 use proptest::prelude::*;
 use sheaf_edit::{
     Anchor, AnnotRef, BatesSpec, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Bring, Delta,
@@ -169,21 +169,21 @@ impl Locals {
 pub(crate) fn with_theirs(f: &mut Form, page: usize, name: &str) -> ObjectId {
     let rect = |x: i64| vec![x.into(), 10.into(), (x + 20).into(), 30.into()];
     let caret = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Caret", "Rect" => rect(10),
-        "NM" => Object::string_literal(name), "Contents" => Object::string_literal("the"),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Caret"), "Rect" => rect(10),
+        "NM" => literal(name), "Contents" => literal("the"),
     });
     let strike = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "StrikeOut", "Rect" => rect(30),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("StrikeOut"), "Rect" => rect(30),
         "QuadPoints" => vec![30.into(), 30.into(), 50.into(), 30.into(), 30.into(), 10.into(), 50.into(), 10.into()],
-        "IRT" => caret, "RT" => "Group", "NM" => Object::string_literal(format!("{name}-strike")),
+        "IRT" => caret, "RT" => Object::name("Group"), "NM" => literal(format!("{name}-strike")),
     });
     let reply = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(10), "IRT" => caret,
-        "NM" => Object::string_literal(format!("{name}-reply")),
-        "Contents" => Object::string_literal("a reply"),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "Rect" => rect(10), "IRT" => caret,
+        "NM" => literal(format!("{name}-reply")),
+        "Contents" => literal("a reply"),
     });
     let link = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Link", "Rect" => rect(100),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"), "Rect" => rect(100),
     });
     let mut annots = f.annots(page);
     annots.extend([caret, strike, reply, link]);

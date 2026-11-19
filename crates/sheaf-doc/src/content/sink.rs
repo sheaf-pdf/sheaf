@@ -11,7 +11,7 @@
 //!
 //! [`ContentWriter`]: super::ContentWriter
 
-use lopdf::{Dictionary, Object, ObjectId};
+use crate::pdf::{Dictionary, Object, ObjectId, Value};
 
 use super::names::ResKind;
 use super::page::ReadObjects;
@@ -38,22 +38,22 @@ pub trait Sink {
 /// The entries of `page`'s `/Contents`, an array's or the one stream's,
 /// never decoded.
 pub fn content_entries(sink: &mut dyn Sink, page: &Dictionary) -> Vec<Object> {
-    match page.get(b"Contents").ok() {
+    match page.get(b"Contents") {
         None => Vec::new(),
-        Some(Object::Array(entries)) => entries.clone(),
-        Some(Object::Reference(r)) => sink
-            .array(*r)
-            .unwrap_or_else(|| vec![Object::Reference(*r)]),
-        Some(other) => vec![other.clone()],
+        Some(object) => match object.value() {
+            Value::Array(entries) => entries.clone(),
+            Value::Ref(r) => sink.array(*r).unwrap_or_else(|| vec![Object::from(*r)]),
+            _ => vec![object.clone()],
+        },
     }
 }
 
 /// `page`'s `/Resources`, a copy to change: a page shares its dictionary
 /// with others by reference.
 pub fn resources(sink: &mut dyn Sink, page: &Dictionary) -> Dictionary {
-    match page.get(b"Resources").ok() {
-        Some(Object::Reference(r)) => sink.dict(*r).unwrap_or_default(),
-        Some(Object::Dictionary(d)) => d.clone(),
+    match page.get(b"Resources").map(Object::value) {
+        Some(Value::Ref(r)) => sink.dict(*r).unwrap_or_default(),
+        Some(Value::Dict(d)) => d.clone(),
         _ => Dictionary::new(),
     }
 }
@@ -66,9 +66,9 @@ pub fn bind(sink: &mut dyn Sink, needs: &ResourceNeeds, resources: &mut Dictiona
     for need in &needs.0 {
         let id = sink.resource(&need.res);
         let key = need.kind.key();
-        let mut category = match resources.get(key) {
-            Ok(Object::Reference(r)) => sink.dict(*r).unwrap_or_default(),
-            Ok(Object::Dictionary(d)) => d.clone(),
+        let mut category = match resources.get(key).map(Object::value) {
+            Some(Value::Ref(r)) => sink.dict(*r).unwrap_or_default(),
+            Some(Value::Dict(d)) => d.clone(),
             _ => Dictionary::new(),
         };
         category.set(need.name.clone(), id);
@@ -81,29 +81,29 @@ pub fn bind(sink: &mut dyn Sink, needs: &ResourceNeeds, resources: &mut Dictiona
 /// written. What a binding that's a reference names isn't read, so a name
 /// bound to one is kept clear of whatever it is.
 pub fn reserved_shallow(sink: &mut dyn Sink, resources: Option<&Object>) -> Reserved {
-    let mut dict = match resources {
-        Some(Object::Reference(r)) => sink.dict(*r).unwrap_or_default(),
-        Some(Object::Dictionary(d)) => d.clone(),
+    let mut dict = match resources.map(Object::value) {
+        Some(Value::Ref(r)) => sink.dict(*r).unwrap_or_default(),
+        Some(Value::Dict(d)) => d.clone(),
         _ => return Reserved::default(),
     };
     for kind in ResKind::ALL {
-        if let Ok(&Object::Reference(r)) = dict.get(kind.key()) {
+        if let Some(r) = dict.get(kind.key()).and_then(Object::as_reference) {
             let category = sink.dict(r).unwrap_or_default();
             dict.set(kind.key(), category);
         }
     }
-    Reserved::read(&Unread, Some(&Object::Dictionary(dict)))
+    Reserved::read(&Unread, Some(&Object::from(dict)))
 }
 
 /// Objects none of which can be read.
 struct Unread;
 
 impl ReadObjects for Unread {
-    fn object(&self, id: ObjectId) -> lopdf::Result<&Object> {
-        Err(lopdf::Error::ObjectNotFound(id))
+    fn object(&self, id: ObjectId) -> crate::pdf::Result<&Object> {
+        Err(crate::pdf::Error::ObjectNotFound(id))
     }
 
-    fn read<R>(&self, id: ObjectId, _: impl FnOnce(&Object) -> R) -> lopdf::Result<R> {
-        Err(lopdf::Error::ObjectNotFound(id))
+    fn read<R>(&self, id: ObjectId, _: impl FnOnce(&Object) -> R) -> crate::pdf::Result<R> {
+        Err(crate::pdf::Error::ObjectNotFound(id))
     }
 }

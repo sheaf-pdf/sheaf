@@ -6,8 +6,8 @@
 //! Only `<annots>` (and `<f>`, the file they're on) for now; M10's form
 //! data goes beside them as `<fields>`.
 
+use crate::pdf::{Dictionary, LazyPdf, Object, Value, literal};
 use anyhow::{Context, Result, bail};
-use lopdf::{Dictionary, LazyPdf, Object, StringFormat};
 use quick_xml::escape::{escape, resolve_predefined_entity};
 use quick_xml::events::Event;
 
@@ -76,11 +76,10 @@ pub fn write(comments: &Comments) -> Result<Vec<u8>> {
         };
         let mut attrs: Vec<(&str, String)> = vec![("page", page.to_string())];
         let nums = |key: &[u8]| numbers(pdf, d, key);
-        let text = |key: &[u8]| d.get(key).ok().map(pdf_text).filter(|t| !t.is_empty());
+        let text = |key: &[u8]| d.get(key).map(pdf_text).filter(|t| !t.is_empty());
         let name = |key: &[u8]| {
             d.get(key)
-                .ok()
-                .and_then(|o| o.as_name().ok())
+                .and_then(Object::as_name)
                 .map(|n| String::from_utf8_lossy(n).into_owned())
         };
         if let Some(r) = nums(b"Rect") {
@@ -104,10 +103,10 @@ pub fn write(comments: &Comments) -> Result<Vec<u8>> {
                 attrs.push((attr, c));
             }
         }
-        if let Some(ca) = d.get(b"CA").ok().and_then(|o| o.as_float().ok()) {
+        if let Some(ca) = d.get(b"CA").and_then(Object::as_number) {
             attrs.push(("opacity", num(ca as f32)));
         }
-        if let Some(f) = d.get(b"F").ok().and_then(|o| o.as_i64().ok()) {
+        if let Some(f) = d.get(b"F").and_then(Object::as_integer) {
             let names: Vec<&str> = FLAGS
                 .iter()
                 .filter(|(_, bit)| f & bit != 0)
@@ -119,45 +118,33 @@ pub fn write(comments: &Comments) -> Result<Vec<u8>> {
         }
         let bs = d
             .get(b"BS")
-            .ok()
             .and_then(|o| pdf.dereference(o).ok())
-            .and_then(|(_, o)| o.as_dict().ok());
-        if let Some(w) = bs
-            .and_then(|bs| bs.get(b"W").ok())
-            .and_then(|w| w.as_float().ok())
-        {
+            .and_then(|(_, o)| o.as_dict());
+        if let Some(w) = bs.and_then(|bs| bs.get(b"W")).and_then(Object::as_number) {
             attrs.push(("width", num(w as f32)));
         }
         let cloudy = d
             .get(b"BE")
-            .ok()
             .and_then(|o| pdf.dereference(o).ok())
-            .and_then(|(_, o)| o.as_dict().ok())
-            .filter(|be| be.get(b"S").ok().and_then(|s| s.as_name().ok()) == Some(b"C"));
+            .and_then(|(_, o)| o.as_dict())
+            .filter(|be| be.get(b"S").and_then(Object::as_name) == Some(b"C"));
         match cloudy {
             Some(be) => {
                 attrs.push(("style", "cloudy".into()));
-                let i = be
-                    .get(b"I")
-                    .ok()
-                    .and_then(|i| i.as_float().ok())
-                    .unwrap_or(1.0);
+                let i = be.get(b"I").and_then(Object::as_number).unwrap_or(1.0);
                 attrs.push(("intensity", num(i as f32)));
             }
             None => {
                 if let Some(style) = bs
-                    .and_then(|bs| bs.get(b"S").ok())
-                    .and_then(|s| s.as_name().ok())
+                    .and_then(|bs| bs.get(b"S"))
+                    .and_then(Object::as_name)
                     .and_then(|s| STYLES.iter().find(|(_, k)| *k == s))
                 {
                     attrs.push(("style", style.0.into()));
                 }
             }
         }
-        if let Some(dash) = bs
-            .and_then(|bs| bs.get(b"D").ok())
-            .and_then(|o| o.as_array().ok())
-        {
+        if let Some(dash) = bs.and_then(|bs| bs.get(b"D")).and_then(Object::as_array) {
             attrs.push(("dashes", join(&floats(pdf, dash), ",")));
         }
         if let Some(rd) = nums(b"RD") {
@@ -172,7 +159,7 @@ pub fn write(comments: &Comments) -> Result<Vec<u8>> {
         if let Some(icon) = name(b"Name") {
             attrs.push(("icon", icon));
         }
-        if let Some(open) = d.get(b"Open").ok().and_then(|o| o.as_bool().ok()) {
+        if let Some(open) = d.get(b"Open").and_then(Object::as_bool) {
             attrs.push(("open", if open { "yes" } else { "no" }.into()));
         }
         if let Some(q) = nums(b"QuadPoints") {
@@ -184,18 +171,19 @@ pub fn write(comments: &Comments) -> Result<Vec<u8>> {
         }
         match d
             .get(b"LE")
-            .ok()
             .and_then(|o| pdf.dereference(o).ok())
-            .map(|(_, o)| o)
+            .map(|(_, o)| o.value())
         {
-            Some(Object::Array(ends)) => {
+            Some(Value::Array(ends)) => {
                 for (end, attr) in ends.iter().zip(["head", "tail"]) {
-                    if let Ok(n) = end.as_name() {
+                    if let Some(n) = end.as_name() {
                         attrs.push((attr, String::from_utf8_lossy(n).into_owned()));
                     }
                 }
             }
-            Some(Object::Name(n)) => attrs.push(("head", String::from_utf8_lossy(n).into_owned())),
+            Some(Value::Name(n)) => {
+                attrs.push(("head", String::from_utf8_lossy(n.as_bytes()).into_owned()))
+            }
             _ => {}
         }
         if let Some(it) = name(b"IT") {
@@ -207,7 +195,7 @@ pub fn write(comments: &Comments) -> Result<Vec<u8>> {
         if let Some(sy) = name(b"Sy") {
             attrs.push(("symbol", sy));
         }
-        if let Some(r) = d.get(b"Rotate").ok().and_then(|o| o.as_i64().ok()) {
+        if let Some(r) = d.get(b"Rotate").and_then(Object::as_integer) {
             attrs.push(("rotation", r.to_string()));
         }
 
@@ -230,15 +218,14 @@ pub fn write(comments: &Comments) -> Result<Vec<u8>> {
         if let Some(v) = nums(b"Vertices") {
             out.push_str(&format!("<vertices>{}</vertices>", pairs(&v)));
         }
-        if let Some(Object::Array(strokes)) = d
+        if let Some(strokes) = d
             .get(b"InkList")
-            .ok()
             .and_then(|o| pdf.dereference(o).ok())
-            .map(|(_, o)| o)
+            .and_then(|(_, o)| o.as_array())
         {
             out.push_str("<inklist>");
             for s in strokes {
-                if let Ok((_, Object::Array(s))) = pdf.dereference(s) {
+                if let Some(s) = pdf.dereference(s).ok().and_then(|(_, o)| o.as_array()) {
                     out.push_str(&format!("<gesture>{}</gesture>", pairs(&floats(pdf, s))));
                 }
             }
@@ -300,7 +287,7 @@ pub fn read(bytes: &[u8]) -> Result<Comments> {
                         if let Some(&(sub, _)) = ELEMENTS.iter().find(|(_, el)| *el == tag) {
                             let (page, dict) = annotation(sub, &attrs);
                             if empty {
-                                let id = built.pdf().add_object(Object::Dictionary(dict));
+                                let id = built.pdf().add_object(Object::from(dict));
                                 annots.push((page, id));
                             } else {
                                 current = Some((page, dict));
@@ -342,10 +329,7 @@ pub fn read(bytes: &[u8]) -> Result<Comments> {
                         let value = std::mem::take(&mut buf);
                         match tag.as_str() {
                             "contents" => dict.set("Contents", crate::save::text_string(&value)),
-                            "defaultappearance" => dict.set(
-                                "DA",
-                                Object::String(value.into_bytes(), StringFormat::Literal),
-                            ),
+                            "defaultappearance" => dict.set("DA", literal(value.into_bytes())),
                             "defaultstyle" => dict.set("DS", crate::save::text_string(&value)),
                             "vertices" => dict.set("Vertices", reals(&value)),
                             "gesture" => strokes.push(reals(&value)),
@@ -355,7 +339,7 @@ pub fn read(bytes: &[u8]) -> Result<Comments> {
                     child = None;
                 } else if tag == "inklist" {
                     if let Some((_, dict)) = &mut current {
-                        dict.set("InkList", Object::Array(std::mem::take(&mut strokes)));
+                        dict.set("InkList", Object::from(std::mem::take(&mut strokes)));
                     }
                 } else if tag == "annots" {
                     in_annots = false;
@@ -364,7 +348,7 @@ pub fn read(bytes: &[u8]) -> Result<Comments> {
                         .iter()
                         .any(|(sub, el)| *el == tag && crate::import::subtype(d) == *sub)
                 }) {
-                    let id = built.pdf().add_object(Object::Dictionary(dict));
+                    let id = built.pdf().add_object(Object::from(dict));
                     annots.push((page, id));
                 }
             }
@@ -381,14 +365,14 @@ pub fn read(bytes: &[u8]) -> Result<Comments> {
 /// An annotation's dictionary, from its element's attributes.
 fn annotation(subtype: &str, attrs: &[(String, String)]) -> (u32, Dictionary) {
     let mut d = Dictionary::new();
-    d.set("Type", Object::Name(b"Annot".to_vec()));
-    d.set("Subtype", Object::Name(subtype.as_bytes().to_vec()));
+    d.set("Type", Object::name("Annot"));
+    d.set("Subtype", Object::name(subtype));
     let mut page = 0;
     let mut bs = Dictionary::new();
     let mut ends: (Option<String>, Option<String>) = (None, None);
     let (mut start, mut end) = (None, None);
     let text = |v: &str| crate::save::text_string(v);
-    let name = |v: &str| Object::Name(v.as_bytes().to_vec());
+    let name = |v: &str| Object::name(v);
     for (k, v) in attrs {
         match k.as_str() {
             "page" => page = v.trim().parse().unwrap_or(0),
@@ -441,7 +425,7 @@ fn annotation(subtype: &str, attrs: &[(String, String)]) -> (u32, Dictionary) {
             }
             "style" => {
                 if let Some((_, s)) = STYLES.iter().find(|(n, _)| *n == v) {
-                    bs.set("S", Object::Name(s.to_vec()));
+                    bs.set("S", Object::name(*s));
                 }
             }
             "dashes" => bs.set("D", reals(v)),
@@ -475,7 +459,7 @@ fn annotation(subtype: &str, attrs: &[(String, String)]) -> (u32, Dictionary) {
     match (subtype, ends) {
         ("Line" | "PolyLine", (h, t)) if h.is_some() || t.is_some() => {
             let end = |e: Option<String>| name(e.as_deref().unwrap_or("None"));
-            d.set("LE", Object::Array(vec![end(h), end(t)]));
+            d.set("LE", Object::from(vec![end(h), end(t)]));
         }
         (_, (Some(h), _)) => d.set("LE", name(&h)),
         _ => {}
@@ -484,8 +468,8 @@ fn annotation(subtype: &str, attrs: &[(String, String)]) -> (u32, Dictionary) {
 }
 
 fn numbers(pdf: &LazyPdf, d: &Dictionary, key: &[u8]) -> Option<Vec<f32>> {
-    let (_, o) = pdf.dereference(d.get(key).ok()?).ok()?;
-    Some(floats(pdf, o.as_array().ok()?))
+    let (_, o) = pdf.dereference(d.get(key)?).ok()?;
+    Some(floats(pdf, o.as_array()?))
 }
 
 fn floats(pdf: &LazyPdf, a: &[Object]) -> Vec<f32> {
@@ -493,7 +477,7 @@ fn floats(pdf: &LazyPdf, a: &[Object]) -> Vec<f32> {
         .map(|o| {
             pdf.dereference(o)
                 .ok()
-                .and_then(|(_, o)| o.as_float().ok())
+                .and_then(|(_, o)| o.as_number())
                 .unwrap_or(0.0) as f32
         })
         .collect()
@@ -501,11 +485,11 @@ fn floats(pdf: &LazyPdf, a: &[Object]) -> Vec<f32> {
 
 /// "1,2.5;3,4" or "1 2.5 3 4" as numbers.
 fn reals(s: &str) -> Object {
-    Object::Array(
+    Object::from(
         s.split([',', ';', ' ', '\n', '\r', '\t'])
             .filter_map(|v| v.trim().parse::<f32>().ok())
             .map(Object::from)
-            .collect(),
+            .collect::<Vec<_>>(),
     )
 }
 
@@ -551,5 +535,5 @@ fn rgb(hex: &str) -> Option<Object> {
             .ok()
             .map(|v| Object::from(v as f32 / 255.0))
     };
-    Some(Object::Array(vec![part(0)?, part(2)?, part(4)?]))
+    Some(Object::from(vec![part(0)?, part(2)?, part(4)?]))
 }

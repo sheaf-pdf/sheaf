@@ -53,7 +53,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use lopdf::{Dictionary, LazyPdf, Object, ObjectId, StringFormat};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, StringFormat, Value as PdfValue, literal};
 
 use super::Cx;
 use crate::annot::AnnotId;
@@ -252,18 +252,25 @@ pub(crate) fn inputs(st: &DocState, primary: &Src) -> Vec<Src> {
     std::iter::once(primary.clone()).chain(others).collect()
 }
 
+fn plain_dict(o: &Object) -> Option<&Dictionary> {
+    match o.value() {
+        PdfValue::Dict(d) => Some(d),
+        _ => None,
+    }
+}
+
 /// The form dictionary `src`'s catalog names, its number when it's an
 /// object of its own.
 fn form_of(src: &Src) -> Option<(Option<ObjectId>, &Dictionary)> {
     let pdf = src.pdf();
-    let at = pdf.catalog().ok()?.get(b"AcroForm").ok()?;
+    let at = pdf.catalog().ok()?.get(b"AcroForm")?;
     let (id, form) = pdf.dereference(at).ok()?;
-    Some((id, form.as_dict().ok()?))
+    Some((id, plain_dict(form)?))
 }
 
 /// `key` of `dict`, references followed in `pdf`, if it's a dictionary.
 fn dict_at<'a>(pdf: &'a LazyPdf, dict: &'a Dictionary, key: &[u8]) -> Option<&'a Dictionary> {
-    pdf.dereference(dict.get(key).ok()?).ok()?.1.as_dict().ok()
+    plain_dict(pdf.dereference(dict.get(key)?).ok()?.1)
 }
 
 /// `/DR`: the primary's, each category read whole, with each other file's
@@ -287,35 +294,35 @@ fn merge_dr(cx: &mut Cx, plan: &mut Plan) {
         let scope = Scope { src: &src, copy: 0 };
         let mut renamed = HashMap::new();
         for (kind, entries) in theirs.iter() {
-            let Some(entries) = (pdf.dereference(entries).ok()).and_then(|(_, e)| e.as_dict().ok())
+            let Some(entries) = (pdf.dereference(entries).ok()).and_then(|(_, e)| plain_dict(e))
             else {
                 continue;
             };
-            let mut ours = match dr.get(kind) {
-                Ok(Object::Dictionary(d)) => d.clone(),
-                _ => Dictionary::new(),
+            let mut ours = match dr.get(kind).and_then(plain_dict) {
+                Some(d) => d.clone(),
+                None => Dictionary::new(),
             };
             for (name, value) in entries.iter() {
-                let at = (kind.clone(), name.clone());
+                let at = (kind.to_vec(), name.to_vec());
                 let new = match origin.get(&at) {
-                    None => name.clone(),
+                    None => name.to_vec(),
                     Some((mine, read))
                         if kind == b"Font" && !same_font((mine, read), (&src, value)) =>
                     {
                         let new = (2..)
-                            .map(|n| [name.as_slice(), format!("_{n}").as_bytes()].concat())
+                            .map(|n| [name, format!("_{n}").as_bytes()].concat())
                             .find(|n| !ours.has(n) && !entries.has(n))
                             .expect("a free name");
-                        renamed.insert(name.clone(), new.clone());
+                        renamed.insert(name.to_vec(), new.clone());
                         new
                     }
                     Some(_) => continue,
                 };
                 let v = cx.sym(value, &scope);
                 ours.set(new.clone(), v);
-                origin.insert((kind.clone(), new), (src.clone(), value.clone()));
+                origin.insert((kind.to_vec(), new), (src.clone(), value.clone()));
             }
-            dr.set(kind.clone(), ours);
+            dr.set(kind, ours);
         }
         if !renamed.is_empty() {
             plan.renamed.insert(src.id(), renamed);
@@ -329,18 +336,13 @@ fn merge_dr(cx: &mut Cx, plan: &mut Plan) {
 /// isn't taken for another).
 fn same_font((a_src, a): (&Src, &Object), (b_src, b): (&Src, &Object)) -> bool {
     let read = |src: &Src, o: &Object| -> Option<Dictionary> {
-        Some(src.pdf().dereference(o).ok()?.1.as_dict().ok()?.clone())
+        Some(plain_dict(src.pdf().dereference(o).ok()?.1)?.clone())
     };
     let (Some(a), Some(b)) = (read(a_src, a), read(b_src, b)) else {
         return false;
     };
-    let name = |d: &Dictionary, k: &[u8]| {
-        d.get(k)
-            .ok()
-            .and_then(|v| v.as_name().ok())
-            .map(<[u8]>::to_vec)
-    };
-    let plain = |d: &Dictionary| d.get(b"Encoding").map_or(true, |e| e.as_name().is_ok());
+    let name = |d: &Dictionary, k: &[u8]| d.get(k).and_then(Object::as_name).map(<[u8]>::to_vec);
+    let plain = |d: &Dictionary| d.get(b"Encoding").is_none_or(|e| e.as_name().is_some());
     plain(&a)
         && plain(&b)
         && [b"Subtype".as_slice(), b"BaseFont", b"Encoding"]
@@ -379,9 +381,17 @@ impl Cx<'_> {
     /// `v`, a `/DA` of an object of `src`, its fonts renamed as `/DR`'s
     /// merge renamed them.
     fn da(&mut self, v: &Object, src: &Src, scope: &Scope) -> Object {
-        match (v, self.form.renamed.get(&src.id())) {
-            (Object::String(da, format), Some(renamed)) => {
-                Object::String(rename_in_da(da, renamed), *format)
+        match (v.value(), self.form.renamed.get(&src.id())) {
+            (PdfValue::String(da, format), Some(renamed)) => {
+                let Some(bytes) = da.as_bytes() else {
+                    return self.sym(v, scope);
+                };
+                let renamed = rename_in_da(bytes, renamed);
+                match format {
+                    Some(StringFormat::Hex) => Object::hex(renamed),
+                    Some(StringFormat::Literal) => literal(renamed),
+                    None => Object::bytes(renamed),
+                }
             }
             _ => self.sym(v, scope),
         }
@@ -419,9 +429,10 @@ pub(crate) fn widget(
     let split = cx.form.split.contains(&w.field);
     let key = ObjKey::Annot(aid);
     // Nothing of it changes: the file's object as it is, unbuilt.
-    let named = |k: &[u8], to: Option<ObjectId>| match dict.get(k) {
-        Ok(&Object::Reference(r)) => Some(r) == to,
-        _ => false,
+    let named = |k: &[u8], to: Option<ObjectId>| {
+        dict.get(k)
+            .and_then(Object::as_reference)
+            .is_some_and(|r| Some(r) == to)
     };
     let field = cx.number_known(ObjKey::Field(w.field));
     let page_at = cx.number_known(ObjKey::Page(page));
@@ -439,7 +450,7 @@ pub(crate) fn widget(
     }
     let mut out = Dictionary::new();
     for (k, v) in dict.iter() {
-        match k.as_slice() {
+        match k {
             b"Parent" => {}
             b"P" => out.set("P", cx.placeholder(ObjKey::Page(page))),
             b"StructParent" if !tags => {}
@@ -450,7 +461,7 @@ pub(crate) fn widget(
             }
             _ => {
                 let v = cx.sym(v, &scope);
-                out.set(k.clone(), v);
+                out.set(k, v);
             }
         }
     }
@@ -477,7 +488,7 @@ fn put(cx: &mut Cx, key: ObjKey, out: Dictionary, r: &ObjRef, read: &Dictionary)
 fn built(cx: &mut Cx, key: ObjKey, out: Dictionary) {
     // An Append writes it only when it's in scope.
     cx.form.touched |= cx.writes(&key);
-    cx.push(key, Object::Dictionary(out));
+    cx.push(key, Object::from(out));
     cx.form.keys.push(key);
 }
 
@@ -561,25 +572,25 @@ pub(crate) fn acroform(cx: &mut Cx) -> Option<Object> {
     let saved = cx.saved().and_then(|record| record.roots.acroform.as_ref());
     let mut out = Dictionary::new();
     for (k, v) in read.iter().flat_map(|(_, d)| d.iter()) {
-        let unowned = !ACROFORM_OWNED.contains(&k.as_slice());
+        let unowned = !ACROFORM_OWNED.contains(&k);
         if !(unowned || damaged) || (k == b"XFA" && drop_xfa.is_some()) {
             continue;
         }
         let v = match saved.filter(|_| unowned && k != b"XFA") {
             Some(saved) => match saved.get(k) {
-                Ok(v) => v,
-                Err(_) => continue,
+                Some(v) => v,
+                None => continue,
             },
             None => v,
         };
         let v = cx.sym(v, &scope);
-        out.set(k.clone(), v);
+        out.set(k, v);
     }
     if damaged {
         let pdf = primary.pdf();
-        let listed = (read.and_then(|(_, d)| d.get(b"Fields").ok()))
+        let listed = (read.and_then(|(_, d)| d.get(b"Fields")))
             .and_then(|f| pdf.dereference(f).ok())
-            .and_then(|(_, f)| f.as_array().ok().cloned())
+            .and_then(|(_, f)| f.as_array().map(<[Object]>::to_vec))
             .unwrap_or_default();
         let mut fields: Vec<Object> = listed.iter().map(|f| cx.sym(f, &scope)).collect();
         fields.extend(roots);
@@ -598,15 +609,12 @@ pub(crate) fn acroform(cx: &mut Cx) -> Option<Object> {
         out.set("CO", order);
     }
     if let Some(da) = &doc.da {
-        out.set(
-            "DA",
-            Object::String(da.as_bytes().to_vec(), StringFormat::Literal),
-        );
+        out.set("DA", literal(da.as_bytes()));
     }
     if doc.align != 0 {
         out.set("Q", i64::from(doc.align));
     }
-    match (&cx.form.dr, read.and_then(|(_, d)| d.get(b"DR").ok())) {
+    match (&cx.form.dr, read.and_then(|(_, d)| d.get(b"DR"))) {
         (Some(dr), _) => out.set("DR", dr.clone()),
         (None, Some(dr)) => {
             let dr = cx.sym(dr, &scope);
@@ -796,9 +804,9 @@ impl Fields {
         let primary = cx.primary.id();
         if copy == 0 && r.src.id() == primary && !split && self.scoped.is_none() {
             let pdf = r.src.pdf();
-            let listed = (read.get(b"Kids").ok())
+            let listed = (read.get(b"Kids"))
                 .and_then(|k| pdf.dereference(k).ok())
-                .and_then(|(_, k)| k.as_array().ok());
+                .and_then(|(_, k)| k.as_array());
             let known = self.file.entry(primary).or_insert_with(|| {
                 let form = r.src.form();
                 (form.nodes.iter().map(|n| n.object))
@@ -807,16 +815,17 @@ impl Fields {
             });
             let widget = |k: &ObjectId| {
                 (pdf.get_dictionary(*k).ok())
-                    .and_then(|d| d.get(b"Subtype").ok())
-                    .is_some_and(|s| s.as_name().is_ok_and(|s| s == b"Widget"))
+                    .and_then(|d| d.get(b"Subtype"))
+                    .and_then(Object::as_name)
+                    == Some(b"Widget")
             };
             let outside: Vec<ObjectId> = (listed.into_iter().flatten())
-                .filter_map(|k| k.as_reference().ok())
+                .filter_map(Object::as_reference)
                 .filter(|k| !self.accounted.contains(k) && !known.contains(k))
                 .filter(widget)
                 .collect();
             for k in outside {
-                let k = cx.sym(&Object::Reference(k), &scope);
+                let k = cx.sym(&Object::from(k), &scope);
                 kids.push(k);
             }
         }
@@ -841,7 +850,7 @@ impl Fields {
         }
         let mut out = Dictionary::new();
         for (k, v) in read.iter() {
-            match k.as_slice() {
+            match k {
                 b"Parent" | b"Kids" => {}
                 k if split && WIDGET_KEYS.contains(&k) => {}
                 b"P" if one.is_some() => {
@@ -855,7 +864,7 @@ impl Fields {
                 }
                 _ => {
                     let v = cx.sym(v, &scope);
-                    out.set(k.clone(), v);
+                    out.set(k, v);
                 }
             }
         }
@@ -887,13 +896,11 @@ impl Fields {
         kids: &[Object],
         one: Option<PageId>,
     ) -> bool {
-        let at = |o: &Object| -> Option<ObjectId> {
-            cx.number_known(cx.syms.key(o.as_reference().ok()?)?)
-        };
+        let at =
+            |o: &Object| -> Option<ObjectId> { cx.number_known(cx.syms.key(o.as_reference()?)?) };
         let names = |k: &[u8], to: Option<ObjectId>| match read.get(k) {
-            Err(_) => to.is_none(),
-            Ok(&Object::Reference(r)) => to == Some(r),
-            Ok(_) => false,
+            None => to.is_none(),
+            Some(o) => o.as_reference().is_some_and(|r| to == Some(r)),
         };
         let parent = node.parent.map(|p| cx.number_known(ObjKey::Field(p)));
         let parent_kept = match parent {
@@ -901,15 +908,14 @@ impl Fields {
             Some(p) => p.is_some() && names(b"Parent", p),
         };
         let kids_kept = match read.get(b"Kids") {
-            Err(_) => kids.is_empty(),
+            None => kids.is_empty(),
             // An empty `/Kids` isn't written.
-            Ok(Object::Array(listed)) => {
+            Some(o) => o.as_array().is_some_and(|listed| {
                 !listed.is_empty()
                     && listed.len() == kids.len()
                     && (listed.iter().zip(kids))
-                        .all(|(l, k)| l.as_reference().ok().is_some_and(|l| at(k) == Some(l)))
-            }
-            Ok(_) => false,
+                        .all(|(l, k)| l.as_reference().is_some_and(|l| at(k) == Some(l)))
+            }),
         };
         let page_kept = match one {
             None => true,
@@ -925,7 +931,7 @@ impl Fields {
     fn push_down(&self, cx: &mut Cx, node: &FieldNode, out: &mut Dictionary) {
         let (da, q) = self.defaults(cx, node);
         if let Some(da) = da.filter(|_| !out.has(b"DA")) {
-            out.set("DA", Object::String(da, StringFormat::Literal));
+            out.set("DA", literal(da));
         }
         if let Some(q) = q.filter(|_| !out.has(b"Q")) {
             out.set("Q", i64::from(q));
@@ -1008,12 +1014,12 @@ pub(crate) fn scripts(cx: &mut Cx) -> Option<Object> {
     }
     all.sort_by(|a, b| a.0.cmp(&b.0));
     let pairs: Vec<Object> = (all.into_iter())
-        .flat_map(|(k, v)| [Object::String(k, StringFormat::Literal), v])
+        .flat_map(|(k, v)| [literal(k), v])
         .collect();
     let mut tree = Dictionary::new();
     tree.set("Names", pairs);
     let key = ObjKey::Names(NameTree::JavaScript);
-    cx.push(key, Object::Dictionary(tree));
+    cx.push(key, Object::from(tree));
     Some(cx.placeholder(key))
 }
 
@@ -1024,7 +1030,7 @@ fn document_scripts(src: &Src) -> Vec<(Vec<u8>, Object)> {
     let mut found = Vec::new();
     let tree = (pdf.catalog().ok())
         .and_then(|c| dict_at(pdf, c, b"Names"))
-        .and_then(|n| n.get(b"JavaScript").ok());
+        .and_then(|n| n.get(b"JavaScript"));
     if let Some(tree) = tree {
         name_tree(pdf, tree, &mut found, &mut HashSet::new(), 0);
     }
@@ -1042,27 +1048,28 @@ fn name_tree(
     if depth > 32 || out.len() >= MAX_SCRIPTS {
         return;
     }
-    if let Ok(id) = node.as_reference()
+    if let Some(id) = node.as_reference()
         && !seen.insert(id)
     {
         return;
     }
-    let Some(d) = (pdf.dereference(node).ok()).and_then(|(_, n)| n.as_dict().ok()) else {
+    let Some(d) = (pdf.dereference(node).ok()).and_then(|(_, n)| plain_dict(n)) else {
         return;
     };
-    let pairs = (d.get(b"Names").ok())
+    let pairs = (d.get(b"Names"))
         .and_then(|n| pdf.dereference(n).ok())
-        .and_then(|(_, n)| n.as_array().ok());
+        .and_then(|(_, n)| n.as_array());
     for pair in pairs.into_iter().flat_map(|p| p.chunks(2)) {
-        if let [Object::String(k, _), v] = pair
+        if let [k, v] = pair
+            && let Some(kb) = k.as_bytes()
             && out.len() < MAX_SCRIPTS
         {
-            out.push((k.clone(), v.clone()));
+            out.push((kb.to_vec(), v.clone()));
         }
     }
-    let kids = (d.get(b"Kids").ok())
+    let kids = (d.get(b"Kids"))
         .and_then(|k| pdf.dereference(k).ok())
-        .and_then(|(_, k)| k.as_array().ok());
+        .and_then(|(_, k)| k.as_array());
     for kid in kids.into_iter().flatten() {
         name_tree(pdf, kid, out, seen, depth + 1);
     }
@@ -1081,16 +1088,13 @@ pub(crate) fn perms(cx: &mut Cx, perms: &Object) -> Option<Object> {
         return Some(cx.sym(perms, &scope));
     }
     let pdf = primary.pdf();
-    let read = pdf.dereference(perms).ok()?.1.as_dict().ok()?;
+    let read = plain_dict(pdf.dereference(perms).ok()?.1)?;
     let mut out = Dictionary::new();
-    for (k, v) in read
-        .iter()
-        .filter(|(k, _)| !matches!(k.as_slice(), b"UR3" | b"UR"))
-    {
+    for (k, v) in read.iter().filter(|&(k, _)| !matches!(k, b"UR3" | b"UR")) {
         let v = cx.sym(v, &scope);
-        out.set(k.clone(), v);
+        out.set(k, v);
     }
-    (!out.is_empty()).then_some(Object::Dictionary(out))
+    (!out.is_empty()).then_some(Object::from(out))
 }
 
 #[cfg(test)]

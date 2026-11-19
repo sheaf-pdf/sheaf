@@ -12,10 +12,10 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_doc::content::{
     DrawnForms, PagOrigin, PageBlocks, PageContent, PaginationKind, ResCx, contents, splice_each,
 };
+use sheaf_doc::pdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_doc::source::Limits;
 use sheaf_edit::Rotation;
 use sheaf_image::raster::{PixelFormat, Raster};
@@ -36,14 +36,16 @@ fn page(streams: &[&[u8]]) -> (Pdf, ObjectId) {
     let mut pdf = Pdf::with_version("1.7");
     let pages = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     });
     let piece = dictionary! { "ADBE_CompoundType" => dictionary! {
-        "DocSettings" => dictionary! {}, "Private" => "Header",
+        "DocSettings" => dictionary! {}, "Private" => Object::name("Header"),
     } };
     let header = pdf.add_object(Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Form", "PieceInfo" => piece,
+            "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"), "PieceInfo" => piece,
             "BBox" => vec![0.into(), 0.into(), 200.into(), 20.into()],
             "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
         },
@@ -57,7 +59,7 @@ fn page(streams: &[&[u8]]) -> (Pdf, ObjectId) {
         })
         .collect();
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page", "Parent" => pages, "Contents" => contents,
+        "Type" => Object::name("Page"), "Parent" => pages, "Contents" => contents,
         "MediaBox" => vec![0.into(), 0.into(), W.into(), H.into()],
         "Resources" => dictionary! {
             "Font" => dictionary! { "F1" => font },
@@ -66,9 +68,13 @@ fn page(streams: &[&[u8]]) -> (Pdf, ObjectId) {
     });
     pdf.objects.insert(
         pages,
-        dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1,
+        }
+        .into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages });
     pdf.trailer.set("Root", catalog);
     (pdf, page)
 }
@@ -81,7 +87,7 @@ fn strip(pdf: &mut Pdf, page: ObjectId) -> bool {
     let lim = Limits::DEFAULT;
     let mut dict = pdf.get_dictionary(page).unwrap().clone();
     let content = PageContent::read(pdf, &contents(&dict), &lim).unwrap();
-    let resources = dict.get(b"Resources").ok();
+    let resources = dict.get(b"Resources");
     let blocks = PageBlocks::of(pdf, &content, resources, &lim, &DrawnForms::default()).unwrap();
     let res = ResCx::read(pdf, resources);
     let kinds = BTreeSet::from([PaginationKind::Header, PaginationKind::Footer]);
@@ -100,7 +106,7 @@ fn strip(pdf: &mut Pdf, page: ObjectId) -> bool {
         })
         .collect();
     dict.set("Contents", entries);
-    pdf.objects.insert(page, Object::Dictionary(dict));
+    pdf.objects.insert(page, Object::from(dict));
     spliced.taken.iter().all(|&taken| taken)
 }
 
@@ -152,7 +158,7 @@ fn stripped_leaves_the_rest(streams: &[&[u8]]) {
     let blocks = PageBlocks::read(
         &pdf,
         &contents(dict),
-        dict.get(b"Resources").ok(),
+        dict.get(b"Resources"),
         &Limits::DEFAULT,
         &DrawnForms::default(),
     )

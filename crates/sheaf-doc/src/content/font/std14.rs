@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-use lopdf::{Object, dictionary};
+use crate::pdf::{Object, dictionary};
 use sheaf_edit::FontChoice;
 use unicode_normalization::UnicodeNormalization;
 
@@ -488,12 +488,12 @@ impl Font for Std14 {
         RESOURCES[*self as usize]
             .get_or_init(|| {
                 let mut dict = dictionary! {
-                    "Type" => "Font",
-                    "Subtype" => "Type1",
-                    "BaseFont" => self.name(),
+                    "Type" => Object::name("Font"),
+                    "Subtype" => Object::name("Type1"),
+                    "BaseFont" => Object::name(self.name()),
                 };
                 if self.encoding() == Encoding::WinAnsi {
-                    dict.set("Encoding", "WinAnsiEncoding");
+                    dict.set("Encoding", Object::name("WinAnsiEncoding"));
                 }
                 let objects: Arc<[Object]> = Arc::new([dict.into()]);
                 FontRes {

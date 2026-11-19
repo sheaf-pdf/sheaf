@@ -10,7 +10,7 @@
 //!
 //! [`SaveRecord`]: super::SaveRecord
 
-use lopdf::ObjectId;
+use crate::pdf::ObjectId;
 
 use crate::annot::AnnotId;
 use crate::content::ResId;
@@ -223,8 +223,8 @@ impl ObjKey {
                 out.push(6);
                 out.extend(blob.hash.to_be_bytes());
                 out.extend(blob.len.to_be_bytes());
-                out.extend(obj.0.to_be_bytes());
-                out.extend(obj.1.to_be_bytes());
+                out.extend(obj.number.to_be_bytes());
+                out.extend(obj.generation.to_be_bytes());
                 out.extend(copy.to_be_bytes());
             }
             ObjKey::Annot(id) => {
@@ -289,7 +289,10 @@ impl ObjKey {
                 out.extend(stream.to_be_bytes());
                 out.extend(filter.to_be_bytes());
             }
-            ObjKey::Built((n, g)) => {
+            ObjKey::Built(ObjectId {
+                number: n,
+                generation: g,
+            }) => {
                 out.push(20);
                 out.extend(n.to_be_bytes());
                 out.extend(g.to_be_bytes());
@@ -332,17 +335,17 @@ mod tests {
             ObjKey::Page(PageId(2)),
             ObjKey::Base {
                 blob,
-                obj: (4, 0),
+                obj: ObjectId::new(4, 0),
                 copy: 0,
             },
             ObjKey::Base {
                 blob,
-                obj: (4, 0),
+                obj: ObjectId::new(4, 0),
                 copy: 1,
             },
             ObjKey::Base {
                 blob,
-                obj: (4, 1),
+                obj: ObjectId::new(4, 1),
                 copy: 0,
             },
             ObjKey::Annot(AnnotId(1)),
@@ -381,8 +384,8 @@ mod tests {
                 stream: 2,
                 filter: 1,
             },
-            ObjKey::Built((1, 0)),
-            ObjKey::Built((1, 1)),
+            ObjKey::Built(ObjectId::new(1, 0)),
+            ObjKey::Built(ObjectId::new(1, 1)),
             ObjKey::Pinned(1),
             ObjKey::Pinned(2),
             ObjKey::Container(1),
@@ -414,7 +417,7 @@ mod tests {
         assert_eq!(ObjKey::Page(PageId(3)).bytes(), [5, 0, 0, 0, 0, 0, 0, 0, 3]);
         let base = ObjKey::Base {
             blob: BlobId { hash: 1, len: 2 },
-            obj: (3, 4),
+            obj: ObjectId::new(3, 4),
             copy: 5,
         };
         let mut want = vec![6];

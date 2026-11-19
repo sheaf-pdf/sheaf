@@ -72,7 +72,7 @@ fn margins_crop_the_shown_sides() {
     let m = margins(10.0, 20.0, 30.0, 40.0);
     let mut f = crate::forms::fixture::Form::new(1);
     let page = f.pages[0];
-    let media = [100.0f32, 50.0, 712.0, 842.0].map(lopdf::Object::from);
+    let media = [100.0f32, 50.0, 712.0, 842.0].map(crate::pdf::Object::from);
     f.dict(page).set("MediaBox", media.to_vec());
     f.dict(page).set("Rotate", 90);
     let bytes = f.bytes();

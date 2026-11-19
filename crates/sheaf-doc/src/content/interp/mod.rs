@@ -71,7 +71,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::{ControlFlow, Range};
 use std::rc::Rc;
 
-use lopdf::{Object, ObjectId};
+use crate::pdf::{Object, ObjectId, Value};
 
 pub use clip::{Clip, ClipPart};
 pub use encode::{EncodeError, Encoded, Unwritable, encode};
@@ -299,17 +299,17 @@ pub struct Summary {
 pub enum InterpError {
     /// Content that can't be lexed: the content interpreted, or form
     /// `form`'s, `error`'s offset into it.
-    #[error("{error}{}", .form.map_or(String::new(), |f| format!(" in form {} {} R", f.0, f.1)))]
+    #[error("{error}{}", .form.map_or(String::new(), |f| format!(" in form {} {} R", f.number, f.generation)))]
     Lex {
         form: Option<ObjectId>,
         error: LexError,
     },
     /// An XObject drawn that can't be read: a form's stream, or the
     /// object.
-    #[error("XObject {} {} R can't be read: {error}", .xobject.0, .xobject.1)]
+    #[error("XObject {} {} R can't be read: {error}", .xobject.number, .xobject.generation)]
     XObject {
         xobject: ObjectId,
-        error: lopdf::Error,
+        error: crate::pdf::Error,
     },
     #[error("past the cap on {0}")]
     Limit(Cap),
@@ -401,7 +401,7 @@ pub fn interpret<R: ReadObjects>(
 
 /// Whose resources the content interpreted draws with, where fonts are
 /// picked by name ([`FontScope`]): no object is numbered 0.
-const PAGE: ObjectId = (0, 0);
+const PAGE: ObjectId = ObjectId::new(0, 0);
 
 /// One interpretation.
 struct Run<'a, R: ReadObjects> {
@@ -720,12 +720,15 @@ impl<'a, R: ReadObjects> Run<'a, R> {
         let gs = self
             .holder(frame, b"ExtGState")
             .and_then(|(_, resources)| entry(objects, resources, b"ExtGState", &name))
-            .and_then(|gs| direct(objects, gs)?.as_dict().ok());
+            .and_then(|gs| match direct(objects, gs)?.value() {
+                Value::Dict(d) => Some(d),
+                _ => None,
+            });
         let Some(gs) = gs else {
             return Ok(());
         };
-        let value = |key: &[u8]| direct(objects, gs.get(key).ok()?);
-        let float = |o: &Object| direct(objects, o)?.as_float().ok().map(|n| n as f32);
+        let value = |key: &[u8]| direct(objects, gs.get(key)?);
+        let float = |o: &Object| direct(objects, o)?.as_number().map(|n| n as f32);
         let finite = |key: &[u8]| value(key).and_then(float).filter(|n| n.is_finite());
         if let Some(width) = finite(b"LW") {
             state.line_width = width;
@@ -739,10 +742,14 @@ impl<'a, R: ReadObjects> Run<'a, R> {
         if let Some(limit) = finite(b"ML") {
             state.miter_limit = limit;
         }
-        if let Some(Object::Array(font)) = value(b"Font") {
-            let name = match font.first().and_then(|n| direct(objects, n)) {
-                Some(Object::Name(n)) => n.as_slice(),
-                Some(Object::String(s, _)) => s.as_slice(),
+        if let Some(font) = value(b"Font").and_then(Object::as_array) {
+            let name = match font
+                .first()
+                .and_then(|n| direct(objects, n))
+                .map(Object::value)
+            {
+                Some(Value::Name(n)) => n.as_bytes(),
+                Some(Value::String(s, _)) => s.as_bytes().unwrap_or(b""),
                 _ => b"",
             };
             self.pick(frame, state, name)?;
@@ -938,7 +945,7 @@ impl<'a, R: ReadObjects> Run<'a, R> {
         let depth = self.lim.content.depth;
         let mask = lex::image_entry(at.content, at.op.clone(), depth, &[b"IM", b"ImageMask"]);
         let facts = ImageFacts {
-            stencil: mask.and_then(|m| lex::object(m, depth)) == Some(Object::Boolean(true)),
+            stencil: mask.and_then(|m| lex::object(m, depth)?.as_bool()) == Some(true),
             ..ImageFacts::default()
         };
         let image = ImageDrawn::new(ImageOf::Inline { data }, &facts, local.state.ctm);
@@ -968,7 +975,7 @@ impl<'a, R: ReadObjects> Run<'a, R> {
         let id = self
             .holder(frame, b"XObject")
             .and_then(|(_, resources)| entry(objects, resources, b"XObject", &name))
-            .and_then(|x| x.as_reference().ok());
+            .and_then(Object::as_reference);
         let Some(id) = id else {
             return Ok(());
         };
@@ -1088,10 +1095,8 @@ impl<'a, R: ReadObjects> Run<'a, R> {
         else {
             return Ok(());
         };
-        let dict = match direct(objects, written) {
-            Some(Object::Dictionary(dict)) => dict,
-            Some(Object::Stream(stream)) => &stream.dict,
-            _ => return Ok(()),
+        let Some(dict) = direct(objects, written).and_then(Object::as_dict) else {
+            return Ok(());
         };
         // PDFium paints a shading within its `/BBox`, and nothing where
         // that isn't four numbers.
@@ -1107,7 +1112,7 @@ impl<'a, R: ReadObjects> Run<'a, R> {
             return Err(not_finite());
         }
         let shading = ShadingDrawn {
-            shading: written.as_reference().ok(),
+            shading: written.as_reference(),
             bounds,
         };
         self.emit(at, &local.state, &local.marks, Kind::Shading(shading))
@@ -1203,8 +1208,8 @@ impl<'a, R: ReadObjects> Run<'a, R> {
         'a: 'x,
     {
         let Some(name) = lex::name(operand) else {
-            return match lex::object(operand, self.lim.content.depth)? {
-                Object::Dictionary(dict) => Some((Props::Inline(dict), None)),
+            return match lex::object(operand, self.lim.content.depth)?.into_value() {
+                Value::Dict(dict) => Some((Props::Inline(dict), None)),
                 _ => None,
             };
         };
@@ -1212,7 +1217,10 @@ impl<'a, R: ReadObjects> Run<'a, R> {
         let written = self
             .holder(frame, b"Properties")
             .and_then(|(_, resources)| entry(objects, resources, b"Properties", &name));
-        let list = written.and_then(|w| direct(objects, w)?.as_dict().ok());
+        let list = written.and_then(|w| match direct(objects, w)?.value() {
+            Value::Dict(d) => Some(d),
+            _ => None,
+        });
         Some((Props::Named(name.into_owned(), list.cloned()), written))
     }
 
@@ -1274,9 +1282,14 @@ fn category<'x>(
     objects: &'x impl ReadObjects,
     resources: &'x Object,
     key: &[u8],
-) -> Option<&'x lopdf::Dictionary> {
-    let resources = direct(objects, resources)?.as_dict().ok()?;
-    direct(objects, resources.get(key).ok()?)?.as_dict().ok()
+) -> Option<&'x crate::pdf::Dictionary> {
+    let Value::Dict(resources) = direct(objects, resources)?.value() else {
+        return None;
+    };
+    match direct(objects, resources.get(key)?)?.value() {
+        Value::Dict(d) => Some(d),
+        _ => None,
+    }
 }
 
 /// Resource `name` of category `key` in `resources`, as written.
@@ -1286,7 +1299,7 @@ fn entry<'x>(
     key: &[u8],
     name: &[u8],
 ) -> Option<&'x Object> {
-    category(objects, resources, key)?.get(name).ok()
+    category(objects, resources, key)?.get(name)
 }
 
 /// The string an operand is, as PDFium takes one (`GetString`): a
@@ -1294,10 +1307,7 @@ fn entry<'x>(
 fn string(operand: &[u8], depth: usize) -> Option<Vec<u8>> {
     match operand {
         [b'/', ..] => Some(lex::name(operand)?.into_owned()),
-        [b'(', ..] | [b'<', ..] => match lex::object(operand, depth)? {
-            Object::String(s, _) => Some(s),
-            _ => None,
-        },
+        [b'(', ..] | [b'<', ..] => lex::object(operand, depth)?.as_bytes().map(<[u8]>::to_vec),
         _ => None,
     }
 }

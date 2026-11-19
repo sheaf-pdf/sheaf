@@ -5,7 +5,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
+use crate::pdf::{
+    Dictionary, Document as Pdf, Object, ObjectId, Stream, StreamExt, Value, dictionary, literal,
+};
 
 use super::encoding::Encoding;
 use super::*;
@@ -194,14 +196,19 @@ fn glyphless_encodes_utf16_at_half_an_em() {
 #[test]
 fn fonts_as_resources() {
     let helvetica = Std14::Helvetica.resource();
-    let [Object::Dictionary(dict)] = &helvetica.objects[..] else {
+    let [obj] = &helvetica.objects[..] else {
+        panic!("one dictionary")
+    };
+    let Value::Dict(dict) = obj.value() else {
         panic!("one dictionary")
     };
     assert_eq!(
         dict,
         &dictionary! {
-            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
-            "Encoding" => "WinAnsiEncoding",
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name("Helvetica"),
+            "Encoding" => Object::name("WinAnsiEncoding"),
         }
     );
     let symbol = Std14::Symbol.resource();
@@ -212,7 +219,7 @@ fn fonts_as_resources() {
     assert_eq!(ids.len(), 14);
     let mut reordered = Dictionary::new();
     for (key, value) in dict.iter().rev() {
-        reordered.set(key.clone(), value.clone());
+        reordered.set(key, value.clone());
     }
     assert_eq!(ResId::of(&[reordered.into()]), helvetica.id);
     assert_ne!(Glyphless.resource().id, helvetica.id);
@@ -277,14 +284,20 @@ fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
 fn simple_widths_from_first_char_and_missing_width() {
     let mut pdf = Pdf::with_version("1.7");
     let descriptor = pdf.add_object(dictionary! {
-        "Type" => "FontDescriptor", "MissingWidth" => 500, "Ascent" => 800, "Descent" => -200,
+        "Type" => Object::name("FontDescriptor"),
+        "MissingWidth" => 500,
+        "Ascent" => 800,
+        "Descent" => -200,
         "FontBBox" => vec![0.into(), (-200).into(), 1000.into(), 800.into()],
     });
     let truetype = |first: i64, last: i64| {
         dictionary! {
-            "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "Foo",
-            "FirstChar" => first, "LastChar" => last,
-            "Widths" => vec![600.into(), Object::Real(700.9)],
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("TrueType"),
+            "BaseFont" => Object::name("Foo"),
+            "FirstChar" => first,
+            "LastChar" => last,
+            "Widths" => vec![600.into(), Object::from(700.9)],
             "FontDescriptor" => descriptor,
         }
     };
@@ -325,7 +338,11 @@ fn simple_widths_from_first_char_and_missing_width() {
 fn standard_14_without_widths() {
     let mut pdf = Pdf::with_version("1.7");
     let type1 = |base: &str| {
-        dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => base.to_string() }
+        dictionary! {
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name(base),
+        }
     };
     let helvetica = foreign(&pdf, type1("Helvetica"));
     assert_eq!(
@@ -374,8 +391,8 @@ fn standard_14_without_widths() {
     encoded.set(
         "Encoding",
         dictionary! {
-            "BaseEncoding" => "WinAnsiEncoding",
-            "Differences" => vec![1.into(), "A".into()],
+            "BaseEncoding" => Object::name("WinAnsiEncoding"),
+            "Differences" => vec![1.into(), Object::name("A")],
         },
     );
     let encoded = foreign(&pdf, encoded);
@@ -386,7 +403,7 @@ fn standard_14_without_widths() {
     );
     assert_eq!(encoded.glyph_box(0x80), None);
     let mut given = type1("Helvetica");
-    given.set("Encoding", "WinAnsiEncoding");
+    given.set("Encoding", Object::name("WinAnsiEncoding"));
     given.set("FirstChar", 0x80);
     given.set("Widths", vec![600.into()]);
     let given = foreign(&pdf, given);
@@ -397,7 +414,7 @@ fn standard_14_without_widths() {
     let courier = foreign(&pdf, type1("Courier"));
     assert!((0..=255).all(|c| courier.width(c) == 600.0));
     let mut symbol = type1("Symbol");
-    symbol.set("Encoding", "WinAnsiEncoding");
+    symbol.set("Encoding", Object::name("WinAnsiEncoding"));
     assert_eq!(foreign(&pdf, symbol).width(b'a'.into()), 631.0);
 
     let program = pdf.add_object(Stream::new(dictionary! {}, vec![0]));
@@ -464,7 +481,11 @@ fn standard_14_by_pdfium_s_names() {
     let pdf = Pdf::with_version("1.7");
     let arial = foreign(
         &pdf,
-        dictionary! { "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "Arial,Bold" },
+        dictionary! {
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("TrueType"),
+            "BaseFont" => Object::name("Arial,Bold"),
+        },
     );
     assert_eq!(arial.width(b'A'.into()), 722.0);
     assert!(!arial.approx().widths);
@@ -474,8 +495,11 @@ fn standard_14_by_pdfium_s_names() {
 fn type0(pdf: &mut Pdf, encoding: Object, descendant: Dictionary) -> Dictionary {
     let cid_font = pdf.add_object(descendant);
     dictionary! {
-        "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "Foo",
-        "Encoding" => encoding, "DescendantFonts" => vec![cid_font.into()],
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type0"),
+        "BaseFont" => Object::name("Foo"),
+        "Encoding" => encoding,
+        "DescendantFonts" => vec![cid_font.into()],
     }
 }
 
@@ -500,9 +524,12 @@ fn identity_h_widths_from_w_and_dw() {
     ];
     let font = type0(
         &mut pdf,
-        "Identity-H".into(),
+        Object::name("Identity-H"),
         dictionary! {
-            "Subtype" => "CIDFontType2", "W" => w, "DW" => 900, "FontDescriptor" => descriptor,
+            "Subtype" => Object::name("CIDFontType2"),
+            "W" => w,
+            "DW" => 900,
+            "FontDescriptor" => descriptor,
         },
     );
     let font = foreign(&pdf, font);
@@ -521,8 +548,8 @@ fn identity_h_widths_from_w_and_dw() {
     // No `/DW`: 1000.
     let bare = type0(
         &mut pdf,
-        "Identity-H".into(),
-        dictionary! { "Subtype" => "CIDFontType0" },
+        Object::name("Identity-H"),
+        dictionary! { "Subtype" => Object::name("CIDFontType0") },
     );
     let bare = foreign(&pdf, bare);
     assert_eq!(bare.kind(), FontKind::Type0(Descendant::CidFontType0));
@@ -532,7 +559,7 @@ fn identity_h_widths_from_w_and_dw() {
     // 118; CNS-EUC-V, which PDFium's table hasn't; KSCpc-EUC-V, which
     // Adobe's hasn't.
     for name in ["Adobe-Korea1-V", "CNS-EUC-V", "KSCpc-EUC-V"] {
-        let predefined = type0(&mut pdf, name.into(), dictionary! { "DW" => 800 });
+        let predefined = type0(&mut pdf, Object::name(name), dictionary! { "DW" => 800 });
         let predefined = foreign(&pdf, predefined);
         assert!(predefined.approx().codes, "{name}");
         assert_eq!(predefined.cid(0x41), None);
@@ -555,11 +582,11 @@ fn predefined_cmaps_are_adobe_s() {
     let mut pdf = Pdf::with_version("1.7");
     let w = |pairs: &[(i64, i64)]| -> Object {
         let w = (pairs.iter()).flat_map(|&(cid, w)| [cid.into(), vec![w.into()].into()]);
-        Object::Array(w.collect())
+        Object::from(w.collect::<Vec<_>>())
     };
     let rksj = type0(
         &mut pdf,
-        "90ms-RKSJ-H".into(),
+        Object::name("90ms-RKSJ-H"),
         dictionary! { "W" => w(&[(264, 500), (843, 1000)]), "DW" => 700 },
     );
     let rksj = foreign(&pdf, rksj);
@@ -579,7 +606,7 @@ fn predefined_cmaps_are_adobe_s() {
 
     let ucs2 = type0(
         &mut pdf,
-        "UniJIS-UCS2-H".into(),
+        Object::name("UniJIS-UCS2-H"),
         dictionary! { "W" => w(&[(34, 550)]) },
     );
     let ucs2 = foreign(&pdf, ucs2);
@@ -594,7 +621,7 @@ fn predefined_cmaps_are_adobe_s() {
     assert_eq!(text.as_deref(), Some("Aあ日"));
     assert_eq!(ucs2.text(b"\0\0"), None);
 
-    let vertical = type0(&mut pdf, "90ms-RKSJ-V".into(), dictionary! {});
+    let vertical = type0(&mut pdf, Object::name("90ms-RKSJ-V"), dictionary! {});
     let vertical = foreign(&pdf, vertical);
     assert!(vertical.is_vertical());
     let cids = (vertical.cid(0x8141), vertical.cid(0x41));
@@ -613,7 +640,7 @@ fn type0_text_as_pdfium_reads_it() {
     let info = |ordering: Object| {
         dictionary! {
             "CIDSystemInfo" => dictionary! {
-                "Registry" => Object::string_literal("Other"), "Ordering" => ordering,
+                "Registry" => literal("Other"), "Ordering" => ordering,
             },
         }
     };
@@ -621,14 +648,14 @@ fn type0_text_as_pdfium_reads_it() {
         let font = type0(pdf, encoding, descendant);
         foreign(pdf, font).text(b"\x01\x08\x03\x4b")
     };
-    let japan1 = info(Object::string_literal("Japan1"));
-    let named = info("Japan1".into());
-    let identity = info(Object::string_literal("Identity"));
-    let ordered = text(&mut pdf, "Identity-H".into(), japan1.clone());
+    let japan1 = info(literal("Japan1"));
+    let named = info(Object::name("Japan1"));
+    let identity = info(literal("Identity"));
+    let ordered = text(&mut pdf, Object::name("Identity-H"), japan1.clone());
     assert_eq!(ordered.as_deref(), Some("Aあ"));
-    let ordered = text(&mut pdf, "Identity-V".into(), named);
+    let ordered = text(&mut pdf, Object::name("Identity-V"), named);
     assert_eq!(ordered.as_deref(), Some("Aあ"));
-    assert_eq!(text(&mut pdf, "Identity-H".into(), identity), None);
+    assert_eq!(text(&mut pdf, Object::name("Identity-H"), identity), None);
     let cmap = pdf.add_object(Stream::new(
         dictionary! {},
         b"1 begincidrange <0000> <FFFF> 0 endcidrange".to_vec(),
@@ -636,11 +663,11 @@ fn type0_text_as_pdfium_reads_it() {
     assert_eq!(text(&mut pdf, cmap.into(), japan1.clone()), None);
     // CID 0, `.notdef`, is Adobe's U+FFFD, as PDFium reads it, but a
     // string showing it isn't text: it's told from another by its bytes.
-    let font = type0(&mut pdf, "Identity-H".into(), japan1.clone());
+    let font = type0(&mut pdf, Object::name("Identity-H"), japan1.clone());
     let font = foreign(&pdf, font);
     assert_eq!(font.code_text(0).as_deref(), Some("\u{FFFD}"));
     assert_eq!(font.text(b"\x01\x08\x00\x00"), None);
-    let font = type0(&mut pdf, "90ms-RKSJ-H".into(), japan1.clone());
+    let font = type0(&mut pdf, Object::name("90ms-RKSJ-H"), japan1.clone());
     let font = foreign(&pdf, font);
     assert_eq!(font.cid(0x80), Some(0));
     assert_eq!(font.text(b"A"), Some("A".into()));
@@ -652,7 +679,7 @@ fn type0_text_as_pdfium_reads_it() {
           2 beginbfchar <0108> <005A> <034B> <0059> endbfchar"
             .to_vec(),
     ));
-    let mut font = type0(&mut pdf, "UniJIS-UCS2-H".into(), japan1);
+    let mut font = type0(&mut pdf, Object::name("UniJIS-UCS2-H"), japan1);
     font.set("ToUnicode", to_unicode);
     let font = foreign(&pdf, font);
     assert_eq!(font.text(b"\x01\x08\x03\x4b").as_deref(), Some("ZY"));
@@ -676,10 +703,12 @@ fn identity_v_metrics_from_w2_and_dw2() {
     ];
     let font = type0(
         &mut pdf,
-        "Identity-V".into(),
+        Object::name("Identity-V"),
         dictionary! {
-            "Subtype" => "CIDFontType0", "W" => vec![3.into(), vec![600.into()].into()],
-            "W2" => w2, "DW2" => vec![900.into(), (-1100).into()],
+            "Subtype" => Object::name("CIDFontType0"),
+            "W" => vec![3.into(), vec![600.into()].into()],
+            "W2" => w2,
+            "DW2" => vec![900.into(), (-1100).into()],
         },
     );
     let font = foreign(&pdf, font);
@@ -688,7 +717,7 @@ fn identity_v_metrics_from_w2_and_dw2() {
     assert_eq!(font.vertical(7), v(-800.0, 250.0, 700.0));
     assert_eq!(font.vertical(3), v(-1100.0, 300.0, 900.0));
     assert_eq!(font.vertical(4), v(-1100.0, 500.0, 900.0));
-    let plain = type0(&mut pdf, "Identity-V".into(), dictionary! {});
+    let plain = type0(&mut pdf, Object::name("Identity-V"), dictionary! {});
     assert_eq!(foreign(&pdf, plain).vertical(4), v(-1000.0, 500.0, 880.0));
 }
 
@@ -703,7 +732,7 @@ fn identity_v_metrics_from_w2_and_dw2() {
 fn embedded_cmap_over_the_one_it_uses() {
     let mut pdf = Pdf::with_version("1.7");
     let base = pdf.add_object(Stream::new(
-        dictionary! { "Type" => "CMap" },
+        dictionary! { "Type" => Object::name("CMap") },
         b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
           2 begincodespacerange <00> <7F> <8000> <FFFF> endcodespacerange\n\
           1 begincidrange <20> <7E> 1 endcidrange\n\
@@ -711,7 +740,7 @@ fn embedded_cmap_over_the_one_it_uses() {
             .to_vec(),
     ));
     let own = pdf.add_object(Stream::new(
-        dictionary! { "Type" => "CMap", "UseCMap" => base },
+        dictionary! { "Type" => Object::name("CMap"), "UseCMap" => base },
         b"begincmap /WMode 1 def\n\
           1 begincidchar <41> 500 endcidchar\n\
           1 begincidrange <8140> <8142> 1000 endcidrange endcmap"
@@ -720,7 +749,7 @@ fn embedded_cmap_over_the_one_it_uses() {
     let font = type0(
         &mut pdf,
         own.into(),
-        dictionary! { "Subtype" => "CIDFontType0" },
+        dictionary! { "Subtype" => Object::name("CIDFontType0") },
     );
     let font = foreign(&pdf, font);
     let split = codes(&font, b"A B\x81\x41\x81");
@@ -773,7 +802,7 @@ fn embedded_cmap_over_the_one_it_uses() {
     assert_eq!(cids, [7, 843, 0].map(Some));
     assert!(other.approx().codes);
     let named = pdf.add_object(Stream::new(
-        dictionary! { "UseCMap" => "90ms-RKSJ-H" },
+        dictionary! { "UseCMap" => Object::name("90ms-RKSJ-H") },
         b"1 begincodespacerange <00> <FF> endcodespacerange".to_vec(),
     ));
     let named = type0(&mut pdf, named.into(), dictionary! {});
@@ -831,9 +860,12 @@ fn reading_a_font_is_charged_to_its_budget() {
     let proc = pdf.add_object(Stream::new(dictionary! {}, proc));
     let to_unicode = pdf.add_object(Stream::new(dictionary! {}, to_unicode));
     let type3 = dictionary! {
-        "Type" => "Font", "Subtype" => "Type3",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type3"),
         "FontMatrix" => vec![0.001.into(), 0.into(), 0.into(), 0.001.into(), 0.into(), 0.into()],
-        "Encoding" => dictionary! { "Differences" => vec![97.into(), "a".into(), "b".into(), "c".into()] },
+        "Encoding" => dictionary! {
+            "Differences" => vec![97.into(), Object::name("a"), Object::name("b"), Object::name("c")],
+        },
         "CharProcs" => dictionary! { "a" => proc, "b" => proc, "c" => proc },
         "ToUnicode" => to_unicode,
     };
@@ -864,10 +896,24 @@ fn reading_a_font_is_charged_to_its_budget() {
     let mut scope = fonts.scope();
     let mut budget = 10 * cost;
     for name in [&b"R1"[..], b"R2", b"R1", b"D1", b"D1"] {
-        let picked = scope.font(&pdf, (1, 0), Some(&resources), name, lim, &mut budget);
+        let picked = scope.font(
+            &pdf,
+            ObjectId::new(1, 0),
+            Some(&resources),
+            name,
+            lim,
+            &mut budget,
+        );
         assert!(picked.unwrap().is_some());
     }
-    let picked = scope.font(&pdf, (2, 0), Some(&resources), b"D1", lim, &mut budget);
+    let picked = scope.font(
+        &pdf,
+        ObjectId::new(2, 0),
+        Some(&resources),
+        b"D1",
+        lim,
+        &mut budget,
+    );
     assert!(picked.unwrap().is_some());
     // R1 and R2 once, and D1 once for each owner it's picked by.
     assert_eq!(budget, 7 * cost);
@@ -896,7 +942,7 @@ fn reading_a_font_is_charged_to_its_budget() {
 fn a_cmap_chain_read_in_part_is_guessed() {
     let mut pdf = Pdf::with_version("1.7");
     let program = || b"1 begincidrange <00> <FF> 0 endcidrange".to_vec();
-    let nothing = pdf.add_object(Object::Integer(7));
+    let nothing = pdf.add_object(Object::from(7));
     let broken = pdf.add_object(Stream::new(dictionary! { "UseCMap" => nothing }, program()));
     let broken = type0(&mut pdf, broken.into(), dictionary! {});
     assert!(foreign(&pdf, broken).approx().codes);
@@ -934,11 +980,13 @@ fn type3_through_its_font_matrix() {
     );
     let type3 = |bbox: Option<Vec<Object>>| {
         let mut font = dictionary! {
-            "Type" => "Font", "Subtype" => "Type3",
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type3"),
             "FontMatrix" => vec![0.01.into(), 0.into(), 0.into(), 0.01.into(), 0.into(), 0.into()],
-            "FirstChar" => 65, "Widths" => vec![50.into(), 0.into()],
+            "FirstChar" => 65,
+            "Widths" => vec![50.into(), 0.into()],
             "Encoding" => dictionary! {
-                "Differences" => vec![65.into(), "a".into(), "b".into(), "c".into()],
+                "Differences" => vec![65.into(), Object::name("a"), Object::name("b"), Object::name("c")],
             },
             "CharProcs" => dictionary! { "a" => a, "b" => b, "c" => c },
         };
@@ -971,10 +1019,15 @@ fn type3_through_its_font_matrix() {
     // box's top, held within it no longer; where `A`'s top is the box's
     // bottom, the heights are one, and a guess.
     let mut over = type3(Some(vec![0.into(), 0.into(), 1000.into(), 1000.into()]));
-    let turned = [0.01, 0.0, 0.0, -0.01, 0.0, 0.0].map(Object::Real);
+    let turned = [0.01, 0.0, 0.0, -0.01, 0.0, 0.0].map(Object::from);
     over.set("FontMatrix", turned.to_vec());
     let mut moved = over.clone();
-    let differences = vec![66.into(), "a".into(), "b".into(), "c".into()];
+    let differences = vec![
+        66.into(),
+        Object::name("a"),
+        Object::name("b"),
+        Object::name("c"),
+    ];
     moved.set("Encoding", dictionary! { "Differences" => differences });
     let moved = foreign(&pdf, moved);
     let m = moved.metrics();
@@ -1009,8 +1062,11 @@ fn type3_through_its_font_matrix() {
 fn heights_by_each_fallback() {
     let mut pdf = Pdf::with_version("1.7");
     let mut heights = |base: &str, descriptor: Option<Dictionary>| {
-        let mut font =
-            dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => base.to_string() };
+        let mut font = dictionary! {
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name(base),
+        };
         if let Some(d) = descriptor {
             font.set("FontDescriptor", pdf.add_object(d));
         }
@@ -1057,7 +1113,7 @@ fn hostile_metrics_stay_bounded() {
     }
     let font = type0(
         &mut pdf,
-        "Identity-H".into(),
+        Object::name("Identity-H"),
         dictionary! { "W" => w, "DW" => 7 },
     );
     let font = foreign(&pdf, font);
@@ -1067,17 +1123,22 @@ fn hostile_metrics_stay_bounded() {
     );
     assert_eq!(font.width(u32::MAX), 7.0);
     let widths: Vec<Object> = (0..1_000_000).map(Object::from).collect();
-    let simple = dictionary! { "Subtype" => "Type1", "FirstChar" => 0, "Widths" => widths };
+    let simple = dictionary! {
+        "Subtype" => Object::name("Type1"),
+        "FirstChar" => 0,
+        "Widths" => widths,
+    };
     let simple = foreign(&pdf, simple);
     assert_eq!(simple.width(255), 255.0);
     let differences = vec![
-        Object::Integer(1 << 40),
-        "A".into(),
-        Object::Integer(-5),
-        "B".into(),
+        Object::from(1_i64 << 40),
+        Object::name("A"),
+        Object::from(-5),
+        Object::name("B"),
     ];
     let encoded = dictionary! {
-        "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
         "Encoding" => dictionary! { "Differences" => differences },
     };
     assert_eq!(foreign(&pdf, encoded).width(b'A'.into()), 667.0);
@@ -1088,12 +1149,18 @@ fn hostile_metrics_stay_bounded() {
 #[test]
 fn fonts_are_read_once() {
     let mut pdf = Pdf::with_version("1.7");
-    let helvetica = pdf.add_object(
-        dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" },
-    );
+    let helvetica = pdf.add_object(dictionary! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
+    });
     let resources: Object = dictionary! {
         "Font" => dictionary! {
-            "F1" => dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier" },
+            "F1" => dictionary! {
+                "Type" => Object::name("Font"),
+                "Subtype" => Object::name("Type1"),
+                "BaseFont" => Object::name("Courier"),
+            },
             "F2" => helvetica,
         },
     }
@@ -1107,7 +1174,7 @@ fn fonts_are_read_once() {
         &by_ref,
         &get(&helvetica.into(), budget).unwrap()
     ));
-    let (page, other) = ((1, 0), (2, 0));
+    let (page, other) = (ObjectId::new(1, 0), ObjectId::new(2, 0));
     let mut pick = |scope: &mut FontScope<'_>, owner, name: &[u8]| {
         let picked = scope.font(&pdf, owner, Some(&resources), name, lim, budget);
         picked.unwrap()
@@ -1124,7 +1191,7 @@ fn fonts_are_read_once() {
     let mut again = fonts.scope();
     let f2 = pick(&mut again, other, b"F2").unwrap();
     assert!(std::ptr::eq(&*by_ref, again.get(f2)));
-    assert!(get(&Object::Integer(1), budget).is_none());
+    assert!(get(&Object::from(1), budget).is_none());
 }
 
 /// Font `name` of [`fixture::programs`]' page, read within `budget`, its
@@ -1291,14 +1358,21 @@ fn malformed_programs_fall_back() {
         let mut pdf = Pdf::with_version("1.7");
         let program = pdf.add_object(Stream::new(dictionary! {}, program));
         let descriptor = pdf.add_object(dictionary! {
-            "Type" => "FontDescriptor", "Flags" => 32, "Ascent" => 700, "Descent" => -200,
+            "Type" => Object::name("FontDescriptor"),
+            "Flags" => 32,
+            "Ascent" => 700,
+            "Descent" => -200,
             key => program,
         });
         let font = foreign(
             &pdf,
             dictionary! {
-                "Type" => "Font", "Subtype" => subtype, "BaseFont" => "Bad",
-                "FirstChar" => 65, "LastChar" => 65, "Widths" => vec![600.into()],
+                "Type" => Object::name("Font"),
+                "Subtype" => Object::name(subtype),
+                "BaseFont" => Object::name("Bad"),
+                "FirstChar" => 65,
+                "LastChar" => 65,
+                "Widths" => vec![600.into()],
                 "FontDescriptor" => descriptor,
             },
         );
@@ -1324,13 +1398,19 @@ fn a_cid_font_s_program_is_read_once() {
     let mut pdf = Pdf::with_version("1.7");
     let program = pdf.add_object(Stream::new(dictionary! {}, program));
     let descriptor = pdf.add_object(dictionary! {
-        "Type" => "FontDescriptor", "Flags" => 32, "Ascent" => 750, "Descent" => -200,
+        "Type" => Object::name("FontDescriptor"),
+        "Flags" => 32,
+        "Ascent" => 750,
+        "Descent" => -200,
         "FontFile" => program,
     });
     let font = type0(
         &mut pdf,
-        "Identity-H".into(),
-        dictionary! { "Subtype" => "CIDFontType0", "FontDescriptor" => descriptor },
+        Object::name("Identity-H"),
+        dictionary! {
+            "Subtype" => Object::name("CIDFontType0"),
+            "FontDescriptor" => descriptor,
+        },
     );
     let font = foreign(&pdf, font);
     assert_eq!(font.program(), FontProgram::Read);
@@ -1349,19 +1429,27 @@ fn a_loca_record_past_the_end_is_read_past() {
     let mut pdf = Pdf::with_version("1.7");
     let program = crate::content::fixture::loca_past_end_program();
     let program = pdf.add_object(Stream::new(
-        dictionary! { "Subtype" => "OpenType" },
+        dictionary! { "Subtype" => Object::name("OpenType") },
         program,
     ));
     let descriptor = pdf.add_object(dictionary! {
-        "Type" => "FontDescriptor", "Flags" => 32, "Ascent" => 750, "Descent" => -200,
+        "Type" => Object::name("FontDescriptor"),
+        "Flags" => 32,
+        "Ascent" => 750,
+        "Descent" => -200,
         "FontFile3" => program,
     });
     let font = foreign(
         &pdf,
         dictionary! {
-            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Fix",
-            "FirstChar" => 65, "LastChar" => 65, "Widths" => vec![600.into()],
-            "Encoding" => "WinAnsiEncoding", "FontDescriptor" => descriptor,
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name("Fix"),
+            "FirstChar" => 65,
+            "LastChar" => 65,
+            "Widths" => vec![600.into()],
+            "Encoding" => Object::name("WinAnsiEncoding"),
+            "FontDescriptor" => descriptor,
         },
     );
     assert_eq!(font.program(), FontProgram::Read);
@@ -1378,15 +1466,24 @@ fn programs_past_their_work_are_unknown() {
         let mut pdf = Pdf::with_version("1.7");
         let program = pdf.add_object(Stream::new(dictionary! {}, program));
         let descriptor = pdf.add_object(dictionary! {
-            "Type" => "FontDescriptor", "Flags" => 32, "Ascent" => 750, "Descent" => 0,
-            "FontBBox" => vec![0.into(), 0.into(), 600.into(), 750.into()], key => program,
+            "Type" => Object::name("FontDescriptor"),
+            "Flags" => 32,
+            "Ascent" => 750,
+            "Descent" => 0,
+            "FontBBox" => vec![0.into(), 0.into(), 600.into(), 750.into()],
+            key => program,
         });
         foreign(
             &pdf,
             dictionary! {
-                "Type" => "Font", "Subtype" => subtype, "BaseFont" => "Heavy",
-                "FirstChar" => 65, "LastChar" => 65, "Widths" => vec![600.into()],
-                "Encoding" => "WinAnsiEncoding", "FontDescriptor" => descriptor,
+                "Type" => Object::name("Font"),
+                "Subtype" => Object::name(subtype),
+                "BaseFont" => Object::name("Heavy"),
+                "FirstChar" => 65,
+                "LastChar" => 65,
+                "Widths" => vec![600.into()],
+                "Encoding" => Object::name("WinAnsiEncoding"),
+                "FontDescriptor" => descriptor,
             },
         )
     };
@@ -1401,13 +1498,20 @@ fn programs_past_their_work_are_unknown() {
     let mut pdf = Pdf::with_version("1.7");
     let bomb = pdf.add_object(Stream::new(dictionary! {}, composite_bomb_program()));
     let descriptor = pdf.add_object(dictionary! {
-        "Type" => "FontDescriptor", "Flags" => 32, "Ascent" => 750, "Descent" => 0,
-        "FontBBox" => vec![0.into(), 0.into(), 600.into(), 750.into()], "FontFile2" => bomb,
+        "Type" => Object::name("FontDescriptor"),
+        "Flags" => 32,
+        "Ascent" => 750,
+        "Descent" => 0,
+        "FontBBox" => vec![0.into(), 0.into(), 600.into(), 750.into()],
+        "FontFile2" => bomb,
     });
     let bomb = type0(
         &mut pdf,
-        "Identity-H".into(),
-        dictionary! { "Subtype" => "CIDFontType2", "FontDescriptor" => descriptor },
+        Object::name("Identity-H"),
+        dictionary! {
+            "Subtype" => Object::name("CIDFontType2"),
+            "FontDescriptor" => descriptor,
+        },
     );
     let bomb = foreign(&pdf, bomb);
     assert_eq!(bomb.char_box(0), None);

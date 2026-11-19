@@ -1,7 +1,7 @@
 //! Which objects share an object stream: grouped by the pages that use
 //! them, in the parts Annex F lays a linearized file out in, so the
 //! linearization crate (between milestones, item 4) can reuse it. A pure
-//! function of each object's number and its use, with no lopdf or
+//! function of each object's number and its use, with no PDF-layer or
 //! materializer types in it.
 
 /// The most objects a container holds: qpdf's default.

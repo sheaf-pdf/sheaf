@@ -2751,9 +2751,9 @@ pub(crate) fn file_in(store: &Store, stream: &ObjRef, size: u64) -> Result<BlobR
     let bytes = stream
         .src
         .pdf()
-        .read(stream.id, |o| match o {
-            lopdf::Object::Stream(s) => crate::attachments::mark_file_bytes(s, size),
-            _ => bail!("the embedded file isn't a stream"),
+        .read(stream.id, |o| match o.as_stream() {
+            Some(s) => crate::attachments::mark_file_bytes(s, size),
+            None => bail!("the embedded file isn't a stream"),
         })
         .context("reading the embedded file")??;
     Ok(store.intern(bytes.into(), BlobKind::Attachment)?.into())
@@ -2802,7 +2802,7 @@ pub(crate) mod history_tests;
 mod tests {
     use std::path::PathBuf;
 
-    use lopdf::ObjectId;
+    use crate::pdf::{ObjectId, StreamExt};
     use sheaf_edit::{
         AnnotRef, BookmarkPatch, BookmarkRef, HeaderFooterSpec, LabelStyle, Local, Op, PageRef,
         PageSel, Patch, Sibling, Turn,
@@ -3525,11 +3525,11 @@ mod tests {
 
     /// A form of one page, its field `a` with a keystroke script.
     fn scripted() -> Vec<u8> {
-        use lopdf::{Object, dictionary};
+        use crate::pdf::{Object, dictionary, literal};
         let mut f = crate::forms::fixture::Form::new(1);
         let a = f.text("a", 0, crate::forms::fixture::row(0));
         let js = dictionary! {
-            "S" => "JavaScript", "JS" => Object::string_literal("event.rc = true;"),
+            "S" => Object::name("JavaScript"), "JS" => literal("event.rc = true;"),
         };
         f.dict(a).set("AA", dictionary! { "K" => js });
         f.bytes()
@@ -4315,9 +4315,9 @@ mod tests {
             assert_eq!(saved.geom(0).rotate, want, "{case}");
             assert_eq!(rotation(&d, 0), want, "{case}");
             if incremental && by.is_none() {
-                let pdf = lopdf::Document::load_mem(saved.bytes()).unwrap();
+                let pdf = crate::pdf::Document::load_mem(saved.bytes()).unwrap();
                 let dict = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
-                let rotate = dict.get(b"Rotate").and_then(lopdf::Object::as_i64).ok();
+                let rotate = dict.get(b"Rotate").and_then(crate::pdf::Object::as_integer);
                 assert_eq!(rotate, own, "{case}: the page's own /Rotate");
             }
         }
@@ -4360,7 +4360,7 @@ mod tests {
             false => saved(&mut d),
         };
         assert_eq!(shown(&d), before, "{incremental}");
-        let pdf = lopdf::Document::load_mem(saved.bytes()).unwrap();
+        let pdf = crate::pdf::Document::load_mem(saved.bytes()).unwrap();
         let dict = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
         let annots = dict.get(b"Annots").unwrap().as_array().unwrap();
         let (_, annot) = pdf.dereference(&annots[0]).unwrap();
@@ -4372,7 +4372,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|v| v.as_float().unwrap() as f32)
+            .map(|v| v.as_number().unwrap() as f32)
             .collect();
         let centre = ((r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0);
         let want = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
@@ -4554,21 +4554,27 @@ mod tests {
         assert_eq!(plain.notices, []);
 
         let written = &d.state().marks_on(page).next().unwrap();
-        let mut pdf = lopdf::Document::with_version("1.7");
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let main = crate::serialize::built::to_pdf(written, &mut pdf).main;
         let utf16: Vec<u8> = [0xFE, 0xFF]
             .into_iter()
             .chain(text.encode_utf16().flat_map(u16::to_be_bytes))
             .collect();
-        assert_eq!(main.get(b"Contents").unwrap().as_str().unwrap(), utf16);
+        assert_eq!(main.get(b"Contents").unwrap().as_bytes().unwrap(), utf16);
         let ap = main.get(b"AP").unwrap().as_dict().unwrap();
         let ap = ap.get(b"N").unwrap().as_reference().unwrap();
-        let content = &pdf.get_object(ap).unwrap().as_stream().unwrap().content;
+        let content = pdf
+            .get_object(ap)
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .decompressed_content()
+            .unwrap();
         let drawn = b"(??????) Tj";
         assert!(
             content.windows(drawn.len()).any(|w| w == drawn),
             "{}",
-            String::from_utf8_lossy(content)
+            String::from_utf8_lossy(&content)
         );
 
         // A header's is found once its tokens are filled in; told once
@@ -4621,10 +4627,10 @@ mod tests {
 
     #[test]
     fn bookmark_styles_come_from_the_file() {
-        use lopdf::{Object, dictionary};
+        use crate::pdf::{dictionary, literal};
         let mut f = crate::forms::fixture::Form::new(3);
         let item = |title: &str, color: Option<f32>, flags: i64| {
-            let mut d = dictionary! { "Title" => Object::string_literal(title), "F" => flags };
+            let mut d = dictionary! { "Title" => literal(title), "F" => flags };
             if let Some(blue) = color {
                 d.set("C", vec![0.into(), 0.into(), blue.into()]);
             }
@@ -4696,20 +4702,19 @@ mod tests {
     /// save, which leaves it the file's item (M10.5 bug 15).
     fn uri_bookmark_kept(how: How) {
         use crate::forms::fixture::{Form, outline_tree};
-        use lopdf::{Object, dictionary};
+        use crate::pdf::{Object, dictionary, literal};
         let mut f = Form::new(3);
         let pages = f.pages.clone();
         let link = f.pdf.add_object(dictionary! {
-            "S" => "URI",
-            "URI" => Object::string_literal("https://example.com/"),
+            "S" => Object::name("URI"),
+            "URI" => literal("https://example.com/"),
         });
-        let section = f
-            .pdf
-            .add_object(dictionary! { "Type" => "StructElem", "S" => "Sect" });
-        let title = Object::string_literal;
-        let site = dictionary! { "Title" => title("Site"), "A" => link, "SE" => section };
-        let mut third = dictionary! { "Title" => title("Third"), "SE" => section };
-        third.set("Dest", vec![pages[2].into(), "Fit".into()]);
+        let section = f.pdf.add_object(
+            dictionary! { "Type" => Object::name("StructElem"), "S" => Object::name("Sect") },
+        );
+        let site = dictionary! { "Title" => literal("Site"), "A" => link, "SE" => section };
+        let mut third = dictionary! { "Title" => literal("Third"), "SE" => section };
+        third.set("Dest", vec![pages[2].into(), Object::name("Fit")]);
         let items = outline_tree(&mut f, vec![(0, site), (0, third)]);
         let store = Store::new();
         let primary = file(&store, f.bytes(), "links.pdf");
@@ -4737,11 +4742,11 @@ mod tests {
         // opens, and whether it has an `/SE`.
         let written = |bytes: Vec<u8>| -> Vec<(Option<u32>, Option<String>, bool)> {
             let src = crate::forms::fixture::source(bytes.clone());
-            let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+            let pdf = crate::pdf::Document::load_mem(&bytes).unwrap();
             let uri = |id| {
                 let item = pdf.get_dictionary(id).ok()?;
-                let action = pdf.get_dictionary(item.get(b"A").ok()?.as_reference().ok()?);
-                Some(crate::file::pdf_text(action.ok()?.get(b"URI").ok()?))
+                let action = pdf.get_dictionary(item.get(b"A")?.as_reference()?).ok()?;
+                Some(crate::file::pdf_text(action.get(b"URI")?))
             };
             (crate::open::outline(&src).into_iter())
                 .map(|i| {
@@ -4784,13 +4789,13 @@ mod tests {
     #[test]
     fn a_bookmark_after_a_deep_branch_keeps_its_own_item() {
         use crate::forms::fixture::{Form, outline_tree};
-        use lopdf::{Object, dictionary};
+        use crate::pdf::{Object, dictionary, literal};
         let mut f = Form::new(2);
         let link = f.pdf.add_object(dictionary! {
-            "S" => "URI",
-            "URI" => Object::string_literal("https://example.com/"),
+            "S" => Object::name("URI"),
+            "URI" => literal("https://example.com/"),
         });
-        let site = dictionary! { "Title" => Object::string_literal("Site"), "A" => link };
+        let site = dictionary! { "Title" => literal("Site"), "A" => link };
         outline_tree(&mut f, vec![(0, site)]);
         let store = Store::new();
         let primary = file(&store, f.bytes(), "deep.pdf");
@@ -4815,14 +4820,14 @@ mod tests {
         // Where the saved file's "Site" sends a reader.
         let uri = |bytes: Vec<u8>| {
             let src = crate::forms::fixture::source(bytes.clone());
-            let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+            let pdf = crate::pdf::Document::load_mem(&bytes).unwrap();
             let item = (crate::open::outline(&src).into_iter())
                 .find(|i| i.title == "Site")
                 .unwrap();
             let item = pdf.get_dictionary(item.object.unwrap()).unwrap();
-            let action = item.get(b"A").ok()?.as_reference().ok()?;
+            let action = item.get(b"A")?.as_reference()?;
             let action = pdf.get_dictionary(action).ok()?;
-            Some(crate::file::pdf_text(action.get(b"URI").ok()?))
+            Some(crate::file::pdf_text(action.get(b"URI")?))
         };
         let first = saved(&mut d);
         assert_eq!(
@@ -5073,17 +5078,17 @@ mod tests {
         assert!(matches!(stamp_held(&opened, id), Some(FormRef::Base(at)) if at.src == primary));
 
         // Another tool's stamp, adopted: no blob, the file's form.
-        use lopdf::dictionary;
+        use crate::pdf::{Object, dictionary};
         let mut f = fixture::Form::new(1);
-        let form = f.pdf.add_object(lopdf::Stream::new(
+        let form = f.pdf.add_object(crate::pdf::Stream::new(
             dictionary! {
-                "Type" => "XObject", "Subtype" => "Form",
+                "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"),
                 "BBox" => vec![0.into(), 0.into(), 100.into(), 40.into()],
             },
             format!("0 0 1 rg 0 0 100 40 re f % {}", fastrand::u64(..)).into_bytes(),
         ));
         let theirs = f.pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Stamp", "Name" => "SBApproved",
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Stamp"), "Name" => Object::name("SBApproved"),
             "Rect" => vec![100.into(), 600.into(), 200.into(), 640.into()],
             "AP" => dictionary! { "N" => form },
         });
@@ -5183,12 +5188,15 @@ mod tests {
         assert_eq!(d.store().bytes(), before + held);
         // The stamp's page draws its square, whichever PDF holds it.
         let square = |form: &FormRef| {
-            let pdf = lopdf::Document::load_mem(&form.to_pdf().unwrap()).unwrap();
-            let drawn = pdf.objects.values().filter_map(|o| o.as_stream().ok());
+            let pdf = crate::pdf::Document::load_mem(&form.to_pdf().unwrap()).unwrap();
+            let drawn = pdf
+                .objects
+                .values()
+                .filter_map(crate::pdf::Object::as_stream);
             let drawn: Vec<Vec<u8>> = drawn
                 .map(|s| {
                     s.decompressed_content()
-                        .unwrap_or_else(|_| s.content.clone())
+                        .unwrap_or_else(|_| s.raw_bytes().to_vec())
                 })
                 .collect();
             let square = b"0 0 20 20 re";
@@ -5879,9 +5887,9 @@ mod tests {
         let file = saved(&mut d);
         assert_eq!(layer_texts(&d).len(), 1);
         assert!(!d.is_dirty());
-        let pdf = lopdf::Document::load_mem(file.bytes()).unwrap();
-        let block = |o: &lopdf::Object| {
-            let stream = o.as_stream().ok();
+        let pdf = crate::pdf::Document::load_mem(file.bytes()).unwrap();
+        let block = |o: &crate::pdf::Object| {
+            let stream = o.as_stream();
             stream.and_then(|s| crate::materialize::ocr_tests::ocr_block(&s.dict))
         };
         assert_eq!(pdf.objects.values().filter_map(block).count(), 1);
@@ -6230,8 +6238,8 @@ mod tests {
     /// object a save reads: an info dictionary, a form with XFA, an outline
     /// root, page labels, names and an open action.
     fn rooted() -> (Vec<u8>, BTreeMap<&'static str, ObjectId>) {
-        use lopdf::{Object, dictionary};
-        let mut pdf = lopdf::Document::with_version("1.7");
+        use crate::pdf::{Object, dictionary, literal};
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let root = pdf.new_object_id();
         let mut ids = BTreeMap::new();
         let mut nodes = Vec::new();
@@ -6240,7 +6248,7 @@ mod tests {
             let pages: Vec<Object> = (0..2)
                 .map(|_| {
                     pdf.add_object(dictionary! {
-                        "Type" => "Page", "Parent" => node,
+                        "Type" => Object::name("Page"), "Parent" => node,
                         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
                     })
                     .into()
@@ -6251,34 +6259,35 @@ mod tests {
             }
             pdf.objects.insert(
                 node,
-                dictionary! { "Type" => "Pages", "Parent" => root, "Kids" => pages, "Count" => 2 }
+                dictionary! { "Type" => Object::name("Pages"), "Parent" => root, "Kids" => pages, "Count" => 2 }
                     .into(),
             );
-            nodes.push(Object::Reference(node));
+            nodes.push(Object::from(node));
         }
         ids.insert("node0", nodes[0].as_reference().unwrap());
         ids.insert("node1", nodes[1].as_reference().unwrap());
         pdf.objects.insert(
             root,
-            dictionary! { "Type" => "Pages", "Kids" => nodes, "Count" => 4 }.into(),
+            dictionary! { "Type" => Object::name("Pages"), "Kids" => nodes, "Count" => 4 }.into(),
         );
-        let xfa = pdf.add_object(lopdf::Stream::new(dictionary! {}, b"<xdp/>".to_vec()));
+        let xfa = pdf.add_object(crate::pdf::Stream::new(dictionary! {}, b"<xdp/>".to_vec()));
         let form = pdf.add_object(dictionary! {
             "Fields" => Vec::<Object>::new(), "XFA" => xfa,
-            "DA" => Object::string_literal("/Helv 0 Tf 0 g"),
+            "DA" => literal("/Helv 0 Tf 0 g"),
         });
-        let outlines = pdf.add_object(dictionary! { "Type" => "Outlines", "Count" => 0 });
+        let outlines =
+            pdf.add_object(dictionary! { "Type" => Object::name("Outlines"), "Count" => 0 });
         let labels = pdf.add_object(
-            dictionary! { "Nums" => vec![0.into(), dictionary! { "S" => "r" }.into()] },
+            dictionary! { "Nums" => vec![0.into(), dictionary! { "S" => Object::name("r") }.into()] },
         );
         let names = pdf
             .add_object(dictionary! { "Dests" => dictionary! { "Names" => Vec::<Object>::new() } });
         let catalog = pdf.add_object(dictionary! {
-            "Type" => "Catalog", "Pages" => root, "AcroForm" => form, "Outlines" => outlines,
-            "PageLabels" => labels, "Names" => names, "Lang" => Object::string_literal("en"),
-            "OpenAction" => vec![ids["page"].into(), "Fit".into()],
+            "Type" => Object::name("Catalog"), "Pages" => root, "AcroForm" => form, "Outlines" => outlines,
+            "PageLabels" => labels, "Names" => names, "Lang" => literal("en"),
+            "OpenAction" => vec![ids["page"].into(), Object::name("Fit")],
         });
-        let info = pdf.add_object(dictionary! { "Title" => Object::string_literal("Rooted") });
+        let info = pdf.add_object(dictionary! { "Title" => literal("Rooted") });
         pdf.trailer.set("Root", catalog);
         pdf.trailer.set("Info", info);
         ids.extend([
@@ -6354,15 +6363,15 @@ mod tests {
         assert_eq!(map.get(&base(src.id(), 1)), None);
         assert_eq!(map.get(&base(BlobId { hash: 1, len: 1 }, 0)), None);
         // Present: the numbers in use, and no other.
-        let mut used: Vec<u32> = src.pdf().ids().map(|(n, _)| n).collect();
+        let mut used: Vec<u32> = src.pdf().ids().map(|id| id.number).collect();
         used.sort_unstable();
         assert_eq!(rec.present.iter().collect::<Vec<_>>(), used);
         assert_eq!(rec.present.len(), used.len());
         let past = used.last().unwrap() + 1;
         assert!(!rec.present.contains(0) && !rec.present.contains(past));
         // Roots: the keys a save doesn't emit from the state.
-        fn keys(d: &lopdf::Dictionary) -> Vec<&[u8]> {
-            let mut keys: Vec<&[u8]> = d.iter().map(|(k, _)| k.as_slice()).collect();
+        fn keys(d: &crate::pdf::Dictionary) -> Vec<&[u8]> {
+            let mut keys: Vec<&[u8]> = d.iter().map(|(k, _)| k).collect();
             keys.sort();
             keys
         }

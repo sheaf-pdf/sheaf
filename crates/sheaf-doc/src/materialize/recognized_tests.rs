@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 
 use in_progress::NoProgress;
 
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
+use crate::pdf::{
+    Dictionary, Document as Pdf, Object, ObjectId, Stream, StreamExt, Value, dictionary, literal,
+};
 use sheaf_edit::{GridPos, Op, Turn, WatermarkContent, Z};
 
 use super::append_tests::{appended_in_place, keys_at, planned_in_place, square, written};
@@ -44,9 +46,9 @@ pub(super) fn pages(pdf: &Pdf) -> Vec<ObjectId> {
 /// What a page of `pdf` names in its `/Contents`, in order.
 pub(super) fn contents(pdf: &Pdf, page: ObjectId) -> Vec<ObjectId> {
     let page = pdf.get_dictionary(page).unwrap();
-    match page.get(b"Contents").unwrap() {
-        Object::Array(a) => a.iter().map(|e| e.as_reference().unwrap()).collect(),
-        Object::Reference(r) => vec![*r],
+    match page.get(b"Contents").unwrap().value() {
+        Value::Array(a) => a.iter().map(|e| e.as_reference().unwrap()).collect(),
+        Value::Ref(r) => vec![*r],
         other => panic!("contents {other:?}"),
     }
 }
@@ -56,22 +58,22 @@ pub(super) fn stream(pdf: &Pdf, id: ObjectId) -> (Dictionary, Vec<u8>) {
     let s = pdf.get_object(id).unwrap().as_stream().unwrap();
     let data = s
         .decompressed_content()
-        .unwrap_or_else(|_| s.content.clone());
+        .unwrap_or_else(|_| s.raw_bytes().to_vec());
     (s.dict.clone(), data)
 }
 
 /// The generator stream `id` of `pdf` is a block of, if it's one.
 pub(super) fn block_of(pdf: &Pdf, id: ObjectId) -> Option<GenId> {
     let (dict, _) = stream(pdf, id);
-    let marker = dict.get(b"SHEF_Block").ok()?.as_dict().ok()?;
-    GenId::parse(marker.get(b"G").ok()?.as_str().ok()?)
+    let marker = dict.get(b"SHEF_Block")?.as_dict()?;
+    GenId::parse(marker.get(b"G")?.as_bytes()?)
 }
 
 /// Whether stream `id` of `pdf` isolates a page's content.
 pub(super) fn isolates(pdf: &Pdf, id: ObjectId) -> bool {
     let (dict, _) = stream(pdf, id);
     (dict.get(b"SHEF_Block").and_then(Object::as_dict))
-        .is_ok_and(|m| m.get(b"K").and_then(Object::as_name).ok() == Some(b"Isolate"))
+        .is_some_and(|m| m.get(b"K").and_then(Object::as_name) == Some(b"Isolate"))
 }
 
 /// Each page's blocks, by generator, in order.
@@ -118,15 +120,46 @@ pub(super) fn depth(pdf: &Pdf, page: ObjectId) -> (i32, Balance) {
 /// What every object of `pdf` says, as one string: names, strings and
 /// streams decoded.
 pub(super) fn everything(pdf: &Pdf) -> String {
+    fn walk(obj: &Object, out: &mut String) {
+        match obj.value() {
+            Value::Name(n) => {
+                out.push('/');
+                out.push_str(&String::from_utf8_lossy(n.as_bytes()));
+                out.push(' ');
+            }
+            Value::String(s, _) => {
+                out.push('(');
+                out.push_str(&String::from_utf8_lossy(s.as_bytes().unwrap_or(b"")));
+                out.push(')');
+            }
+            Value::Array(items) => items.iter().for_each(|o| walk(o, out)),
+            Value::Dict(d) => {
+                for (k, v) in d.iter() {
+                    out.push('/');
+                    out.push_str(&String::from_utf8_lossy(k));
+                    out.push(' ');
+                    walk(v, out);
+                }
+            }
+            Value::Stream(s) => {
+                for (k, v) in s.dict.iter() {
+                    out.push('/');
+                    out.push_str(&String::from_utf8_lossy(k));
+                    out.push(' ');
+                    walk(v, out);
+                }
+                let data = s
+                    .decompressed_content()
+                    .unwrap_or_else(|_| s.raw_bytes().to_vec());
+                out.push_str(&String::from_utf8_lossy(&data));
+                out.push(' ');
+            }
+            _ => {}
+        }
+    }
     let mut out = String::new();
     for obj in pdf.objects.values() {
-        out.push_str(&format!("{obj:?}"));
-        if let Object::Stream(s) = obj {
-            let data = s
-                .decompressed_content()
-                .unwrap_or_else(|_| s.content.clone());
-            out.push_str(&String::from_utf8_lossy(&data));
-        }
+        walk(obj, &mut out);
     }
     out
 }
@@ -185,7 +218,10 @@ fn as_it_is(how: How) {
     for (a, b) in pages(&file).into_iter().zip(pages(&written)) {
         assert_eq!(contents(&file, a), contents(&written, b), "{how:?}");
         let res = |pdf: &Pdf, p| pdf.get_dictionary(p).unwrap().get(b"Resources").cloned();
-        assert_eq!(res(&file, a).unwrap(), res(&written, b).unwrap(), "{how:?}");
+        assert!(
+            res(&file, a).unwrap().eq_value(&res(&written, b).unwrap()),
+            "{how:?}"
+        );
     }
     let st = again.state();
     for (id, _, _) in st.pages() {
@@ -354,8 +390,8 @@ fn image(how: How) {
     let images = |pdf: &Pdf| -> BTreeSet<ObjectId> {
         (pdf.objects.iter())
             .filter(|(_, o)| {
-                (o.as_stream()).is_ok_and(|s| {
-                    s.dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Image")
+                (o.as_stream()).is_some_and(|s| {
+                    s.dict.get(b"Subtype").and_then(Object::as_name) == Some(b"Image")
                 })
             })
             .map(|(&id, _)| id)
@@ -504,11 +540,11 @@ fn an_empty_block_keeps_its_page_in_scope() {
     let (mut dict, _) = stream(&pdf, ids[3]);
     let empty = sheaf_util::checksum(&[]).to_be_bytes().to_vec();
     let marker = dict.get_mut(b"SHEF_Block").unwrap().as_dict_mut().unwrap();
-    marker.set("L", Object::String(empty, lopdf::StringFormat::Hexadecimal));
+    marker.set("L", Object::hex(empty));
     dict.remove(b"Filter");
     let block = pdf.add_object(Stream::new(dict, Vec::new()));
-    let mut entries: Vec<Object> = ids.iter().map(|&i| Object::Reference(i)).collect();
-    entries[3] = Object::Reference(block);
+    let mut entries: Vec<Object> = ids.iter().map(|&i| Object::from(i)).collect();
+    entries[3] = Object::from(block);
     (pdf.get_object_mut(third).unwrap().as_dict_mut().unwrap()).set("Contents", entries);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
@@ -674,11 +710,13 @@ fn shared(how: How) {
     let mut pdf = Pdf::with_version("1.7");
     let root = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     });
     let list = dictionary! {
-        "Type" => "Pagination", "Subtype" => "Watermark",
-        "SHEF_Gen" => Object::string_literal("g1f"),
+        "Type" => Object::name("Pagination"), "Subtype" => Object::name("Watermark"),
+        "SHEF_Gen" => literal("g1f"),
     };
     let content = b"/Artifact /P0 BDC q BT /F1 30 Tf 100 100 Td (THEIRS) Tj ET Q EMC\n\
                     BT /F1 24 Tf 72 72 Td (shared) Tj ET";
@@ -686,15 +724,15 @@ fn shared(how: How) {
     let kids: Vec<Object> = (0..3)
         .map(|_| {
             let page = dictionary! {
-                "Type" => "Page", "Parent" => root, "Contents" => shared,
+                "Type" => Object::name("Page"), "Parent" => root, "Contents" => shared,
             };
             pdf.add_object(page).into()
         })
         .collect();
     pdf.objects.insert(
         root,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => kids, "Count" => 3,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => kids, "Count" => 3,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "Resources" => dictionary! {
                 "Font" => dictionary! { "F1" => font },
@@ -702,7 +740,8 @@ fn shared(how: How) {
             },
         }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => root });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
@@ -792,10 +831,10 @@ fn what_sheaf_wouldn_t_write_isn_t_found() {
             .as_reference()
             .unwrap();
         let mut json: serde_json::Value =
-            serde_json::from_slice(pdf.get_object(at).unwrap().as_str().unwrap()).unwrap();
+            serde_json::from_slice(pdf.get_object(at).unwrap().as_bytes().unwrap()).unwrap();
         edit(&mut json);
         let json = serde_json::to_vec(&json).unwrap();
-        pdf.objects.insert(at, Object::string_literal(json));
+        pdf.objects.insert(at, literal(json));
         let mut out = Vec::new();
         pdf.save_to(&mut out).unwrap();
         let (_, again) = opened(&dir, "b.pdf", &out);
@@ -853,23 +892,25 @@ fn with_a_page_added(bytes: &[u8], text: &str) -> Vec<u8> {
         .and_then(Object::as_reference)
         .unwrap();
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     });
     let drawn = format!("BT /F1 24 Tf 72 72 Td ({text}) Tj ET");
     let content = pdf.add_object(Stream::new(dictionary! {}, drawn.into_bytes()));
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page", "Parent" => root, "Contents" => content,
+        "Type" => Object::name("Page"), "Parent" => root, "Contents" => content,
         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
     });
     let tree = pdf.get_object_mut(root).unwrap().as_dict_mut().unwrap();
-    let count = tree.get(b"Count").and_then(Object::as_i64).unwrap();
+    let count = tree.get(b"Count").and_then(Object::as_integer).unwrap();
     tree.set("Count", count + 1);
     let kids = tree
         .get_mut(b"Kids")
         .and_then(Object::as_array_mut)
         .unwrap();
-    kids.push(Object::Reference(page));
+    kids.push(Object::from(page));
     let mut out = Vec::new();
     pdf.save_to(&mut out).unwrap();
     out
@@ -1086,7 +1127,7 @@ fn drawing_isolation(how: How) {
     assert!(isolates(&pdf, open));
     let mut stream = pdf.get_object(open).unwrap().as_stream().unwrap().clone();
     stream.dict.remove(b"Filter");
-    stream.set_content(b"q BT /F1 12 Tf 72 300 Td (Secret) Tj ET".to_vec());
+    stream.set_bytes(b"q BT /F1 12 Tf 72 300 Td (Secret) Tj ET".to_vec());
     pdf.objects.insert(open, stream.into());
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();

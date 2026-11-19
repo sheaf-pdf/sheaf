@@ -1,5 +1,5 @@
 //! The content toolkit (M10.5 §13), pulled forward from M11: page
-//! content read as tokens, without lopdf's `Content::decode`, which
+//! content read as tokens, without `Content::decode`, which
 //! re-encodes what it reads, loses comments and spacing, and reads inline
 //! images by the first `EI` it meets.
 //!

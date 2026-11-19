@@ -11,14 +11,13 @@
 
 use std::path::Path;
 
-use lopdf::{
-    Document as Pdf, EncryptionState, EncryptionVersion, Object, ObjectId, Permissions, dictionary,
-};
 use sheaf_doc::export::Export;
 use sheaf_doc::forms::fixture::{Form, detached, note, outline_tree};
 use sheaf_doc::forms::sigs::{Integrity, Verdict};
 use sheaf_doc::forms::{Finding, Value, check};
 use sheaf_doc::materialize::{Ask, AskAnswers, Note, SaveReport, SaveStop, StrategyKind, Why};
+use sheaf_doc::pdf::test_crypt::{CipherKind, TestEncryption};
+use sheaf_doc::pdf::{Document as Pdf, Object, ObjectId, dictionary, literal};
 use sheaf_doc::tx::fixture::{
     add, bookmark, delete, duplicate, insert, move_pages, patch_bookmark, rotate,
 };
@@ -48,9 +47,8 @@ fn parts(bytes: &[u8]) -> (bool, bool, bool) {
     let catalog = pdf.catalog().unwrap();
     let form = catalog
         .get(b"AcroForm")
-        .ok()
         .and_then(|f| pdf.dereference(f).ok())
-        .and_then(|(_, f)| f.as_dict().ok());
+        .and_then(|(_, f)| f.as_dict());
     (
         form.is_some_and(|f| f.has(b"XFA")),
         catalog.has(b"Perms"),
@@ -69,7 +67,6 @@ fn tooltips(bytes: &[u8]) -> Vec<(String, Option<String>)> {
                 .get_dictionary(f.object)
                 .unwrap()
                 .get(b"TU")
-                .ok()
                 .map(sheaf_doc::file::pdf_text);
             (f.name, tu)
         })
@@ -240,7 +237,7 @@ fn an_xfa_copy_holding_values_the_acroform_lacks_is_found() {
     let facts = form_in(&f.bytes()).facts;
     assert_eq!(facts.xfa_values, 1);
     // With its value back in the AcroForm, nothing's missing.
-    f.dict(y).set("V", Object::string_literal("Why"));
+    f.dict(y).set("V", literal("Why"));
     assert_eq!(form_in(&f.bytes()).facts.xfa_values, 0);
 }
 
@@ -568,16 +565,9 @@ fn an_encrypted_signed_file_appends_and_keeps_its_signature() {
     // encrypted with the file's own key (M10.5 slice 7).
     let dir = scratch("saves-signed-encrypted");
     let mut f = signed();
-    let id = Object::string_literal("0123456789abcdef");
+    let id = literal("0123456789abcdef");
     f.pdf.trailer.set("ID", vec![id.clone(), id]);
-    let state = EncryptionState::try_from(EncryptionVersion::V2 {
-        document: &f.pdf,
-        owner_password: "owner",
-        user_password: "",
-        key_length: 128,
-        permissions: Permissions::all(),
-    })
-    .unwrap();
+    let state = TestEncryption::new(CipherKind::Rc4_128, "", "owner");
     f.pdf.encrypt(&state).unwrap();
     let path = write(&dir, "signed.pdf", &mut f);
     let original = std::fs::read(&path).unwrap();
@@ -722,17 +712,17 @@ fn everything() -> Form {
     let mark = sheaf_doc::serialize::built::to_pdf(&note(), &mut f.pdf).main;
     let mark = f.pdf.add_object(mark);
     let theirs = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Text",
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"),
         "Rect" => vec![300.into(), 300.into(), 320.into(), 320.into()],
-        "Contents" => Object::string_literal("Theirs"),
-        "NM" => Object::string_literal("theirs-1"),
-        "T" => Object::string_literal("Pat"),
+        "Contents" => literal("Theirs"),
+        "NM" => literal("theirs-1"),
+        "T" => literal("Pat"),
     });
     let link = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Link",
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"),
         "Rect" => vec![300.into(), 400.into(), 400.into(), 420.into()],
         "A" => dictionary! {
-            "S" => "URI", "URI" => Object::string_literal("https://example.com/"),
+            "S" => Object::name("URI"), "URI" => literal("https://example.com/"),
         },
     });
     let mut first = f.annots(0);
@@ -744,8 +734,8 @@ fn everything() -> Form {
     let pages = f.pages.clone();
     let item = |title: &str, page: ObjectId| {
         dictionary! {
-            "Title" => Object::string_literal(title),
-            "Dest" => vec![page.into(), "Fit".into()],
+            "Title" => literal(title),
+            "Dest" => vec![page.into(), Object::name("Fit")],
         }
     };
     outline_tree(

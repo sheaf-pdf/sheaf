@@ -27,7 +27,7 @@ fn images_become_pages() {
         "{}",
         String::from_utf8_lossy(&run.stderr)
     );
-    let pdf = lopdf::Document::load(&out).unwrap();
+    let pdf = sheaf_doc::pdf::Document::load(&out).unwrap();
     assert_eq!(pdf.get_pages().len(), 2);
     // A second run won't overwrite.
     let again = Command::new(env!("CARGO_BIN_EXE_sheaf-cli"))

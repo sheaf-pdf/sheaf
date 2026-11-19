@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use lopdf::{Dictionary, Object};
+use crate::pdf::{Dictionary, Object, Value};
 
 use super::lex::{self, LexError, LexErrorKind, ResCx, Step, Tok};
 use super::page::{Concat, ReadObjects, SpanAcross, direct};
@@ -24,18 +24,24 @@ pub struct PropertiesDict {
 impl PropertiesDict {
     /// The property lists of `resources`, as written.
     pub fn read(objects: &impl ReadObjects, resources: Option<&Object>) -> PropertiesDict {
+        fn plain_dict(o: &Object) -> Option<&Dictionary> {
+            match o.value() {
+                Value::Dict(d) => Some(d),
+                _ => None,
+            }
+        }
         let lists = resources
             .and_then(|r| direct(objects, r))
-            .and_then(|r| r.as_dict().ok())
-            .and_then(|r| direct(objects, r.get(b"Properties").ok()?))
-            .and_then(|p| p.as_dict().ok());
+            .and_then(plain_dict)
+            .and_then(|r| direct(objects, r.get(b"Properties")?))
+            .and_then(plain_dict);
         PropertiesDict {
             lists: lists
                 .into_iter()
                 .flat_map(|lists| lists.iter())
                 .filter_map(|(name, list)| {
-                    let list = direct(objects, list)?.as_dict().ok()?;
-                    Some((name.clone(), list.clone()))
+                    let list = plain_dict(direct(objects, list)?)?;
+                    Some((name.to_vec(), list.clone()))
                 })
                 .collect(),
         }
@@ -170,8 +176,8 @@ impl<'p> Nest<'p> {
             let list = self.props.get(&name).cloned();
             return Some(Props::Named(name.into_owned(), list));
         }
-        match lex::object(operand, self.depth)? {
-            Object::Dictionary(dict) => Some(Props::Inline(dict)),
+        match lex::object(operand, self.depth)?.into_value() {
+            Value::Dict(dict) => Some(Props::Inline(dict)),
             _ => None,
         }
     }

@@ -490,7 +490,7 @@ mod tests {
         let bytes = std::fs::read(sidecar).ok()?;
         let mut lines = bytes.splitn(4, |&b| b == b'\n');
         let body = lines.nth(3).unwrap();
-        let pdf = lopdf::Document::load_mem(body).unwrap();
+        let pdf = sheaf_doc::pdf::Document::load_mem(body).unwrap();
         Some(pdf.get_pages().len())
     }
 
@@ -611,7 +611,7 @@ mod tests {
                             assert!(!model.is_dirty());
                         })
                     });
-                    let saved = lopdf::Document::load(&to).unwrap();
+                    let saved = sheaf_doc::pdf::Document::load(&to).unwrap();
                     assert_eq!(saved.get_pages().len(), 3);
                     assert!(
                         kept(&recovery).is_empty(),
@@ -739,7 +739,7 @@ mod tests {
                             pages(v)
                         })
                     });
-                    let saved = lopdf::Document::load(&to).unwrap();
+                    let saved = sheaf_doc::pdf::Document::load(&to).unwrap();
                     assert_eq!(saved.get_pages().len(), landed, "every page landed");
                     assert!(gave.load(Ordering::Relaxed) < 20, "stopped short");
                     ran.store(true, Ordering::Relaxed);
@@ -1079,11 +1079,32 @@ mod tests {
 
     /// Each page's images' bytes in the PDF at `path`, in page order.
     fn page_images(path: &Path) -> Vec<Vec<Vec<u8>>> {
-        let pdf = lopdf::Document::load(path).unwrap();
+        let pdf = sheaf_doc::pdf::Document::load(path).unwrap();
         (pdf.get_pages().into_values())
             .map(|page| {
-                let images = pdf.get_page_images(page).unwrap();
-                images.iter().map(|image| image.content.to_vec()).collect()
+                let Some(res) = pdf.resources_of_page(page) else {
+                    return Vec::new();
+                };
+                let Some(sheaf_doc::pdf::Value::Dict(xobjects)) = res
+                    .get(b"XObject")
+                    .and_then(|o| pdf.dereference(o).ok())
+                    .map(|(_, o)| o.value())
+                else {
+                    return Vec::new();
+                };
+                xobjects
+                    .iter()
+                    .filter_map(|(_, obj)| {
+                        let (_, obj) = pdf.dereference(obj).ok()?;
+                        let stream = obj.as_stream()?;
+                        let subtype = stream
+                            .dict
+                            .get(b"Subtype")
+                            .and_then(sheaf_doc::pdf::Object::as_name)?;
+                        (subtype == b"Image")
+                            .then(|| sheaf_doc::pdf::StreamExt::raw_bytes(stream).to_vec())
+                    })
+                    .collect()
             })
             .collect()
     }

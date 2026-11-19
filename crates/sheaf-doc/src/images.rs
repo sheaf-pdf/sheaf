@@ -8,10 +8,8 @@
 //! or RGB under Flate. Reading and decoding the files is
 //! [`sheaf_image::io`]'s.
 
-use std::io::Write;
-
+use crate::pdf::{Document as Pdf, Object, Stream, deflate, dictionary};
 use anyhow::{Result, bail};
-use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_edit::Fit;
 use sheaf_image::io::{PageImage, Pixels};
 
@@ -76,7 +74,7 @@ pub fn to_pdf(pages: &[PageImage], fit: Fit) -> Result<Vec<u8>> {
             format!("q {w:.4} 0 0 {h:.4} {x:.4} {y:.4} cm /Im0 Do Q").into_bytes(),
         ));
         let mut dict = dictionary! {
-            "Type" => "Page",
+            "Type" => Object::name("Page"),
             "Parent" => pages_id,
             "MediaBox" => vec![0.into(), 0.into(), Object::from(pw), Object::from(ph)],
             "Contents" => content,
@@ -90,9 +88,10 @@ pub fn to_pdf(pages: &[PageImage], fit: Fit) -> Result<Vec<u8>> {
     let count = kids.len() as i64;
     pdf.objects.insert(
         pages_id,
-        dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => count }.into(),
+        dictionary! { "Type" => Object::name("Pages"), "Kids" => kids, "Count" => count }.into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
     crate::serialize::full::write_built(&pdf)
 }
@@ -101,9 +100,9 @@ pub(crate) fn image_stream(page: &PageImage) -> Result<Stream> {
     let (w, h) = (page.width as i64, page.height as i64);
     let base = |cs: &str, bits: i64| {
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Image",
+            "Type" => Object::name("XObject"), "Subtype" => Object::name("Image"),
             "Width" => w, "Height" => h,
-            "ColorSpace" => cs, "BitsPerComponent" => bits,
+            "ColorSpace" => Object::name(cs), "BitsPerComponent" => bits,
         }
     };
     Ok(match &page.pixels {
@@ -116,28 +115,26 @@ pub(crate) fn image_stream(page: &PageImage) -> Result<Stream> {
                 },
                 8,
             );
-            d.set("Filter", "DCTDecode");
-            Stream::new(d, bytes.clone()).with_compression(false)
+            d.set("Filter", Object::name("DCTDecode"));
+            Stream::new(d, bytes.clone())
         }
         Pixels::Gray(v) => flate(base("DeviceGray", 8), v)?,
         Pixels::Rgb(v) => flate(base("DeviceRGB", 8), v)?,
         Pixels::G4(bytes) => {
             let mut d = base("DeviceGray", 1);
-            d.set("Filter", "CCITTFaxDecode");
+            d.set("Filter", Object::name("CCITTFaxDecode"));
             d.set(
                 "DecodeParms",
                 dictionary! { "K" => -1, "Columns" => w, "Rows" => h },
             );
-            Stream::new(d, bytes.clone()).with_compression(false)
+            Stream::new(d, bytes.clone())
         }
     })
 }
 
-fn flate(mut dict: lopdf::Dictionary, data: &[u8]) -> Result<Stream> {
-    let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-    enc.write_all(data)?;
-    dict.set("Filter", "FlateDecode");
-    Ok(Stream::new(dict, enc.finish()?).with_compression(false))
+fn flate(mut dict: crate::pdf::Dictionary, data: &[u8]) -> Result<Stream> {
+    dict.set("Filter", Object::name("FlateDecode"));
+    Ok(Stream::new(dict, deflate(data)))
 }
 
 #[cfg(test)]
@@ -172,9 +169,12 @@ mod tests {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .map(|o| o.as_float().unwrap() as f32)
+                    .map(|o| o.as_number().unwrap() as f32)
                     .collect();
-                let rot = page.get(b"Rotate").and_then(|o| o.as_i64()).unwrap_or(0);
+                let rot = page
+                    .get(b"Rotate")
+                    .and_then(Object::as_integer)
+                    .unwrap_or(0);
                 let xo = page
                     .get(b"Resources")
                     .and_then(|r| r.as_dict())

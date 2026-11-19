@@ -23,7 +23,7 @@
 use std::cmp::Ordering;
 use std::ops::Range;
 
-use lopdf::{Object, dictionary};
+use crate::pdf::{dictionary, literal};
 
 use crate::annot::{Box2, Pt};
 use crate::content::{BlockId, ContentWriter, Glyphless, Reserved, ResourceNeeds, TextMode};
@@ -138,7 +138,7 @@ pub(crate) fn block(
     let mut w = ContentWriter::new();
     match private {
         Private::Keep => {
-            let list = dictionary! { "SHEF_OcrBlock" => Object::string_literal(id.to_string()) };
+            let list = dictionary! { "SHEF_OcrBlock" => literal(id.to_string()) };
             w.begin_marked("ShOCR", list);
         }
         Private::Strip | Private::Scrub => w.begin_tagged("ShOCR"),
@@ -186,7 +186,7 @@ pub(crate) fn block(
 
 #[cfg(test)]
 mod tests {
-    use lopdf::Document as Pdf;
+    use crate::pdf::{Document as Pdf, StreamExt};
     use sheaf_edit::Rotation;
 
     use super::*;
@@ -324,7 +324,7 @@ mod tests {
         assert!(c.starts_with(&start), "{c}");
         assert!(c.ends_with("ET\nQ\nEMC\n"), "{c}");
         assert_eq!(list.kind, ResKind::Properties);
-        let said = dictionary! { "SHEF_OcrBlock" => Object::string_literal("b2a") };
+        let said = dictionary! { "SHEF_OcrBlock" => literal("b2a") };
         assert_eq!(list.res, Res::dict(said));
         assert!(c.contains(&format!("/{} 10 Tf\n", name(font))), "{c}");
         assert!(font.name.starts_with(b"Sh"));
@@ -460,7 +460,7 @@ mod tests {
                     .unwrap(),
             )
             .unwrap();
-        assert_eq!(cid.get(b"DW").unwrap().as_i64().unwrap(), 500);
+        assert_eq!(cid.get(b"DW").unwrap().as_integer().unwrap(), 500);
         let c2g = pdf
             .get_object(cid.get(b"CIDToGIDMap").unwrap().as_reference().unwrap())
             .unwrap()

@@ -65,35 +65,45 @@ fetch "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/LICENSE" "$
 
 # ONNX Runtime: Microsoft's generic x86-64 build (runtime CPU dispatch, so
 # no AVX2 requirement), unlike the x86-64-v3 static binaries `ort` downloads.
-ort="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}"
+# Fetched from Microsoft's official `Microsoft.ML.OnnxRuntime` NuGet package
+# (microsoft/onnxruntime on GitHub went offline in Nov 2026; the NuGet `.nupkg`
+# distributes the identical Microsoft-built shared libraries).
+ORT_NUPKG_SHA256_1_28_0="769d1d3ea8ab6cd69f737c9dd4d4462aa4ad0ccfa106eaf506efc40d7bead5db"
 case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64)  ort_pkg="onnxruntime-linux-x64-${ORT_VERSION}.tgz";   ort_lib="libonnxruntime.so" ;;
-  Linux-aarch64) ort_pkg="onnxruntime-linux-aarch64-${ORT_VERSION}.tgz"; ort_lib="libonnxruntime.so" ;;
-  Darwin-arm64)  ort_pkg="onnxruntime-osx-arm64-${ORT_VERSION}.tgz";   ort_lib="libonnxruntime.dylib" ;;
-  Darwin-x86_64) ort_pkg="onnxruntime-osx-x86_64-${ORT_VERSION}.tgz";  ort_lib="libonnxruntime.dylib" ;;
-  MINGW64*|MSYS*|CYGWIN*) ort_pkg="onnxruntime-win-x64-${ORT_VERSION}.zip"; ort_lib="onnxruntime.dll" ;;
-  *) echo "unknown host for ONNX Runtime; set it up by hand" >&2; ort_pkg="" ;;
+  Linux-x86_64)  ort_rid="linux-x64";  ort_lib="libonnxruntime.so" ;;
+  Linux-aarch64) ort_rid="linux-arm64"; ort_lib="libonnxruntime.so" ;;
+  Darwin-arm64)  ort_rid="osx-arm64";  ort_lib="libonnxruntime.dylib" ;;
+  MINGW64*|MSYS*|CYGWIN*) ort_rid="win-x64"; ort_lib="onnxruntime.dll" ;;
+  *) echo "unknown host for ONNX Runtime; set it up by hand" >&2; ort_rid="" ;;
 esac
-if [[ -n "$ort_pkg" && ! -s "$dest/lib/$ort_lib" ]]; then
+if [[ -n "$ort_rid" && ! -s "$dest/lib/$ort_lib" ]]; then
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
-  fetch "$ort/$ort_pkg" "$tmp/$ort_pkg"
-  mkdir -p "$tmp/x"
-  if [[ "$ort_pkg" == *.zip ]]; then
-    # Git Bash has no unzip; PowerShell does.
-    powershell.exe -NoProfile -Command \
-      "Expand-Archive -Path '$(cygpath -w "$tmp/$ort_pkg")' -DestinationPath '$(cygpath -w "$tmp/x")' -Force"
-  else
-    tar -xzf "$tmp/$ort_pkg" -C "$tmp/x"
+  ort_nupkg="https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/${ORT_VERSION}/microsoft.ml.onnxruntime.${ORT_VERSION}.nupkg"
+  fetch "$ort_nupkg" "$tmp/onnxruntime.zip"
+  if [[ "$ORT_VERSION" == "1.28.0" ]]; then
+    if command -v sha256sum >/dev/null 2>&1; then
+      got="$(sha256sum "$tmp/onnxruntime.zip" | awk '{print $1}')"
+    else
+      got="$(shasum -a 256 "$tmp/onnxruntime.zip" | awk '{print $1}')"
+    fi
+    [[ "$got" == "$ORT_NUPKG_SHA256_1_28_0" ]] || {
+      echo "onnxruntime.zip SHA-256 $got != $ORT_NUPKG_SHA256_1_28_0" >&2
+      exit 1
+    }
   fi
-  # The library is versioned (libonnxruntime.so.1.28.0 or
-  # libonnxruntime.1.28.0.dylib, plus symlinks); keep one real file under
-  # the plain name.
-  found="$(find "$tmp/x" -type f \( -name "$ort_lib" -o -name "$ort_lib.*" -o -name "libonnxruntime.*.dylib" \) | sort | head -1)"
-  [[ -n "$found" ]] || { echo "no $ort_lib in $ort_pkg" >&2; exit 1; }
+  mkdir -p "$tmp/x"
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -q "$tmp/onnxruntime.zip" "runtimes/$ort_rid/native/$ort_lib" "LICENSE" -d "$tmp/x"
+  else
+    # Git Bash has no unzip unless added; PowerShell Expand-Archive extracts .zip.
+    powershell.exe -NoProfile -Command \
+      "Expand-Archive -Path '$(cygpath -w "$tmp/onnxruntime.zip")' -DestinationPath '$(cygpath -w "$tmp/x")' -Force"
+  fi
+  found="$tmp/x/runtimes/$ort_rid/native/$ort_lib"
+  [[ -s "$found" ]] || { echo "no $ort_lib in Microsoft.ML.OnnxRuntime ${ORT_VERSION} ($ort_rid)" >&2; exit 1; }
   cp "$found" "$dest/lib/$ort_lib"
-  lic="$(find "$tmp/x" -maxdepth 2 -name LICENSE | head -1)"
-  [[ -n "$lic" ]] && cp "$lic" "$dest/lib/LICENSE"
+  [[ -s "$tmp/x/LICENSE" ]] && tr -d '\r' < "$tmp/x/LICENSE" > "$dest/lib/LICENSE"
 fi
 
 echo "installed into $dest:"; du -sh "$dest"/*; ls -l "$dest/models" "$dest/tessdata" "$dest/lib"

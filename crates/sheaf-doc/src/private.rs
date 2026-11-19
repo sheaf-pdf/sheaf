@@ -13,7 +13,7 @@
 
 use std::collections::BTreeSet;
 
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, StreamExt, Value, literal};
 
 use crate::content::{self, ContentFault, PageContent, ResCx, Tok};
 use crate::source::Limits;
@@ -180,7 +180,7 @@ pub fn neutral_nm(nm: &str) -> String {
 /// Whether annotation dictionary `dict` holds sheaf's private data: a key
 /// of [`KEYS`], or a name sheaf gave it.
 pub(crate) fn in_annot(dict: &Dictionary) -> bool {
-    let nm = dict.get(b"NM").ok().and_then(|nm| nm.as_str().ok());
+    let nm = dict.get(b"NM").and_then(Object::as_bytes);
     (dict.iter()).any(|(key, _)| is_private(key)) || nm.is_some_and(is_sheaf_nm)
 }
 
@@ -190,16 +190,16 @@ pub(crate) fn in_annot(dict: &Dictionary) -> bool {
 pub(crate) fn strip_annot(dict: &mut Dictionary) {
     let keys: Vec<Vec<u8>> = (dict.iter())
         .filter(|(key, _)| is_private(key))
-        .map(|(key, _)| key.clone())
+        .map(|(key, _)| key.to_vec())
         .collect();
     for key in keys {
         dict.remove(&key);
     }
-    if let Ok(nm) = dict.get(b"NM").and_then(Object::as_str)
+    if let Some(nm) = dict.get(b"NM").and_then(Object::as_bytes)
         && is_sheaf_nm(nm)
     {
         let neutral = neutral_nm(&String::from_utf8_lossy(nm));
-        dict.set("NM", Object::string_literal(neutral));
+        dict.set("NM", literal(neutral));
     }
 }
 
@@ -216,10 +216,9 @@ pub struct Found {
 /// name or a property list's key in the content of a page, a form or a
 /// tiling pattern. Content that can't be read whole is read a stream at a
 /// time, and what can't be read fails closed: content that can't be lexed,
-/// and a stream whose data can't be decoded (lopdf hands back what of a
-/// broken deflated stream inflates) are searched for `/SHEF_` as bytes,
-/// and a stream that decodes past the content limit is taken to hold
-/// some.
+/// and a stream whose data can't be decoded are searched for `/SHEF_` as
+/// bytes, and a stream that decodes past the content limit is taken to
+/// hold some.
 pub fn found(pdf: &Pdf) -> Vec<Found> {
     let mut found = BTreeSet::new();
     walk(pdf, &mut |at, said| {
@@ -275,23 +274,26 @@ fn walk(pdf: &Pdf, f: &mut dyn FnMut(ObjectId, Said)) {
     let lim = Limits::DEFAULT;
     for (&id, obj) in &pdf.objects {
         object(id, obj, f);
-        let Ok(dict) = obj.as_dict().or_else(|_| obj.as_stream().map(|s| &s.dict)) else {
+        let Some(dict) = obj.as_dict() else {
             continue;
         };
-        if let Ok(Object::String(nm, _)) = dict.get(b"NM") {
+        if let Some(nm) = dict.get(b"NM").and_then(Object::as_bytes) {
             f(id, Said::Nm(nm));
         }
         let is = |key: &[u8], value: &[u8]| {
             dict.get(key)
                 .and_then(Object::as_name)
-                .is_ok_and(|n| n == value)
+                .is_some_and(|n| n == value)
         };
-        let streams = match obj {
-            _ if is(b"Type", b"Page") => content::contents(dict),
-            Object::Stream(_) if is(b"Subtype", b"Form") || dict.has(b"PatternType") => vec![id],
-            _ => continue,
+        let streams = if is(b"Type", b"Page") {
+            content::contents(dict)
+        } else if obj.as_stream().is_some() && (is(b"Subtype", b"Form") || dict.has(b"PatternType"))
+        {
+            vec![id]
+        } else {
+            continue;
         };
-        let resources = dict.get(b"Resources").ok();
+        let resources = dict.get(b"Resources");
         let res = ResCx::read(pdf, resources);
         if let Ok(read) = PageContent::read(pdf, &streams, &lim) {
             lexed(id, read.concat().bytes(), (&res, &lim), f);
@@ -305,8 +307,8 @@ fn walk(pdf: &Pdf, f: &mut dyn FnMut(ObjectId, Said)) {
                 Ok(read) => lexed(id, read.concat().bytes(), (&res, &lim), f),
                 Err(ContentFault::TooLarge(_)) => f(id, Said::Unread),
                 Err(_) => {
-                    let raw = pdf.get_object(stream).and_then(Object::as_stream);
-                    if raw.is_ok_and(|raw| says_shef(&raw.content)) {
+                    let raw = pdf.get_object(stream).ok().and_then(Object::as_stream);
+                    if raw.is_some_and(|raw| says_shef(raw.raw_bytes())) {
                         f(id, Said::Unread);
                     }
                 }
@@ -353,11 +355,11 @@ fn says_shef(bytes: &[u8]) -> bool {
 /// Each name and dictionary key in `obj`, at any depth, handed to `f`
 /// as `at`'s.
 fn object(at: ObjectId, obj: &Object, f: &mut dyn FnMut(ObjectId, Said)) {
-    match obj {
-        Object::Name(name) => f(at, Said::Name(name)),
-        Object::Array(items) => items.iter().for_each(|o| object(at, o, f)),
-        Object::Dictionary(dict) => entries(at, dict, f),
-        Object::Stream(stream) => entries(at, &stream.dict, f),
+    match obj.value() {
+        Value::Name(name) => f(at, Said::Name(name.as_bytes())),
+        Value::Array(items) => items.iter().for_each(|o| object(at, o, f)),
+        Value::Dict(dict) => entries(at, dict, f),
+        Value::Stream(stream) => entries(at, &stream.dict, f),
         _ => {}
     }
 }
@@ -372,7 +374,7 @@ fn entries(at: ObjectId, dict: &Dictionary, f: &mut dyn FnMut(ObjectId, Said)) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lopdf::{Stream, dictionary};
+    use crate::pdf::{Stream, dictionary};
 
     /// The table derives what Strip takes out of lists and streams, and
     /// matches names exactly or by prefix as it says.
@@ -395,15 +397,14 @@ mod tests {
         assert!(is_sheaf_nm(b"sheaf:12") && is_sheaf_nm(b"sheaf-anon:ab"));
         assert!(!is_sheaf_nm(b"sheafy") && !is_sheaf_nm(b"a1b2-c3"));
         // Every name sheaf writes is a second-class name (ISO 32000-2 Annex
-        // E): its prefix, `SHEF_`, then the rest.
+        // E): a 4-byte registered prefix (`SHEF`), `_`, then a non-empty key.
+        let is_second_class = |n: &[u8]| {
+            n.len() > 5 && n[4] == b'_' && n[..4].iter().all(|&b| b.is_ascii_graphic() && b != b'_')
+        };
         for key in KEYS.iter().filter(|k| k.places != [Place::Nm]) {
             let name = String::from_utf8_lossy(key.name);
             assert!(key.name.starts_with(b"SHEF_"), "{name}");
-            assert_eq!(
-                pdf_lint::Class::of(key.name),
-                pdf_lint::Class::Second,
-                "{name}"
-            );
+            assert!(is_second_class(key.name), "{name}");
         }
     }
 
@@ -426,17 +427,18 @@ mod tests {
     fn found_reads_dictionaries_names_and_content() {
         let mut pdf = Pdf::with_version("1.7");
         let content = pdf.add_object(Stream::new(
-            dictionary! { "SHEF_Block" => dictionary! { "K" => "Ocr", "B" => Object::string_literal("b1") } },
+            dictionary! { "SHEF_Block" => dictionary! { "K" => Object::name("Ocr"), "B" => literal("b1") } },
             b"/Artifact <</SHEF_Gen (g1) /Type /Pagination>> BDC /SHEF_OcrBlock 9 Tf (SHEF_Annot) Tj EMC"
                 .to_vec(),
         ));
         let image = pdf.add_object(Stream::new(
-            dictionary! { "Subtype" => "Image" },
+            dictionary! { "Subtype" => Object::name("Image") },
             b"/SHEF_Image Do".to_vec(),
         ));
-        let page = pdf.add_object(dictionary! { "Type" => "Page", "Contents" => content });
+        let page =
+            pdf.add_object(dictionary! { "Type" => Object::name("Page"), "Contents" => content });
         let annot = pdf.add_object(dictionary! {
-            "NM" => Object::string_literal("sheaf:7"), "SHEF_Annot" => Object::string_literal("{}"),
+            "NM" => literal("sheaf:7"), "SHEF_Annot" => literal("{}"),
         });
         let at = |at, name: &[u8]| Found {
             at,
@@ -467,7 +469,8 @@ mod tests {
         let unread = |data: &[u8]| {
             let mut pdf = Pdf::with_version("1.7");
             let content = pdf.add_object(Stream::new(dictionary! {}, data.to_vec()));
-            let page = pdf.add_object(dictionary! { "Type" => "Page", "Contents" => content });
+            let page = pdf
+                .add_object(dictionary! { "Type" => Object::name("Page"), "Contents" => content });
             (page, found(&pdf))
         };
         let want = |at| Found {
@@ -491,10 +494,11 @@ mod tests {
                 dictionary! {},
                 b"/Artifact <</SHEF_Gen (g1)>> BDC 0 0 9 9 re f EMC".to_vec(),
             ));
-            let filter = dictionary! { "Filter" => "JBIG2Decode" };
+            let filter = dictionary! { "Filter" => Object::name("JBIG2Decode") };
             let undecoded = pdf.add_object(Stream::new(filter, undecoded.to_vec()));
             let contents = vec![readable.into(), undecoded.into()];
-            let page = pdf.add_object(dictionary! { "Type" => "Page", "Contents" => contents });
+            let page = pdf
+                .add_object(dictionary! { "Type" => Object::name("Page"), "Contents" => contents });
             assert!(PageContent::read(&pdf, &[readable, undecoded], &Limits::DEFAULT).is_err());
             (page, found(&pdf))
         };

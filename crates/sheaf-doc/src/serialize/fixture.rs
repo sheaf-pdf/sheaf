@@ -1,31 +1,13 @@
 //! Encrypted files built in code, for this crate's tests and, with the
-//! `fixtures` feature, other crates': the encryptions a save keeps
-//! (RC4-40, RC4-128, AES-128 and AES-256, and AES-128 for attachments
-//! only, by `/EFF`) as lopdf writes them, a form to encrypt, a file whose
-//! `/ID` is one string, and a file whose objects are in an encrypted
-//! object stream, which lopdf can't write; and what the serializer's
-//! tests share: whole files as saves write them, packed or not, the edit
-//! they save, the bytes some writers put before the header, a file whose
-//! cross-reference table is long, a file with a later revision cut out,
-//! which PDFium refuses, a file linearized as far as Annex F's minimum
-//! (B3) tells, searches of the bytes written, as they are and as a
-//! reader inflates them, and a file's object streams.
+//! `fixtures` feature, other crates' (M18 slices 11–13), synthesized via
+//! `crate::pdf::test_crypt` (`pdf-crypt`'s `insecure-test-writer` +
+//! `pdf-structure::write::Encryptor`).
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
-use std::io::Read as _;
 use std::path::Path;
-use std::sync::Arc;
 
 use in_progress::NoProgress;
-use lopdf::encryption;
-use lopdf::encryption::crypt_filters::{Aes128CryptFilter, Aes256CryptFilter, CryptFilter};
-use lopdf::xref::XrefType;
-use lopdf::{
-    Dictionary, Document as Pdf, EncryptionState, EncryptionVersion, LazyPdf, Object, ObjectId,
-    Permissions, Stream, XrefKind, dictionary,
-};
-
 use sheaf_edit::Turn;
 
 use super::crypt::Crypt;
@@ -35,22 +17,22 @@ use crate::forms::fixture::{Form, note, outline_tree, row};
 use crate::materialize::ObjKey;
 use crate::materialize::emit::PdfVersion;
 use crate::model::Document;
+use crate::pdf::test_crypt::{CipherKind, TestEncryption};
+use crate::pdf::{
+    Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, ReadLimits, Stream, XrefKind,
+    dictionary, inflate, literal, resolve_fn,
+};
 use crate::store::BlobId;
 use crate::tx::fixture as fx;
 
 pub const OWNER: &str = "owner";
 pub const USER: &str = "user";
 
-/// What [`form`] holds, each a string nothing else in the file says: its
-/// text field's name and value, its bookmark's title, and its attached
-/// file's data.
 pub const FIELD: &str = "applicant";
 pub const VALUE: &str = "Ann Lee";
 pub const BOOKMARK: &str = "Chapter One";
 pub const ATTACHED: &[u8] = b"an attached note";
 
-/// Everything [`form`] says, its page's text included, which an
-/// encrypted file of it never shows in the clear.
 pub const FORM_SECRETS: [&[u8]; 5] = [
     FIELD.as_bytes(),
     VALUE.as_bytes(),
@@ -73,168 +55,105 @@ pub fn form() -> Pdf {
         vec![(
             0,
             dictionary! {
-                "Title" => Object::string_literal(BOOKMARK),
-                "Dest" => vec![page.into(), "Fit".into()],
+                "Title" => literal(BOOKMARK),
+                "Dest" => vec![Object::from(page), Object::name("Fit")],
             },
         )],
     );
     let data = f.pdf.add_object(Stream::new(
-        dictionary! { "Type" => "EmbeddedFile" },
+        dictionary! { "Type" => Object::name("EmbeddedFile") },
         ATTACHED.to_vec(),
     ));
     let spec = f.pdf.add_object(dictionary! {
-        "Type" => "Filespec",
-        "F" => Object::string_literal("note.txt"),
+        "Type" => Object::name("Filespec"),
+        "F" => literal("note.txt"),
         "EF" => dictionary! { "F" => data },
     });
     let catalog = f.catalog;
     f.dict(catalog).set(
         "Names",
         dictionary! { "EmbeddedFiles" => dictionary! {
-            "Names" => vec![Object::string_literal("note.txt"), spec.into()],
+            "Names" => vec![literal("note.txt"), Object::from(spec)],
         } },
     );
-    let id = Object::string_literal("0123456789abcdef");
+    let id = literal("0123456789abcdef");
     f.pdf.trailer.set("ID", vec![id.clone(), id]);
     f.pdf
 }
 
-/// `pdf` with its `/ID` cut to its first string, as some writers write
-/// it: RC4's and AES-128's keys are made from that string all the same.
+/// `pdf` with its `/ID` cut to its first string.
 pub fn one_id(mut pdf: Pdf) -> Pdf {
     let first = pdf.trailer.get(b"ID").unwrap().as_array().unwrap()[0].clone();
     pdf.trailer.set("ID", vec![first]);
     pdf
 }
 
-/// `plain` encrypted with RC4-40 (`/V 1`), with its name: apart from
-/// [`rc4_aes_128_and_aes_256`], to chain where every encryption is tried.
-pub fn rc4_40(plain: &Pdf) -> (&'static str, EncryptionState) {
-    let version = EncryptionVersion::V1 {
-        document: plain,
-        owner_password: OWNER,
-        user_password: USER,
-        permissions: Permissions::all(),
-    };
-    ("RC4-40", EncryptionState::try_from(version).unwrap())
+/// RC4-40 (`/V 1`) encryption spec for `plain`.
+pub fn rc4_40(_plain: &Pdf) -> (&'static str, TestEncryption) {
+    (
+        "RC4-40",
+        TestEncryption::new(CipherKind::Rc4_40, USER, OWNER),
+    )
 }
 
-/// `plain` encrypted with RC4-128, AES-128 and AES-256, each with its
-/// name.
-pub fn rc4_aes_128_and_aes_256(plain: &Pdf) -> [(&'static str, EncryptionState); 3] {
-    let std_cf = |filter: Arc<dyn CryptFilter>| BTreeMap::from([(b"StdCF".to_vec(), filter)]);
-    let versions = [
+/// RC4-128, AES-128 and AES-256 encryption specs for `plain`.
+pub fn rc4_aes_128_and_aes_256(_plain: &Pdf) -> [(&'static str, TestEncryption); 3] {
+    [
         (
             "RC4-128",
-            EncryptionVersion::V2 {
-                document: plain,
-                owner_password: OWNER,
-                user_password: USER,
-                key_length: 128,
-                permissions: Permissions::all(),
-            },
+            TestEncryption::new(CipherKind::Rc4_128, USER, OWNER),
         ),
         (
             "AES-128",
-            EncryptionVersion::V4 {
-                document: plain,
-                encrypt_metadata: true,
-                crypt_filters: std_cf(Arc::new(Aes128CryptFilter)),
-                stream_filter: b"StdCF".to_vec(),
-                string_filter: b"StdCF".to_vec(),
-                owner_password: OWNER,
-                user_password: USER,
-                permissions: Permissions::all(),
-            },
+            TestEncryption::new(CipherKind::Aes128, USER, OWNER),
         ),
         (
             "AES-256",
-            EncryptionVersion::V5 {
-                encrypt_metadata: true,
-                crypt_filters: std_cf(Arc::new(Aes256CryptFilter)),
-                file_encryption_key: &[7; 32],
-                stream_filter: b"StdCF".to_vec(),
-                string_filter: b"StdCF".to_vec(),
-                owner_password: OWNER,
-                user_password: USER,
-                permissions: Permissions::all(),
-            },
+            TestEncryption::new(CipherKind::Aes256, USER, OWNER),
         ),
-    ];
-    versions.map(|(name, version)| (name, EncryptionState::try_from(version).unwrap()))
+    ]
 }
 
-/// V4 with AES-128 for embedded files only: `/StmF` and `/StrF` are
-/// `/Identity`, and `/EFF` names `/CF`'s `/StdCF`.
-pub fn attachment_only(plain: &Pdf) -> EncryptionState {
-    let mut state = EncryptionState::try_from(EncryptionVersion::V4 {
-        document: plain,
-        encrypt_metadata: true,
-        crypt_filters: BTreeMap::from([(
-            b"StdCF".to_vec(),
-            Arc::new(Aes128CryptFilter) as Arc<dyn CryptFilter>,
-        )]),
-        stream_filter: b"Identity".to_vec(),
-        string_filter: b"Identity".to_vec(),
-        owner_password: OWNER,
-        user_password: USER,
-        permissions: Permissions::all(),
-    })
-    .unwrap();
-    state.set_embedded_file_filter(b"StdCF".to_vec());
-    state
+/// V4 with AES-128 for embedded files only (`/StmF /Identity`, `/StrF /Identity`, `/EFF /StdCF`).
+pub fn attachment_only(_plain: &Pdf) -> TestEncryption {
+    TestEncryption::new(CipherKind::Aes128, USER, OWNER).with_filters(
+        b"Identity",
+        b"Identity",
+        Some(b"StdCF".to_vec()),
+    )
 }
 
-/// `state`'s `/Encrypt` dictionary as Acrobat writes it: lopdf's, with
-/// AES-256's `/Length 256`, which lopdf leaves out (M11) and qpdf warns
-/// of, and poppler garbles every stream without.
-pub fn encrypt_dict(state: &EncryptionState) -> Dictionary {
-    let mut dict = state.encode().unwrap();
-    if dict.get(b"V").and_then(Object::as_i64).ok() == Some(5) {
-        dict.set("Length", 256);
-    }
-    dict
+/// `state`'s `/Encrypt` dictionary as stored in `plain`.
+pub fn encrypt_dict_for(plain: &Pdf, state: &TestEncryption) -> Dictionary {
+    state.encrypt_dict(plain)
 }
 
-/// `plain` encrypted with `state` and [`written`]. The `/Encrypt`
-/// dictionary, [`encrypt_dict`]'s, gets `edit`'s changes first.
+/// `plain` encrypted with `state` and [`written`], applying `edit` to the
+/// emitted `/Encrypt` dictionary before writing.
 pub fn encrypted(
     plain: &Pdf,
-    state: &EncryptionState,
+    state: &TestEncryption,
     edit: impl Fn(&mut Dictionary),
 ) -> [Vec<u8>; 2] {
     let mut pdf = plain.clone();
     pdf.encrypt(state).unwrap();
     let id = pdf.trailer.get(b"Encrypt").unwrap().as_reference().unwrap();
     let dict = pdf.get_dictionary_mut(id).unwrap();
-    *dict = encrypt_dict(state);
     edit(dict);
     written(&pdf)
 }
 
-/// `pdf` as lopdf writes it, with a cross-reference table and with a
-/// stream.
+/// `pdf` written with a cross-reference table and with a stream.
 pub fn written(pdf: &Pdf) -> [Vec<u8>; 2] {
-    [
-        XrefType::CrossReferenceTable,
-        XrefType::CrossReferenceStream,
-    ]
-    .map(|kind| {
+    [XrefKind::Table, XrefKind::Stream].map(|kind| {
         let mut pdf = pdf.clone();
-        pdf.reference_table.cross_reference_type = kind;
+        pdf.xref_kind = kind;
         let mut bytes = Vec::new();
         pdf.save_to(&mut bytes).unwrap();
         bytes
     })
 }
 
-/// `objects` as a whole file of `version` whose cross-references are
-/// `kind` and whose trailer is `base`'s but for its sections' own keys,
-/// through the writer saves use ([`full::write_bodies`]): each object
-/// written anew, keyed as a file's own at its number, encrypted with
-/// `crypt` when given, the `/Encrypt` dictionary after the last. What a
-/// full write leaves out (object streams, cross-reference streams, a
-/// linearization dictionary) is left out.
 pub fn whole(
     objects: &BTreeMap<ObjectId, Object>,
     base: &Dictionary,
@@ -245,9 +164,6 @@ pub fn whole(
     write_whole(objects, base, kind, version, crypt, None)
 }
 
-/// [`whole`]'s file of version 1.7 with a cross-reference stream, packed:
-/// what may go in an object stream does, grouped by `uses`, which pages
-/// use each object.
 pub fn whole_packed(
     objects: &BTreeMap<ObjectId, Object>,
     base: &Dictionary,
@@ -262,7 +178,6 @@ pub fn whole_packed(
     write_whole(objects, base, XrefKind::Stream, "1.7", crypt, Some(pack))
 }
 
-/// [`whole`]'s file, packed as `pack` says when given.
 fn write_whole(
     objects: &BTreeMap<ObjectId, Object>,
     base: &Dictionary,
@@ -275,7 +190,11 @@ fn write_whole(
     let written: Vec<(&ObjectId, &Object)> = (objects.iter())
         .filter(|(_, obj)| !full::left_out(obj))
         .collect();
-    let past = written.iter().map(|(id, _)| id.0 + 1).max().unwrap_or(1);
+    let past = written
+        .iter()
+        .map(|(id, _)| id.number + 1)
+        .max()
+        .unwrap_or(1);
     let bodies = written.into_iter().map(|(&id, obj)| {
         let key = ObjKey::Base {
             blob,
@@ -289,65 +208,62 @@ fn write_whole(
         kind,
         version: PdfVersion::parse(version.as_bytes()).expect("a version"),
         crypt,
-        encrypt_at: (past, 0),
+        encrypt_at: ObjectId::new(past, 0),
         xref_from: 1,
         pack,
     };
     full::write_bodies(bodies, &layout, &NoProgress).unwrap().0
 }
 
-/// `pdf` encrypted with `state` the way a writer that packs objects into
-/// an object stream does, which lopdf's `save_modern` gets wrong (it
-/// encrypts each member under its own number, in a container it leaves
-/// plain): every object but the streams in one object stream, plain
-/// inside it, the container encrypted whole; each stream encrypted under
-/// its own number; the `/Encrypt` dictionary, [`encrypt_dict`]'s; and a
-/// cross-reference stream, which isn't encrypted, listing each member by
-/// its place in the container. `pdf`'s trailer gives `/Root`, `/Info` and
-/// `/ID`.
-pub fn object_streams_encrypted(pdf: &Pdf, state: &EncryptionState) -> Vec<u8> {
+/// `pdf` encrypted with `state` with every non-stream object in one encrypted
+/// `/ObjStm` container and a cross-reference stream.
+pub fn object_streams_encrypted(pdf: &Pdf, state: &TestEncryption) -> Vec<u8> {
     let container = pdf.max_id + 1;
     let (encrypt, xref) = (container + 1, container + 2);
-    // Each number's row: its type, then its offset or container, then its
-    // generation or place.
     let mut rows: BTreeMap<u32, (u8, u64, u16)> = BTreeMap::from([(0, (0, 0, u16::MAX))]);
     let (mut pairs, mut members) = (String::new(), Vec::new());
     let mut packed = 0;
-    for (&(num, generation), obj) in &pdf.objects {
-        if matches!(obj, Object::Stream(_)) {
+    for (&id, obj) in &pdf.objects {
+        if obj.as_stream().is_some() {
             continue;
         }
-        assert_eq!(generation, 0, "an object stream holds generation 0 only");
-        pairs.push_str(&format!("{num} {} ", members.len()));
+        assert_eq!(id.generation, 0, "an object stream holds generation 0 only");
+        pairs.push_str(&format!("{} {} ", id.number, members.len()));
         object::write(&mut members, obj).unwrap();
         members.push(b'\n');
-        rows.insert(num, (2, u64::from(container), packed));
+        rows.insert(id.number, (2, u64::from(container), packed));
         packed += 1;
     }
     let objstm = Stream::new(
         dictionary! {
-            "Type" => "ObjStm",
+            "Type" => Object::name("ObjStm"),
             "N" => i64::from(packed),
             "First" => pairs.len() as i64,
         },
         [pairs.into_bytes(), members].concat(),
     );
 
+    let enc = state.encryptor(pdf);
+    let encrypt_id = ObjectId::new(encrypt, 0);
+    let resolve = resolve_fn(|id| pdf.objects.get(&id));
+    let encrypting = enc
+        .laid_out(None, Some(encrypt_id), &pdf.trailer, &resolve)
+        .unwrap();
+
     let mut out = format!("%PDF-{}\n", pdf.version).into_bytes();
     out.extend_from_slice(full::BINARY);
     let streams = pdf
         .objects
         .iter()
-        .filter(|(_, obj)| matches!(obj, Object::Stream(_)))
+        .filter(|(_, obj)| obj.as_stream().is_some())
         .map(|(&id, obj)| (id, obj.clone()))
-        .chain([((container, 0), Object::Stream(objstm))]);
-    for (id, mut obj) in streams {
-        encryption::encrypt_object(state, id, &mut obj).unwrap();
-        let pos = object::indirect(&mut out, id, &obj).unwrap();
-        rows.insert(id.0, (1, pos as u64, id.1));
+        .chain([(ObjectId::new(container, 0), Object::from(objstm))]);
+    for (id, obj) in streams {
+        let pos = object::indirect_with(&mut out, id, &obj, &encrypting).unwrap();
+        rows.insert(id.number, (1, pos as u64, id.generation));
     }
-    let dict = Object::Dictionary(encrypt_dict(state));
-    let pos = object::indirect(&mut out, (encrypt, 0), &dict).unwrap();
+    let dict = Object::from(state.encrypt_dict(pdf));
+    let pos = object::indirect(&mut out, encrypt_id, &dict).unwrap();
     rows.insert(encrypt, (1, pos as u64, 0));
 
     let start = out.len();
@@ -360,32 +276,28 @@ pub fn object_streams_encrypted(pdf: &Pdf, state: &EncryptionState) -> Vec<u8> {
         data.extend_from_slice(&last.to_be_bytes());
     }
     let mut trailer = dictionary! {
-        "Type" => "XRef",
+        "Type" => Object::name("XRef"),
         "Size" => i64::from(xref + 1),
-        "W" => vec![1.into(), 4.into(), 2.into()],
-        "Encrypt" => (encrypt, 0),
+        "W" => vec![Object::from(1), Object::from(4), Object::from(2)],
+        "Encrypt" => encrypt_id,
     };
     for key in [&b"Root"[..], b"Info", b"ID"] {
-        if let Ok(value) = pdf.trailer.get(key) {
+        if let Some(value) = pdf.trailer.get(key) {
             trailer.set(key, value.clone());
         }
     }
     object::indirect(
         &mut out,
-        (xref, 0),
-        &Object::Stream(Stream::new(trailer, data)),
+        ObjectId::new(xref, 0),
+        &Object::from(Stream::new(trailer, data)),
     )
     .unwrap();
     out.extend_from_slice(format!("startxref\n{start}\n%%EOF\n").as_bytes());
     out
 }
 
-/// Bytes some writers put before `%PDF-`.
 pub const PREFIX: [u8; 100] = [b'~'; 100];
 
-/// `count` blank pages, written with a cross-reference table: a row an
-/// object, so a long one, which starts further back than a stamp's tail
-/// once there are a few thousand.
 pub fn blank_table(count: usize) -> Vec<u8> {
     let mut pdf = Pdf::with_version("1.4");
     let pages = pdf.new_object_id();
@@ -393,29 +305,29 @@ pub fn blank_table(count: usize) -> Vec<u8> {
     let kids: Vec<Object> = (0..count)
         .map(|_| {
             let page = dictionary! {
-                "Type" => "Page", "Parent" => pages, "Contents" => content,
-                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                "Type" => Object::name("Page"), "Parent" => pages, "Contents" => content,
+                "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(612), Object::from(792)],
             };
             pdf.add_object(page).into()
         })
         .collect();
-    let tree = dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => count as i64 };
+    let tree = dictionary! {
+        "Type" => Object::name("Pages"),
+        "Kids" => kids,
+        "Count" => count as i64,
+    };
     pdf.objects.insert(pages, tree.into());
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    let catalog = pdf.add_object(dictionary! {
+        "Type" => Object::name("Catalog"),
+        "Pages" => pages,
+    });
     pdf.trailer.set("Root", catalog);
-    pdf.reference_table.cross_reference_type = XrefType::CrossReferenceTable;
+    pdf.xref_kind = XrefKind::Table;
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
     bytes
 }
 
-/// `bytes`, a file with a cross-reference table, as the corpus's
-/// safedocs/4422502 is: a later revision cut out but for its trailer,
-/// which names a catalog past every object the file has, and its
-/// `startxref`, which leads into the middle of the first revision's
-/// table. PDFium rebuilds the cross-references, takes that trailer's
-/// `/Root`, finds no catalog and refuses the file (`FPDF_ERR_FORMAT`);
-/// sheaf's reader rebuilds them and reads the catalog the file has.
 pub fn revision_cut_out(mut bytes: Vec<u8>) -> Vec<u8> {
     let max = Pdf::load_mem(&bytes).unwrap().max_id;
     let at = bytes.windows(9).rposition(|w| w == b"startxref").unwrap() + 9;
@@ -435,17 +347,10 @@ pub fn revision_cut_out(mut bytes: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
-/// A one-page file whose linearization holds as far as ISO 32000-1
-/// Annex F's minimum tells (B3): its first object is a linearization
-/// dictionary whose `/L` is the file's length. Its hint tables are none,
-/// so a full check finds them wrong. Written by hand: lopdf's writer
-/// leaves out a dictionary with `/Linearized`.
 pub fn linearized_file() -> Vec<u8> {
     linearized_file_after(b"")
 }
 
-/// [`linearized_file`], with `lead` between its header and its first
-/// object, and `/L` the length still.
 pub fn linearized_file_after(lead: &[u8]) -> Vec<u8> {
     const L: &str = "/L 0000000000";
     let mut out = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n".to_vec();
@@ -497,15 +402,10 @@ pub fn linearized_file_after(lead: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Whether `bytes` hold `text` anywhere.
 pub fn holds(bytes: &[u8], text: &[u8]) -> bool {
     bytes.windows(text.len()).any(|w| w == text)
 }
 
-/// Whether `bytes` hold `text` where a reader finds it with no key: as it
-/// is ([`holds`]) or in hex, as a string written `<…>` holds it, in either
-/// case of digit; in the bytes, or in a stream's data that inflates, as an
-/// object stream's members do, which a search of the bytes misses.
 pub fn in_clear(bytes: &[u8], text: &[u8]) -> bool {
     let hex = |digits: &[u8; 16]| -> Vec<u8> {
         (text.iter())
@@ -518,7 +418,6 @@ pub fn in_clear(bytes: &[u8], text: &[u8]) -> bool {
         hex(b"0123456789abcdef"),
     ];
     let found = |hay: &[u8]| forms.iter().any(|form| holds(hay, form));
-    // A stream's data: after `stream` and its end of line, to `endstream`.
     let data = |at: usize| {
         let data = &bytes[at..];
         let data = data.strip_prefix(b"\r").unwrap_or(data);
@@ -527,10 +426,7 @@ pub fn in_clear(bytes: &[u8], text: &[u8]) -> bool {
         Some(&data[..end])
     };
     let inflates_to_it = |data: &[u8]| {
-        // What inflates before an error: of encrypted data, nothing.
-        let mut inflated = Vec::new();
-        let _ = flate2::read::ZlibDecoder::new(data).read_to_end(&mut inflated);
-        found(&inflated)
+        inflate(data, ReadLimits::DEFAULT.max_decompressed).is_ok_and(|plain| found(&plain))
     };
     found(bytes)
         || (bytes.windows(6).enumerate())
@@ -539,17 +435,12 @@ pub fn in_clear(bytes: &[u8], text: &[u8]) -> bool {
             .any(inflates_to_it)
 }
 
-/// The object streams `pdf`'s table lists, by number, read as objects: a
-/// search of the bytes would find a string or a name that says `/ObjStm`
-/// too.
 pub fn object_streams_of(pdf: &LazyPdf) -> Vec<ObjectId> {
     (pdf.ids())
         .filter(|&id| pdf.get(id).is_ok_and(objstm::is_container))
         .collect()
 }
 
-/// `path` opened as the app opens it, with `password`, its first page
-/// turned a quarter and a note put on it.
 pub fn edited(path: &Path, password: Option<&str>) -> Document {
     let mut doc = crate::open::file(path, password).unwrap().doc;
     let page = doc.page(0).unwrap();

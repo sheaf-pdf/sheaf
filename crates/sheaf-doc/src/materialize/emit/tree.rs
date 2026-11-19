@@ -20,8 +20,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use crate::pdf::{Dictionary, Object, ObjectId};
 use anyhow::{Context as _, Result, bail};
-use lopdf::{Dictionary, Object, ObjectId};
 
 use super::Cx;
 use crate::materialize::copy::Scope;
@@ -138,7 +138,7 @@ fn build(
 pub(crate) fn nodes(cx: &mut Cx, shape: &Shape) {
     for (n, node) in (0..).zip(&shape.nodes) {
         let mut dict = Dictionary::new();
-        dict.set("Type", Object::Name(b"Pages".to_vec()));
+        dict.set("Type", Object::name("Pages"));
         if let Some(parent) = node.parent {
             dict.set("Parent", cx.placeholder(ObjKey::PagesNode(parent)));
         }
@@ -152,7 +152,7 @@ pub(crate) fn nodes(cx: &mut Cx, shape: &Shape) {
             .collect::<Vec<_>>();
         dict.set("Kids", kids);
         dict.set("Count", node.count as i64);
-        cx.push(ObjKey::PagesNode(n), Object::Dictionary(dict));
+        cx.push(ObjKey::PagesNode(n), Object::from(dict));
     }
 }
 
@@ -326,11 +326,7 @@ pub fn spliced(
         match index.get(&kid) {
             Some(&j) => {
                 if std::mem::replace(&mut walked[j], true) {
-                    bail!(
-                        "the saved file's page tree lists node {} {} twice",
-                        kid.0,
-                        kid.1
-                    );
+                    bail!("the saved file's page tree lists node {kid} twice");
                 }
                 parent[j] = Some(i);
                 under[i].push(j);
@@ -452,9 +448,9 @@ pub fn spliced(
         let node = &work[w];
         let key = match node.id {
             Some(id) => {
-                let k = keys.get(&id).with_context(|| {
-                    format!("node {} {} of the saved page tree has no key", id.0, id.1)
-                })?;
+                let k = keys
+                    .get(&id)
+                    .with_context(|| format!("node {id} of the saved page tree has no key"))?;
                 ObjKey::PagesNode(*k)
             }
             None => {
@@ -615,12 +611,12 @@ pub(crate) fn spliced_nodes(cx: &mut Cx, spliced: &Spliced) {
             .from
             .and_then(|at| primary.pdf().get_dictionary(at).ok());
         for (k, v) in held.into_iter().flat_map(|d| d.iter()) {
-            if !matches!(k.as_slice(), b"Type" | b"Parent" | b"Kids" | b"Count") {
+            if !matches!(k, b"Type" | b"Parent" | b"Kids" | b"Count") {
                 let v = cx.sym(v, &scope);
-                dict.set(k.clone(), v);
+                dict.set(k, v);
             }
         }
-        dict.set("Type", Object::Name(b"Pages".to_vec()));
+        dict.set("Type", Object::name("Pages"));
         if let Some(parent) = node.parent {
             let parent = spliced.nodes[parent as usize].key;
             dict.set("Parent", cx.placeholder(parent));
@@ -635,7 +631,7 @@ pub(crate) fn spliced_nodes(cx: &mut Cx, spliced: &Spliced) {
             .collect::<Vec<_>>();
         dict.set("Kids", kids);
         dict.set("Count", node.count as i64);
-        cx.push(node.key, Object::Dictionary(dict));
+        cx.push(node.key, Object::from(dict));
     }
 }
 
@@ -717,10 +713,10 @@ mod tests {
     fn saved(nodes: &[(u32, &[u32])]) -> (TreeShape, ObjMap) {
         let nodes: Vec<TreeNode> = (nodes.iter())
             .map(|&(n, kids)| TreeNode {
-                id: (n, 0),
-                kids: kids.iter().map(|&k| (k, 0)).collect(),
+                id: ObjectId::new(n, 0),
+                kids: kids.iter().map(|&k| ObjectId::new(k, 0)).collect(),
                 size: kids.len(),
-                from: Some((n, 0)),
+                from: Some(ObjectId::new(n, 0)),
             })
             .collect();
         let keys = (0..).zip(&nodes).map(|(k, n)| (ObjKey::PagesNode(k), n.id));
@@ -734,7 +730,7 @@ mod tests {
     /// Page `PageId(n)` is object `n` of the saved file; one past 9,999 it
     /// hasn't got.
     fn at(p: PageId) -> Option<ObjectId> {
-        (p.0 < 10_000).then_some((p.0 as u32, 0))
+        (p.0 < 10_000).then_some(ObjectId::new(p.0 as u32, 0))
     }
 
     fn ids(ns: impl IntoIterator<Item = u32>) -> Vec<PageId> {
@@ -857,7 +853,10 @@ mod tests {
         assert_eq!(more, ObjKey::PagesNode(3));
         let node = |k: ObjKey| s.nodes.iter().find(|n| n.key == k).unwrap();
         assert_eq!((node(a).count, node(more).count), (65, 64));
-        assert_eq!((node(more).id, node(more).from), (None, Some((2, 0))));
+        assert_eq!(
+            (node(more).id, node(more).from),
+            (None, Some(ObjectId::new(2, 0)))
+        );
         assert_eq!(node(more).size, 64);
         assert!(node(root).changed && node(a).changed && node(more).changed);
         assert!(!node(b).changed);
@@ -910,10 +909,10 @@ mod tests {
     fn nodes_are_their_keys_by_number() {
         let (tree, mut map) = saved(&[(1, &[2, 3]), (2, &[100]), (3, &[101])]);
         map.keys = BTreeMap::from([
-            (ObjKey::PagesNode(7), (1, 0)),
-            (ObjKey::PagesNode(2), (2, 0)),
-            (ObjKey::PagesNode(5), (3, 0)),
-            (ObjKey::PagesNode(9), (50, 0)),
+            (ObjKey::PagesNode(7), ObjectId::new(1, 0)),
+            (ObjKey::PagesNode(2), ObjectId::new(2, 0)),
+            (ObjKey::PagesNode(5), ObjectId::new(3, 0)),
+            (ObjKey::PagesNode(9), ObjectId::new(50, 0)),
         ]);
         let s = spliced(&tree, &map, &at, &ids([100, 101])).unwrap();
         let keys: Vec<ObjKey> = s.nodes.iter().map(|n| n.key).collect();

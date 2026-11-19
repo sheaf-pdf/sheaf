@@ -1,4 +1,4 @@
-//! Direct access to a PDF file's object graph via lopdf. This is the
+//! Direct access to a PDF file's object graph. This is the
 //! serialization backend (see docs/document-model.md), not the editing
 //! model; the viewer never touches it.
 
@@ -7,14 +7,14 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 pub struct PdfFile {
-    inner: lopdf::Document,
+    inner: crate::pdf::Document,
 }
 
 impl PdfFile {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let inner =
-            lopdf::Document::load(path).with_context(|| format!("loading {}", path.display()))?;
+        let inner = crate::pdf::Document::load(path)
+            .with_context(|| format!("loading {}", path.display()))?;
         Ok(Self { inner })
     }
 
@@ -28,14 +28,14 @@ impl PdfFile {
         Ok(())
     }
 
-    pub fn into_inner(self) -> lopdf::Document {
+    pub fn into_inner(self) -> crate::pdf::Document {
         self.inner
     }
 }
 
 use std::collections::HashMap;
 
-use lopdf::{Dictionary, Object, ObjectId};
+use crate::pdf::{Dictionary, Object, ObjectId, Value};
 use sheaf_edit::Rotation;
 
 use crate::annot::{Annot, AnnotKind, Box2, Pt, from_json};
@@ -50,9 +50,11 @@ use crate::attachments::Objects;
 /// which is another tool's.
 pub(crate) fn sheaf_mark<P: Objects + ?Sized>(pdf: &P, entry: &Object) -> Option<Annot> {
     let (_, dict) = pdf.dereference(entry).ok()?;
-    let dict = dict.as_dict().ok()?;
-    let (_, json) = pdf.dereference(dict.get(b"SHEF_Annot").ok()?).ok()?;
-    let payload = from_json(text_string(json.as_str().ok()?).as_bytes())?;
+    let Value::Dict(dict) = dict.value() else {
+        return None;
+    };
+    let (_, json) = pdf.dereference(dict.get(b"SHEF_Annot")?).ok()?;
+    let payload = from_json(text_string(json.as_bytes()?).as_bytes())?;
     if payload.v != crate::annot::VERSION {
         return None;
     }
@@ -93,18 +95,14 @@ pub(crate) fn stamp_page<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Opt
     if forms.len() != 1 {
         return None;
     }
-    forms.iter().next()?.1.as_reference().ok()
+    forms.iter().next()?.1.as_reference()
 }
 
 /// The embedded file an attachment's file specification holds, `dict` its
 /// dictionary: its stream, which isn't read.
 pub(crate) fn attached_file<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<ObjectId> {
     let ef = dict_at(pdf, dict_at(pdf, dict, b"FS")?, b"EF")?;
-    ef.get(b"F")
-        .or_else(|_| ef.get(b"UF"))
-        .ok()?
-        .as_reference()
-        .ok()
+    ef.get(b"F").or_else(|| ef.get(b"UF"))?.as_reference()
 }
 
 /// `d`'s `key`, its references followed: a dictionary, or a stream's.
@@ -113,11 +111,7 @@ fn dict_at<'a, P: Objects + ?Sized>(
     d: &'a Dictionary,
     key: &[u8],
 ) -> Option<&'a Dictionary> {
-    match pdf.dereference(d.get(key).ok()?).ok()?.1 {
-        Object::Dictionary(d) => Some(d),
-        Object::Stream(s) => Some(&s.dict),
-        _ => None,
-    }
+    pdf.dereference(d.get(key)?).ok()?.1.as_dict()
 }
 
 /// Is this `/Annots` entry one of ours to rewrite: a mark this build can
@@ -132,7 +126,10 @@ pub(crate) fn is_ours<P: Objects + ?Sized>(pdf: &P, entry: &Object) -> bool {
     let Some(dict) = pdf
         .dereference(entry)
         .ok()
-        .and_then(|(_, o)| o.as_dict().ok())
+        .and_then(|(_, o)| match o.value() {
+            Value::Dict(d) => Some(d),
+            _ => None,
+        })
     else {
         return false;
     };
@@ -141,13 +138,13 @@ pub(crate) fn is_ours<P: Objects + ?Sized>(pdf: &P, entry: &Object) -> bool {
         return mark(entry).is_some();
     }
     // One step only: a companion's /IRT is its mark, never another companion.
-    let Ok(irt) = dict.get(b"IRT") else {
+    let Some(irt) = dict.get(b"IRT") else {
         return false;
     };
     let name = |key: &[u8], is: &[u8]| {
         dict.get(key)
             .and_then(Object::as_name)
-            .is_ok_and(|n| n == is)
+            .is_some_and(|n| n == is)
     };
     name(b"RT", b"Group")
         && name(b"Subtype", b"StrikeOut")
@@ -205,7 +202,7 @@ impl ForeignAnnot {
 /// A name for an annotation without `/NM`, from what it says: the same
 /// every time it's read, so a reply made in sheaf can name it, and a save
 /// writes it in as its `/NM`.
-pub fn anon_name(dict: &lopdf::Dictionary) -> String {
+pub fn anon_name(dict: &crate::pdf::Dictionary) -> String {
     // The fields one after another, each ended by a byte no text has, and
     // their checksum: stable across builds, unlike std's hasher.
     let mut fields: Vec<u8> = Vec::new();
@@ -221,16 +218,16 @@ pub fn anon_name(dict: &lopdf::Dictionary) -> String {
         b"CreationDate",
         b"Contents",
     ] {
-        let v = dict.get(key).ok();
-        match v {
-            Some(lopdf::Object::Array(a)) => {
+        let v = dict.get(key);
+        match v.map(Object::value) {
+            Some(Value::Array(a)) => {
                 for o in a {
                     // As an f32, as reals were read before, so names stay.
-                    eat(format!("{:.2}", o.as_float().unwrap_or(0.0) as f32).as_bytes());
+                    eat(format!("{:.2}", o.as_number().unwrap_or(0.0) as f32).as_bytes());
                 }
             }
-            Some(lopdf::Object::Name(n)) => eat(n),
-            Some(o) => eat(pdf_text(o).as_bytes()),
+            Some(Value::Name(n)) => eat(n.as_bytes()),
+            Some(_) => eat(pdf_text(v.unwrap()).as_bytes()),
             None => eat(b""),
         }
     }
@@ -238,9 +235,8 @@ pub fn anon_name(dict: &lopdf::Dictionary) -> String {
 }
 
 /// What an annotation is called in threads: its `/NM`, else [`anon_name`].
-pub fn thread_name(dict: &lopdf::Dictionary) -> String {
+pub fn thread_name(dict: &crate::pdf::Dictionary) -> String {
     dict.get(b"NM")
-        .ok()
         .map(pdf_text)
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| anon_name(dict))
@@ -313,34 +309,40 @@ impl AnnotsInFile {
 }
 
 /// [`load_pdf`] for a file in memory.
-pub fn load_pdf_mem(bytes: &[u8], password: Option<&str>) -> Result<lopdf::Document> {
-    let mut pdf = lopdf::Document::load_mem(bytes)?;
-    if pdf.is_encrypted() {
-        let options = lopdf::LoadOptions::with_password(password.unwrap_or(""));
-        pdf = lopdf::Document::load_mem_with_options(bytes, options)
+pub fn load_pdf_mem(bytes: &[u8], password: Option<&str>) -> Result<crate::pdf::Document> {
+    match password {
+        Some(pw) => crate::pdf::Document::load_mem_with_password(bytes, pw)
             .map_err(|e| anyhow::anyhow!("{e}"))
-            .context("decrypting")?;
+            .context("decrypting"),
+        None => {
+            let pdf = crate::pdf::Document::load_mem(bytes)?;
+            if pdf.is_encrypted() {
+                anyhow::bail!("encrypted PDF requires a password");
+            }
+            Ok(pdf)
+        }
     }
-    Ok(pdf)
 }
 
-/// Load a file with lopdf and, if it's encrypted, decrypt it in memory with
-/// `password` (or the empty user password many files use): strings and
-/// streams readable, lopdf's `EncryptionState` kept. lopdf's reader takes
-/// the `/Encrypt` dictionary out, so lopdf's own writer would write the
-/// file unencrypted; sheaf's writers take the encryption from the source
-/// instead ([`Source::crypt`](crate::source::Source::crypt)), and keep it.
-pub fn load_pdf(path: &Path, password: Option<&str>) -> Result<lopdf::Document> {
-    let mut pdf =
-        lopdf::Document::load(path).with_context(|| format!("loading {}", path.display()))?;
-    if pdf.is_encrypted() {
-        // lopdf only parses an encrypted file's objects when it has the
-        // password at load time, so load again with it.
-        pdf = lopdf::Document::load_with_password(path, password.unwrap_or(""))
+/// Load a file into memory through `pdf-structure` and, if it's encrypted,
+/// decrypt it with `password` (or the empty user password many files use).
+/// Decrypted documents omit `/Encrypt` from their trailer; sheaf's writers
+/// take the encryption from the source instead
+/// ([`Source::crypt`](crate::source::Source::crypt)), and keep it.
+pub fn load_pdf(path: &Path, password: Option<&str>) -> Result<crate::pdf::Document> {
+    match password {
+        Some(pw) => crate::pdf::Document::load_with_password(path, pw)
             .map_err(|e| anyhow::anyhow!("{e}"))
-            .with_context(|| format!("decrypting {}", path.display()))?;
+            .with_context(|| format!("decrypting {}", path.display())),
+        None => {
+            let pdf = crate::pdf::Document::load(path)
+                .with_context(|| format!("loading {}", path.display()))?;
+            if pdf.is_encrypted() {
+                anyhow::bail!("decrypting {}: password required", path.display());
+            }
+            Ok(pdf)
+        }
     }
-    Ok(pdf)
 }
 
 /// A text string's text, as PDFium decodes one: UTF-16 (a last odd byte
@@ -388,10 +390,10 @@ fn pdf_doc_char(b: u8) -> char {
 }
 
 /// Decode a PDF text string: UTF-16BE with BOM, else PDFDoc/Latin-1.
-pub fn pdf_text(o: &lopdf::Object) -> String {
-    match o.as_str() {
-        Ok(bytes) => pdf_text_bytes(bytes),
-        Err(_) => String::new(),
+pub fn pdf_text(o: &crate::pdf::Object) -> String {
+    match o.as_bytes() {
+        Some(bytes) => pdf_text_bytes(bytes),
+        None => String::new(),
     }
 }
 
@@ -435,20 +437,20 @@ fn is_listed_subtype(s: &str) -> bool {
 /// or its attachment's file.
 pub fn annots_in<P: Objects + ?Sized>(
     pdf: &P,
-    pages: impl IntoIterator<Item = (lopdf::ObjectId, Rotation)>,
+    pages: impl IntoIterator<Item = (crate::pdf::ObjectId, Rotation)>,
 ) -> AnnotsInFile {
     let mut out = AnnotsInFile::default();
     for (i, (page_id, turn)) in pages.into_iter().enumerate() {
         let Ok(page) = pdf.get_dictionary(page_id) else {
             continue;
         };
-        let Ok(annots) = page
+        let Some(annots) = page
             .get(b"Annots")
-            .and_then(|a| pdf.dereference(a).map(|(_, o)| o))
+            .and_then(|a| pdf.dereference(a).ok().map(|(_, o)| o))
         else {
             continue;
         };
-        let Ok(list) = annots.as_array() else {
+        let Some(list) = annots.as_array() else {
             continue;
         };
         if list.is_empty() {
@@ -457,12 +459,14 @@ pub fn annots_in<P: Objects + ?Sized>(
         let mut found = Vec::new();
         // Other tools', each by its place in `found`, and their
         // dictionaries, to convert together.
-        let mut dicts: Vec<(usize, &lopdf::Dictionary)> = Vec::new();
+        let mut dicts: Vec<(usize, &crate::pdf::Dictionary)> = Vec::new();
         for (slot, entry) in list.iter().enumerate() {
             let Ok((object, obj)) = pdf.dereference(entry) else {
                 continue;
             };
-            let Ok(dict) = obj.as_dict() else { continue };
+            let Value::Dict(dict) = obj.value() else {
+                continue;
+            };
             if let Some(annot) = sheaf_mark(pdf, entry) {
                 let held = held(pdf, dict, &annot);
                 found.push(InFile {
@@ -481,8 +485,7 @@ pub fn annots_in<P: Objects + ?Sized>(
             }
             let subtype = dict
                 .get(b"Subtype")
-                .ok()
-                .and_then(|o| o.as_name().ok())
+                .and_then(Object::as_name)
                 .map(|n| String::from_utf8_lossy(n).into_owned())
                 .unwrap_or_default();
             if subtype.is_empty() || !is_listed_subtype(&subtype) {
@@ -490,12 +493,11 @@ pub fn annots_in<P: Objects + ?Sized>(
             }
             let rect: Vec<f32> = dict
                 .get(b"Rect")
-                .ok()
                 .and_then(|o| pdf.dereference(o).ok())
-                .and_then(|(_, o)| o.as_array().ok())
+                .and_then(|(_, o)| o.as_array())
                 .map(|a| {
                     a.iter()
-                        .map(|v| v.as_float().unwrap_or(0.0) as f32)
+                        .map(|v| v.as_number().unwrap_or(0.0) as f32)
                         .collect()
                 })
                 .unwrap_or_default();
@@ -504,8 +506,11 @@ pub fn annots_in<P: Objects + ?Sized>(
             }
             let text = |key: &[u8]| dict.get(key).map(pdf_text).unwrap_or_default();
             let name_of = |key: &[u8]| -> Option<String> {
-                let (_, o) = pdf.dereference(dict.get(key).ok()?).ok()?;
-                Some(thread_name(o.as_dict().ok()?))
+                let (_, o) = pdf.dereference(dict.get(key)?).ok()?;
+                let Value::Dict(d) = o.value() else {
+                    return None;
+                };
+                Some(thread_name(d))
             };
             let state = match (text(b"StateModel"), text(b"State")) {
                 (_, s) if s.is_empty() => None,
@@ -536,26 +541,23 @@ pub fn annots_in<P: Objects + ?Sized>(
                 parent: name_of(b"IRT"),
                 grouped: dict
                     .get(b"RT")
-                    .ok()
-                    .and_then(|o| o.as_name().ok())
+                    .and_then(Object::as_name)
                     .is_some_and(|n| n == b"Group"),
                 state,
                 created: text(b"CreationDate"),
                 slot,
                 hidden: dict
                     .get(b"F")
-                    .ok()
-                    .and_then(|f| f.as_i64().ok())
+                    .and_then(Object::as_integer)
                     .is_some_and(|f| f & 2 != 0),
                 color: dict
                     .get(b"C")
-                    .ok()
                     .and_then(|c| pdf.dereference(c).ok())
-                    .and_then(|(_, c)| c.as_array().ok())
+                    .and_then(|(_, c)| c.as_array())
                     .filter(|c| c.len() == 3)
                     .map(|c| {
                         let v = |i: usize| {
-                            (c[i].as_float().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8
+                            (c[i].as_number().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8
                         };
                         [v(0), v(1), v(2)]
                     }),
@@ -569,7 +571,7 @@ pub fn annots_in<P: Objects + ?Sized>(
             });
         }
         if !dicts.is_empty() {
-            let (at, dicts): (Vec<usize>, Vec<&lopdf::Dictionary>) = dicts.into_iter().unzip();
+            let (at, dicts): (Vec<usize>, Vec<&crate::pdf::Dictionary>) = dicts.into_iter().unzip();
             let marks = crate::import::convert_page(pdf, &dicts, turn, Default::default());
             for ((i, dict), m) in at.into_iter().zip(dicts).zip(marks) {
                 if let Found::Foreign(f) = &mut found[i].found {
@@ -590,41 +592,48 @@ pub fn annots_in<P: Objects + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lopdf::{Object, Stream, dictionary};
+    use crate::pdf::{Object, Stream, dictionary, literal};
 
     /// `pdf`'s pages, none of them turned, as [`annots_in`] takes them.
-    fn upright(pdf: &lopdf::Document) -> impl Iterator<Item = (lopdf::ObjectId, Rotation)> + '_ {
+    fn upright(
+        pdf: &crate::pdf::Document,
+    ) -> impl Iterator<Item = (crate::pdf::ObjectId, Rotation)> + '_ {
         pdf.page_iter().map(|page| (page, Rotation::R0))
     }
 
-    /// Reals are f64s (vendor/lopdf/SHEAF.md). Read and written back by
-    /// lopdf, a fraction, a large number and a 16-digit coordinate keep
-    /// their digits, in a dictionary and in content; and an f32 that sheaf
-    /// computes is written as the digits it always was.
+    /// Reals are f64s. Read and written back, a fraction, a large number
+    /// and a 16-digit coordinate keep their digits, in a dictionary and in
+    /// content; and an f32 that sheaf computes is written as the digits it
+    /// always was.
     #[test]
     fn reals_keep_their_digits() {
-        use lopdf::content::{Content, Operation};
+        use crate::pdf::content::{Content, Operation};
         const TEXTS: [&str; 3] = ["0.1", "123456.789", "306.1234567890123"];
-        let reals = || TEXTS.map(|t| Object::Real(t.parse().unwrap())).to_vec();
-        let mut pdf = lopdf::Document::with_version("1.7");
+        let reals = || {
+            TEXTS
+                .map(|t| Object::from(t.parse::<f64>().unwrap()))
+                .to_vec()
+        };
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let pages_id = pdf.new_object_id();
         let ops = format!("{} {} m\n{} w", TEXTS[1], TEXTS[2], TEXTS[0]);
         let content = pdf.add_object(Stream::new(dictionary! {}, ops.clone().into_bytes()));
         let page = pdf.add_object(dictionary! {
-            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+            "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "SheafReals" => reals(),
         });
         pdf.objects.insert(
             pages_id,
-            dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+            dictionary! { "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1 }.into(),
         );
-        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        let catalog =
+            pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
         pdf.trailer.set("Root", catalog);
         let mut first = Vec::new();
         pdf.save_to(&mut first).unwrap();
 
-        let mut read = lopdf::Document::load_mem(&first).unwrap();
+        let mut read = crate::pdf::Document::load_mem(&first).unwrap();
         let mut written = Vec::new();
         read.save_to(&mut written).unwrap();
         let array = format!("[{}]", TEXTS.join(" "));
@@ -633,11 +642,12 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&written)
         );
-        let again = lopdf::Document::load_mem(&written).unwrap();
+        let again = crate::pdf::Document::load_mem(&written).unwrap();
         let dict = again.get_dictionary(page).unwrap();
-        assert_eq!(
-            dict.get(b"SheafReals").unwrap().as_array().unwrap(),
-            &reals()
+        assert!(
+            dict.get(b"SheafReals")
+                .unwrap()
+                .eq_value(&Object::from(reals()))
         );
         let content = Content::decode(&again.get_page_content(page)).unwrap();
         let operands: Vec<Object> = content
@@ -649,54 +659,57 @@ mod tests {
         assert_eq!(operands, vec![b, c, a]);
         assert_eq!(String::from_utf8(content.encode().unwrap()).unwrap(), ops);
 
-        // An f32 writes its shortest digits, a whole one too.
+        // An f32 writes its shortest digits, a point always so it reads back as a Real.
         let reals = [0.1f32, 612.0, -3.0, 16_777_216.0, 1e-7].map(Object::from);
         let width = Content {
             operations: vec![Operation::new("w", reals.to_vec())],
         };
-        assert_eq!(width.encode().unwrap(), b"0.1 612 -3 16777216 0.0000001 w");
+        assert_eq!(
+            width.encode().unwrap(),
+            b"0.1 612.0 -3.0 16777216.0 0.0000001 w"
+        );
     }
 
     #[test]
     fn their_threads_read_with_states_and_groups() {
-        use lopdf::{Object, Stream, dictionary};
-        let mut pdf = lopdf::Document::with_version("1.7");
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let pages_id = pdf.new_object_id();
         let content = pdf.add_object(Stream::new(dictionary! {}, b"".to_vec()));
-        let rect = || Object::Array(vec![10.into(), 10.into(), 20.into(), 20.into()]);
-        let text = |s: &str| Object::string_literal(s);
+        let rect = || Object::from(vec![10.into(), 10.into(), 20.into(), 20.into()]);
+        let text = |s: &str| literal(s);
         let parent = pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Highlight", "Rect" => rect(), "NM" => text("p"),
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Highlight"), "Rect" => rect(), "NM" => text("p"),
         });
         let accepted = pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(), "IRT" => parent,
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "Rect" => rect(), "IRT" => parent,
             "State" => text("Accepted"), "StateModel" => text("Review"), "F" => 30,
         });
         // No /StateModel: Review, as Acrobat reads it.
         let completed = pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(), "IRT" => parent,
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "Rect" => rect(), "IRT" => parent,
             "State" => text("Completed"),
         });
         let part = pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "StrikeOut", "Rect" => rect(), "IRT" => parent,
-            "RT" => Object::Name(b"Group".to_vec()),
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("StrikeOut"), "Rect" => rect(), "IRT" => parent,
+            "RT" => Object::name("Group"),
         });
         let list: Vec<Object> = [parent, accepted, completed, part]
             .into_iter()
-            .map(Object::Reference)
+            .map(Object::from)
             .collect();
         let page = pdf.add_object(dictionary! {
-            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
-            "MediaBox" => Object::Array(vec![0.into(), 0.into(), 612.into(), 792.into()]),
+            "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
+            "MediaBox" => Object::from(vec![0.into(), 0.into(), 612.into(), 792.into()]),
             "Annots" => list,
         });
         pdf.objects.insert(
             pages_id,
-            Object::Dictionary(
-                dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 },
+            Object::from(
+                dictionary! { "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1 },
             ),
         );
-        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        let catalog =
+            pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
         pdf.trailer.set("Root", catalog);
         let read = annots_in(&pdf, upright(&pdf));
         let found: Vec<&ForeignAnnot> = read.foreign().into_iter().map(|(_, f)| f).collect();
@@ -717,11 +730,10 @@ mod tests {
     /// kept.
     #[test]
     fn a_mark_this_build_cant_read_is_another_tool_s() {
-        use lopdf::{Object, Stream, dictionary};
-        let mut pdf = lopdf::Document::with_version("1.7");
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let pages_id = pdf.new_object_id();
         let content = pdf.add_object(Stream::new(dictionary! {}, b"".to_vec()));
-        let rect = || Object::Array(vec![10.into(), 10.into(), 20.into(), 20.into()]);
+        let rect = || Object::from(vec![10.into(), 10.into(), 20.into(), 20.into()]);
         let ours = Annot {
             id: crate::annot::AnnotId(5),
             kind: crate::annot::AnnotKind::Note {
@@ -742,35 +754,36 @@ mod tests {
         };
         let main = crate::serialize::built::to_pdf(&ours, &mut pdf).main;
         let mut other_version = main.clone();
-        let json = text_string(main.get(b"SHEF_Annot").unwrap().as_str().unwrap());
+        let json = text_string(main.get(b"SHEF_Annot").unwrap().as_bytes().unwrap());
         let version = format!("\"v\":{}", crate::annot::VERSION);
         assert!(json.contains(&version), "{json}");
         let json = json.replace(&version, "\"v\":999");
-        other_version.set("SHEF_Annot", Object::string_literal(json));
+        other_version.set("SHEF_Annot", literal(json));
         let main = pdf.add_object(main);
         let other_version = pdf.add_object(other_version);
         let unknown = pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "StrikeOut", "Rect" => rect(),
-            "SHEF_Annot" => Object::string_literal(
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("StrikeOut"), "Rect" => rect(),
+            "SHEF_Annot" => literal(
                 format!(r#"{{"v":{},"id":6,"kind":{{"Future":{{}}}}}}"#, crate::annot::VERSION),
             ),
         });
         let list: Vec<Object> = [main, other_version, unknown]
             .into_iter()
-            .map(Object::Reference)
+            .map(Object::from)
             .collect();
         let page = pdf.add_object(dictionary! {
-            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
-            "MediaBox" => Object::Array(vec![0.into(), 0.into(), 612.into(), 792.into()]),
+            "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
+            "MediaBox" => Object::from(vec![0.into(), 0.into(), 612.into(), 792.into()]),
             "Annots" => list.clone(),
         });
         pdf.objects.insert(
             pages_id,
-            Object::Dictionary(
-                dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 },
+            Object::from(
+                dictionary! { "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1 },
             ),
         );
-        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        let catalog =
+            pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
         pdf.trailer.set("Root", catalog);
 
         let mine: Vec<bool> = list.iter().map(|e| is_ours(&pdf, e)).collect();
@@ -788,11 +801,10 @@ mod tests {
     /// tool's Caret, a StrikeOut is another tool's.
     #[test]
     fn a_strike_grouped_under_a_sheaf_caret_is_its_companion() {
-        use lopdf::{Object, Stream, dictionary};
-        let mut pdf = lopdf::Document::with_version("1.7");
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let pages_id = pdf.new_object_id();
         let content = pdf.add_object(Stream::new(dictionary! {}, b"".to_vec()));
-        let rect = || Object::Array(vec![10.into(), 10.into(), 20.into(), 20.into()]);
+        let rect = || Object::from(vec![10.into(), 10.into(), 20.into(), 20.into()]);
         let mark = |id, kind| Annot {
             id: crate::annot::AnnotId(id),
             kind,
@@ -827,7 +839,7 @@ mod tests {
         let caret = pdf.add_object(written.main);
         let [mut strike] = <[_; 1]>::try_from(written.companions).ok().unwrap();
         strike.set("IRT", caret);
-        strike.set("RT", Object::Name(b"Group".to_vec()));
+        strike.set("RT", Object::name("Group"));
         let strike = pdf.add_object(strike);
         let note = mark(
             6,
@@ -837,33 +849,34 @@ mod tests {
         );
         let note = crate::serialize::built::to_pdf(&note, &mut pdf).main;
         let note = pdf.add_object(note);
-        let grouped = |pdf: &mut lopdf::Document, under| {
+        let grouped = |pdf: &mut crate::pdf::Document, under| {
             pdf.add_object(dictionary! {
-                "Type" => "Annot", "Subtype" => "StrikeOut", "Rect" => rect(),
-                "IRT" => under, "RT" => "Group",
+                "Type" => Object::name("Annot"), "Subtype" => Object::name("StrikeOut"), "Rect" => rect(),
+                "IRT" => under, "RT" => Object::name("Group"),
             })
         };
         let under_note = grouped(&mut pdf, note);
         let their_caret = pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Caret", "Rect" => rect(),
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Caret"), "Rect" => rect(),
         });
         let under_theirs = grouped(&mut pdf, their_caret);
         let list: Vec<Object> = [caret, strike, note, under_note, their_caret, under_theirs]
             .into_iter()
-            .map(Object::Reference)
+            .map(Object::from)
             .collect();
         let page = pdf.add_object(dictionary! {
-            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
-            "MediaBox" => Object::Array(vec![0.into(), 0.into(), 612.into(), 792.into()]),
+            "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
+            "MediaBox" => Object::from(vec![0.into(), 0.into(), 612.into(), 792.into()]),
             "Annots" => list.clone(),
         });
         pdf.objects.insert(
             pages_id,
-            Object::Dictionary(
-                dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 },
+            Object::from(
+                dictionary! { "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1 },
             ),
         );
-        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        let catalog =
+            pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
         pdf.trailer.set("Root", catalog);
 
         let mine: Vec<bool> = list.iter().map(|e| is_ours(&pdf, e)).collect();
@@ -881,26 +894,26 @@ mod tests {
     /// with its object.
     #[test]
     fn reads_foreign_and_sheaf_annotations() {
-        let mut pdf = lopdf::Document::with_version("1.7");
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let pages_id = pdf.new_object_id();
         let content = pdf.add_object(Stream::new(dictionary! {}, b"".to_vec()));
         let note = pdf.add_object(dictionary! {
-            "Type" => "Annot",
-            "Subtype" => "Text",
-            "Rect" => Object::Array(vec![100.0.into(), 700.0.into(), 120.0.into(), 720.0.into()]),
-            "T" => Object::String(b"Reviewer".to_vec(), lopdf::StringFormat::Literal),
-            "Contents" => Object::String(vec![0xFE, 0xFF, 0x00, b'H', 0x00, b'i', 0x20, 0x14], lopdf::StringFormat::Hexadecimal),
-            "M" => Object::String(b"D:20260101120000Z".to_vec(), lopdf::StringFormat::Literal),
+            "Type" => Object::name("Annot"),
+            "Subtype" => Object::name("Text"),
+            "Rect" => Object::from(vec![100.0.into(), 700.0.into(), 120.0.into(), 720.0.into()]),
+            "T" => literal(b"Reviewer"),
+            "Contents" => Object::hex(vec![0xFE, 0xFF, 0x00, b'H', 0x00, b'i', 0x20, 0x14]),
+            "M" => literal(b"D:20260101120000Z"),
         });
         let link = pdf.add_object(dictionary! {
-            "Type" => "Annot",
-            "Subtype" => "Link",
-            "Rect" => Object::Array(vec![0.0.into(), 0.0.into(), 10.0.into(), 10.0.into()]),
+            "Type" => Object::name("Annot"),
+            "Subtype" => Object::name("Link"),
+            "Rect" => Object::from(vec![0.0.into(), 0.0.into(), 10.0.into(), 10.0.into()]),
         });
         let popup = pdf.add_object(dictionary! {
-            "Type" => "Annot",
-            "Subtype" => "Popup",
-            "Rect" => Object::Array(vec![0.0.into(), 0.0.into(), 10.0.into(), 10.0.into()]),
+            "Type" => Object::name("Annot"),
+            "Subtype" => Object::name("Popup"),
+            "Rect" => Object::from(vec![0.0.into(), 0.0.into(), 10.0.into(), 10.0.into()]),
         });
         let ours = Annot {
             id: crate::annot::AnnotId(3),
@@ -923,19 +936,20 @@ mod tests {
         let dict = crate::serialize::built::to_pdf(&ours, &mut pdf).main;
         let mine = pdf.add_object(dict);
         let page = pdf.add_object(dictionary! {
-            "Type" => "Page",
+            "Type" => Object::name("Page"),
             "Parent" => pages_id,
-            "MediaBox" => Object::Array(vec![0.into(), 0.into(), 612.into(), 792.into()]),
+            "MediaBox" => Object::from(vec![0.into(), 0.into(), 612.into(), 792.into()]),
             "Contents" => content,
-            "Annots" => Object::Array(vec![note.into(), link.into(), popup.into(), mine.into()]),
+            "Annots" => Object::from(vec![note.into(), link.into(), popup.into(), mine.into()]),
         });
         pdf.objects.insert(
             pages_id,
-            Object::Dictionary(dictionary! {
-                "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1,
+            Object::from(dictionary! {
+                "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1,
             }),
         );
-        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        let catalog =
+            pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
         pdf.trailer.set("Root", catalog);
 
         let found = annots_in(&pdf, upright(&pdf));
@@ -964,10 +978,10 @@ mod tests {
     /// the stamp converted through its appearance.
     #[test]
     fn annotations_read_from_a_source_as_loaded() {
-        let mut pdf = lopdf::Document::with_version("1.7");
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let pages_id = pdf.new_object_id();
-        let rect = || Object::Array(vec![10.into(), 10.into(), 20.into(), 20.into()]);
-        let text = |s: &str| Object::string_literal(s);
+        let rect = || Object::from(vec![10.into(), 10.into(), 20.into(), 20.into()]);
+        let text = |s: &str| literal(s);
         let at = Box2 {
             x: 10.0,
             y: 10.0,
@@ -998,50 +1012,51 @@ mod tests {
         let main = pdf.add_object(written.main);
         let [mut strike] = <[_; 1]>::try_from(written.companions).ok().unwrap();
         strike.set("IRT", main);
-        strike.set("RT", Object::Name(b"Group".to_vec()));
+        strike.set("RT", Object::name("Group"));
         let part = pdf.add_object(strike);
         let note = pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(), "NM" => text("n"),
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "Rect" => rect(), "NM" => text("n"),
             "T" => text("Reviewer"), "Contents" => text("Why?"),
         });
         let reply = pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(), "IRT" => note,
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "Rect" => rect(), "IRT" => note,
             "Contents" => text("Because."),
         });
         // The same content every run, so its stamp page is one cache file.
         let form = pdf.add_object(Stream::new(
             dictionary! {
-                "Type" => "XObject", "Subtype" => "Form",
+                "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"),
                 "BBox" => vec![0.into(), 0.into(), 100.into(), 40.into()],
             },
             b"0 0 1 rg 0 0 100 40 re f".to_vec(),
         ));
         let stamp = pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Stamp", "Name" => "SBApproved",
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Stamp"), "Name" => Object::name("SBApproved"),
             "Rect" => vec![100.into(), 600.into(), 200.into(), 640.into()],
             "AP" => dictionary! { "N" => form },
         });
         let file = pdf.add_object(Stream::new(dictionary! {}, b"attached".to_vec()));
         let attached = pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "FileAttachment", "Rect" => rect(),
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("FileAttachment"), "Rect" => rect(),
             "FS" => dictionary! {
-                "Type" => "Filespec", "F" => text("a.txt"), "EF" => dictionary! { "F" => file },
+                "Type" => Object::name("Filespec"), "F" => text("a.txt"), "EF" => dictionary! { "F" => file },
             },
         });
         let list: Vec<Object> = [main, part, note, reply, stamp, attached]
             .into_iter()
-            .map(Object::Reference)
+            .map(Object::from)
             .collect();
         let page = pdf.add_object(dictionary! {
-            "Type" => "Page", "Parent" => pages_id,
+            "Type" => Object::name("Page"), "Parent" => pages_id,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "Annots" => list,
         });
         pdf.objects.insert(
             pages_id,
-            dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+            dictionary! { "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1 }.into(),
         );
-        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        let catalog =
+            pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
         pdf.trailer.set("Root", catalog);
 
         let src = crate::open::tests::lazily(&mut pdf);

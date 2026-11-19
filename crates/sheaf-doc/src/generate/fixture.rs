@@ -3,7 +3,7 @@
 //! says is a header; and one Acrobat drew, a form its `/PieceInfo` says is
 //! a header. For tests here and in other crates (the `fixtures` feature).
 
-use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
+use crate::pdf::{Dictionary, Document as Pdf, Object, Stream, Value, dictionary, literal};
 
 /// A header Acrobat drew after the page's content, as it writes it: its
 /// form, `/HeaderFm`, drawn in an artifact.
@@ -16,15 +16,15 @@ pub const ACROBAT_HEADER: &[u8] = b"/Artifact <</Type /Pagination /Subtype /Head
 /// object they are).
 pub fn acrobat_header(pdf: &mut Pdf, page: &mut Dictionary) {
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
-        "Encoding" => "WinAnsiEncoding",
+        "Type" => Object::name("Font"), "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica"),
+        "Encoding" => Object::name("WinAnsiEncoding"),
     });
     let piece = dictionary! { "ADBE_CompoundType" => dictionary! {
-        "DocSettings" => dictionary! {}, "Private" => "Header",
+        "DocSettings" => dictionary! {}, "Private" => Object::name("Header"),
     } };
     let form = pdf.add_object(Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Form", "PieceInfo" => piece,
+            "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"), "PieceInfo" => piece,
             "BBox" => vec![0.into(), 0.into(), 300.into(), 20.into()],
             "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
         },
@@ -33,7 +33,7 @@ pub fn acrobat_header(pdf: &mut Pdf, page: &mut Dictionary) {
     let header = pdf.add_object(Stream::new(dictionary! {}, ACROBAT_HEADER.to_vec()));
     bind(pdf, page, b"XObject", b"HeaderFm", form.into());
     let mut contents: Vec<Object> = (crate::content::contents(page).into_iter())
-        .map(Object::Reference)
+        .map(Object::from)
         .collect();
     contents.push(header.into());
     page.set("Contents", contents);
@@ -63,21 +63,21 @@ pub const SHEAF_HEADER_JSON: &str = concat!(
 /// is ([`SHEAF_HEADER_JSON`]).
 pub fn sheaf_header(pdf: &mut Pdf, page: &mut Dictionary) {
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
-        "Encoding" => "WinAnsiEncoding",
+        "Type" => Object::name("Font"), "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica"),
+        "Encoding" => Object::name("WinAnsiEncoding"),
     });
     let list = dictionary! {
-        "Type" => "Pagination", "Subtype" => "Header",
-        "SHEF_Gen" => Object::string_literal("g1f"),
+        "Type" => Object::name("Pagination"), "Subtype" => Object::name("Header"),
+        "SHEF_Gen" => literal("g1f"),
     };
     let marker = dictionary! {
-        "SHEF_Block" => dictionary! { "K" => "Gen", "G" => Object::string_literal("g1f") },
+        "SHEF_Block" => dictionary! { "K" => Object::name("Gen"), "G" => literal("g1f") },
     };
     let block = pdf.add_object(Stream::new(marker, SHEAF_HEADER.to_vec()));
     bind(pdf, page, b"Font", b"ShHelv", font.into());
     bind(pdf, page, b"Properties", b"ShHead", list.into());
     let mut contents: Vec<Object> = (crate::content::contents(page).into_iter())
-        .map(Object::Reference)
+        .map(Object::from)
         .collect();
     contents.push(block.into());
     page.set("Contents", contents);
@@ -86,11 +86,14 @@ pub fn sheaf_header(pdf: &mut Pdf, page: &mut Dictionary) {
 /// `name` bound to `value` in `category` of `page`'s resources, those of
 /// its own or the object they are.
 fn bind(pdf: &mut Pdf, page: &mut Dictionary, category: &[u8], name: &[u8], value: Object) {
-    if let Ok(&Object::Reference(r)) = page.get(b"Resources") {
-        let resources = pdf.get_object_mut(r).and_then(Object::as_dict_mut);
+    if let Some(r) = page.get(b"Resources").and_then(Object::as_reference) {
+        let resources = pdf.get_object_mut(r).ok().and_then(Object::as_dict_mut);
         return bind_in(resources.expect("resources"), category, name, value);
     }
-    if !matches!(page.get(b"Resources"), Ok(Object::Dictionary(_))) {
+    if !matches!(
+        page.get(b"Resources").map(Object::value),
+        Some(Value::Dict(_))
+    ) {
         page.set("Resources", Dictionary::new());
     }
     let resources = page.get_mut(b"Resources").and_then(Object::as_dict_mut);

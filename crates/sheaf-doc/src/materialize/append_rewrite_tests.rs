@@ -37,8 +37,11 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::pdf::{
+    Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, StreamExt, Value as PdfValue,
+    dictionary, literal,
+};
 use in_progress::NoProgress;
-use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
 use proptest::prelude::*;
 use sheaf_edit::{Anchor, HeaderFooterSpec, Op, PageRef, Style as MarkStyle, Turn, Z};
 
@@ -69,19 +72,20 @@ use crate::tx::fixture as fx;
 /// Page `page`'s link of [`with_theirs`] goes to page `to`.
 fn link_to(f: &mut Form, link: ObjectId, to: usize) {
     let to = f.pages[to];
-    f.dict(link).set("Dest", vec![to.into(), "Fit".into()]);
+    f.dict(link)
+        .set("Dest", vec![to.into(), Object::name("Fit")]);
 }
 
 /// [`every_kind`]'s push button, on the second page of `f`, its action a
 /// GoTo of its own to page `to`.
 fn button_to(f: &mut Form, to: usize) {
-    let named = |d: &Dictionary| d.get(b"T").and_then(Object::as_str).ok() == Some(b"print[0]");
+    let named = |d: &Dictionary| d.get(b"T").and_then(Object::as_bytes) == Some(b"print[0]");
     let button = (f.annots(1).into_iter())
         .find(|&w| f.pdf.get_dictionary(w).is_ok_and(named))
         .expect("the push button");
     let to = f.pages[to];
     let action = f.pdf.add_object(dictionary! {
-        "S" => "GoTo", "D" => vec![to.into(), "Fit".into()],
+        "S" => Object::name("GoTo"), "D" => vec![to.into(), Object::name("Fit")],
     });
     f.dict(button).set("A", action);
 }
@@ -114,15 +118,15 @@ fn files_opening(xfa: bool, open: bool) -> (Vec<u8>, Vec<u8>) {
     if open {
         let (catalog, to) = (f.catalog, f.pages[1]);
         f.dict(catalog)
-            .set("OpenAction", vec![to.into(), "Fit".into()]);
+            .set("OpenAction", vec![to.into(), Object::name("Fit")]);
     }
     if xfa {
         f.xfa();
     }
     let item = |title: &str, page: ObjectId| {
         dictionary! {
-            "Title" => Object::string_literal(title),
-            "Dest" => vec![page.into(), "Fit".into()],
+            "Title" => literal(title),
+            "Dest" => vec![page.into(), Object::name("Fit")],
         }
     };
     let pages = f.pages.clone();
@@ -146,7 +150,7 @@ fn files_opening(xfa: bool, open: bool) -> (Vec<u8>, Vec<u8>) {
 fn screen_on(f: &mut Form, page: usize) {
     let p = f.pages[page];
     let screen = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Screen", "P" => p,
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Screen"), "P" => p,
         "Rect" => vec![200.into(), 10.into(), 220.into(), 30.into()],
     });
     let mut annots = f.annots(page);
@@ -252,18 +256,19 @@ struct Reopened {
 /// `o` of `pdf` written out by value, references followed `depth` deep,
 /// a stream as its dictionary and its decoded bytes.
 fn canon(pdf: &LazyPdf, o: &Object, depth: u8) -> String {
-    match o {
-        Object::Reference(id) if depth > 0 => match pdf.get(*id) {
+    match o.value() {
+        PdfValue::Ref(id) if depth > 0 => match pdf.get(*id) {
             Ok(o) => canon(pdf, o, depth - 1),
             Err(_) => "null".into(),
         },
-        Object::Dictionary(d) => dict(pdf, d, depth),
-        Object::Array(items) => {
+        PdfValue::Dict(d) => dict(pdf, d, depth),
+        PdfValue::Array(items) => {
             let items: Vec<String> = items.iter().map(|o| canon(pdf, o, depth)).collect();
             format!("[{}]", items.join(" "))
         }
-        Object::Stream(s) => format!("{} stream {}", dict(pdf, &s.dict, depth), decoded(s)),
-        o => format!("{o:?}"),
+        PdfValue::Stream(s) => format!("{} stream {}", dict(pdf, &s.dict, depth), decoded(s)),
+        PdfValue::String(s, _) => format!("string({:?})", s.as_bytes()),
+        v => format!("{v:?}"),
     }
 }
 
@@ -271,7 +276,7 @@ fn canon(pdf: &LazyPdf, o: &Object, depth: u8) -> String {
 /// with how the stream it heads is written.
 fn dict(pdf: &LazyPdf, d: &Dictionary, depth: u8) -> String {
     let mut entries: Vec<String> = (d.iter())
-        .filter(|(k, _)| !matches!(k.as_slice(), b"Length" | b"Filter" | b"DecodeParms"))
+        .filter(|(k, _)| !matches!(*k, b"Length" | b"Filter" | b"DecodeParms"))
         .map(|(k, v)| format!("/{} {}", String::from_utf8_lossy(k), canon(pdf, v, depth)))
         .collect();
     entries.sort();
@@ -282,7 +287,7 @@ fn dict(pdf: &LazyPdf, d: &Dictionary, depth: u8) -> String {
 fn decoded(s: &Stream) -> String {
     let bytes = s
         .decompressed_content()
-        .unwrap_or_else(|_| s.content.clone());
+        .unwrap_or_else(|_| s.raw_bytes().to_vec());
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
@@ -295,18 +300,22 @@ fn dest(pdf: &LazyPdf, id: ObjectId, pages: &[ObjectId]) -> Option<Dest> {
 /// among `pages`, goes: its `/Dest`, or its action's `/D`.
 fn dest_of(pdf: &LazyPdf, link: &Dictionary, pages: &[ObjectId]) -> Option<Dest> {
     let dest = match link.get(b"Dest") {
-        Ok(dest) => dest,
-        Err(_) => {
-            let (_, action) = pdf.dereference(link.get(b"A").ok()?).ok()?;
-            action.as_dict().ok()?.get(b"D").ok()?
+        Some(dest) => dest,
+        None => {
+            let (_, action) = pdf.dereference(link.get(b"A")?).ok()?;
+            action.as_dict()?.get(b"D")?
         }
     };
     let (_, dest) = pdf.dereference(dest).ok()?;
-    let page = (dest.as_array().ok())
-        .and_then(|d| Some((d.first()?.as_reference().ok()?, &d[1..])))
+    let page = dest
+        .as_array()
+        .and_then(|d| Some((d.first()?.as_reference()?, &d[1..])))
         .and_then(|(page, view)| Some((pages.iter().position(|&p| p == page)?, view)));
     Some(match page {
-        Some((at, view)) => Dest::Page(at, format!("{view:?}")),
+        Some((at, view)) => {
+            let view: Vec<String> = view.iter().map(|v| canon(pdf, v, 0)).collect();
+            Dest::Page(at, format!("[{}]", view.join(" ")))
+        }
         None => Dest::Other(canon(pdf, dest, 0)),
     })
 }
@@ -328,8 +337,8 @@ fn reopened(path: &Path) -> Reopened {
             let facts = src.page(def.base.index).expect("a page of its file");
             let ids: Vec<ObjectId> = src.page_ids().collect();
             let content = (facts.contents.iter())
-                .map(|&c| match pdf.get(c) {
-                    Ok(Object::Stream(s)) => decoded(s),
+                .map(|&c| match pdf.get(c).map(Object::value) {
+                    Ok(PdfValue::Stream(s)) => decoded(s),
                     o => format!("{o:?}"),
                 })
                 .collect();
@@ -337,10 +346,10 @@ fn reopened(path: &Path) -> Reopened {
                 (facts.resources.as_deref()).map_or_else(String::new, |r| canon(pdf, r, 8));
             // The page's `/Annots`, as its file has it.
             let listed: &[Object] = (pdf.get_dictionary(facts.id).ok())
-                .and_then(|d| d.get(b"Annots").ok())
+                .and_then(|d| d.get(b"Annots"))
                 .and_then(|a| pdf.dereference(a).ok())
-                .and_then(|(_, a)| a.as_array().ok())
-                .map_or(&[], Vec::as_slice);
+                .and_then(|(_, a)| a.as_array())
+                .unwrap_or(&[]);
             let annots = (st.annots_on(id))
                 .map(|(_, rec)| match &rec.body {
                     AnnotBody::Mark(m) => AnnotSays::Mark(Box::new(m.annot.clone())),
@@ -349,7 +358,7 @@ fn reopened(path: &Path) -> Reopened {
                             Some(r) => dest(r.src.pdf(), r.id, &ids),
                             // Written straight into `/Annots`.
                             None => (listed.get(f.summary.slot))
-                                .and_then(|e| e.as_dict().ok())
+                                .and_then(Object::as_dict)
                                 .and_then(|d| dest_of(pdf, d, &ids)),
                         };
                         AnnotSays::Foreign(Box::new((*f.summary).clone()), to)
@@ -363,19 +372,23 @@ fn reopened(path: &Path) -> Reopened {
                 })
                 .collect();
             let subtype = |d: &Dictionary| {
-                (d.get(b"Subtype").ok())
-                    .and_then(|s| s.as_name().ok())
+                d.get(b"Subtype")
+                    .and_then(Object::as_name)
                     .map_or_else(String::new, |s| String::from_utf8_lossy(s).into_owned())
             };
-            let entries =
-                || (listed.iter()).filter_map(|e| pdf.dereference(e).ok()?.1.as_dict().ok());
+            let entries = || {
+                (listed.iter()).filter_map(|e| match pdf.dereference(e).ok()?.1.value() {
+                    PdfValue::Dict(d) => Some(d),
+                    _ => None,
+                })
+            };
             let goes = entries()
                 .filter_map(|d| Some((subtype(d), dest_of(pdf, d, &ids)?)))
                 .collect();
             let astray = entries()
                 .filter(|d| {
                     d.get(b"P")
-                        .is_ok_and(|p| p.as_reference().ok() != Some(facts.id))
+                        .is_some_and(|p| p.as_reference() != Some(facts.id))
                 })
                 .map(subtype)
                 .collect();
@@ -495,9 +508,9 @@ fn reopened(path: &Path) -> Reopened {
 fn opened_at(doc: &Document) -> Option<Dest> {
     let src = doc.primary();
     let pdf = src.pdf();
-    let open = pdf.catalog().ok()?.get(b"OpenAction").ok()?;
-    let as_link = match pdf.dereference(open).ok()?.1 {
-        Object::Array(_) => dictionary! { "Dest" => open.clone() },
+    let open = pdf.catalog().ok()?.get(b"OpenAction")?;
+    let as_link = match pdf.dereference(open).ok()?.1.value() {
+        PdfValue::Array(_) => dictionary! { "Dest" => open.clone() },
         _ => dictionary! { "A" => open.clone() },
     };
     let pages: Vec<ObjectId> = src.page_ids().collect();
@@ -1431,7 +1444,7 @@ fn append_rewrite_a_copy_s_link_action_follows_its_page() {
     let link = with_theirs(&mut f, 0, "theirs");
     let to = f.pages[1];
     let action = f.pdf.add_object(dictionary! {
-        "S" => "GoTo", "D" => vec![to.into(), "Fit".into()],
+        "S" => Object::name("GoTo"), "D" => vec![to.into(), Object::name("Fit")],
     });
     f.dict(link).set("A", action);
     let b = dir.join("b.pdf");
@@ -1480,7 +1493,7 @@ fn a_copy_s_action_follows_its_page(
     let mut f = Form::new(2);
     let to = f.pages[1];
     let action = f.pdf.add_object(dictionary! {
-        "S" => "GoTo", "D" => vec![to.into(), "Fit".into()],
+        "S" => Object::name("GoTo"), "D" => vec![to.into(), Object::name("Fit")],
     });
     holder(&mut f, action);
     let b = dir.join("b.pdf");
@@ -1585,12 +1598,12 @@ fn append_rewrite_a_copy_s_inline_link_follows_its_page() {
     a_copy_s_action_follows_its_page(
         |f, action| {
             let link = dictionary! {
-                "Type" => "Annot", "Subtype" => "Link",
+                "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"),
                 "Rect" => vec![100.into(), 10.into(), 120.into(), 30.into()],
                 "A" => action,
             };
             let page = f.pages[0];
-            f.dict(page).set("Annots", vec![Object::Dictionary(link)]);
+            f.dict(page).set("Annots", vec![Object::from(link)]);
         },
         &[0, 1],
         true,
@@ -1604,7 +1617,7 @@ fn append_rewrite_a_copy_s_screen_action_follows_its_page() {
     a_copy_s_action_follows_its_page(
         |f, action| {
             let screen = f.pdf.add_object(dictionary! {
-                "Type" => "Annot", "Subtype" => "Screen",
+                "Type" => Object::name("Annot"), "Subtype" => Object::name("Screen"),
                 "Rect" => vec![100.into(), 10.into(), 120.into(), 30.into()],
                 "A" => action,
             });
@@ -1630,7 +1643,7 @@ fn append_rewrite_a_duplicate_s_button_action_follows_its_page() {
     let button = f.push_button("go", 0, crate::forms::fixture::row(0), "Go");
     let to = f.pages[1];
     let action = f.pdf.add_object(dictionary! {
-        "S" => "GoTo", "D" => vec![to.into(), "Fit".into()],
+        "S" => Object::name("GoTo"), "D" => vec![to.into(), Object::name("Fit")],
     });
     f.dict(button).set("A", action);
     std::fs::write(&path, f.bytes()).unwrap();
@@ -1654,7 +1667,7 @@ fn append_rewrite_a_duplicate_s_button_action_follows_its_page() {
 /// A GoTo action to `to`, as an object of `f`.
 fn go_to(f: &mut Form, to: ObjectId) -> ObjectId {
     f.pdf.add_object(dictionary! {
-        "S" => "GoTo", "D" => vec![to.into(), "Fit".into()],
+        "S" => Object::name("GoTo"), "D" => vec![to.into(), Object::name("Fit")],
     })
 }
 
@@ -1720,7 +1733,7 @@ fn append_rewrite_an_open_action_to_a_page_deleted_after_its_duplicate_rewrites(
         |f, to| {
             let catalog = f.catalog;
             f.dict(catalog)
-                .set("OpenAction", vec![to.into(), "Fit".into()]);
+                .set("OpenAction", vec![to.into(), Object::name("Fit")]);
         },
         |_| Refused::Stale(ObjKey::Catalog),
     );
@@ -1733,7 +1746,7 @@ fn append_rewrite_names_of_a_page_deleted_after_its_duplicate_rewrite() {
     a_page_deleted_after_its_duplicate(
         |f, to| {
             let dests = f.pdf.add_object(dictionary! {
-                "Names" => vec![Object::string_literal("last"), vec![to.into(), "Fit".into()].into()],
+                "Names" => vec![literal("last"), vec![to.into(), Object::name("Fit")].into()],
             });
             let catalog = f.catalog;
             f.dict(catalog)
@@ -1744,10 +1757,10 @@ fn append_rewrite_names_of_a_page_deleted_after_its_duplicate_rewrite() {
     a_page_deleted_after_its_duplicate(
         |f, to| {
             let element = f.pdf.add_object(dictionary! {
-                "Type" => "StructElem", "S" => "P", "Pg" => to,
+                "Type" => Object::name("StructElem"), "S" => Object::name("P"), "Pg" => to,
             });
             let root = f.pdf.add_object(dictionary! {
-                "Type" => "StructTreeRoot", "K" => vec![element.into()],
+                "Type" => Object::name("StructTreeRoot"), "K" => vec![element.into()],
             });
             let catalog = f.catalog;
             f.dict(catalog).set("StructTreeRoot", root);

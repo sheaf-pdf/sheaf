@@ -8,11 +8,11 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use in_progress::NoProgress;
-use lopdf::xref::XrefType;
-use lopdf::{
-    ByteSource, Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary,
+use crate::pdf::{
+    ByteSource, Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, XrefKind,
+    dictionary, literal,
 };
+use in_progress::NoProgress;
 use sheaf_edit::{Rotation, Turn};
 
 use super::append::append;
@@ -39,19 +39,25 @@ fn rect(r: [i64; 4]) -> Object {
 /// saying its number, as lopdf writes it in `kind`: the root gives every
 /// page its box and its font, and the first node, of more than one,
 /// turns its pages a quarter on a smaller box.
-pub(super) fn file(nodes: &[usize], kind: XrefType, version: &str) -> Vec<u8> {
+pub(super) fn file(nodes: &[usize], kind: XrefKind, version: &str) -> Vec<u8> {
     let mut pdf = Pdf::with_version(version);
     let root = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     });
     let mut n = 0;
     let mut page = |pdf: &mut Pdf, parent: ObjectId| {
         let text = format!("BT /F1 24 Tf 72 72 Td (page {n}) Tj ET");
         n += 1;
         let content = pdf.add_object(Stream::new(dictionary! {}, text.into_bytes()));
-        let page = dictionary! { "Type" => "Page", "Parent" => parent, "Contents" => content };
-        Object::Reference(pdf.add_object(page))
+        let page = dictionary! {
+            "Type" => Object::name("Page"),
+            "Parent" => parent,
+            "Contents" => content,
+        };
+        Object::from(pdf.add_object(page))
     };
     let kids: Vec<Object> = match nodes {
         [one] => (0..*one).map(|_| page(&mut pdf, root)).collect(),
@@ -60,29 +66,30 @@ pub(super) fn file(nodes: &[usize], kind: XrefType, version: &str) -> Vec<u8> {
                 let node = pdf.new_object_id();
                 let kids: Vec<Object> = (0..count).map(|_| page(&mut pdf, node)).collect();
                 let mut dict = dictionary! {
-                    "Type" => "Pages", "Parent" => root, "Kids" => kids, "Count" => count as i64,
+                    "Type" => Object::name("Pages"), "Parent" => root, "Kids" => kids, "Count" => count as i64,
                 };
                 if i == 0 {
                     dict.set("Rotate", 90);
                     dict.set("MediaBox", rect([0, 0, 300, 400]));
                 }
-                pdf.objects.insert(node, Object::Dictionary(dict));
-                Object::Reference(node)
+                pdf.objects.insert(node, Object::from(dict));
+                Object::from(node)
             })
             .collect(),
     };
     let count: usize = nodes.iter().sum();
     pdf.objects.insert(
         root,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => kids, "Count" => count as i64,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => kids, "Count" => count as i64,
             "MediaBox" => rect([0, 0, 612, 792]),
             "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
         }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => root });
     pdf.trailer.set("Root", catalog);
-    pdf.reference_table.cross_reference_type = kind;
+    pdf.xref_kind = kind;
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
     bytes
@@ -131,7 +138,10 @@ pub(super) fn written(base: usize, section: &[u8], whole: &Path) -> BTreeSet<Obj
     let bytes = std::fs::read(whole).unwrap();
     assert_eq!(bytes.len(), base + section.len());
     let pdf = lazy(&bytes);
-    let xref = |id| (pdf.get(id).ok()).is_some_and(|o| o.type_name().ok() == Some(b"XRef"));
+    let xref = |id| {
+        (pdf.get(id).ok())
+            .is_some_and(|o| o.as_dict().and_then(Dictionary::type_name) == Some(b"XRef"))
+    };
     pdf.ids()
         .filter(|&id| pdf.raw_span(id).is_some_and(|span| span.start >= base) && !xref(id))
         .collect()
@@ -197,11 +207,7 @@ fn color_of(path: &Path) -> [u8; 3] {
 #[test]
 fn a_mark_s_color_change_writes_the_mark_alone() {
     let dir = scratch();
-    let (path, mut doc) = opened(
-        &dir,
-        "a.pdf",
-        &file(&[3], XrefType::CrossReferenceTable, "1.7"),
-    );
+    let (path, mut doc) = opened(&dir, "a.pdf", &file(&[3], XrefKind::Table, "1.7"));
     let page = doc.page(0).unwrap();
     let add = fx::add(page, &square(1));
     doc.commit_ops(vec![add], "add").unwrap();
@@ -242,7 +248,11 @@ fn a_mark_s_color_change_writes_the_mark_alone() {
         );
     }
     for &at in wrote.iter().filter(|&&at| at != own) {
-        assert!(at.0 >= opened.xref.size, "{at:?} past {}", opened.xref.size);
+        assert!(
+            at.number >= opened.xref.size,
+            "{at:?} past {}",
+            opened.xref.size
+        );
         assert!(was.get(at).is_err());
     }
     assert!(doc.state().annot_ids_on(page).is_some());
@@ -257,8 +267,8 @@ fn a_mark_s_color_change_writes_the_mark_alone() {
 fn both_kinds_of_cross_reference_reopen_after_an_append() {
     let dir = scratch();
     for (kind, name) in [
-        (XrefType::CrossReferenceTable, "table.pdf"),
-        (XrefType::CrossReferenceStream, "stream.pdf"),
+        (XrefKind::Table, "table.pdf"),
+        (XrefKind::Stream, "stream.pdf"),
     ] {
         let (path, mut doc) = opened(&dir, name, &file(&[2, 3], kind, "1.7"));
         let pages: Vec<PageId> = (0..5).map(|i| doc.page(i).unwrap()).collect();
@@ -334,11 +344,7 @@ fn a_linearized_file_appended_to_is_linearized_no_more() {
 #[test]
 fn a_page_moved_across_nodes_carries_its_parent_and_inherited_keys() {
     let dir = scratch();
-    let (path, mut doc) = opened(
-        &dir,
-        "a.pdf",
-        &file(&[2, 2], XrefType::CrossReferenceTable, "1.7"),
-    );
+    let (path, mut doc) = opened(&dir, "a.pdf", &file(&[2, 2], XrefKind::Table, "1.7"));
     let pages: Vec<PageId> = (0..4).map(|i| doc.page(i).unwrap()).collect();
     let was = doc.geom(pages[0]);
     assert_eq!(was.rotate, Rotation::R90);
@@ -358,8 +364,13 @@ fn a_page_moved_across_nodes_carries_its_parent_and_inherited_keys() {
         parent,
         second.get(b"Parent").unwrap().as_reference().unwrap()
     );
-    assert_eq!(moved.get(b"Rotate").unwrap().as_i64().unwrap(), 90);
-    assert_eq!(moved.get(b"MediaBox").unwrap(), &rect([0, 0, 300, 400]));
+    assert_eq!(moved.get(b"Rotate").unwrap().as_integer().unwrap(), 90);
+    assert!(
+        moved
+            .get(b"MediaBox")
+            .unwrap()
+            .eq_value(&rect([0, 0, 300, 400]))
+    );
     assert!(moved.has(b"Resources"));
     // The two leaves, and that page: the root's kids and count stay.
     assert_eq!(wrote.len(), 3, "{wrote:?}");
@@ -383,16 +394,16 @@ fn a_page_moved_across_nodes_carries_its_parent_and_inherited_keys() {
 /// [`file`]'s pages under two nodes of two, written with a stream, the
 /// first page holding a mark of sheaf's and another tool's comment.
 fn commented() -> Vec<u8> {
-    let bytes = file(&[2, 2], XrefType::CrossReferenceStream, "1.7");
+    let bytes = file(&[2, 2], XrefKind::Stream, "1.7");
     let mut pdf = Pdf::load_mem(&bytes).unwrap();
     let first = pdf.get_pages()[&1];
     let mark = crate::serialize::built::to_pdf(&square(3), &mut pdf).main;
     let mark = pdf.add_object(mark);
     let theirs = pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Text", "NM" => Object::string_literal("theirs"),
-        "Rect" => rect([100, 700, 120, 720]), "Contents" => Object::string_literal("their note"),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "NM" => literal("theirs"),
+        "Rect" => rect([100, 700, 120, 720]), "Contents" => literal("their note"),
     });
-    let annots = vec![Object::Reference(mark), Object::Reference(theirs)];
+    let annots = vec![Object::from(mark), Object::from(theirs)];
     pdf.get_dictionary_mut(first).unwrap().set("Annots", annots);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
@@ -435,7 +446,12 @@ fn a_crop_appends_only_page_dicts() {
             assert_eq!(page.get(b"Type").unwrap().as_name().unwrap(), b"Page");
             let before = was.get_dictionary(at).unwrap();
             for key in [&b"Contents"[..], b"Annots", b"Parent"] {
-                assert_eq!(page.get(key).ok(), before.get(key).ok(), "{name}: {key:?}");
+                let same = match (page.get(key), before.get(key)) {
+                    (Some(a), Some(b)) => a.eq_value(b),
+                    (None, None) => true,
+                    _ => false,
+                };
+                assert!(same, "{name}: {key:?}");
             }
         }
         let back = crate::open::file(&path, None).unwrap().doc;
@@ -444,7 +460,10 @@ fn a_crop_appends_only_page_dicts() {
             let at = was.get_pages()[&(i as u32 + 1)];
             let written = now.get_dictionary(at).unwrap().get(b"CropBox").unwrap();
             let [x0, y0, x1, y1] = [crop.x0, crop.y0, crop.x1, crop.y1].map(Object::from);
-            assert_eq!(written, &Object::from(vec![x0, y0, x1, y1]), "{name}");
+            assert!(
+                written.eq_value(&Object::from(vec![x0, y0, x1, y1])),
+                "{name}"
+            );
             let geom = back.geom(back.page(i).unwrap());
             assert_eq!(geom, doc.geom(p), "{name}: page {i}");
             assert_ne!(geom.crop, geom.media, "{name}: page {i}");
@@ -462,11 +481,7 @@ fn a_crop_appends_only_page_dicts() {
 #[test]
 fn a_split_node_keeps_its_key_through_another_append() {
     let dir = scratch();
-    let (path, mut doc) = opened(
-        &dir,
-        "a.pdf",
-        &file(&[128, 2], XrefType::CrossReferenceStream, "1.7"),
-    );
+    let (path, mut doc) = opened(&dir, "a.pdf", &file(&[128, 2], XrefKind::Stream, "1.7"));
     let first = doc.page(5).unwrap();
     doc.commit_ops(vec![fx::duplicate(&[first])], "duplicate")
         .unwrap();
@@ -510,7 +525,7 @@ fn a_split_node_keeps_its_key_through_another_append() {
 #[test]
 fn new_numbers_start_past_the_size_and_the_cross_reference_stream() {
     let dir = scratch();
-    let bytes = file(&[2], XrefType::CrossReferenceStream, "1.7");
+    let bytes = file(&[2], XrefKind::Stream, "1.7");
     let was = lazy(&bytes);
     let (size, stream) = (was.xref().size, was.xref().max_stream.unwrap());
     assert!(stream + 1 >= size, "lopdf numbers its stream last");
@@ -519,23 +534,53 @@ fn new_numbers_start_past_the_size_and_the_cross_reference_stream() {
     doc.commit_ops(vec![add], "add").unwrap();
     let (base, section) = appended_in_place(&mut doc).unwrap();
     let wrote = written(base.len(), &section, &path);
-    let fresh: Vec<u32> = wrote.iter().map(|id| id.0).filter(|&n| n >= size).collect();
+    let fresh: Vec<u32> = wrote
+        .iter()
+        .map(|id| id.number)
+        .filter(|&n| n >= size)
+        .collect();
     assert!(!fresh.is_empty());
     assert!(fresh.iter().all(|&n| n > stream), "{fresh:?} past {stream}");
     let record = doc.saved_record().unwrap();
     let own = record.xref.max_stream.unwrap();
-    assert!(wrote.iter().all(|id| id.0 < own), "{wrote:?} before {own}");
+    assert!(
+        wrote.iter().all(|id| id.number < own),
+        "{wrote:?} before {own}"
+    );
     assert_eq!(record.xref.size, own + 1);
 }
 
-/// The same Append twice writes the same section, encrypted as the file
-/// is, its AES IVs keyed by what each object is: nothing the mark says is
-/// in it in the clear, and it reads back.
+/// The same Append twice writes the same section on unencrypted and RC4
+/// files, and fresh OS CSPRNG IVs on AES files: nothing the mark says is
+/// in an encrypted section in the clear, and both runs decrypt alike.
 #[test]
 fn the_same_section_twice_is_the_same_bytes() {
+    use crate::pdf::test_crypt::CipherKind;
     use crate::serialize::fixture::{USER, encrypted, holds, rc4_aes_128_and_aes_256};
     let dir = scratch();
-    let plain = crate::source::lazy_tests::plaintext();
+    let mut plain = crate::source::lazy_tests::plaintext();
+    let mut plain_bytes = Vec::new();
+    plain.save_to(&mut plain_bytes).unwrap();
+    {
+        let path = dir.join("plain.pdf");
+        std::fs::write(&path, &plain_bytes).unwrap();
+        let mut doc = crate::open::file(&path, None).unwrap().doc;
+        let add = fx::add(doc.page(0).unwrap(), &square(1));
+        doc.commit_ops(vec![add], "add").unwrap();
+        let v = doc.current_version();
+        let input = doc.save_input(v).unwrap();
+        let plan = SavePlan {
+            strategy: Strategy::Append { onto: Onto::Saved },
+            asks: Vec::new(),
+            transforms: Vec::new(),
+            notes: Vec::new(),
+        };
+        let base: Arc<dyn ByteSource> = Arc::new(Arc::<[u8]>::from(&plain_bytes[..]));
+        let once = append(&input, &plan, base.clone(), Mode::Veto, &NoProgress).unwrap();
+        let twice = append(&input, &plan, base, Mode::Veto, &NoProgress).unwrap();
+        doc.abandon_save(v);
+        assert_eq!(once.bytes, twice.bytes, "plain");
+    }
     for (name, state) in rc4_aes_128_and_aes_256(&plain) {
         let [bytes, _] = encrypted(&plain, &state, |_| {});
         let path = dir.join(format!("{name}.pdf"));
@@ -557,22 +602,39 @@ fn the_same_section_twice_is_the_same_bytes() {
         let once = append(&input, &plan, base.clone(), Mode::Veto, &NoProgress).unwrap();
         let twice = append(&input, &plan, base, Mode::Veto, &NoProgress).unwrap();
         doc.abandon_save(v);
-        assert_eq!(once.bytes, twice.bytes, "{name}");
-        assert_eq!(once.after, Some(bytes.len()));
-        assert!(!holds(&once.bytes, b"a secret square"), "{name}");
-        let whole = [&bytes[..], &once.bytes].concat();
-        let pdf = LazyPdf::open(
-            Arc::<[u8]>::from(&whole[..]),
-            Some(USER),
-            &Limits::DEFAULT.reader,
-        )
-        .unwrap();
-        assert!(pdf.base_sound(), "{name}");
-        assert_eq!(
-            pdf.trailer().get(b"Encrypt").ok(),
-            lazy_encrypt(&bytes).as_ref(),
-            "{name}"
-        );
+        if state.kind == CipherKind::Rc4_128 {
+            assert_eq!(once.bytes, twice.bytes, "{name}");
+        } else {
+            assert_ne!(once.bytes, twice.bytes, "{name}: fresh random AES IVs");
+        }
+        for out in [&once, &twice] {
+            assert_eq!(out.after, Some(bytes.len()));
+            assert!(!holds(&out.bytes, b"a secret square"), "{name}");
+            let whole = [&bytes[..], &out.bytes].concat();
+            let pdf = LazyPdf::open(
+                Arc::<[u8]>::from(&whole[..]),
+                Some(USER),
+                &Limits::DEFAULT.reader,
+            )
+            .unwrap();
+            assert!(pdf.base_sound(), "{name}");
+            assert_eq!(
+                pdf.trailer().get(b"Encrypt").and_then(Object::as_reference),
+                lazy_encrypt(&bytes).and_then(|o| o.as_reference()),
+                "{name}"
+            );
+            let reopened = Pdf::load_mem_with_password(&whole, USER).unwrap();
+            let annots = reopened
+                .get_page_annotations(reopened.get_pages()[&1])
+                .unwrap();
+            assert!(
+                annots
+                    .iter()
+                    .any(|d| d.get(b"Contents").and_then(Object::as_bytes)
+                        == Some(b"a secret square")),
+                "{name}"
+            );
+        }
     }
 }
 
@@ -585,7 +647,7 @@ fn lazy_encrypt(bytes: &[u8]) -> Option<Object> {
         &Limits::DEFAULT.reader,
     )
     .ok()?;
-    pdf.trailer().get(b"Encrypt").ok().cloned()
+    pdf.trailer().get(b"Encrypt").cloned()
 }
 
 /// A section that needs a later version than its file is says so in the
@@ -593,11 +655,7 @@ fn lazy_encrypt(bytes: &[u8]) -> Option<Object> {
 #[test]
 fn a_version_bump_writes_the_catalog_with_its_version() {
     let dir = scratch();
-    let (path, mut doc) = opened(
-        &dir,
-        "a.pdf",
-        &file(&[2], XrefType::CrossReferenceTable, "1.1"),
-    );
+    let (path, mut doc) = opened(&dir, "a.pdf", &file(&[2], XrefKind::Table, "1.1"));
     let catalog = doc.saved_record().unwrap().map.keys[&ObjKey::Catalog];
     let page = doc.page(0).unwrap();
     let add = fx::add(page, &square(1));
@@ -635,11 +693,7 @@ fn a_version_bump_writes_the_catalog_with_its_version() {
 #[test]
 fn what_a_rewrite_pruned_stops_an_append() {
     let dir = scratch();
-    let (path, mut doc) = opened(
-        &dir,
-        "a.pdf",
-        &file(&[3], XrefType::CrossReferenceTable, "1.7"),
-    );
+    let (path, mut doc) = opened(&dir, "a.pdf", &file(&[3], XrefKind::Table, "1.7"));
     let gone = doc.page(1).unwrap();
     doc.commit_ops(vec![fx::delete(&[gone])], "delete").unwrap();
     save_with(
@@ -664,11 +718,7 @@ fn what_a_rewrite_pruned_stops_an_append() {
 #[test]
 fn an_insert_leaves_the_catalog_and_keeps_the_nodes_keys() {
     let dir = scratch();
-    let (path, mut doc) = opened(
-        &dir,
-        "a.pdf",
-        &file(&[2, 2], XrefType::CrossReferenceTable, "1.7"),
-    );
+    let (path, mut doc) = opened(&dir, "a.pdf", &file(&[2, 2], XrefKind::Table, "1.7"));
     let catalog = doc.saved_record().unwrap().map.keys[&ObjKey::Catalog];
     let second = doc.page(1).unwrap();
     doc.commit_ops(vec![fx::duplicate(&[second])], "duplicate")
@@ -686,8 +736,8 @@ fn an_insert_leaves_the_catalog_and_keeps_the_nodes_keys() {
         pdf.get_dictionary(parent).unwrap().clone()
     };
     let first = node(pages[2]);
-    assert_eq!(first.get(b"Rotate").unwrap().as_i64().unwrap(), 90);
-    assert_eq!(first.get(b"Count").unwrap().as_i64().unwrap(), 3);
+    assert_eq!(first.get(b"Rotate").unwrap().as_integer().unwrap(), 90);
+    assert_eq!(first.get(b"Count").unwrap().as_integer().unwrap(), 3);
     assert_eq!(
         said(&path),
         ["page 0", "page 1", "page 1", "page 2", "page 3"]
@@ -703,17 +753,19 @@ fn dangling(page: &[u32], reply: &[u32]) -> (Vec<u8>, u32) {
     let main = crate::serialize::built::to_pdf(&square(3), &mut f.pdf).main;
     let main = f.pdf.add_object(main);
     let theirs = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Text", "IRT" => main,
-        "NM" => Object::string_literal("r1"), "Rect" => rect([100, 700, 120, 720]),
-        "Contents" => Object::string_literal("their reply"),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "IRT" => main,
+        "NM" => literal("r1"), "Rect" => rect([100, 700, 120, 720]),
+        "Contents" => literal("their reply"),
     });
     f.set_annots(0, &[main, theirs]);
-    f.pdf.reference_table.cross_reference_type = XrefType::CrossReferenceTable;
+    f.pdf.xref_kind = XrefKind::Table;
     let size = f.pdf.max_id + 1;
     let gone = |past: &[u32]| -> Dictionary {
-        (past.iter().enumerate())
-            .map(|(i, &n)| (format!("D{i}"), Object::Reference((size + n, 0))))
-            .collect()
+        let mut dict = Dictionary::new();
+        for (i, &n) in past.iter().enumerate() {
+            dict.set(format!("D{i}"), Object::from(ObjectId::new(size + n, 0)));
+        }
+        dict
     };
     f.dict(f.pages[0]).set("PieceInfo", gone(page));
     f.dict(theirs).set("ExData", gone(reply));
@@ -744,8 +796,11 @@ fn named_in(path: &Path, at: ObjectId, key: &[u8]) -> Vec<(ObjectId, bool)> {
 fn a_dangling_reference_stays_dangling_past_the_new_numbers() {
     let dir = scratch();
     let (bytes, size) = dangling(&[0, 4], &[]);
-    let gone = [((size, 0), false), ((size + 4, 0), false)];
-    let other = file(&[3], XrefType::CrossReferenceTable, "1.7");
+    let gone = [
+        (ObjectId::new(size, 0), false),
+        (ObjectId::new(size + 4, 0), false),
+    ];
+    let other = file(&[3], XrefKind::Table, "1.7");
     let edit = |doc: &mut Document| {
         let add = fx::add(doc.page(0).unwrap(), &square(1));
         doc.commit_ops(vec![add], "add").unwrap();
@@ -760,7 +815,11 @@ fn a_dangling_reference_stays_dangling_past_the_new_numbers() {
     let wrote = written(base.len(), &section, &path);
     assert!(wrote.contains(&page), "{wrote:?}");
     assert_eq!(named_in(&path, page, b"PieceInfo"), gone);
-    let fresh: Vec<u32> = wrote.iter().map(|id| id.0).filter(|&n| n >= size).collect();
+    let fresh: Vec<u32> = wrote
+        .iter()
+        .map(|id| id.number)
+        .filter(|&n| n >= size)
+        .collect();
     assert!(fresh.len() > 4, "{fresh:?}");
     assert!(fresh.iter().all(|&n| n > size + 4), "{fresh:?}");
     assert_eq!(crate::open::file(&path, None).unwrap().doc.page_count(), 4);
@@ -788,8 +847,15 @@ fn a_reply_written_as_it_was_keeps_its_dangling_reference() {
     let (base, section) = planned_in_place(&mut doc);
     let wrote = written(base.len(), &section, &path);
     assert!(wrote.contains(&reply), "{wrote:?}");
-    assert_eq!(named_in(&path, reply, b"ExData"), [((size, 0), false)]);
-    let fresh: Vec<u32> = wrote.iter().map(|id| id.0).filter(|&n| n >= size).collect();
+    assert_eq!(
+        named_in(&path, reply, b"ExData"),
+        [(ObjectId::new(size, 0), false)]
+    );
+    let fresh: Vec<u32> = wrote
+        .iter()
+        .map(|id| id.number)
+        .filter(|&n| n >= size)
+        .collect();
     assert!(!fresh.is_empty());
     assert!(fresh.iter().all(|&n| n > size), "{fresh:?}");
     assert_eq!(color_of(&path), [10, 200, 10]);
@@ -806,10 +872,10 @@ fn numbers_named_near_the_last_refuse_the_append() {
     use super::append::Refused;
     use super::plan::Why;
     let dir = scratch();
-    let mut pdf = Pdf::load_mem(&file(&[1], XrefType::CrossReferenceTable, "1.7")).unwrap();
+    let mut pdf = Pdf::load_mem(&file(&[1], XrefKind::Table, "1.7")).unwrap();
     let page = pdf.get_pages()[&1];
     let last = crate::serialize::NUMBERS - 1;
-    let gone = dictionary! { "D0" => Object::Reference((last, 0)) };
+    let gone = dictionary! { "D0" => Object::from(ObjectId::new(last, 0)) };
     (pdf.get_dictionary_mut(page).unwrap()).set("PieceInfo", gone);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();

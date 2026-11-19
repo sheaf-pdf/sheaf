@@ -12,9 +12,9 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
+use crate::pdf::{Dictionary, Object, ObjectId, Stream, StreamExt, Value, XrefKind};
 use anyhow::{Context as _, Result, bail};
 use in_progress::NoProgress;
-use lopdf::{Dictionary, Object, ObjectId, Stream, XrefKind};
 
 use super::alloc::Numbers;
 use crate::layers::{LayerId, ocg_patch};
@@ -142,7 +142,7 @@ impl Part {
                 }
                 SymObject::Built(obj) => self.text(obj, &mut named),
                 SymObject::Deferred(d) => {
-                    let dict = self.text(&Object::Dictionary(d.dict.clone()), &mut named);
+                    let dict = self.text(&Object::from(d.dict.clone()), &mut named);
                     let data = (d.data)().expect("a deferred stream's data");
                     format!("deferred {dict} {}", sheaf_util::checksum(&data))
                 }
@@ -161,21 +161,24 @@ impl Part {
     /// `named` gets.
     fn text(&self, obj: &Object, named: &mut Vec<ObjKey>) -> String {
         fn named_in(obj: &Object, syms: &Syms, named: &mut Vec<ObjKey>) -> Object {
-            match obj {
-                Object::Reference(r) => match syms.key(*r) {
+            match obj.value() {
+                Value::Ref(r) => match syms.key(*r) {
                     Some(key) => {
                         named.push(key);
-                        Object::Name(format!("@{key:?}").into_bytes())
+                        Object::name(format!("@{key:?}"))
                     }
                     None => obj.clone(),
                 },
-                Object::Array(items) => {
-                    Object::Array(items.iter().map(|o| named_in(o, syms, named)).collect())
-                }
-                Object::Dictionary(d) => Object::Dictionary(dict_named(d, syms, named)),
-                Object::Stream(s) => {
+                Value::Array(items) => Object::from(
+                    items
+                        .iter()
+                        .map(|o| named_in(o, syms, named))
+                        .collect::<Vec<_>>(),
+                ),
+                Value::Dict(d) => Object::from(dict_named(d, syms, named)),
+                Value::Stream(s) => {
                     let dict = dict_named(&s.dict, syms, named);
-                    Object::Stream(Stream::new(dict, s.content.clone()))
+                    Object::from(Stream::new(dict, s.raw_bytes().to_vec()))
                 }
                 _ => obj.clone(),
             }
@@ -183,7 +186,7 @@ impl Part {
         fn dict_named(d: &Dictionary, syms: &Syms, named: &mut Vec<ObjKey>) -> Dictionary {
             let mut out = Dictionary::new();
             for (k, v) in d.iter() {
-                out.set(k.clone(), named_in(v, syms, named));
+                out.set(k, named_in(v, syms, named));
             }
             out
         }
@@ -197,13 +200,14 @@ const CHUNK: usize = 32;
 
 /// About what `obj` holds on the heap beyond its own slot.
 fn held(obj: &Object) -> usize {
-    match obj {
-        Object::Name(b) | Object::String(b, _) => CHUNK + b.capacity(),
-        Object::Array(items) => {
+    match obj.value() {
+        Value::Name(b) => CHUNK + b.len(),
+        Value::String(b, _) => CHUNK + b.as_bytes().map_or(0, <[u8]>::len),
+        Value::Array(items) => {
             CHUNK + items.capacity() * size_of::<Object>() + items.iter().map(held).sum::<usize>()
         }
-        Object::Dictionary(d) => dict_held(d),
-        Object::Stream(s) => dict_held(&s.dict) + CHUNK + s.content.capacity(),
+        Value::Dict(d) => dict_held(d),
+        Value::Stream(s) => dict_held(&s.dict) + CHUNK + s.raw_bytes().len(),
         _ => 0,
     }
 }
@@ -215,7 +219,7 @@ fn dict_held(d: &Dictionary) -> usize {
     let entry = size_of::<(u64, Vec<u8>, Object)>();
     let index = 2 * slots * (size_of::<usize>() + 1);
     let values = (d.iter())
-        .map(|(k, v)| CHUNK + k.capacity() + held(v))
+        .map(|(k, v)| CHUNK + k.len() + held(v))
         .sum::<usize>();
     2 * CHUNK + slots * entry + index + values
 }
@@ -280,17 +284,17 @@ fn numbered(
                     obj
                 }
                 SymObject::Deferred(d) => {
-                    let mut dict = Object::Dictionary(d.dict.clone());
+                    let mut dict = Object::from(d.dict.clone());
                     resolved(&mut dict)?;
-                    let Object::Dictionary(dict) = dict else {
+                    let Some(dict) = dict.as_dict().cloned() else {
                         unreachable!("a dictionary resolves to one")
                     };
                     let data = (d.data)().with_context(|| format!("making {key:?}"))?;
-                    Object::Stream(Stream::new(dict, data))
+                    Object::from(Stream::new(dict, data))
                 }
             };
             if out.insert(n, (*key, obj)).is_some() {
-                bail!("two objects would be written at {} {}", n.0, n.1);
+                bail!("two objects would be written at {n}");
             }
         }
     }
@@ -304,23 +308,23 @@ fn follow(
     syms: &Syms,
     number: &mut dyn FnMut(ObjKey) -> Result<ObjectId>,
 ) -> Result<()> {
-    match obj {
-        Object::Reference(r) => {
+    match obj.value_mut() {
+        Value::Ref(r) => {
             if let Some(key) = syms.key(*r) {
                 *r = number(key)?;
             }
         }
-        Object::Array(items) => {
+        Value::Array(items) => {
             for o in items {
                 follow(o, syms, number)?;
             }
         }
-        Object::Dictionary(d) => {
+        Value::Dict(d) => {
             for (_, o) in d.iter_mut() {
                 follow(o, syms, number)?;
             }
         }
-        Object::Stream(s) => {
+        Value::Stream(s) => {
             for (_, o) in s.dict.iter_mut() {
                 follow(o, syms, number)?;
             }
@@ -364,10 +368,7 @@ pub(crate) fn patch(
     };
     let mut catalog = src.pdf().catalog()?.clone();
     catalog.set("OCProperties", layers);
-    let objects = BTreeMap::from([(
-        numbers.base.root,
-        (ObjKey::Catalog, Object::Dictionary(catalog)),
-    )]);
+    let objects = BTreeMap::from([(numbers.base.root, (ObjKey::Catalog, Object::from(catalog)))]);
     write_section(src, &objects, numbers).map(Some)
 }
 
@@ -387,8 +388,10 @@ pub(crate) fn standalone(src: &Src, parts: &[&Part], numbers: &mut Numbers) -> R
         .find(|(_, (key, _))| *key == ObjKey::Catalog)
         .map(|(&at, _)| at)
         .context("the group has no catalog")?;
-    if let Some((_, Object::Dictionary(catalog))) = objects.get_mut(&root) {
-        let drop: Vec<Vec<u8>> = (catalog.iter().map(|(k, _)| k.clone()))
+    if let Some((_, obj)) = objects.get_mut(&root)
+        && let Value::Dict(catalog) = obj.value_mut()
+    {
+        let drop: Vec<Vec<u8>> = (catalog.iter().map(|(k, _)| k.to_vec()))
             .filter(|k| !STANDALONE_CATALOG.contains(&k.as_slice()))
             .collect();
         for k in drop {
@@ -421,8 +424,8 @@ pub(crate) fn standalone(src: &Src, parts: &[&Part], numbers: &mut Numbers) -> R
         let Ok(obj) = pdf.object_unkept(id) else {
             continue;
         };
-        let node = match &*obj {
-            Object::Dictionary(d) => d.get(b"Type").and_then(Object::as_name).ok(),
+        let node = match obj.value() {
+            Value::Dict(d) => d.get(b"Type").and_then(Object::as_name),
             _ => None,
         };
         if matches!(node, Some(b"Page" | b"Pages")) || full::left_out(&obj) {
@@ -448,7 +451,7 @@ pub(crate) fn standalone(src: &Src, parts: &[&Part], numbers: &mut Numbers) -> R
         kind: XrefKind::Table,
         version,
         crypt: None,
-        encrypt_at: (0, 0),
+        encrypt_at: ObjectId::new(0, 0),
         xref_from: 0,
         pack: None,
     };
@@ -459,18 +462,14 @@ pub(crate) fn standalone(src: &Src, parts: &[&Part], numbers: &mut Numbers) -> R
 
 /// Each reference in `obj`, to `to`.
 fn refs(obj: &Object, to: &mut dyn FnMut(ObjectId)) {
-    match obj {
-        Object::Reference(r) => to(*r),
-        Object::Array(items) => items.iter().for_each(|o| refs(o, to)),
-        Object::Dictionary(d) => d.iter().for_each(|(_, o)| refs(o, to)),
-        Object::Stream(s) => s.dict.iter().for_each(|(_, o)| refs(o, to)),
-        _ => {}
+    for r in obj.references() {
+        to(r);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use lopdf::dictionary;
+    use crate::pdf::dictionary;
 
     use super::*;
 
@@ -481,23 +480,21 @@ mod tests {
     /// page's delta).
     #[test]
     fn an_object_weighs_its_entries_and_what_they_hold() {
-        let small = Object::Dictionary(dictionary! { "Type" => "Page" });
-        let names: Vec<Object> = (0..100)
-            .map(|i| Object::Name(format!("n{i}").into()))
-            .collect();
-        let page = Object::Dictionary(dictionary! {
-            "Type" => "Page",
+        let small = Object::from(dictionary! { "Type" => Object::name("Page") });
+        let names: Vec<Object> = (0..100).map(|i| Object::name(format!("n{i}"))).collect();
+        let page = Object::from(dictionary! {
+            "Type" => Object::name("Page"),
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "Names" => names,
         });
         assert!(held(&page) >= 100 * (size_of::<Object>() + CHUNK) + held(&small));
-        let stream = Object::Stream(Stream::new(dictionary! {}, vec![0; 10_000]));
+        let stream = Object::from(Stream::new(dictionary! {}, vec![0; 10_000]));
         assert!(held(&stream) > 10_000);
         let mut wide = Dictionary::new();
         for i in 0..64 {
             wide.set(format!("K{i}"), i);
         }
         let entry = size_of::<(u64, Vec<u8>, Object)>();
-        assert!(held(&Object::Dictionary(wide)) >= 64 * (entry + CHUNK));
+        assert!(held(&Object::from(wide)) >= 64 * (entry + CHUNK));
     }
 }

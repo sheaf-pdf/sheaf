@@ -58,9 +58,9 @@ use std::io;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
+use crate::pdf::{ByteSource, LazyPdf, Object, ObjectId, Stream, Value, XrefFacts, XrefKind};
 use anyhow::{Context as _, Result, bail};
 use in_progress::Progress;
-use lopdf::{ByteSource, LazyPdf, Object, ObjectId, Stream, XrefFacts, XrefKind};
 
 use super::emit::{self, Emission, EmitBase, EmitScope, SymObject};
 use super::key::ObjKey;
@@ -253,14 +253,13 @@ pub fn append(
                 obj
             }
             SymObject::Deferred(d) => {
-                let mut dict = Object::Dictionary(d.dict.clone());
+                let mut dict = Object::from(d.dict.clone());
                 follow(&mut dict, &placeholder)?;
-                let Object::Dictionary(dict) = dict else {
+                let Value::Dict(dict) = dict.into_value() else {
                     unreachable!("a dictionary resolves to one")
                 };
-                let data =
-                    (d.data)().with_context(|| format!("making object {} {}", at.0, at.1))?;
-                Object::Stream(Stream::new(dict, data))
+                let data = (d.data)().with_context(|| format!("making object {at}"))?;
+                Object::from(Stream::new(dict, data))
             }
             // The primary's object as it is: what it names is the file's.
             SymObject::Raw(r) if r.src.id() == primary.id() => {
@@ -276,14 +275,12 @@ pub fn append(
                 }
                 obj
             }
-            SymObject::Raw(r) => bail!(
-                "object {} {} of another file can't be written as it is",
-                r.id.0,
-                r.id.1
-            ),
+            SymObject::Raw(r) => {
+                bail!("object {} of another file can't be written as it is", r.id)
+            }
         };
         if objects.insert(at, (*key, obj)).is_some() {
-            bail!("two objects would be written at {} {}", at.0, at.1);
+            bail!("two objects would be written at {at}");
         }
     }
     p.check()?;
@@ -548,7 +545,7 @@ impl<'a> Saved<'a> {
                 self.own(obj)
             }
             key if key.of_state() => match self.owned.get(&key) {
-                Some(&at) if self.record.present.contains(at.0) => Ok(at),
+                Some(&at) if self.record.present.contains(at.number) => Ok(at),
                 _ => Err(missing),
             },
             _ => Err(missing),
@@ -560,7 +557,10 @@ impl<'a> Saved<'a> {
     /// values name what saves wrote by number), or when the primary never
     /// had it (its damage, which the file keeps).
     fn own(&self, n: ObjectId) -> Result<ObjectId, NotInFile> {
-        if self.record.present.contains(n.0) || self.mapped().contains(&n.0) || !self.used(n.0) {
+        if self.record.present.contains(n.number)
+            || self.mapped().contains(&n.number)
+            || !self.used(n.number)
+        {
             return Ok(n);
         }
         Err(NotInFile {
@@ -573,13 +573,13 @@ impl<'a> Saved<'a> {
     }
 
     fn mapped(&self) -> &HashSet<u32> {
-        (self.mapped).get_or_init(|| self.record.map.keys.values().map(|id| id.0).collect())
+        (self.mapped).get_or_init(|| self.record.map.keys.values().map(|id| id.number).collect())
     }
 
     fn used(&self, n: u32) -> bool {
         let used = self
             .used
-            .get_or_init(|| self.primary.pdf().ids().map(|id| id.0).collect());
+            .get_or_init(|| self.primary.pdf().ids().map(|id| id.number).collect());
         used.contains(&n)
     }
 }
@@ -609,13 +609,13 @@ fn held(
         if at != own {
             return Err(Refused::Held(*key));
         }
-        if !file.mapped().contains(&own.0) {
+        if !file.mapped().contains(&own.number) {
             continue;
         }
         let there = there.get_or_insert_with(|| {
             let mut at: HashMap<u32, Vec<ObjKey>> = HashMap::new();
             for (k, n) in &file.record.map.keys {
-                at.entry(n.0).or_default().push(*k);
+                at.entry(n.number).or_default().push(*k);
             }
             at
         });
@@ -626,8 +626,8 @@ fn held(
                 && matches!(k, ObjKey::Page(p) if renumbered.contains(p))
                 && numbers.by_key.get(k).is_some_and(|&at| at != own)
         };
-        let stays =
-            (there.get(&own.0).into_iter().flatten()).any(|k| k != key && !merged(k) && !moved(k));
+        let stays = (there.get(&own.number).into_iter().flatten())
+            .any(|k| k != key && !merged(k) && !moved(k));
         if stays {
             return Err(Refused::Held(*key));
         }
@@ -637,36 +637,26 @@ fn held(
 
 /// `obj` with each reference the number `to` gives it.
 fn follow(obj: &mut Object, to: &dyn Fn(ObjectId) -> Result<ObjectId>) -> Result<()> {
-    match obj {
-        Object::Reference(r) => *r = to(*r)?,
-        Object::Array(items) => {
-            for o in items {
-                follow(o, to)?;
+    let mut err = None;
+    obj.renumber(|r| match to(r) {
+        Ok(id) => Some(id),
+        Err(e) => {
+            if err.is_none() {
+                err = Some(e);
             }
+            Some(r)
         }
-        Object::Dictionary(d) => {
-            for (_, o) in d.iter_mut() {
-                follow(o, to)?;
-            }
-        }
-        Object::Stream(s) => {
-            for (_, o) in s.dict.iter_mut() {
-                follow(o, to)?;
-            }
-        }
-        _ => {}
+    });
+    match err {
+        Some(e) => Err(e),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Each reference in `obj`, to `to`.
 pub(crate) fn refs(obj: &Object, to: &mut dyn FnMut(ObjectId)) {
-    match obj {
-        Object::Reference(r) => to(*r),
-        Object::Array(items) => items.iter().for_each(|o| refs(o, to)),
-        Object::Dictionary(d) => d.iter().for_each(|(_, o)| refs(o, to)),
-        Object::Stream(s) => s.dict.iter().for_each(|(_, o)| refs(o, to)),
-        _ => {}
+    for r in obj.references() {
+        to(r);
     }
 }
 
@@ -677,15 +667,21 @@ fn roots(was: &RootValues, objects: &BTreeMap<ObjectId, (ObjKey, Object)>) -> Ro
     let written = |of: ObjKey| {
         (objects.values())
             .find(|(key, _)| *key == of)
-            .and_then(|(_, obj)| obj.as_dict().ok())
+            .and_then(|(_, obj)| match obj.value() {
+                Value::Dict(d) => Some(d),
+                _ => None,
+            })
     };
     let mut roots = was.clone();
     if let Some(catalog) = written(ObjKey::Catalog) {
         roots.catalog = unowned(catalog, CATALOG_OWNED);
-        roots.names = match catalog.get(b"Names") {
-            Ok(Object::Dictionary(names)) => Some(names.clone()),
-            Ok(Object::Reference(at)) => match objects.get(at) {
-                Some((_, obj)) => obj.as_dict().ok().cloned(),
+        roots.names = match catalog.get(b"Names").map(Object::value) {
+            Some(Value::Dict(names)) => Some(names.clone()),
+            Some(Value::Ref(at)) => match objects.get(at) {
+                Some((_, obj)) => match obj.value() {
+                    Value::Dict(d) => Some(d.clone()),
+                    _ => None,
+                },
                 None => was.names.clone(),
             },
             _ => None,

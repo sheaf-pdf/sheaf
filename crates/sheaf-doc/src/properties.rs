@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use lopdf::{Dictionary, LazyPdf, Object, ObjectId};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId};
 
 use crate::attachments::resolve;
 use crate::file::pdf_text;
@@ -67,17 +67,16 @@ const FONT_PAGE_LIMIT: usize = 5_000;
 /// The properties of `src`: its strings decrypted as it's read, its
 /// security from the `/Encrypt` it keeps. Fast Web View isn't one: the
 /// dialog reads it from the file it shows, the saved record's when a save
-/// wrote it ([`lopdf::XrefFacts::linearized`]).
+/// wrote it ([`crate::pdf::XrefFacts::linearized`]).
 pub fn read(src: &Source) -> Properties {
     let pdf = src.pdf();
     let info = pdf
         .trailer()
         .get(b"Info")
-        .ok()
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_dict().ok());
+        .and_then(Object::as_dict);
     let text = |k: &[u8]| {
-        info.and_then(|d| d.get(k).ok())
+        info.and_then(|d| d.get(k))
             .and_then(|o| resolve(pdf, o))
             .map(pdf_text)
             .unwrap_or_default()
@@ -85,8 +84,8 @@ pub fn read(src: &Source) -> Properties {
     let catalog = pdf.catalog().ok();
     let mut version = pdf.version().to_string();
     if let Some(v) = catalog
-        .and_then(|c| c.get(b"Version").ok())
-        .and_then(|o| o.as_name().ok())
+        .and_then(|c| c.get(b"Version"))
+        .and_then(Object::as_name)
     {
         let v = String::from_utf8_lossy(v).into_owned();
         if v > version {
@@ -94,11 +93,11 @@ pub fn read(src: &Source) -> Properties {
         }
     }
     let tagged = catalog
-        .and_then(|c| c.get(b"MarkInfo").ok())
+        .and_then(|c| c.get(b"MarkInfo"))
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_dict().ok())
-        .and_then(|m| m.get(b"Marked").ok())
-        .and_then(|o| o.as_bool().ok())
+        .and_then(Object::as_dict)
+        .and_then(|m| m.get(b"Marked"))
+        .and_then(Object::as_bool)
         .unwrap_or(false);
     let (fonts, fonts_truncated) = fonts_in(pdf, src.pages());
     Properties {
@@ -124,28 +123,24 @@ fn security_of(pdf: &LazyPdf) -> Security {
     let enc = pdf
         .trailer()
         .get(b"Encrypt")
-        .ok()
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_dict().ok());
-    let int = |k: &[u8]| {
-        enc.and_then(|d| d.get(k).ok())
-            .and_then(|o| o.as_i64().ok())
-    };
+        .and_then(Object::as_dict);
+    let int = |k: &[u8]| enc.and_then(|d| d.get(k)).and_then(Object::as_integer);
     let filter = enc
-        .and_then(|d| d.get(b"Filter").ok())
-        .and_then(|o| o.as_name().ok())
+        .and_then(|d| d.get(b"Filter"))
+        .and_then(Object::as_name)
         .map(|n| String::from_utf8_lossy(n).into_owned())
         .unwrap_or_default();
     let cipher = match int(b"V") {
         Some(5) => "AES-256".to_string(),
         Some(4) => {
             let aes = enc
-                .and_then(|d| d.get(b"CF").ok())
-                .and_then(|o| o.as_dict().ok())
-                .and_then(|cf| cf.get(b"StdCF").ok())
-                .and_then(|o| o.as_dict().ok())
-                .and_then(|s| s.get(b"CFM").ok())
-                .and_then(|o| o.as_name().ok())
+                .and_then(|d| d.get(b"CF"))
+                .and_then(Object::as_dict)
+                .and_then(|cf| cf.get(b"StdCF"))
+                .and_then(Object::as_dict)
+                .and_then(|s| s.get(b"CFM"))
+                .and_then(Object::as_name)
                 == Some(b"AESV2");
             if aes { "AES-128" } else { "RC4 128-bit" }.to_string()
         }
@@ -193,7 +188,7 @@ fn fonts_in(pdf: &LazyPdf, pages: &[PageFacts]) -> (Vec<Font>, bool) {
             .resources
             .as_deref()
             .and_then(|o| resolve(pdf, o))
-            .and_then(|o| o.as_dict().ok())
+            .and_then(Object::as_dict)
         {
             walk_resources(pdf, res, &mut seen_fonts, &mut seen_res, &mut fonts, 0);
         }
@@ -216,17 +211,16 @@ fn walk_resources(
     }
     if let Some(fonts) = res
         .get(b"Font")
-        .ok()
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_dict().ok())
+        .and_then(Object::as_dict)
     {
         for (_, f) in fonts.iter() {
-            if let Object::Reference(id) = f
-                && !seen_fonts.insert(*id)
+            if let Some(id) = f.as_reference()
+                && !seen_fonts.insert(id)
             {
                 continue;
             }
-            if let Some(d) = resolve(pdf, f).and_then(|o| o.as_dict().ok()) {
+            if let Some(d) = resolve(pdf, f).and_then(Object::as_dict) {
                 out.push(describe_font(pdf, d));
             }
         }
@@ -234,27 +228,25 @@ fn walk_resources(
     // Form XObjects (and their own resources) draw text too.
     if let Some(xobjects) = res
         .get(b"XObject")
-        .ok()
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_dict().ok())
+        .and_then(Object::as_dict)
     {
         for (_, x) in xobjects.iter() {
-            let Object::Reference(id) = x else { continue };
-            if !seen_res.insert(*id) {
+            let Some(id) = x.as_reference() else { continue };
+            if !seen_res.insert(id) {
                 continue;
             }
-            let Ok(Object::Stream(s)) = pdf.get_object(*id) else {
+            let Some(s) = pdf.get_object(id).ok().and_then(Object::as_stream) else {
                 continue;
             };
-            if s.dict.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"Form") {
+            if s.dict.get(b"Subtype").and_then(Object::as_name) != Some(b"Form") {
                 continue;
             }
             if let Some(r) = s
                 .dict
                 .get(b"Resources")
-                .ok()
                 .and_then(|o| resolve(pdf, o))
-                .and_then(|o| o.as_dict().ok())
+                .and_then(Object::as_dict)
             {
                 walk_resources(pdf, r, seen_fonts, seen_res, out, depth + 1);
             }
@@ -265,9 +257,8 @@ fn walk_resources(
 fn describe_font(pdf: &LazyPdf, d: &Dictionary) -> Font {
     let name_of = |d: &Dictionary, k: &[u8]| {
         d.get(k)
-            .ok()
             .and_then(|o| resolve(pdf, o))
-            .and_then(|o| o.as_name().ok())
+            .and_then(Object::as_name)
             .map(|n| String::from_utf8_lossy(n).into_owned())
             .unwrap_or_default()
     };
@@ -276,21 +267,19 @@ fn describe_font(pdf: &LazyPdf, d: &Dictionary) -> Font {
     // Type0 fonts keep their descriptor on the descendant.
     let desc_owner = if kind == "Type0" {
         d.get(b"DescendantFonts")
-            .ok()
             .and_then(|o| resolve(pdf, o))
-            .and_then(|o| o.as_array().ok())
+            .and_then(Object::as_array)
             .and_then(|a| a.first())
             .and_then(|o| resolve(pdf, o))
-            .and_then(|o| o.as_dict().ok())
+            .and_then(Object::as_dict)
             .unwrap_or(d)
     } else {
         d
     };
     let has_file = desc_owner
         .get(b"FontDescriptor")
-        .ok()
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_dict().ok())
+        .and_then(Object::as_dict)
         .is_some_and(|fd| {
             [b"FontFile".as_slice(), b"FontFile2", b"FontFile3"]
                 .iter()
@@ -320,13 +309,8 @@ fn describe_font(pdf: &LazyPdf, d: &Dictionary) -> Font {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
-
-    use lopdf::encryption::crypt_filters::{Aes256CryptFilter, CryptFilter};
-    use lopdf::{
-        Document as Pdf, EncryptionState, EncryptionVersion, Permissions, Stream, dictionary,
-    };
+    use crate::pdf::test_crypt::{CipherKind, TestEncryption};
+    use crate::pdf::{Document as Pdf, Permissions, Stream, dictionary, literal};
 
     use super::*;
     use crate::store::Src;
@@ -336,40 +320,57 @@ mod tests {
     fn sample() -> Pdf {
         let mut pdf = Pdf::with_version("1.4");
         let file = pdf.add_object(Stream::new(dictionary! {}, vec![0u8; 4]));
-        let desc = pdf.add_object(dictionary! { "Type" => "FontDescriptor", "FontFile2" => file });
-        let embedded = pdf.add_object(dictionary! {
-            "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "ABCDEF+Arial-Bold", "FontDescriptor" => desc,
+        let desc = pdf.add_object(dictionary! {
+            "Type" => Object::name("FontDescriptor"),
+            "FontFile2" => file,
         });
-        let helv = pdf.add_object(
-            dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" },
-        );
-        let courier = pdf.add_object(
-            dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier" },
-        );
+        let embedded = pdf.add_object(dictionary! {
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("TrueType"),
+            "BaseFont" => Object::name("ABCDEF+Arial-Bold"),
+            "FontDescriptor" => desc,
+        });
+        let helv = pdf.add_object(dictionary! {
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name("Helvetica"),
+        });
+        let courier = pdf.add_object(dictionary! {
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name("Courier"),
+        });
         let form = pdf.add_object(Stream::new(
-            dictionary! { "Subtype" => "Form", "Resources" => dictionary! { "Font" => dictionary! { "F9" => helv } } },
+            dictionary! {
+                "Subtype" => Object::name("Form"),
+                "Resources" => dictionary! { "Font" => dictionary! { "F9" => helv } },
+            },
             Vec::new(),
         ));
         let pages_id = pdf.new_object_id();
         let page = pdf.add_object(dictionary! {
-            "Type" => "Page", "Parent" => pages_id,
+            "Type" => Object::name("Page"),
+            "Parent" => pages_id,
             "Resources" => dictionary! { "Font" => dictionary! { "F1" => embedded }, "XObject" => dictionary! { "X1" => form } },
         });
-        let plain = pdf.add_object(dictionary! { "Type" => "Page", "Parent" => pages_id });
+        let plain =
+            pdf.add_object(dictionary! { "Type" => Object::name("Page"), "Parent" => pages_id });
         pdf.objects.insert(
             pages_id,
             dictionary! {
-                "Type" => "Pages", "Kids" => vec![page.into(), plain.into()], "Count" => 2,
+                "Type" => Object::name("Pages"), "Kids" => vec![page.into(), plain.into()], "Count" => 2,
                 "Resources" => dictionary! { "Font" => dictionary! { "F2" => courier } },
             }
             .into(),
         );
         let info = pdf.add_object(dictionary! {
-            "Title" => Object::string_literal("Engagement letter"),
-            "Producer" => Object::string_literal("sheaf test"),
+            "Title" => literal("Engagement letter"),
+            "Producer" => literal("sheaf test"),
         });
         let catalog = pdf.add_object(dictionary! {
-            "Type" => "Catalog", "Pages" => pages_id, "Version" => "1.7",
+            "Type" => Object::name("Catalog"),
+            "Pages" => pages_id,
+            "Version" => Object::name("1.7"),
             "MarkInfo" => dictionary! { "Marked" => true },
         });
         pdf.trailer.set("Root", catalog);
@@ -417,19 +418,9 @@ mod tests {
     #[test]
     fn an_encrypted_file_reads_decrypted_with_its_permissions() {
         let mut pdf = sample();
-        let filter: Arc<dyn CryptFilter> = Arc::new(Aes256CryptFilter);
-        let state = EncryptionState::try_from(EncryptionVersion::V5 {
-            encrypt_metadata: true,
-            crypt_filters: BTreeMap::from([(b"StdCF".to_vec(), filter)]),
-            file_encryption_key: &[7; 32],
-            stream_filter: b"StdCF".to_vec(),
-            string_filter: b"StdCF".to_vec(),
-            owner_password: "owner",
-            user_password: "",
-            // Print and copy allowed; nothing else.
-            permissions: Permissions::PRINTABLE | Permissions::COPYABLE,
-        })
-        .unwrap();
+        // Print and copy allowed; nothing else.
+        let state = TestEncryption::new(CipherKind::Aes256, "", "owner")
+            .with_permissions(Permissions::PRINT | Permissions::COPY);
         pdf.encrypt(&state).unwrap();
         let p = read(&source(&pdf));
         // Its strings decrypt as they're read; /Encrypt is kept.

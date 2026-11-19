@@ -1,7 +1,7 @@
 //! TextBags: the same words whatever fonts and codes draw them, read
 //! through `/ToUnicode`, `/Differences` and the base encodings.
 
-use lopdf::{Document as Pdf, Object, Stream, dictionary};
+use crate::pdf::{Document as Pdf, Object, Stream, StreamExt, dictionary};
 
 use super::*;
 use crate::source::Limits;
@@ -27,7 +27,7 @@ fn to_unicode(pdf: &mut Pdf, cmap: &str) -> Object {
          endcmap CMapName currentdict /CMap defineresource pop end end"
     );
     let mut stream = Stream::new(dictionary! {}, cmap.into_bytes());
-    let _ = stream.compress();
+    stream.compress();
     pdf.add_object(stream).into()
 }
 
@@ -38,13 +38,24 @@ fn to_unicode(pdf: &mut Pdf, cmap: &str) -> Object {
 fn the_same_text_in_two_subsets_gives_equal_bags() {
     let mut pdf = Pdf::with_version("1.7");
     let simple = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "ABCDEF+Arial",
-        "FirstChar" => 1, "LastChar" => 8,
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("TrueType"),
+        "BaseFont" => Object::name("ABCDEF+Arial"),
+        "FirstChar" => 1,
+        "LastChar" => 8,
         "Encoding" => dictionary! {
-            "Type" => "Encoding", "BaseEncoding" => "WinAnsiEncoding",
+            "Type" => Object::name("Encoding"),
+            "BaseEncoding" => Object::name("WinAnsiEncoding"),
             "Differences" => vec![
-                1.into(), "H".into(), "e".into(), "l".into(), "o".into(), "W".into(),
-                "r".into(), "uni0064".into(), "space".into(),
+                1.into(),
+                Object::name("H"),
+                Object::name("e"),
+                Object::name("l"),
+                Object::name("o"),
+                Object::name("W"),
+                Object::name("r"),
+                Object::name("uni0064"),
+                Object::name("space"),
             ],
         },
     });
@@ -56,8 +67,11 @@ fn the_same_text_in_two_subsets_gives_equal_bags() {
          1 beginbfchar <0030> <0064> endbfchar",
     );
     let composite = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "GHIJKL+Arial",
-        "Encoding" => "Identity-H", "ToUnicode" => cmap,
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type0"),
+        "BaseFont" => Object::name("GHIJKL+Arial"),
+        "Encoding" => Object::name("Identity-H"),
+        "ToUnicode" => cmap,
     });
     let resources: Object = dictionary! {
         "Font" => dictionary! { "F1" => simple, "F2" => composite },
@@ -87,12 +101,16 @@ fn composed_and_decomposed_text_give_equal_bags() {
     let mut pdf = Pdf::with_version("1.7");
     let decomposed = to_unicode(&mut pdf, "1 beginbfchar <01> <00650301> endbfchar");
     let decomposed = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
         "ToUnicode" => decomposed,
     });
     let win_ansi = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
-        "Encoding" => "WinAnsiEncoding",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
+        "Encoding" => Object::name("WinAnsiEncoding"),
     });
     let resources: Object = dictionary! {
         "Font" => dictionary! { "D" => decomposed, "W" => win_ansi },
@@ -115,10 +133,14 @@ fn composed_and_decomposed_text_give_equal_bags() {
 fn words_end_where_the_text_moves() {
     let mut pdf = Pdf::with_version("1.7");
     let symbol = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Symbol",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Symbol"),
     });
     let standard = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Times-Roman",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Times-Roman"),
     });
     let resources: Object = dictionary! {
         "Font" => dictionary! { "S" => symbol, "T" => standard },
@@ -154,14 +176,20 @@ fn words_end_where_the_text_moves() {
 fn codes_no_font_reads_are_their_bytes_hash() {
     let mut pdf = Pdf::with_version("1.7");
     let standard = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Times-Roman",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Times-Roman"),
     });
     let symbolic = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "ABCDEF+Wingdings",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("TrueType"),
+        "BaseFont" => Object::name("ABCDEF+Wingdings"),
     });
     let composite = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "GHIJKL+Arial",
-        "Encoding" => "Identity-H",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type0"),
+        "BaseFont" => Object::name("GHIJKL+Arial"),
+        "Encoding" => Object::name("Identity-H"),
     });
     let resources: Object = dictionary! {
         "Font" => dictionary! { "T" => standard, "W" => symbolic, "C" => composite },
@@ -236,8 +264,11 @@ fn codespace_ranges_split_mixed_codes() {
          1 beginbfrange <889F> <88A0> <4E9C> endbfrange",
     );
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "MSGothic",
-        "Encoding" => "90ms-RKSJ-H", "ToUnicode" => cmap,
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type0"),
+        "BaseFont" => Object::name("MSGothic"),
+        "Encoding" => Object::name("90ms-RKSJ-H"),
+        "ToUnicode" => cmap,
     });
     let resources: Object = dictionary! { "Font" => dictionary! { "J" => font } }.into();
     // A, then 889F and 88A0 as two-byte codes, counting up from U+4E9C,
@@ -266,12 +297,16 @@ fn content_that_doesnt_lex_is_an_error() {
 fn forms_are_their_own_and_gs_picks_the_font() {
     let mut pdf = Pdf::with_version("1.7");
     let standard = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Times-Roman",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Times-Roman"),
     });
     let fonts = dictionary! { "T" => standard };
     let form = Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(), 0.into(), 9.into(), 9.into()],
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
+            "BBox" => vec![0.into(), 0.into(), 9.into(), 9.into()],
             "Resources" => dictionary! { "Font" => fonts.clone() },
         },
         b"BT /T 9 Tf (inside) Tj ET".to_vec(),

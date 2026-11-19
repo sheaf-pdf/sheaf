@@ -8,8 +8,8 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::pdf::{Document as Pdf, Object, ObjectId, StreamExt, dictionary, literal};
 use in_progress::NoProgress;
-use lopdf::{Document as Pdf, Object, ObjectId, dictionary};
 use sheaf_edit::{BatesSpec, FlattenSet, Transform, Z};
 
 use super::removal_tests::{opened, scratch};
@@ -46,9 +46,9 @@ fn everything(dir: &Path) -> Document {
     f.fill(field, "Ada");
     let page = f.pages[0];
     let square = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Square", "P" => page, "F" => 4,
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Square"), "P" => page, "F" => 4,
         "Rect" => vec![400.into(), 400.into(), 500.into(), 450.into()],
-        "Contents" => Object::string_literal("Theirs"),
+        "Contents" => literal("Theirs"),
     });
     let mut annots = f.annots(0);
     annots.push(square);
@@ -160,17 +160,19 @@ fn everything(dir: &Path) -> Document {
 fn dynamic_page() -> Vec<u8> {
     let mut pdf = Pdf::with_version("1.7");
     let pages = pdf.new_object_id();
-    let content = lopdf::Stream::new(dictionary! {}, b"0 0 1 RG 4 w 2 2 196 76 re S".to_vec());
+    let content = crate::pdf::Stream::new(dictionary! {}, b"0 0 1 RG 4 w 2 2 196 76 re S".to_vec());
     let content = pdf.add_object(content);
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page", "Parent" => pages, "Contents" => content,
+        "Type" => Object::name("Page"), "Parent" => pages, "Contents" => content,
         "MediaBox" => vec![0.into(), 0.into(), 200.into(), 80.into()],
     });
     pdf.objects.insert(
         pages,
-        dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        dictionary! { "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1 }
+            .into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
@@ -203,14 +205,13 @@ fn stripped(doc: &Document, filtered: bool) -> Result<Vec<u8>, ExportError> {
 }
 
 /// Every annotation of `pdf`'s pages, in order, by object.
-fn annots(pdf: &Pdf) -> Vec<(ObjectId, lopdf::Dictionary)> {
+fn annots(pdf: &Pdf) -> Vec<(ObjectId, crate::pdf::Dictionary)> {
     (pdf.get_pages().into_values())
         .flat_map(|page| {
-            let list = pdf.get_dictionary(page).unwrap().get(b"Annots").ok();
-            let list = list.and_then(|a| a.as_array().ok()).cloned();
-            list.unwrap_or_default()
+            let list = pdf.get_dictionary(page).unwrap().get(b"Annots");
+            list.and_then(Object::as_array).unwrap_or_default().to_vec()
         })
-        .filter_map(|a| a.as_reference().ok())
+        .filter_map(|a| a.as_reference())
         .map(|id| (id, pdf.get_dictionary(id).unwrap().clone()))
         .collect()
 }
@@ -259,19 +260,19 @@ fn a_file_without_private_data_holds_none() {
     assert_eq!(sheaf_names(&pdf), BTreeSet::new());
     let annots = annots(&pdf);
     let names: Vec<&[u8]> = (annots.iter())
-        .filter_map(|(_, d)| d.get(b"NM").ok()?.as_str().ok())
+        .filter_map(|(_, d)| d.get(b"NM")?.as_bytes())
         .collect();
     let unique: BTreeSet<&[u8]> = names.iter().copied().collect();
     assert_eq!(unique.len(), names.len(), "{names:?}");
-    let named = |d: &lopdf::Dictionary, said: &str| {
-        d.get(b"Contents").and_then(Object::as_str).ok() == Some(said.as_bytes())
+    let named = |d: &crate::pdf::Dictionary, said: &str| {
+        d.get(b"Contents").and_then(Object::as_bytes) == Some(said.as_bytes())
     };
     let find = |said: &str| annots.iter().find(|(_, d)| named(d, said)).unwrap();
     let irt = |said: &str| find(said).1.get(b"IRT").unwrap().as_reference().unwrap();
     assert_eq!(irt("Because."), find("Why?").0);
     assert_eq!(irt("Seen."), find("Theirs").0);
     let strike = (annots.iter())
-        .find(|(_, d)| d.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"StrikeOut"));
+        .find(|(_, d)| d.get(b"Subtype").and_then(Object::as_name) == Some(b"StrikeOut"));
     assert_eq!(
         strike
             .unwrap()
@@ -283,7 +284,7 @@ fn a_file_without_private_data_holds_none() {
         find("new").0
     );
     let links = (annots.iter())
-        .filter(|(_, d)| d.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Link"));
+        .filter(|(_, d)| d.get(b"Subtype").and_then(Object::as_name) == Some(b"Link"));
     assert_eq!(links.filter(|(_, d)| d.has(b"Dest")).count(), 2);
     let all = super::recognized_tests::everything(&pdf);
     for drawn in ["Page 3 AB000003", "<00530061007600650064>", "(DRAFT)"] {
@@ -341,10 +342,10 @@ fn private_data_a_page_s_content_hides_fails_a_clean_copy_alone() {
         super::others_tests::acrobat_file(&[&[super::others_tests::BODY, merged, undecoded]]);
     let mut pdf = Pdf::load_mem(&file).unwrap();
     for obj in pdf.objects.values_mut() {
-        if let Ok(stream) = obj.as_stream_mut()
-            && stream.content == undecoded
+        if let Some(stream) = obj.as_stream_mut()
+            && stream.raw_bytes() == undecoded
         {
-            stream.dict.set("Filter", "JBIG2Decode");
+            stream.dict.set("Filter", Object::name("JBIG2Decode"));
         }
     }
     let mut bytes = Vec::new();

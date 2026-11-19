@@ -9,7 +9,7 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use lopdf::{Dictionary, Object, ObjectId};
+use crate::pdf::{Dictionary, Object, ObjectId, StreamExt, Value};
 use sheaf_edit::Rotation;
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Box2, Pt, REVIEW};
@@ -205,8 +205,7 @@ pub fn convert<P: Objects + ?Sized>(
             let size = size.filter(|s| *s > 0.0).unwrap_or(12.0);
             let callout = dict
                 .get(b"IT")
-                .ok()
-                .and_then(|o| o.as_name().ok())
+                .and_then(Object::as_name)
                 .is_some_and(|n| n == b"FreeTextCallout");
             match numbers(pdf, dict, b"CL").filter(|_| callout) {
                 Some(cl) if cl.len() == 4 || cl.len() == 6 => {
@@ -231,12 +230,16 @@ pub fn convert<P: Objects + ?Sized>(
             let l = numbers(pdf, dict, b"L")
                 .filter(|l| l.len() == 4)
                 .ok_or_else(unsupported)?;
-            let ends: Vec<bool> = match dict.get(b"LE").ok().and_then(|o| pdf.dereference(o).ok()) {
-                Some((_, Object::Array(a))) => a
+            let ends: Vec<bool> = match dict
+                .get(b"LE")
+                .and_then(|o| pdf.dereference(o).ok())
+                .and_then(|(_, o)| o.as_array())
+            {
+                Some(a) => a
                     .iter()
-                    .map(|o| o.as_name().is_ok_and(|n| n.ends_with(b"Arrow")))
+                    .map(|o| o.as_name().is_some_and(|n| n.ends_with(b"Arrow")))
                     .collect(),
-                _ => Vec::new(),
+                None => Vec::new(),
             };
             AnnotKind::Line {
                 a: point(l[0], l[1]),
@@ -291,8 +294,7 @@ pub fn convert<P: Objects + ?Sized>(
         color: color.unwrap_or([0, 0, 0]),
         opacity: dict
             .get(b"CA")
-            .ok()
-            .and_then(|o| o.as_float().ok())
+            .and_then(Object::as_number)
             .unwrap_or(1.0)
             .clamp(0.0, 1.0) as f32,
         stroke,
@@ -304,11 +306,10 @@ pub fn convert<P: Objects + ?Sized>(
         dashed: border_style(pdf, dict).is_some_and(|s| s == b"D"),
         cloudy: dict
             .get(b"BE")
-            .ok()
             .and_then(|o| pdf.dereference(o).ok())
-            .and_then(|(_, o)| o.as_dict().ok())
-            .and_then(|be| be.get(b"S").ok())
-            .and_then(|s| s.as_name().ok())
+            .and_then(|(_, o)| o.as_dict())
+            .and_then(|be| be.get(b"S"))
+            .and_then(Object::as_name)
             .is_some_and(|s| s == b"C"),
         turn,
         name: thread_name(dict),
@@ -318,7 +319,7 @@ pub fn convert<P: Objects + ?Sized>(
 /// What a dimension annotation measures, by its `/IT`.
 fn measured(dict: &Dictionary) -> Option<crate::measure::Measured> {
     use crate::measure::Measured;
-    match dict.get(b"IT").ok()?.as_name().ok()? {
+    match dict.get(b"IT")?.as_name()? {
         b"LineDimension" => Some(Measured::Distance),
         b"PolyLineDimension" => Some(Measured::Perimeter),
         b"PolygonDimension" => Some(Measured::Area),
@@ -328,8 +329,8 @@ fn measured(dict: &Dictionary) -> Option<crate::measure::Measured> {
 
 /// Its `/Measure` as a scale.
 fn scale<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<crate::measure::Scale> {
-    let (_, m) = pdf.dereference(dict.get(b"Measure").ok()?).ok()?;
-    crate::measure::scale_of(pdf, m.as_dict().ok()?)
+    let (_, m) = pdf.dereference(dict.get(b"Measure")?).ok()?;
+    crate::measure::scale_of(pdf, m.as_dict()?)
 }
 
 /// A measurement of `points`; the value its text starts with comes off,
@@ -368,8 +369,7 @@ fn stamp<P: Objects + ?Sized>(
 ) -> AnnotKind {
     let name = dict
         .get(b"Name")
-        .ok()
-        .and_then(|o| o.as_name().ok())
+        .and_then(Object::as_name)
         .map(|n| String::from_utf8_lossy(n).into_owned())
         .unwrap_or_default();
     // Acrobat's own are "SBApproved", "SHSignHere"…; custom ones "#…".
@@ -405,8 +405,8 @@ fn stamp<P: Objects + ?Sized>(
 
 /// The form a stamp's normal appearance (`/AP /N`) is.
 pub(crate) fn appearance<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<ObjectId> {
-    let (_, ap) = pdf.dereference(dict.get(b"AP").ok()?).ok()?;
-    ap.as_dict().ok()?.get(b"N").ok()?.as_reference().ok()
+    let (_, ap) = pdf.dereference(dict.get(b"AP")?).ok()?;
+    ap.as_dict()?.get(b"N")?.as_reference()
 }
 
 /// An attachment, its embedded file interned through `files`.
@@ -416,21 +416,14 @@ fn attachment<P: Objects + ?Sized>(
     rect: Box2,
     files: &Interned<'_>,
 ) -> Option<AnnotKind> {
-    let deref_dict = |o: &Object| pdf.dereference(o).ok()?.1.as_dict().ok().cloned();
-    let fs = deref_dict(dict.get(b"FS").ok()?)?;
-    let ef = deref_dict(fs.get(b"EF").ok()?)?;
-    let file = ef
-        .get(b"UF")
-        .or_else(|_| ef.get(b"F"))
-        .ok()?
-        .as_reference()
-        .ok()?;
-    let Ok(Object::Stream(s)) = pdf.get_object(file) else {
-        return None;
-    };
+    let deref_dict = |o: &Object| pdf.dereference(o).ok()?.1.as_dict().cloned();
+    let fs = deref_dict(dict.get(b"FS")?)?;
+    let ef = deref_dict(fs.get(b"EF")?)?;
+    let file = ef.get(b"UF").or_else(|| ef.get(b"F"))?.as_reference()?;
+    let s = pdf.get_object(file).ok()?.as_stream()?;
     let bytes = s
         .decompressed_content()
-        .unwrap_or_else(|_| s.content.clone());
+        .unwrap_or_else(|_| s.raw_bytes().to_vec());
     let size = bytes.len() as u64;
     let stem = files
         .intern(bytes.into(), BlobKind::Attachment)?
@@ -438,12 +431,11 @@ fn attachment<P: Objects + ?Sized>(
         .stem();
     let name = [b"UF".as_slice(), b"F"]
         .iter()
-        .find_map(|k| fs.get(k).ok().map(pdf_text).filter(|n| !n.is_empty()))
+        .find_map(|k| fs.get(k).map(pdf_text).filter(|n| !n.is_empty()))
         .unwrap_or_else(|| "attachment".into());
     let icon = dict
         .get(b"Name")
-        .ok()
-        .and_then(|o| o.as_name().ok())
+        .and_then(Object::as_name)
         .map(|n| String::from_utf8_lossy(n).into_owned())
         .filter(|n| crate::annot::ATTACHMENT_ICONS.contains(&n.as_str()))
         .unwrap_or_else(|| "PushPin".into());
@@ -458,8 +450,7 @@ fn attachment<P: Objects + ?Sized>(
 
 pub fn subtype(dict: &Dictionary) -> String {
     dict.get(b"Subtype")
-        .ok()
-        .and_then(|o| o.as_name().ok())
+        .and_then(Object::as_name)
         .map(|n| String::from_utf8_lossy(n).into_owned())
         .unwrap_or_default()
 }
@@ -467,30 +458,29 @@ pub fn subtype(dict: &Dictionary) -> String {
 /// `/RT /Group`: part of what its `/IRT` is, not a reply to it.
 fn is_grouped(dict: &Dictionary) -> bool {
     dict.get(b"RT")
-        .ok()
-        .and_then(|o| o.as_name().ok())
+        .and_then(Object::as_name)
         .is_some_and(|n| n == b"Group")
 }
 
 /// What `/IRT` names: the annotation it refers to, by its name, or (as
 /// XFDF gives it) the name itself.
 pub fn irt_name<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<String> {
-    match dict.get(b"IRT").ok()? {
-        Object::Reference(id) => pdf.get_dictionary(*id).ok().map(thread_name),
-        o @ Object::String(..) => Some(pdf_text(o)).filter(|n| !n.is_empty()),
+    let o = dict.get(b"IRT")?;
+    match o.value() {
+        Value::Ref(id) => pdf.get_dictionary(*id).ok().map(thread_name),
+        Value::String(..) => Some(pdf_text(o)).filter(|n| !n.is_empty()),
         _ => None,
     }
 }
 
 /// `/InkList`'s strokes, those with points.
 fn ink<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<Vec<Vec<Pt>>> {
-    let (_, list) = pdf.dereference(dict.get(b"InkList").ok()?).ok()?;
+    let (_, list) = pdf.dereference(dict.get(b"InkList")?).ok()?;
     Some(
-        list.as_array()
-            .ok()?
+        list.as_array()?
             .iter()
             .filter_map(|s| pdf.dereference(s).ok())
-            .filter_map(|(_, s)| s.as_array().ok())
+            .filter_map(|(_, s)| s.as_array())
             .map(|s| points(&floats(pdf, s)))
             .filter(|p| !p.is_empty())
             .collect(),
@@ -515,15 +505,15 @@ fn floats<P: Objects + ?Sized>(pdf: &P, a: &[Object]) -> Vec<f32> {
         .map(|o| {
             pdf.dereference(o)
                 .ok()
-                .and_then(|(_, o)| o.as_float().ok())
+                .and_then(|(_, o)| o.as_number())
                 .unwrap_or(0.0) as f32
         })
         .collect()
 }
 
 fn numbers<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, key: &[u8]) -> Option<Vec<f32>> {
-    let (_, o) = pdf.dereference(dict.get(key).ok()?).ok()?;
-    Some(floats(pdf, o.as_array().ok()?))
+    let (_, o) = pdf.dereference(dict.get(key)?).ok()?;
+    Some(floats(pdf, o.as_array()?))
 }
 
 /// A user-space box `[x0 y0 x1 y1]`, in either order, as a mark's.
@@ -567,13 +557,9 @@ fn inset(r: Box2, d: f32) -> Box2 {
 fn border_width<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> f32 {
     let bs = dict
         .get(b"BS")
-        .ok()
         .and_then(|o| pdf.dereference(o).ok())
-        .and_then(|(_, o)| o.as_dict().ok());
-    if let Some(w) = bs
-        .and_then(|bs| bs.get(b"W").ok())
-        .and_then(|w| w.as_float().ok())
-    {
+        .and_then(|(_, o)| o.as_dict());
+    if let Some(w) = bs.and_then(|bs| bs.get(b"W")).and_then(Object::as_number) {
         return w as f32;
     }
     numbers(pdf, dict, b"Border")
@@ -582,8 +568,8 @@ fn border_width<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> f32 {
 }
 
 fn border_style<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<Vec<u8>> {
-    let (_, bs) = pdf.dereference(dict.get(b"BS").ok()?).ok()?;
-    Some(bs.as_dict().ok()?.get(b"S").ok()?.as_name().ok()?.to_vec())
+    let (_, bs) = pdf.dereference(dict.get(b"BS")?).ok()?;
+    Some(bs.as_dict()?.get(b"S")?.as_name()?.to_vec())
 }
 
 /// `/C` or `/IC` as RGB: gray, RGB or CMYK; none when empty.

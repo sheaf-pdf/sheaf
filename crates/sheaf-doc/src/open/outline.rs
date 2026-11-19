@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use lopdf::{Dictionary, LazyPdf, Object, ObjectId};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, Value};
 use sheaf_edit::{DestView, TextStyle};
 
 use crate::Source;
@@ -62,9 +62,9 @@ pub fn outline(src: &Source) -> Vec<FlatOutlineItem> {
     let first = pdf
         .catalog()
         .ok()
-        .and_then(|c| c.get(b"Outlines").ok())
+        .and_then(|c| c.get(b"Outlines"))
         .and_then(|o| resolve(pdf, o))
-        .and_then(|o| o.as_dict().ok())
+        .and_then(Object::as_dict)
         .and_then(|d| link(d, b"First"));
     let Some(first) = first else {
         return Vec::new();
@@ -93,12 +93,11 @@ impl<'a> Dests<'a> {
     /// to a page by its index.
     pub(crate) fn page_of(&mut self, item: &'a Dictionary) -> Option<(ObjectId, Option<DestView>)> {
         let walk = &mut self.walk;
-        let dest = (item.get(b"Dest").ok())
+        let dest = item
+            .get(b"Dest")
             .and_then(|dest| walk.dest(dest))
             .or_else(|| walk.goto(item))?;
-        let &Object::Reference(page) = dest.first()? else {
-            return None;
-        };
+        let page = dest.first()?.as_reference()?;
         walk.pages
             .contains_key(&page)
             .then(|| (page, walk.view(dest)))
@@ -132,7 +131,7 @@ fn shown_title(title: &str) -> String {
 
 /// An item's `/First` or `/Next`.
 fn link(item: &Dictionary, key: &[u8]) -> Option<ObjectId> {
-    item.get(key).and_then(Object::as_reference).ok()
+    item.get(key).and_then(Object::as_reference)
 }
 
 struct Walk<'a> {
@@ -178,9 +177,8 @@ impl<'a> Walk<'a> {
             let (color, style) = self.style(item);
             let count = item
                 .get(b"Count")
-                .ok()
                 .and_then(|c| resolve(self.pdf, c))
-                .and_then(|c| c.as_i64().ok());
+                .and_then(Object::as_integer);
             let title = self.title(item);
             self.out.push(FlatOutlineItem {
                 title,
@@ -202,9 +200,9 @@ impl<'a> Walk<'a> {
 
     /// `item`'s `/Title`, as shown.
     fn title(&self, item: &Dictionary) -> String {
-        (item.get(b"Title").ok())
+        item.get(b"Title")
             .and_then(|t| resolve(self.pdf, t))
-            .and_then(|t| t.as_str().ok())
+            .and_then(Object::as_bytes)
             .map(title)
             .unwrap_or_default()
     }
@@ -213,7 +211,7 @@ impl<'a> Walk<'a> {
     /// page, no position; and then whether it has a `/Dest` or an `/A`,
     /// which go somewhere else, kept as read.
     fn target(&mut self, item: &'a Dictionary) -> (Option<u32>, Option<DestView>, bool) {
-        let explicit = item.get(b"Dest").ok();
+        let explicit = item.get(b"Dest");
         let dest = explicit.and_then(|dest| self.dest(dest));
         let Some((page, dest)) = dest
             .or_else(|| self.goto(item))
@@ -226,21 +224,23 @@ impl<'a> Walk<'a> {
 
     /// The destination of `item`'s `/A`, when it's a GoTo.
     fn goto(&mut self, item: &'a Dictionary) -> Option<&'a [Object]> {
-        let action = resolve(self.pdf, item.get(b"A").ok()?)?.as_dict().ok()?;
-        let kind = resolve(self.pdf, action.get(b"S").ok()?)?.as_name().ok()?;
+        let action = resolve(self.pdf, item.get(b"A")?)?.as_dict()?;
+        let kind = resolve(self.pdf, action.get(b"S")?)?.as_name()?;
         if kind != b"GoTo" {
             return None;
         }
-        self.dest(action.get(b"D").ok()?)
+        self.dest(action.get(b"D")?)
     }
 
     /// A destination's array: written out, or by name, in the `/Names
     /// /Dests` tree or else the catalog's `/Dests` (PDF 1.1), where the
     /// array may be a dictionary's `/D`.
     fn dest(&mut self, dest: &'a Object) -> Option<&'a [Object]> {
-        let name = match resolve(self.pdf, dest)? {
-            Object::Array(dest) => return Some(dest),
-            Object::Name(name) | Object::String(name, _) => name,
+        let resolved = resolve(self.pdf, dest)?;
+        let name = match resolved.value() {
+            Value::Array(dest) => return Some(dest),
+            Value::Name(name) => name.as_bytes(),
+            Value::String(name, _) => name.as_bytes()?,
             _ => return None,
         };
         let pdf = self.pdf;
@@ -249,15 +249,12 @@ impl<'a> Walk<'a> {
             .get(&pdf_text_bytes(name))
             .copied()
             .or_else(|| {
-                let dests = resolve(pdf, pdf.catalog().ok()?.get(b"Dests").ok()?)?;
-                dests.as_dict().ok()?.get(name).ok()
+                let dests = resolve(pdf, pdf.catalog().ok()?.get(b"Dests")?)?;
+                dests.as_dict()?.get(name)
             })?;
-        match resolve(pdf, named)? {
-            Object::Array(dest) => Some(dest),
-            Object::Dictionary(d) => resolve(pdf, d.get(b"D").ok()?)?
-                .as_array()
-                .ok()
-                .map(Vec::as_slice),
+        match resolve(pdf, named)?.value() {
+            Value::Array(dest) => Some(dest),
+            Value::Dict(d) => resolve(pdf, d.get(b"D")?)?.as_array(),
             _ => None,
         }
     }
@@ -277,9 +274,9 @@ impl<'a> Walk<'a> {
     /// The page a destination names: a page object, by its index in the
     /// page table, or an index itself.
     fn page(&self, dest: &[Object]) -> Option<u32> {
-        match dest.first()? {
-            Object::Reference(id) => self.pages.get(id).copied(),
-            Object::Integer(index) => u32::try_from(*index)
+        match dest.first()?.value() {
+            Value::Ref(id) => self.pages.get(id).copied(),
+            Value::Integer(index) => u32::try_from(*index)
                 .ok()
                 .filter(|&index| index < self.src.page_count()),
             _ => None,
@@ -291,7 +288,7 @@ impl<'a> Walk<'a> {
     /// it's just the page. Other kinds keep their numbers as written, as
     /// many as the kind takes.
     fn view(&self, dest: &[Object]) -> Option<DestView> {
-        let kind = resolve(self.pdf, dest.get(1)?)?.as_name().ok()?;
+        let kind = resolve(self.pdf, dest.get(1)?)?.as_name()?;
         let takes = match kind {
             b"XYZ" => 3,
             b"Fit" | b"FitB" => 0,
@@ -301,7 +298,7 @@ impl<'a> Walk<'a> {
         };
         let params: Vec<Option<f32>> = (2..2 + takes)
             .map(|i| {
-                let n = resolve(self.pdf, dest.get(i)?)?.as_float().ok()?;
+                let n = resolve(self.pdf, dest.get(i)?)?.as_number()?;
                 Some(n as f32)
             })
             .collect();
@@ -323,22 +320,17 @@ impl<'a> Walk<'a> {
     fn style(&self, item: &Dictionary) -> (Option<[u8; 3]>, TextStyle) {
         let color = item
             .get(b"C")
-            .ok()
             .and_then(|c| resolve(self.pdf, c))
-            .and_then(|c| c.as_array().ok())
+            .and_then(Object::as_array)
             .filter(|a| a.len() == 3)
             .map(|a| {
                 let v = |i: usize| {
-                    (a[i].as_float().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8
+                    (a[i].as_number().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8
                 };
                 [v(0), v(1), v(2)]
             })
             .filter(|c| *c != [0, 0, 0]);
-        let flags = item
-            .get(b"F")
-            .ok()
-            .and_then(|f| f.as_i64().ok())
-            .unwrap_or(0);
+        let flags = item.get(b"F").and_then(Object::as_integer).unwrap_or(0);
         let style = TextStyle {
             italic: flags & 1 != 0,
             bold: flags & 2 != 0,

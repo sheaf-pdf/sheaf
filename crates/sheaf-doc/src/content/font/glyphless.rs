@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use lopdf::{Object, Stream, dictionary};
+use crate::pdf::{Object, ObjectId, Stream, dictionary, literal};
 
 use super::{Font, FontRes, Unencoded};
 use crate::content::ResId;
@@ -73,31 +73,31 @@ impl Font for Glyphless {
                 let map = [0u8, 1].repeat(65536);
                 let objects: Arc<[Object]> = Arc::new([
                     dictionary! {
-                        "Type" => "Font",
-                        "Subtype" => "Type0",
-                        "BaseFont" => "GlyphLessFont",
-                        "Encoding" => "Identity-H",
-                        "DescendantFonts" => vec![Object::Reference((1, 0))],
-                        "ToUnicode" => Object::Reference((5, 0)),
+                        "Type" => Object::name("Font"),
+                        "Subtype" => Object::name("Type0"),
+                        "BaseFont" => Object::name("GlyphLessFont"),
+                        "Encoding" => Object::name("Identity-H"),
+                        "DescendantFonts" => vec![Object::from(ObjectId::new(1, 0))],
+                        "ToUnicode" => Object::from(ObjectId::new(5, 0)),
                     }
                     .into(),
                     dictionary! {
-                        "Type" => "Font",
-                        "Subtype" => "CIDFontType2",
-                        "BaseFont" => "GlyphLessFont",
+                        "Type" => Object::name("Font"),
+                        "Subtype" => Object::name("CIDFontType2"),
+                        "BaseFont" => Object::name("GlyphLessFont"),
                         "CIDSystemInfo" => dictionary! {
-                            "Registry" => Object::string_literal("Adobe"),
-                            "Ordering" => Object::string_literal("Identity"),
+                            "Registry" => literal("Adobe"),
+                            "Ordering" => literal("Identity"),
                             "Supplement" => 0i64,
                         },
-                        "FontDescriptor" => Object::Reference((2, 0)),
+                        "FontDescriptor" => Object::from(ObjectId::new(2, 0)),
                         "DW" => 500i64,
-                        "CIDToGIDMap" => Object::Reference((4, 0)),
+                        "CIDToGIDMap" => Object::from(ObjectId::new(4, 0)),
                     }
                     .into(),
                     dictionary! {
-                        "Type" => "FontDescriptor",
-                        "FontName" => "GlyphLessFont",
+                        "Type" => Object::name("FontDescriptor"),
+                        "FontName" => Object::name("GlyphLessFont"),
                         "Flags" => 5i64, // FixedPitch + Symbolic
                         "FontBBox" => vec![0.into(), 0.into(), 500.into(), 1000.into()],
                         "Ascent" => 1000i64,
@@ -105,7 +105,7 @@ impl Font for Glyphless {
                         "CapHeight" => 1000i64,
                         "ItalicAngle" => 0i64,
                         "StemV" => 80i64,
-                        "FontFile2" => Object::Reference((3, 0)),
+                        "FontFile2" => Object::from(ObjectId::new(3, 0)),
                     }
                     .into(),
                     Stream::new(

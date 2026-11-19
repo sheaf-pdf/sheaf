@@ -15,8 +15,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use lopdf::xref::XrefType;
-use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, Stream, dictionary};
+use sheaf_doc::pdf::{Dictionary, Document as Pdf, LazyPdf, Object, Stream, XrefKind, dictionary};
 use sheaf_doc::tx::fixture::{move_pages, rotate};
 use sheaf_edit::{Rotation, Turn};
 use sheaf_image::raster::{PixelFormat, Raster};
@@ -32,16 +31,18 @@ fn rect(r: [i64; 4]) -> Object {
 /// A file whose root boxes its pages, with a node under it turned 90° and
 /// cropped holding two pages, then a page of the root's own; each page
 /// draws a blue block at its bottom left and a red one where it says.
-/// Written by lopdf in `kind`.
-fn file(kind: XrefType) -> Vec<u8> {
+/// Written in `kind`.
+fn file(kind: XrefKind) -> Vec<u8> {
     let mut pdf = Pdf::with_version("1.7");
     let root = pdf.new_object_id();
     let node = pdf.new_object_id();
     let page = |pdf: &mut Pdf, parent, [x, y]: [i64; 2]| {
         let content = format!("0 0 1 rg 46 82 60 40 re f 1 0 0 rg {x} {y} 30 30 re f");
         let content = pdf.add_object(Stream::new(dictionary! {}, content.into_bytes()));
-        let page = dictionary! { "Type" => "Page", "Parent" => parent, "Contents" => content };
-        Object::Reference(pdf.add_object(page))
+        let page = dictionary! {
+            "Type" => Object::name("Page"), "Parent" => parent, "Contents" => content,
+        };
+        Object::from(pdf.add_object(page))
     };
     let under = vec![
         page(&mut pdf, node, [400, 500]),
@@ -49,22 +50,23 @@ fn file(kind: XrefType) -> Vec<u8> {
     ];
     pdf.objects.insert(
         node,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Parent" => root, "Kids" => under, "Count" => 2,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Parent" => root, "Kids" => under, "Count" => 2,
             "Rotate" => 90, "CropBox" => rect([36, 72, 576, 720]),
         }),
     );
     let own = page(&mut pdf, root, [300, 300]);
     pdf.objects.insert(
         root,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => vec![node.into(), own], "Count" => 3,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![node.into(), own], "Count" => 3,
             "MediaBox" => rect([0, 0, 612, 792]), "Resources" => Dictionary::new(),
         }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => root });
     pdf.trailer.set("Root", catalog);
-    pdf.reference_table.cross_reference_type = kind;
+    pdf.xref_kind = kind;
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
     bytes
@@ -91,8 +93,8 @@ fn scratch(name: &str) -> PathBuf {
 #[test]
 fn pages_moved_across_nodes_show_as_they_did() {
     for (kind, name) in [
-        (XrefType::CrossReferenceTable, "table.pdf"),
-        (XrefType::CrossReferenceStream, "stream.pdf"),
+        (XrefKind::Table, "table.pdf"),
+        (XrefKind::Stream, "stream.pdf"),
     ] {
         let bytes = file(kind);
         let path = scratch(name);
@@ -147,8 +149,8 @@ fn pages_moved_across_nodes_show_as_they_did() {
 #[test]
 fn three_appends_in_a_row_reopen() {
     for (kind, name) in [
-        (XrefType::CrossReferenceTable, "three-table.pdf"),
-        (XrefType::CrossReferenceStream, "three-stream.pdf"),
+        (XrefKind::Table, "three-table.pdf"),
+        (XrefKind::Stream, "three-stream.pdf"),
     ] {
         let bytes = file(kind);
         let path = scratch(name);

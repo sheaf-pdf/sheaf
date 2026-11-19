@@ -3,19 +3,18 @@
 //! within the caps, the conformance claims in its XMP, and how it's
 //! encrypted.
 
-use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use lopdf::{Object, ObjectId};
+use crate::pdf::{Object, ObjectId, Value, deflate};
 use sheaf_edit::{PageSize, Rotation};
 
 use super::lazy_tests::{QUICK, catalog, plaintext, stream, with_table};
 use super::{Conformance, Limits, OpenError, PageTreeError, PageTreeLimits, PdfA};
 use crate::geom::Rect;
 use crate::serialize::fixture::{
-    USER, attachment_only, encrypt_dict, encrypted, rc4_aes_128_and_aes_256,
+    USER, attachment_only, encrypt_dict_for, encrypted, rc4_aes_128_and_aes_256,
 };
 use crate::store::{BlobKind, Src, Store};
 
@@ -210,17 +209,17 @@ fn a_page_listed_twice_is_two_pages() {
     assert_eq!(
         ids(&src),
         [
-            ((3, 0), 0),
-            ((4, 0), 0),
-            ((3, 0), 1),
-            ((6, 0), 0),
-            ((6, 0), 1)
+            (ObjectId::new(3, 0), 0),
+            (ObjectId::new(4, 0), 0),
+            (ObjectId::new(3, 0), 1),
+            (ObjectId::new(6, 0), 0),
+            (ObjectId::new(6, 0), 1)
         ]
     );
     // A kid with /Kids is a node whatever its /Type, and any other a page.
     // A kid that names no dictionary keeps its place as a Letter page, as
-    // PDFium and lopdf's get_pages keep it; one written in place, which
-    // has no object to be, is skipped, as get_pages skips it.
+    // PDFium and `Document::get_pages` keep it; one written in place, which
+    // has no object to be, is skipped, as `get_pages` skips it.
     let objects = [
         catalog(),
         object(
@@ -234,7 +233,12 @@ fn a_page_listed_twice_is_two_pages() {
     let src = open(&objects).unwrap();
     assert_eq!(
         ids(&src),
-        [((4, 0), 0), ((4, 0), 1), ((9, 0), 0), ((5, 0), 0)]
+        [
+            (ObjectId::new(4, 0), 0),
+            (ObjectId::new(4, 0), 1),
+            (ObjectId::new(9, 0), 0),
+            (ObjectId::new(5, 0), 0)
+        ]
     );
     assert_eq!(src.page_size(1), size(10.0, 10.0));
     assert_eq!(src.page_size(2), size(612.0, 792.0));
@@ -245,7 +249,7 @@ fn a_page_listed_twice_is_two_pages() {
         object(2, "<< /Type /Page /MediaBox [0 0 10 20] >>"),
     ];
     let src = open(&one).unwrap();
-    assert_eq!(ids(&src), [((2, 0), 0)]);
+    assert_eq!(ids(&src), [(ObjectId::new(2, 0), 0)]);
     assert_eq!(src.page_size(0), size(10.0, 20.0));
     // Past the last page, Letter.
     assert_eq!(src.page_size(1), size(612.0, 792.0));
@@ -307,7 +311,7 @@ fn pages_share_what_they_hold_however_often_it_s_listed() {
     assert_eq!(src.page_count(), 90_000);
     let first = src.page(0).unwrap();
     for (i, page) in src.pages().iter().enumerate() {
-        assert_eq!((page.id, page.repeat), ((4, 0), i as u32));
+        assert_eq!((page.id, page.repeat), (ObjectId::new(4, 0), i as u32));
         assert!(Arc::ptr_eq(&page.annots, &first.annots));
         assert!(Arc::ptr_eq(&page.contents, &first.contents));
         let resources = (page.resources.as_ref(), first.resources.as_ref());
@@ -335,8 +339,8 @@ fn a_broken_object_every_page_names_is_read_once() {
     // And it fails as it failed the first time.
     for _ in 0..2 {
         assert!(matches!(
-            src.pdf().get((3, 0)),
-            Err(lopdf::Error::IndirectObject { .. })
+            src.pdf().get(ObjectId::new(3, 0)),
+            Err(crate::pdf::Error::IndirectObject { .. })
         ));
     }
 }
@@ -368,7 +372,7 @@ fn the_root_s_count_ends_the_table_as_it_ends_pdfium_s() {
         object(3, "<< /Type /Page /Parent 2 0 R >>"),
         object(4, "<< /Type /Pages /Parent 2 0 R /Kids [2 0 R] >>"),
     ];
-    assert_eq!(ids(&open(&objects).unwrap()), [((3, 0), 0)]);
+    assert_eq!(ids(&open(&objects).unwrap()), [(ObjectId::new(3, 0), 0)]);
 }
 
 #[test]
@@ -487,28 +491,35 @@ fn per_page_annots_are_listed() {
     ];
     let src = open(&objects).unwrap();
     let page = |i| src.page(i).unwrap();
+    let annot_refs: Vec<_> = page(0).annots.iter().map(Object::as_reference).collect();
     assert_eq!(
-        &*page(0).annots,
-        [Object::Reference((10, 0)), Object::Reference((11, 0))]
+        annot_refs,
+        [Some(ObjectId::new(10, 0)), Some(ObjectId::new(11, 0))]
     );
     // An indirect /Annots is followed; a direct entry is kept as written.
     assert_eq!(page(1).annots.len(), 2);
-    assert_eq!(page(1).annots[0], Object::Reference((13, 0)));
-    assert!(page(1).annots[1].as_dict().is_ok());
+    assert_eq!(page(1).annots[0].as_reference(), Some(ObjectId::new(13, 0)));
+    assert!(matches!(page(1).annots[1].value(), Value::Dict(_)));
     // One that names nothing lists none.
     assert!(page(2).annots.is_empty());
 
-    assert_eq!(&*page(0).contents, [(20, 0)]);
-    assert_eq!(&*page(1).contents, [(21, 0), (22, 0)]);
+    assert_eq!(&*page(0).contents, [ObjectId::new(20, 0)]);
+    assert_eq!(
+        &*page(1).contents,
+        [ObjectId::new(21, 0), ObjectId::new(22, 0)]
+    );
     assert!(page(2).contents.is_empty());
     assert_eq!(page(0).struct_parents, Some(7));
     assert_eq!(page(1).struct_parents, None);
     assert_eq!(
-        page(0).resources.as_deref(),
-        Some(&Object::Reference((9, 0)))
+        page(0).resources.as_deref().and_then(Object::as_reference),
+        Some(ObjectId::new(9, 0))
     );
-    assert!(page(1).resources.as_ref().unwrap().as_dict().is_ok());
-    assert_eq!(page(0).parents().collect::<Vec<_>>(), [(2, 0)]);
+    assert!(matches!(
+        page(1).resources.as_ref().unwrap().value(),
+        Value::Dict(_)
+    ));
+    assert_eq!(page(0).parents().collect::<Vec<_>>(), [ObjectId::new(2, 0)]);
     // Pages under one node share its chain.
     assert!(std::sync::Arc::ptr_eq(
         page(0).parent.as_ref().unwrap(),
@@ -518,11 +529,9 @@ fn per_page_annots_are_listed() {
 
 /// A file whose catalog has XMP `xml` as its `/Metadata`, deflated when
 /// `deflate`.
-fn with_xmp(xml: &str, deflate: bool) -> Result<Src, OpenError> {
-    let (filter, data) = if deflate {
-        let mut d = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-        d.write_all(xml.as_bytes()).unwrap();
-        ("/Filter /FlateDecode ", d.finish().unwrap())
+fn with_xmp(xml: &str, deflate_xmp: bool) -> Result<Src, OpenError> {
+    let (filter, data) = if deflate_xmp {
+        ("/Filter /FlateDecode ", deflate(xml.as_bytes()))
     } else {
         ("", xml.as_bytes().to_vec())
     };
@@ -622,6 +631,7 @@ fn an_encrypted_source_keeps_how_it_is_encrypted() {
     let mut states = rc4_aes_128_and_aes_256(&plain).to_vec();
     states.push(("attachment only", attachment_only(&plain)));
     for (name, state) in states {
+        let expected_dict = Object::from(encrypt_dict_for(&plain, &state));
         for bytes in encrypted(&plain, &state, |_| {}) {
             let kind = BlobKind::file(Path::new("t.pdf"), Some(USER));
             let src = Store::new().open(bytes.into(), kind).unwrap();
@@ -630,17 +640,13 @@ fn an_encrypted_source_keeps_how_it_is_encrypted() {
             // says; its /ID; and its filters.
             let at = src.pdf().trailer().get(b"Encrypt").unwrap();
             assert_eq!(crypt.at(), at.as_reference().unwrap(), "{name}");
-            assert_eq!(crypt.dict(), &encrypt_dict(&state), "{name}");
+            assert!(
+                Object::from(crypt.dict().clone()).eq_value(&expected_dict),
+                "{name}"
+            );
             let [first, _] = src.xref().id.as_ref().unwrap();
             assert_eq!(crypt.first_id(), Some(&first[..]), "{name}");
-            let filters = |state: &lopdf::EncryptionState| {
-                [
-                    state.default_stream_filter().to_vec(),
-                    state.default_string_filter().to_vec(),
-                    state.default_embedded_file_filter().to_vec(),
-                ]
-            };
-            assert_eq!(filters(crypt.state()), filters(&state), "{name}");
+            assert!(crypt.packs(), "{name}");
         }
     }
     let src = open(&[

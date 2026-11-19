@@ -22,14 +22,16 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use image::GrayImage;
-use lopdf::xref::XrefType;
-use lopdf::{Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
 use sheaf_doc::export::{Export, ExportFrom, Out};
 use sheaf_doc::forms::corpus::Corpus;
 use sheaf_doc::forms::fixture::{Form, Rect, source};
 use sheaf_doc::forms::{FileForm, Finding, Report, Value, check};
 use sheaf_doc::geom::Geom;
 pub use sheaf_doc::materialize::{How, StrategyKind};
+use sheaf_doc::pdf::{
+    Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, StreamExt, Value as PdfValue,
+    XrefKind, dictionary, literal,
+};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture as fx;
 use sheaf_doc::{
@@ -134,10 +136,10 @@ pub fn row(i: usize) -> Rect {
 /// A text field filled with `value`, whose appearance is a solid blue box.
 pub fn blue(form: &mut Form, name: &str, page: usize, i: usize, value: &str) -> ObjectId {
     let id = form.text(name, page, row(i));
-    form.dict(id).set("V", Object::string_literal(value));
+    form.dict(id).set("V", literal(value));
     let ap = form.pdf.add_object(Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Form",
+            "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"),
             "BBox" => vec![0.into(), 0.into(), 200.into(), 30.into()],
         },
         format!("0 0 1 rg 0 0 200 30 re f BT /Helv 10 Tf 2 10 Td ({value}) Tj ET").into_bytes(),
@@ -163,12 +165,12 @@ pub fn two_page_form() -> Form {
 pub fn acrobat_headed_form() -> Form {
     let mut f = two_page_form();
     let piece = dictionary! { "ADBE_CompoundType" => dictionary! {
-        "DocSettings" => dictionary! {}, "Private" => "Header",
+        "DocSettings" => dictionary! {}, "Private" => Object::name("Header"),
     } };
     let helv = f.helv;
     let form = f.pdf.add_object(Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Form", "PieceInfo" => piece,
+            "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"), "PieceInfo" => piece,
             "BBox" => vec![0.into(), 0.into(), 300.into(), 20.into()],
             "Resources" => dictionary! { "Font" => dictionary! { "F1" => helv } },
         },
@@ -217,15 +219,15 @@ pub fn holds(bytes: &[u8], needle: &[u8]) -> bool {
     }
     // Strings the file writes in hex, and streams, decoded.
     fn any(o: &Object, found: &dyn Fn(&[u8]) -> bool) -> bool {
-        match o {
-            Object::String(s, _) => found(s),
-            Object::Array(a) => a.iter().any(|o| any(o, found)),
-            Object::Dictionary(d) => d.iter().any(|(_, o)| any(o, found)),
-            Object::Stream(s) => {
+        match o.value() {
+            PdfValue::String(s, _) => s.as_bytes().is_some_and(found),
+            PdfValue::Array(a) => a.iter().any(|o| any(o, found)),
+            PdfValue::Dict(d) => d.iter().any(|(_, o)| any(o, found)),
+            PdfValue::Stream(s) => {
                 s.dict.iter().any(|(_, o)| any(o, found))
                     || found(
                         &s.decompressed_content()
-                            .unwrap_or_else(|_| s.content.clone()),
+                            .unwrap_or_else(|_| s.raw_bytes().to_vec()),
                     )
             }
             _ => false,
@@ -365,8 +367,14 @@ pub fn appended_objects(base: usize, whole: &[u8]) -> BTreeMap<ObjectId, bool> {
     (pdf.ids().filter(|&id| past(id)))
         .filter_map(|id| {
             let object = pdf.get(id).ok();
-            let named = |name: &[u8]| object.and_then(|o| o.type_name().ok()) == Some(name);
-            let page = matches!(object, Some(Object::Dictionary(_))) && named(b"Page");
+            let named = |name: &[u8]| {
+                object
+                    .and_then(Object::as_dict)
+                    .and_then(Dictionary::type_name)
+                    == Some(name)
+            };
+            let page =
+                matches!(object.map(Object::value), Some(PdfValue::Dict(_))) && named(b"Page");
             (!named(b"XRef")).then_some((id, page))
         })
         .collect()
@@ -386,25 +394,33 @@ pub fn written(doc: &Document, how: How) -> Vec<u8> {
 pub fn dangling_structure(bytes: &[u8]) -> usize {
     let pdf = Pdf::load_mem(bytes).unwrap();
     let objr = |o: &Object| {
-        let o = match o {
-            Object::Reference(id) => pdf.get_object(*id).ok(),
-            o => Some(o),
+        let o = match o.value() {
+            PdfValue::Ref(id) => pdf.get_object(*id).ok(),
+            _ => Some(o),
         };
-        o.and_then(|o| o.as_dict().ok())
-            .filter(|d| d.get(b"Type").and_then(|t| t.as_name()).ok() == Some(b"OBJR"))
-            .is_some_and(|d| match d.get(b"Obj") {
-                Ok(Object::Reference(id)) => pdf.get_object(*id).is_err(),
-                _ => true,
-            })
+        o.and_then(|o| match o.value() {
+            PdfValue::Dict(d) => Some(d),
+            _ => None,
+        })
+        .filter(|d| d.type_name() == Some(b"OBJR"))
+        .is_some_and(|d| match d.get(b"Obj").and_then(Object::as_reference) {
+            Some(id) => pdf.get_object(id).is_err(),
+            None => true,
+        })
     };
     pdf.objects
         .values()
-        .filter_map(|o| o.as_dict().ok())
-        .filter(|d| d.get(b"Type").and_then(|t| t.as_name()).ok() == Some(b"StructElem"))
+        .filter_map(|o| match o.value() {
+            PdfValue::Dict(d) => Some(d),
+            _ => None,
+        })
+        .filter(|d| d.type_name() == Some(b"StructElem"))
         .map(|d| match d.get(b"K") {
-            Ok(Object::Array(kids)) => kids.iter().filter(|k| objr(k)).count(),
-            Ok(k) => usize::from(objr(k)),
-            Err(_) => 0,
+            Some(k) => match k.value() {
+                PdfValue::Array(kids) => kids.iter().filter(|k| objr(k)).count(),
+                _ => usize::from(objr(k)),
+            },
+            None => 0,
         })
         .sum()
 }
@@ -412,10 +428,10 @@ pub fn dangling_structure(bytes: &[u8]) -> usize {
 /// The catalog's `/AcroForm /Fields`, or None with no `/AcroForm`.
 pub fn fields_of(bytes: &[u8]) -> Option<Vec<Object>> {
     let pdf = Pdf::load_mem(bytes).unwrap();
-    let form = pdf.catalog().unwrap().get(b"AcroForm").ok()?;
+    let form = pdf.catalog().unwrap().get(b"AcroForm")?;
     let form = pdf.dereference(form).unwrap().1.as_dict().unwrap();
     let fields = pdf.dereference(form.get(b"Fields").unwrap()).unwrap().1;
-    Some(fields.as_array().unwrap().clone())
+    Some(fields.as_array().unwrap().to_vec())
 }
 
 /// A corpus form, or None (and the corpus tests skip) without one.
@@ -572,7 +588,7 @@ pub fn filled(bytes: &[u8], name: &str, value: &str) -> Vec<u8> {
     sheaf_doc::forms::fixture::append_revision(bytes, &[field.object], |pdf| {
         pdf.get_dictionary_mut(field.object)
             .unwrap()
-            .set("V", Object::string_literal(value));
+            .set("V", literal(value));
     })
 }
 
@@ -636,14 +652,16 @@ pub fn ready(store: Arc<Store>, primary: Src, name: &str) -> anyhow::Result<Docu
     Ok(d)
 }
 
-/// A file of `n` Letter pages as lopdf writes it in `kind`, each drawing
+/// A file of `n` Letter pages written in `kind`, each drawing
 /// a few shapes and "page i" in Helvetica, which their parent node gives
 /// them.
-pub fn file(n: usize, kind: XrefType) -> Vec<u8> {
+pub fn file(n: usize, kind: XrefKind) -> Vec<u8> {
     let mut pdf = Pdf::with_version("1.7");
     let root = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     });
     let kids: Vec<Object> = (0..n)
         .map(|i| {
@@ -653,21 +671,24 @@ pub fn file(n: usize, kind: XrefType) -> Vec<u8> {
                 100 + 40 * i
             );
             let content = pdf.add_object(Stream::new(dictionary! {}, content.into_bytes()));
-            let page = dictionary! { "Type" => "Page", "Parent" => root, "Contents" => content };
+            let page = dictionary! {
+                "Type" => Object::name("Page"), "Parent" => root, "Contents" => content,
+            };
             pdf.add_object(page).into()
         })
         .collect();
     pdf.objects.insert(
         root,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => kids, "Count" => n as i64,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => kids, "Count" => n as i64,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
         }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => root });
     pdf.trailer.set("Root", catalog);
-    pdf.reference_table.cross_reference_type = kind;
+    pdf.xref_kind = kind;
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
     bytes

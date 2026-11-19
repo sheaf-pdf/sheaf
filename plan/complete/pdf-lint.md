@@ -385,7 +385,7 @@ measurements, hand checks for Greg, what review found, Found.)
    - **Two contexts** (B44, 0117296): a key is unlisted only when no
      table that reaches the object lists it, so 13 of B44's 19 rows went;
      B44 stays open on 6.
-   - **[B63](../backlog/B63.md), new, a pdf-lint bug:** `render` cuts a
+   - **[B63](backlog-closed.md#b63-pdf-lint-shows-a-long-utf-16-string-two-ways-in-an-encrypted-file), new, a pdf-lint bug:** `render` cuts a
      byte string at 80 bytes but a text string at 80 characters. In an
      encrypted file, the reader puts qpdf's plaintext in plain-view
      objects and tokenizes an object stream's strings as bytes, so a
@@ -393,7 +393,7 @@ measurements, hand checks for Greg, what review found, Found.)
      the form's when a save moves its page into or out of an object
      stream. 43 findings in 19 saves of 17 forms, held by 17 rows, one
      per form. Reproduced with qpdf and the `pdf-lint` binary alone.
-   - **[F29](../backlog/F29.md), new:** 1819139 and 4422502's
+   - **[F29](backlog-closed.md#f29-research-how-the-arlington-tier-holds-a-damaged-form-pdf-lint-reads-nothing-of), new:** 1819139 and 4422502's
      `startxref` names nothing, so pdf-lint reads little of them, while
      sheaf opens them by lopdf's recovery: their faults in what sheaf
      merges (78 FieldTx `/DR` deprecated, 9 `/Tabs` too-new) aren't

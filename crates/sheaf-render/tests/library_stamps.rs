@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use lopdf::{Document as Pdf, Object, Stream, dictionary};
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture::add;
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Document, FixedCount, Store};
@@ -31,14 +31,16 @@ fn one_page(
     pdf: &mut Pdf,
     media: [i64; 4],
     content: Object,
-    xobjects: lopdf::Dictionary,
+    xobjects: sheaf_doc::pdf::Dictionary,
 ) -> Vec<u8> {
     let pages = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     });
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page", "Parent" => pages, "Contents" => content,
+        "Type" => Object::name("Page"), "Parent" => pages, "Contents" => content,
         "MediaBox" => media.map(Object::from).to_vec(),
         "Resources" => dictionary! {
             "Font" => dictionary! { "F1" => font },
@@ -47,9 +49,13 @@ fn one_page(
     });
     pdf.objects.insert(
         pages,
-        dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1,
+        }
+        .into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
@@ -148,16 +154,20 @@ fn a_stamp_from_a_cropped_turned_page_lands_where_it_shows() {
             .to_vec(),
     ));
     let page = stamp.add_object(dictionary! {
-        "Type" => "Page", "Parent" => pages, "Contents" => content,
+        "Type" => Object::name("Page"), "Parent" => pages, "Contents" => content,
         "MediaBox" => vec![0.into(), 0.into(), 300.into(), 200.into()],
         "CropBox" => vec![50.into(), 60.into(), 250.into(), 160.into()],
         "Rotate" => 90,
     });
     stamp.objects.insert(
         pages,
-        dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1,
+        }
+        .into(),
     );
-    let catalog = stamp.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    let catalog =
+        stamp.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages });
     stamp.trailer.set("Root", catalog);
     let mut stamp_bytes = Vec::new();
     stamp.save_to(&mut stamp_bytes).unwrap();

@@ -19,8 +19,7 @@ anyhow.workspace = true
 log.workspace = true
 # Renders come back on oneshot channels (sheaf-render's engine pool).
 futures.workspace = true
-# Stamp collections are PDFs; favorites are JSON.
-lopdf.workspace = true
+# Favorites are JSON.
 serde_json.workspace = true
 regex.workspace = true
 serde.workspace = true
@@ -34,6 +33,4 @@ sheaf-doc = { workspace = true, features = ["fixtures"] }
 # Codes drawn on synthetic pages, scanned badly (`codes::fixture`).
 sheaf-image = { workspace = true, features = ["fixtures"] }
 # The corpus's pool inventory is gzipped (realize_corpus's sample).
-flate2 = "1"
-# What sheaf writes, held to the Arlington model (tests/arlington.rs).
-pdf-lint.workspace = true
+flate2.workspace = true

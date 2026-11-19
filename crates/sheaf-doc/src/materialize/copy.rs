@@ -20,8 +20,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StreamExt, Value};
 use anyhow::Result;
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
 
 use super::emit::Syms;
 use super::key::ObjKey;
@@ -174,19 +174,24 @@ impl<'a> Closure<'a> {
     /// `scope`'s copy of it, which the closure then copies. A stream's
     /// `/Length` is the writer's to give.
     pub(crate) fn sym(&mut self, syms: &mut Syms, obj: &Object, scope: &Scope) -> Object {
-        match obj {
-            Object::Reference(r) => self.reference(syms, *r, scope),
-            Object::Array(items) => {
-                Object::Array(items.iter().map(|o| self.sym(syms, o, scope)).collect())
-            }
-            Object::Dictionary(d) => Object::Dictionary(self.sym_dict(syms, d, scope, false)),
-            Object::Stream(s) => {
+        match obj.value() {
+            Value::Ref(r) => self.reference(syms, *r, scope),
+            Value::Array(items) => Object::from(
+                items
+                    .iter()
+                    .map(|o| self.sym(syms, o, scope))
+                    .collect::<Vec<_>>(),
+            ),
+            Value::Dict(d) => Object::from(self.sym_dict(syms, d, scope, false)),
+            Value::Stream(s) => {
                 let dict = self.sym_dict(syms, &s.dict, scope, true);
-                let mut stream = lopdf::Stream::new(dict, s.content.clone());
-                stream.allows_compression = s.allows_compression;
-                Object::Stream(stream)
+                Object::from(Stream::new(dict, s.raw_bytes().to_vec()))
             }
-            other => other.clone(),
+            _ => {
+                let mut copy = obj.clone();
+                copy.unplace();
+                copy
+            }
         }
     }
 
@@ -201,7 +206,7 @@ impl<'a> Closure<'a> {
         let mut out = Dictionary::new();
         for (k, v) in d.iter() {
             if !(stream && k == b"Length") {
-                out.set(k.clone(), self.sym(syms, v, scope));
+                out.set(k, self.sym(syms, v, scope));
             }
         }
         out
@@ -223,12 +228,12 @@ impl<'a> Closure<'a> {
             None => is_type(pdf, r, b"Catalog").then_some(Some(ObjKey::Catalog)),
         };
         if let Some(to) = level {
-            return to.map_or(Object::Null, |key| syms.placeholder(key));
+            return to.map_or(Object::null(), |key| syms.placeholder(key));
         }
         if is_page_node(pdf, r) {
             return match self.pages.named(blob, r, scope.copy) {
                 Some(page) => syms.placeholder(ObjKey::Page(page)),
-                None => Object::Null,
+                None => Object::null(),
             };
         }
         let key = ObjKey::Base {
@@ -272,17 +277,17 @@ impl<'a> Closure<'a> {
         };
         let read = match src.pdf().object_unkept(obj) {
             Ok(o) => o,
-            Err(lopdf::Error::MissingXrefEntry | lopdf::Error::ObjectNotFound(_)) => {
-                return Some(Ok((key, Object::Null)));
+            Err(crate::pdf::Error::MissingXrefEntry | crate::pdf::Error::ObjectNotFound(_)) => {
+                return Some(Ok((key, Object::null())));
             }
             Err(e) => {
-                log::warn!("copying object {} {} as null: {e}", obj.0, obj.1);
+                log::warn!("copying object {obj} as null: {e}");
                 self.unreadable += 1;
-                return Some(Ok((key, Object::Null)));
+                return Some(Ok((key, Object::null())));
             }
         };
         if is_widget(&read) {
-            return Some(Ok((key, Object::Null)));
+            return Some(Ok((key, Object::null())));
         }
         let scope = Scope { src: &src, copy };
         Some(Ok((key, self.sym(syms, &read, &scope))))
@@ -315,21 +320,21 @@ pub(crate) fn page_named(
 /// and its information dictionary, null. The written file has its own of
 /// each, and a copy of one would bring its file's whole structure along.
 /// Any other dictionary typed `/Catalog` is the written catalog too.
-pub(crate) fn document_level(pdf: &lopdf::LazyPdf) -> HashMap<ObjectId, Option<ObjKey>> {
+pub(crate) fn document_level(pdf: &crate::pdf::LazyPdf) -> HashMap<ObjectId, Option<ObjKey>> {
     let mut out = HashMap::new();
     let trailer = pdf.trailer();
-    if let Ok(info) = trailer.get(b"Info").and_then(Object::as_reference) {
+    if let Some(info) = trailer.get(b"Info").and_then(Object::as_reference) {
         out.insert(info, None);
     }
-    let Ok(root) = trailer.get(b"Root").and_then(Object::as_reference) else {
+    let Some(root) = trailer.get(b"Root").and_then(Object::as_reference) else {
         return out;
     };
     out.insert(root, Some(ObjKey::Catalog));
     for (k, v) in pdf.get_dictionary(root).into_iter().flat_map(|c| c.iter()) {
-        let Ok(r) = v.as_reference() else {
+        let Some(r) = v.as_reference() else {
             continue;
         };
-        let to = match k.as_slice() {
+        let to = match k {
             b"AcroForm" => Some(ObjKey::AcroForm),
             b"Pages" | b"Outlines" | b"StructTreeRoot" | b"Names" | b"Dests" | b"Threads"
             | b"OCProperties" | b"PageLabels" => None,
@@ -342,28 +347,26 @@ pub(crate) fn document_level(pdf: &lopdf::LazyPdf) -> HashMap<ObjectId, Option<O
 
 /// Whether `obj` is a widget annotation.
 fn is_widget(obj: &Object) -> bool {
-    let subtype = obj.as_dict().ok().and_then(|d| d.get(b"Subtype").ok());
-    subtype.and_then(|s| s.as_name().ok()) == Some(b"Widget".as_slice())
+    matches!(
+        obj.value(),
+        Value::Dict(d) if d.get(b"Subtype").and_then(Object::as_name) == Some(b"Widget")
+    )
 }
 
 /// Whether object `id` of `pdf` is a dictionary of `/Type` `kind`.
 fn is_type<P: Objects + ?Sized>(pdf: &P, id: ObjectId, kind: &[u8]) -> bool {
-    matches!(
-        pdf.get_object(id),
-        Ok(Object::Dictionary(d)) if d.get(b"Type").ok().and_then(|t| t.as_name().ok()) == Some(kind)
-    )
+    pdf.get_object(id)
+        .is_ok_and(|o| matches!(o.value(), Value::Dict(d) if d.has_type(kind)))
 }
 
 /// A page or a node of the page tree.
 pub(crate) fn is_page_node<P: Objects + ?Sized>(pdf: &P, id: ObjectId) -> bool {
-    matches!(
-        pdf.get_object(id),
-        Ok(Object::Dictionary(d)) if d
-            .get(b"Type")
-            .ok()
-            .and_then(|t| t.as_name().ok())
-            .is_some_and(|t| t == b"Page" || t == b"Pages")
-    )
+    pdf.get_object(id).is_ok_and(|o| {
+        matches!(
+            o.value(),
+            Value::Dict(d) if matches!(d.type_name(), Some(b"Page" | b"Pages"))
+        )
+    })
 }
 
 /// `id` copied into `dst`, or None for a page that isn't being copied
@@ -384,7 +387,7 @@ pub(crate) fn copy_object<P: Objects + ?Sized>(
     let new_id = dst.new_object_id();
     map.insert(id, new_id);
     // Placeholder first so cycles terminate.
-    dst.objects.insert(new_id, Object::Null);
+    dst.objects.insert(new_id, Object::null());
     let obj = src.get_object(id)?.clone();
     let obj = remap(src, &obj, dst, map)?;
     dst.objects.insert(new_id, obj);
@@ -400,33 +403,35 @@ pub(crate) fn remap<P: Objects + ?Sized>(
     dst: &mut Pdf,
     map: &mut HashMap<ObjectId, ObjectId>,
 ) -> Result<Object> {
-    Ok(match obj {
-        Object::Reference(r) => match copy_object(src, *r, dst, map)? {
-            Some(id) => Object::Reference(id),
-            None => Object::Null,
+    Ok(match obj.value() {
+        Value::Ref(r) => match copy_object(src, *r, dst, map)? {
+            Some(id) => Object::from(id),
+            None => Object::null(),
         },
-        Object::Array(items) => Object::Array(
+        Value::Array(items) => Object::from(
             items
                 .iter()
                 .map(|o| remap(src, o, dst, map))
-                .collect::<Result<_>>()?,
+                .collect::<Result<Vec<_>>>()?,
         ),
-        Object::Dictionary(d) => {
+        Value::Dict(d) => {
             let mut out = Dictionary::new();
             for (k, v) in d.iter() {
-                out.set(k.clone(), remap(src, v, dst, map)?);
+                out.set(k, remap(src, v, dst, map)?);
             }
-            Object::Dictionary(out)
+            Object::from(out)
         }
-        Object::Stream(s) => {
+        Value::Stream(s) => {
             let mut dict = Dictionary::new();
             for (k, v) in s.dict.iter() {
-                dict.set(k.clone(), remap(src, v, dst, map)?);
+                dict.set(k, remap(src, v, dst, map)?);
             }
-            let mut stream = lopdf::Stream::new(dict, s.content.clone());
-            stream.allows_compression = s.allows_compression;
-            Object::Stream(stream)
+            Object::from(Stream::new(dict, s.raw_bytes().to_vec()))
         }
-        other => other.clone(),
+        _ => {
+            let mut copy = obj.clone();
+            copy.unplace();
+            copy
+        }
     })
 }

@@ -57,3 +57,8 @@ Area: M11: Security and redaction · Part of [build or adopt](README.md)
   these crates, with `Zeroizing` keys. Swapping lopdf's RC4 for the rc4
   crate, or keeping its 66 lines, are both fine. AES-GCM (ISO/TS 32003)
   isn't planned; RustCrypto's aes-gcm would cover it.
+- **Status (M18 slices 6 and 12–13, 2026-11-18):** **Done.** Implemented in
+  `pdf-crypt` (`sheaf-pdf/pdf-lint`, `MIT OR Apache-2.0`) on RustCrypto with
+  `Zeroizing` keys (closing F19) and fresh OS CSPRNG AES IVs (`Ivs::new()`,
+  ISO 32000-2 §7.6.3.2–3), with deterministic `insecure-test-writer` gated to
+  dev/test targets only.

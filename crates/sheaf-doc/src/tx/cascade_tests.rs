@@ -3,8 +3,8 @@
 //! with that rule switched off finds it missing. Then validation, which
 //! fails and never repairs (§6.4), and what a duplicate copies (bug 12).
 
+use crate::pdf::{Object, dictionary, literal};
 use in_progress::NoProgress;
-use lopdf::{Object, dictionary};
 use sheaf_edit::{
     AnnotRef, BookmarkRef, Imported, LabelStyle, Local, MarkKind, Op, PageLabelRange, PageRef,
     PageSel, ScopeSel, Sibling, Turn,
@@ -539,9 +539,9 @@ fn replied_to() -> Vec<u8> {
     let written = crate::serialize::built::to_pdf(&crate::forms::fixture::note(), &mut f.pdf).main;
     let note = f.pdf.add_object(written);
     let reply = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Text", "IRT" => note, "NM" => Object::string_literal("theirs"),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "IRT" => note, "NM" => literal("theirs"),
         "Rect" => vec![0.into(), 0.into(), 20.into(), 20.into()],
-        "Contents" => Object::string_literal("Agreed"),
+        "Contents" => literal("Agreed"),
     });
     f.set_annots(0, &[note, reply]);
     f.bytes()

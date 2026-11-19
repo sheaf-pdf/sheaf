@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use image::{GrayImage, Luma, Rgb, RgbImage};
-use lopdf::Document as Pdf;
 use sheaf_doc::materialize::{AskAnswers, StrategyKind};
+use sheaf_doc::pdf::Document as Pdf;
 use sheaf_doc::recovery;
 use sheaf_doc::{Actor, EditError, JobKind, TextLayer};
 use sheaf_edit::{Op, PageRef, PageSel, PageSize, PageSource, Rotation, Turn};
@@ -655,7 +655,7 @@ fn a_multi_page_tiff_scans_page_by_page() {
         .map(|&id| {
             let page = pdf.get_dictionary(id).unwrap();
             let media = page.get(b"MediaBox").unwrap().as_array().unwrap();
-            let n = |i: usize| media[i].as_float().unwrap().round() as i64;
+            let n = |i: usize| media[i].as_number().unwrap().round() as i64;
             (n(2), n(3))
         })
         .collect();

@@ -1,11 +1,11 @@
 use super::*;
 use crate::annot::{Annot, AnnotKind, Pt};
 use crate::model::Document;
+use crate::pdf::{Document as Pdf, Stream, dictionary, literal};
 use crate::prim::Key;
 use crate::tx::fixture::add;
 use crate::tx::{Actor, CommitOpts, EditError, JobKind, Stale};
 use in_progress::NoProgress;
-use lopdf::{Document as Pdf, Stream, dictionary};
 use sheaf_edit::Rotation;
 
 /// Comments a test makes, each on its page, as a data file holds them.
@@ -17,7 +17,7 @@ struct Making {
 
 impl Making {
     fn add(&mut self, page: u32, d: Dictionary) -> ObjectId {
-        let id = self.built.pdf().add_object(Object::Dictionary(d));
+        let id = self.built.pdf().add_object(Object::from(d));
         self.annots.push((page, id));
         id
     }
@@ -35,68 +35,68 @@ fn sample() -> Comments {
     let note = c.add(
         0,
         dictionary! {
-            "Type" => "Annot", "Subtype" => "Text", "Rect" => r(100, 600), "NM" => Object::string_literal("n1"),
-            "T" => Object::string_literal("Ann"), "Contents" => crate::save::text_string("Tie <&> “foot”"),
-            "M" => Object::string_literal("D:20261001120000"), "C" => vec![1.into(), 1.into(), 0.into()],
-            "F" => 28, "Name" => "Comment", "Open" => false,
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "Rect" => r(100, 600), "NM" => literal("n1"),
+            "T" => literal("Ann"), "Contents" => crate::save::text_string("Tie <&> “foot”"),
+            "M" => literal("D:20261001120000"), "C" => vec![1.into(), 1.into(), 0.into()],
+            "F" => 28, "Name" => Object::name("Comment"), "Open" => false,
         },
     );
     c.add(
         0,
         dictionary! {
-            "Type" => "Annot", "Subtype" => "Text", "Rect" => r(100, 600), "NM" => Object::string_literal("r1"),
-            "IRT" => note, "T" => Object::string_literal("Bo"), "Contents" => Object::string_literal("Done"),
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "Rect" => r(100, 600), "NM" => literal("r1"),
+            "IRT" => note, "T" => literal("Bo"), "Contents" => literal("Done"),
         },
     );
     c.add(
         0,
         dictionary! {
-            "Type" => "Annot", "Subtype" => "Text", "Rect" => r(100, 600), "NM" => Object::string_literal("s1"),
-            "IRT" => note, "State" => Object::string_literal("Accepted"),
-            "StateModel" => Object::string_literal("Review"),
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "Rect" => r(100, 600), "NM" => literal("s1"),
+            "IRT" => note, "State" => literal("Accepted"),
+            "StateModel" => literal("Review"),
         },
     );
     c.add(
         0,
         dictionary! {
-            "Type" => "Annot", "Subtype" => "Highlight", "Rect" => r(100, 680),
-            "NM" => Object::string_literal("h1"), "C" => vec![1.into(), 1.into(), 0.into()], "CA" => 0.5,
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Highlight"), "Rect" => r(100, 680),
+            "NM" => literal("h1"), "C" => vec![1.into(), 1.into(), 0.into()], "CA" => 0.5,
             "QuadPoints" => vec![100.into(), 700.into(), 200.into(), 700.into(), 100.into(), 688.into(), 200.into(), 688.into()],
         },
     );
     c.add(
         1,
         dictionary! {
-            "Type" => "Annot", "Subtype" => "Line", "Rect" => r(10, 10), "NM" => Object::string_literal("l1"),
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Line"), "Rect" => r(10, 10), "NM" => literal("l1"),
             "L" => vec![10.into(), 10.into(), 200.into(), 150.into()],
-            "LE" => vec![Object::Name(b"None".to_vec()), Object::Name(b"OpenArrow".to_vec())],
-            "C" => vec![1.into(), 0.into(), 0.into()], "BS" => dictionary! { "W" => 3, "S" => "D", "D" => vec![3.into(), 3.into()] },
+            "LE" => vec![Object::name("None"), Object::name("OpenArrow")],
+            "C" => vec![1.into(), 0.into(), 0.into()], "BS" => dictionary! { "W" => 3, "S" => Object::name("D"), "D" => vec![3.into(), 3.into()] },
         },
     );
     c.add(
         1,
         dictionary! {
-            "Type" => "Annot", "Subtype" => "Ink", "Rect" => r(10, 10), "NM" => Object::string_literal("i1"),
-            "InkList" => vec![Object::Array(vec![10.into(), 10.into(), 20.into(), 25.into(), 40.into(), 30.into()])],
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Ink"), "Rect" => r(10, 10), "NM" => literal("i1"),
+            "InkList" => vec![Object::from(vec![10.into(), 10.into(), 20.into(), 25.into(), 40.into(), 30.into()])],
         },
     );
     c.add(
         1,
         dictionary! {
-            "Type" => "Annot", "Subtype" => "Polygon", "Rect" => r(300, 300), "NM" => Object::string_literal("p1"),
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Polygon"), "Rect" => r(300, 300), "NM" => literal("p1"),
             "Vertices" => vec![300.into(), 300.into(), 400.into(), 310.into(), 350.into(), 400.into()],
-            "BE" => dictionary! { "S" => "C", "I" => 1 }, "IC" => vec![0.into(), 0.into(), 1.into()],
+            "BE" => dictionary! { "S" => Object::name("C"), "I" => 1 }, "IC" => vec![0.into(), 0.into(), 1.into()],
         },
     );
     c.add(
         1,
         dictionary! {
-            "Type" => "Annot", "Subtype" => "FreeText", "IT" => "FreeTextCallout",
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("FreeText"), "IT" => Object::name("FreeTextCallout"),
             "Rect" => vec![200.into(), 200.into(), 400.into(), 260.into()],
             "RD" => vec![50.into(), 0.into(), 0.into(), 0.into()],
             "CL" => vec![205.into(), 205.into(), 230.into(), 230.into(), 250.into(), 230.into()],
-            "DA" => Object::string_literal("/Helv 10 Tf 0 0 1 rg"), "LE" => "OpenArrow",
-            "NM" => Object::string_literal("f1"), "Contents" => Object::string_literal("Why?"),
+            "DA" => literal("/Helv 10 Tf 0 0 1 rg"), "LE" => Object::name("OpenArrow"),
+            "NM" => literal("f1"), "Contents" => literal("Why?"),
         },
     );
     c.comments(Some("review.pdf"))
@@ -187,27 +187,30 @@ fn another_pdf_s_comments_are_read_from_it() {
     let mut f = crate::forms::fixture::Form::new(2);
     let r = || vec![100.into(), 600.into(), 120.into(), 620.into()];
     let note = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Text", "Rect" => r(), "NM" => Object::string_literal("ann-1"),
-        "T" => Object::string_literal("Ann"), "Contents" => Object::string_literal("Look"),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "Rect" => r(), "NM" => literal("ann-1"),
+        "T" => literal("Ann"), "Contents" => literal("Look"),
     });
     let reply = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Text", "Rect" => r(), "NM" => Object::string_literal("bo-1"),
-        "IRT" => note, "T" => Object::string_literal("Bo"), "Contents" => Object::string_literal("Done"),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "Rect" => r(), "NM" => literal("bo-1"),
+        "IRT" => note, "T" => literal("Bo"), "Contents" => literal("Done"),
     });
     let others = ["Popup", "Link", "Widget"].map(|subtype| {
-        f.pdf
-            .add_object(dictionary! { "Type" => "Annot", "Subtype" => subtype, "Rect" => r() })
+        f.pdf.add_object(dictionary! {
+            "Type" => Object::name("Annot"),
+            "Subtype" => Object::name(subtype),
+            "Rect" => r(),
+        })
     });
     let ours = crate::forms::fixture::note();
     let main = crate::serialize::built::to_pdf(&ours, &mut f.pdf).main;
-    let ours_id = f.pdf.add_object(Object::Dictionary(main));
+    let ours_id = f.pdf.add_object(Object::from(main));
     let free = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "FreeText", "Rect" => r(), "NM" => Object::string_literal("ft-1"),
-        "Contents" => Object::string_literal("On two"), "DA" => Object::string_literal("/Helv 10 Tf"),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("FreeText"), "Rect" => r(), "NM" => literal("ft-1"),
+        "Contents" => literal("On two"), "DA" => literal("/Helv 10 Tf"),
     });
     f.set_annots(0, &[note, others[0], reply, others[1], others[2], ours_id]);
     f.set_annots(1, &[free]);
-    let id = Object::string_literal("0123456789abcdef");
+    let id = literal("0123456789abcdef");
     f.pdf.trailer.set("ID", vec![id.clone(), id]);
     let plain = f.bytes();
     let [_, (_, aes), _] = rc4_aes_128_and_aes_256(&f.pdf);
@@ -222,7 +225,7 @@ fn another_pdf_s_comments_are_read_from_it() {
         let want = [(0, "ann-1"), (0, "bo-1"), (0, &*ours.name()), (1, "ft-1")];
         assert_eq!(names, want.map(|(page, nm)| (page, nm.to_string())));
         assert_eq!(c.parent_of(c.dict(1).unwrap()).as_deref(), Some("ann-1"));
-        let entry = Object::Reference(c.annots[2].1);
+        let entry = Object::from(c.annots[2].1);
         let back = crate::file::sheaf_mark(c.src.pdf(), &entry).unwrap();
         assert_eq!(
             (back.id, back.kind, back.contents),
@@ -245,24 +248,25 @@ fn pdf_with_square(dir: &std::path::Path) -> std::path::PathBuf {
     for i in 0..2 {
         let content = pdf.add_object(Stream::new(dictionary! {}, Vec::new()));
         let mut page = dictionary! {
-            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+            "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         };
         if i == 0 {
             let sq = pdf.add_object(dictionary! {
-                "Type" => "Annot", "Subtype" => "Square", "NM" => Object::string_literal("sq"),
+                "Type" => Object::name("Annot"), "Subtype" => Object::name("Square"), "NM" => literal("sq"),
                 "Rect" => vec![100.into(), 100.into(), 200.into(), 150.into()],
-                "T" => Object::string_literal("Pat"), "Contents" => Object::string_literal("Box"),
+                "T" => literal("Pat"), "Contents" => literal("Box"),
             });
             page.set("Annots", vec![sq.into()]);
         }
-        kids.push(Object::Reference(pdf.add_object(page)));
+        kids.push(Object::from(pdf.add_object(page)));
     }
     pdf.objects.insert(
         pages_id,
-        dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => 2 }.into(),
+        dictionary! { "Type" => Object::name("Pages"), "Kids" => kids, "Count" => 2 }.into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
     let path = dir.join("two.pdf");
     pdf.save(&path).unwrap();
@@ -324,8 +328,8 @@ fn imports_planned_together_conflict_over_what_they_matched_by() {
     c.add(
         1,
         dictionary! {
-            "Subtype" => "Text", "Rect" => vec![100.into(), 100.into(), 120.into(), 120.into()],
-            "NM" => Object::string_literal("new"), "Contents" => Object::string_literal("Hello"),
+            "Subtype" => Object::name("Text"), "Rect" => vec![100.into(), 100.into(), 120.into(), 120.into()],
+            "NM" => literal("new"), "Contents" => literal("Hello"),
         },
     );
     let c = c.comments(None);
@@ -374,19 +378,28 @@ fn imports_match_by_name_and_report_the_rest() {
     // sheaf can't hold; one past the last page.
     c.add(
         0,
-        dictionary! { "Subtype" => "Text", "Rect" => r(), "NM" => crate::save::text_string(&ours.name()), "Contents" => Object::string_literal("ours, edited") },
+        dictionary! { "Subtype" => Object::name("Text"), "Rect" => r(), "NM" => crate::save::text_string(&ours.name()), "Contents" => literal("ours, edited") },
     );
     c.add(
         0,
-        dictionary! { "Subtype" => "Square", "Rect" => r(), "NM" => Object::string_literal("sq"), "Contents" => Object::string_literal("Box, edited") },
+        dictionary! { "Subtype" => Object::name("Square"), "Rect" => r(), "NM" => literal("sq"), "Contents" => literal("Box, edited") },
     );
     c.add(
         1,
-        dictionary! { "Subtype" => "Text", "Rect" => r(), "NM" => Object::string_literal("new"), "Contents" => Object::string_literal("Hello") },
+        dictionary! { "Subtype" => Object::name("Text"), "Rect" => r(), "NM" => literal("new"), "Contents" => literal("Hello") },
     );
-    c.add(1, dictionary! { "Subtype" => "Sound", "Rect" => r() });
-    c.add(1, dictionary! { "Subtype" => "Popup", "Rect" => r() });
-    c.add(5, dictionary! { "Subtype" => "Text", "Rect" => r() });
+    c.add(
+        1,
+        dictionary! { "Subtype" => Object::name("Sound"), "Rect" => r() },
+    );
+    c.add(
+        1,
+        dictionary! { "Subtype" => Object::name("Popup"), "Rect" => r() },
+    );
+    c.add(
+        5,
+        dictionary! { "Subtype" => Object::name("Text"), "Rect" => r() },
+    );
     let got = import(&snap, doc.store(), &c.comments(None));
     assert_eq!((got.added, got.updated, got.off_the_end), (1, 2, 1));
     assert_eq!(got.skipped, BTreeMap::from([("Sound".to_string(), 1)]));
@@ -492,7 +505,10 @@ fn our_marks_bring_their_stamps_and_files() {
     let page = marks[0].stamp.as_ref().unwrap().to_pdf().unwrap();
     assert_eq!(*stamp, crate::store::blob_id(&page).stem());
     assert_eq!(
-        lopdf::Document::load_mem(&page).unwrap().get_pages().len(),
+        crate::pdf::Document::load_mem(&page)
+            .unwrap()
+            .get_pages()
+            .len(),
         1
     );
     assert!(
@@ -524,20 +540,20 @@ fn replies_come_in_after_their_comments() {
     // By name, as XFDF says what a reply is to: the reply first, then its
     // comment; a reply to the square here; one to nothing.
     add(dictionary! {
-        "Subtype" => "Text", "Rect" => r(), "NM" => Object::string_literal("re"),
-        "IRT" => Object::string_literal("why"), "Contents" => Object::string_literal("Because"),
+        "Subtype" => Object::name("Text"), "Rect" => r(), "NM" => literal("re"),
+        "IRT" => literal("why"), "Contents" => literal("Because"),
     });
     add(dictionary! {
-        "Subtype" => "Text", "Rect" => r(), "NM" => Object::string_literal("why"),
-        "Contents" => Object::string_literal("Why?"),
+        "Subtype" => Object::name("Text"), "Rect" => r(), "NM" => literal("why"),
+        "Contents" => literal("Why?"),
     });
     add(dictionary! {
-        "Subtype" => "Text", "Rect" => r(), "NM" => Object::string_literal("ok"),
-        "IRT" => Object::string_literal("sq"), "Contents" => Object::string_literal("OK"),
+        "Subtype" => Object::name("Text"), "Rect" => r(), "NM" => literal("ok"),
+        "IRT" => literal("sq"), "Contents" => literal("OK"),
     });
     add(dictionary! {
-        "Subtype" => "Text", "Rect" => r(), "NM" => Object::string_literal("lost"),
-        "IRT" => Object::string_literal("gone"), "Contents" => Object::string_literal("?"),
+        "Subtype" => Object::name("Text"), "Rect" => r(), "NM" => literal("lost"),
+        "IRT" => literal("gone"), "Contents" => literal("?"),
     });
     let got = import(&doc.snapshot(), doc.store(), &c.comments(None));
     assert_eq!((got.added, got.updated, got.orphans), (3, 0, 1));

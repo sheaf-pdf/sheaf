@@ -8,8 +8,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
+use crate::pdf::{Dictionary, Object, ObjectId, Value, dictionary, literal};
 use in_progress::NoProgress;
-use lopdf::{Dictionary, Object, ObjectId, dictionary};
 use sheaf_edit::{Rotation, Turn};
 
 use super::emit::{self, Emission, EmitBase, EmitScope, Overlay, RotatePolicy, SymObject};
@@ -95,9 +95,12 @@ fn object(e: &Emission, key: ObjKey) -> &SymObject {
 /// The dictionary `e` writes under `key`, made anew.
 fn built(e: &Emission, key: ObjKey) -> &Dictionary {
     match object(e, key) {
-        SymObject::Built(Object::Dictionary(d)) => d,
+        SymObject::Built(o) => match o.value() {
+            Value::Dict(d) => d,
+            _ => panic!("{key:?} isn't a dictionary"),
+        },
         SymObject::Raw(r) => panic!("{key:?} is the file's {:?}", r.id),
-        _ => panic!("{key:?} isn't made anew"),
+        SymObject::Deferred(_) => panic!("{key:?} is a deferred stream"),
     }
 }
 
@@ -113,8 +116,8 @@ fn named(e: &Emission, o: &Object) -> ObjKey {
 
 /// The keys page `page`'s `/Annots` names, in order.
 fn listed(e: &Emission, page: PageId) -> Vec<ObjKey> {
-    let annots = built(e, ObjKey::Page(page)).get(b"Annots").ok();
-    let annots = annots.map(|a| a.as_array().unwrap().as_slice());
+    let annots = built(e, ObjKey::Page(page)).get(b"Annots");
+    let annots = annots.map(|a| a.as_array().unwrap());
     annots
         .unwrap_or_default()
         .iter()
@@ -142,7 +145,7 @@ fn kinds(e: &Emission, st: &DocState, page: PageId) -> Vec<&'static str> {
 
 /// `/F`, as written in `dict`.
 fn flags(dict: &Dictionary) -> i64 {
-    dict.get(b"F").map_or(0, |f| f.as_i64().unwrap())
+    dict.get(b"F").map_or(0, |f| f.as_integer().unwrap())
 }
 
 /// [`every_kind_in`]'s fields on the first two of `pages` pages, and
@@ -172,7 +175,7 @@ fn an_overlay_page_hangs_under_the_group_root_with_its_inherited_keys() {
         .map(|k| named(&e, k))
         .collect();
     assert_eq!(kids, [ObjKey::Page(p2), ObjKey::Page(p0)]);
-    assert_eq!(root.get(b"Count").unwrap(), &Object::Integer(2));
+    assert_eq!(root.get(b"Count").unwrap(), &Object::from(2));
     assert!(!root.has(b"Parent"));
     // The node above it gave it its resources and media box.
     let node = (pdf.catalog().unwrap().get(b"Pages").unwrap())
@@ -194,8 +197,12 @@ fn an_overlay_page_hangs_under_the_group_root_with_its_inherited_keys() {
         };
         assert_eq!(named(&e, page.get(b"Resources").unwrap()), base);
         let media: Vec<Object> = vec![0.into(), 0.into(), 612.into(), 792.into()];
-        assert_eq!(page.get(b"MediaBox").unwrap(), &Object::Array(media));
-        assert_eq!(page.get(b"Rotate").unwrap(), &Object::Integer(0));
+        assert!(
+            page.get(b"MediaBox")
+                .unwrap()
+                .eq_value(&Object::from(media))
+        );
+        assert_eq!(page.get(b"Rotate").unwrap().as_integer(), Some(0));
         assert!(!page.has(b"CropBox"));
     }
     let catalog = built(&e, ObjKey::Catalog);
@@ -242,18 +249,18 @@ fn keep_base_keeps_the_base_rotate_after_a_turn() {
     let rotate = |e: &Emission, p| built(e, ObjKey::Page(p)).get(b"Rotate").unwrap().clone();
     let screen = ViewInputs::screen();
     let kept = emitted(st, d.primary(), &ids, &screen, RotatePolicy::KeepBase);
-    assert_eq!(rotate(&kept, ids[0]), Object::Integer(90));
-    assert_eq!(rotate(&kept, ids[1]), Object::Integer(-90));
+    assert_eq!(rotate(&kept, ids[0]).as_integer(), Some(90));
+    assert_eq!(rotate(&kept, ids[1]).as_integer(), Some(-90));
     for p in ids {
-        let written = Rotation::from_degrees(rotate(&kept, p).as_i64().unwrap() as i32);
+        let written = Rotation::from_degrees(rotate(&kept, p).as_integer().unwrap() as i32);
         let turned = written.plus(st.render_delta(p).unwrap());
         assert_eq!(turned, st.geom(p).unwrap().rotate, "{p:?}");
     }
     let model = emitted(st, d.primary(), &ids, &screen, RotatePolicy::Model);
     let rewrite = rewritten(&d);
     for (p, want) in [(ids[0], 180), (ids[1], 0)] {
-        assert_eq!(rotate(&model, p), Object::Integer(want));
-        assert_eq!(rotate(&rewrite, p), Object::Integer(want));
+        assert_eq!(rotate(&model, p).as_integer(), Some(want));
+        assert_eq!(rotate(&rewrite, p).as_integer(), Some(want));
     }
 }
 
@@ -267,17 +274,17 @@ fn by_host_leaves_sheaf_marks_out_and_by_engine_draws_them() {
     let mut f = theirs(2);
     with_ours(&mut f);
     let screen = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Screen",
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Screen"),
         "Rect" => vec![300.into(), 300.into(), 400.into(), 400.into()],
     });
     // Their reply to one of sheaf's: not threaded where that isn't drawn.
     let square = (f.annots(0).into_iter())
-        .find(|&a| f.dict(a).get(b"NM").ok() == Some(&Object::string_literal("ours-square")))
+        .find(|&a| f.dict(a).get(b"NM").and_then(Object::as_bytes) == Some(b"ours-square"))
         .unwrap();
     let reply = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Text", "IRT" => square,
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "IRT" => square,
         "Rect" => vec![10.into(), 10.into(), 30.into(), 30.into()],
-        "NM" => Object::string_literal("their-reply"),
+        "NM" => literal("their-reply"),
     });
     let mut annots = f.annots(0);
     annots.extend([screen, reply]);
@@ -397,9 +404,10 @@ fn a_hidden_comment_carries_the_hidden_flag_under_its_own_key() {
 
 /// What `e` writes page `page`'s `/Contents` as: each stream's key.
 fn contents(e: &Emission, page: PageId) -> Vec<ObjKey> {
-    match built(e, ObjKey::Page(page)).get(b"Contents").unwrap() {
-        Object::Array(items) => items.iter().map(|o| named(e, o)).collect(),
-        one => vec![named(e, one)],
+    let c = built(e, ObjKey::Page(page)).get(b"Contents").unwrap();
+    match c.as_array() {
+        Some(items) => items.iter().map(|o| named(e, o)).collect(),
+        None => vec![named(e, c)],
     }
 }
 
@@ -491,7 +499,8 @@ fn a_duplicate_is_a_new_page_object_in_its_original_s_scope() {
     let mut f = every_kind_in(2);
     let link = with_theirs(&mut f, 0, "theirs");
     let to = f.pages[1];
-    f.dict(link).set("Dest", vec![to.into(), "Fit".into()]);
+    f.dict(link)
+        .set("Dest", vec![to.into(), Object::name("Fit")]);
     let mut d = opened(f.bytes(), "form.pdf");
     let p0 = d.page(0).unwrap();
     d.commit_ops(vec![fx::duplicate(&[p0])], "Duplicate page 1")
@@ -513,7 +522,7 @@ fn a_duplicate_is_a_new_page_object_in_its_original_s_scope() {
     let (page, dup) = (built(&e, ObjKey::Page(p0)), built(&e, ObjKey::Page(copy)));
     for key in [b"Contents".as_slice(), b"Resources"] {
         let (a, b) = (page.get(key).unwrap(), dup.get(key).unwrap());
-        assert_eq!(a, b, "{}", String::from_utf8_lossy(key));
+        assert!(a.eq_value(b), "{}", String::from_utf8_lossy(key));
     }
     assert_eq!(named(&e, dup.get(b"Parent").unwrap()), ObjKey::PagesNode(0));
     // Its link leads nowhere in the overlay, whose pages are these two:
@@ -523,7 +532,7 @@ fn a_duplicate_is_a_new_page_object_in_its_original_s_scope() {
         .find(|(_, f)| f.summary.is_link())
         .unwrap();
     let dest = built(&e, ObjKey::Annot(link)).get(b"Dest").unwrap();
-    assert_eq!(dest.as_array().unwrap()[0], Object::Null);
+    assert!(dest.as_array().unwrap()[0].is_null());
     // With page 2 in the overlay, the copy's link leads there: to the one
     // copy of it there is.
     let p1 = d.page(2).unwrap();
@@ -534,7 +543,7 @@ fn a_duplicate_is_a_new_page_object_in_its_original_s_scope() {
     let keys = listed(&e, copy);
     for &key in &keys {
         assert!(!e.owned.contains_key(&key), "{key:?}");
-        if let Ok(p) = built(&e, key).get(b"P") {
+        if let Some(p) = built(&e, key).get(b"P") {
             assert_eq!(named(&e, p), ObjKey::Page(copy));
         }
     }
@@ -567,7 +576,8 @@ fn a_link_to_a_page_gone_is_left_out_as_a_save_leaves_it() {
     let mut f = every_kind_in(2);
     let link = with_theirs(&mut f, 0, "theirs");
     let to = f.pages[1];
-    f.dict(link).set("Dest", vec![to.into(), "Fit".into()]);
+    f.dict(link)
+        .set("Dest", vec![to.into(), Object::name("Fit")]);
     let mut d = opened(f.bytes(), "form.pdf");
     let [p0, p1] = [0, 1].map(|i| d.page(i).unwrap());
     let st = d.state();
@@ -594,8 +604,8 @@ fn top(st: &DocState, fid: crate::forms::FieldId) -> crate::forms::FieldId {
 /// A text field `name` with a widget on each of `pages` of `f`.
 fn spanning(f: &mut Form, name: &str, pages: [usize; 2]) {
     let field = f.pdf.add_object(dictionary! {
-        "FT" => "Tx", "T" => Object::string_literal(name),
-        "DA" => Object::string_literal("/Helv 10 Tf 0 g"),
+        "FT" => Object::name("Tx"), "T" => literal(name),
+        "DA" => literal("/Helv 10 Tf 0 g"),
     });
     let mut kids: Vec<Object> = Vec::new();
     for page in pages {
@@ -603,7 +613,7 @@ fn spanning(f: &mut Form, name: &str, pages: [usize; 2]) {
             .map(|&v| Object::from(v))
             .collect();
         let widget = f.pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Widget", "Rect" => rect, "F" => 4,
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Widget"), "Rect" => rect, "F" => 4,
             "P" => f.pages[page], "Parent" => field,
         });
         let mut annots = f.annots(page);
@@ -662,10 +672,13 @@ fn the_group_form_lists_only_fields_with_a_widget_on_its_pages() {
             assert_eq!(written, nodes, "{p:?}");
             // Each lists only those, and only the page's widgets.
             for (key, obj) in &e.objects {
-                let (ObjKey::Field(_), SymObject::Built(Object::Dictionary(d))) = (key, obj) else {
+                let (ObjKey::Field(_), SymObject::Built(obj)) = (key, obj) else {
                     continue;
                 };
-                let kids = (d.get(b"Kids").ok()).map(|k| k.as_array().unwrap().as_slice());
+                let Value::Dict(d) = obj.value() else {
+                    continue;
+                };
+                let kids = d.get(b"Kids").map(|k| k.as_array().unwrap());
                 for kid in kids.unwrap_or_default().iter().map(|k| named(&e, k)) {
                     match kid {
                         ObjKey::Field(_) => assert!(nodes.contains(&kid), "{key:?}: {kid:?}"),
@@ -718,7 +731,7 @@ fn an_inserted_form_s_defaults_are_pushed_down_as_a_save_pushes_them() {
     let acroform = other.acroform;
     other
         .dict(acroform)
-        .set("DA", Object::string_literal("/Helv 9 Tf 1 0 0 rg"));
+        .set("DA", literal("/Helv 9 Tf 1 0 0 rg"));
     other.dict(acroform).set("Q", 1);
     let other = add(&d, &other.bytes(), "other.pdf");
     insert(&mut d, &other, 0);
@@ -736,24 +749,25 @@ fn an_inserted_form_s_defaults_are_pushed_down_as_a_save_pushes_them() {
     assert_eq!(theirs.len(), 1);
     let defaults = |e: &Emission, f| {
         let field = built(e, ObjKey::Field(f));
-        (
-            field.get(b"DA").ok().cloned(),
-            field.get(b"Q").ok().cloned(),
-        )
+        let unplace = |o: &Object| {
+            let mut copy = o.clone();
+            copy.unplace();
+            copy
+        };
+        (field.get(b"DA").map(unplace), field.get(b"Q").map(unplace))
     };
     let pushed = defaults(&rewrite, theirs[0]);
     assert_eq!(
         pushed,
-        (
-            Some(Object::string_literal("/Helv 9 Tf 1 0 0 rg")),
-            Some(Object::Integer(1))
-        )
+        (Some(literal("/Helv 9 Tf 1 0 0 rg")), Some(Object::from(1)))
     );
     assert_eq!(defaults(&e, theirs[0]), pushed);
     let p0 = d.page(0).unwrap();
     let own = overlay(&d, &[p0], &screen);
     for f in roots(d.primary().id()) {
-        if let SymObject::Built(Object::Dictionary(field)) = object(&own, ObjKey::Field(f)) {
+        if let SymObject::Built(obj) = object(&own, ObjKey::Field(f))
+            && let Value::Dict(field) = obj.value()
+        {
             assert!(!field.has(b"Q"), "{f:?}");
         }
     }
@@ -763,8 +777,8 @@ fn an_inserted_form_s_defaults_are_pushed_down_as_a_save_pushes_them() {
 /// configuration an object of its own: the bytes and the layers.
 fn layered() -> (Vec<u8>, [ObjectId; 3]) {
     let mut pdf = file("A", 1, false);
-    let group = |pdf: &mut lopdf::Document, name: &str| {
-        pdf.add_object(dictionary! { "Type" => "OCG", "Name" => Object::string_literal(name) })
+    let group = |pdf: &mut crate::pdf::Document, name: &str| {
+        pdf.add_object(dictionary! { "Type" => Object::name("OCG"), "Name" => literal(name) })
     };
     let ids = [
         group(&mut pdf, "Grid"),
@@ -807,15 +821,17 @@ fn the_ocg_patch_turns_the_layer_off_in_the_default_config() {
             .map(|o| o.as_reference().unwrap())
             .collect()
     };
-    let on = Object::Name(b"ON".to_vec());
-    assert_eq!(patched.get(b"BaseState").unwrap(), &on);
+    assert_eq!(
+        patched.get(b"BaseState").unwrap().as_name(),
+        Some(b"ON".as_slice())
+    );
     assert_eq!(
         (listed(b"ON"), listed(b"OFF")),
         (vec![notes], vec![grid, orphan])
     );
     assert_eq!(listed(b"Order"), [grid, notes, orphan]);
     // Put in the catalog, it reads as those layers off.
-    let mut pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    let mut pdf = crate::pdf::Document::load_mem(&bytes).unwrap();
     let root = pdf.trailer.get(b"Root").unwrap().as_reference().unwrap();
     pdf.get_dictionary_mut(root)
         .unwrap()

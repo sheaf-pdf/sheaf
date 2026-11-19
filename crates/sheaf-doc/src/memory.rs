@@ -8,8 +8,8 @@
 //! [`full::write_built`]: crate::serialize::full::write_built
 //! [`Memory`]: crate::store::Origin::Memory
 
+use crate::pdf::{Dictionary, Document as Pdf, Object, Stream, dictionary, literal};
 use anyhow::{Context as _, Result, bail};
-use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 use sheaf_edit::{Fit, PageSize};
 
 use crate::store::{BlobKind, MemoryKind, Src, Store};
@@ -36,7 +36,7 @@ fn pages_pdf(width: f32, height: f32, count: u32, info: Option<Dictionary>) -> R
         (0..count)
             .map(|_| {
                 pdf.add_object(dictionary! {
-                    "Type" => "Page",
+                    "Type" => Object::name("Page"),
                     "Parent" => pages_id,
                     "MediaBox" => vec![0.into(), 0.into(), Object::from(width), Object::from(height)],
                     "Contents" => content,
@@ -48,9 +48,10 @@ fn pages_pdf(width: f32, height: f32, count: u32, info: Option<Dictionary>) -> R
     };
     pdf.objects.insert(
         pages_id,
-        dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => i64::from(count) }.into(),
+        dictionary! { "Type" => Object::name("Pages"), "Kids" => kids, "Count" => i64::from(count) }.into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
     if let Some(info) = info {
         let info = pdf.add_object(info);
@@ -81,8 +82,8 @@ pub fn empty(store: &Store) -> Result<Src> {
 pub fn titled(store: &Store, title: &str) -> Result<Src> {
     let info = dictionary! {
         "Title" => crate::save::text_string(title),
-        "Producer" => Object::string_literal("sheaf"),
-        "CreationDate" => Object::string_literal(crate::annot::pdf_date_now()),
+        "Producer" => literal("sheaf"),
+        "CreationDate" => literal(crate::annot::pdf_date_now()),
     };
     let pdf = pages_pdf(0.0, 0.0, 0, Some(info))?;
     Ok(store.open(pdf.into(), BlobKind::memory(MemoryKind::Blank))?)
@@ -142,7 +143,7 @@ mod tests {
         let bytes = empty.blob().bytes().clone();
         let objects = Pdf::load_mem(&bytes).unwrap().objects;
         let types: Vec<&[u8]> = (objects.values())
-            .filter_map(|o| o.as_dict().ok()?.get(b"Type").ok()?.as_name().ok())
+            .filter_map(|o| o.as_dict()?.get(b"Type")?.as_name())
             .collect();
         assert_eq!((objects.len(), types), (2, vec![&b"Pages"[..], b"Catalog"]));
         drop(empty);

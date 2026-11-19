@@ -7,7 +7,7 @@
 //! ([`Measured`], [`Scale`]); the values, parsing what's typed and the PDF
 //! are here.
 
-use lopdf::{Dictionary, Object, dictionary};
+use crate::pdf::{Dictionary, Object, dictionary, literal};
 
 pub use sheaf_edit::measure::*;
 
@@ -178,43 +178,41 @@ pub fn measure_dict(scale: &Scale) -> Dictionary {
     let denominator = 10i64.pow(scale.precision.min(6) as u32);
     let format = |unit: &str, c: f64| {
         dictionary! {
-            "Type" => "NumberFormat",
-            "U" => Object::string_literal(unit),
-            "C" => Object::Real(c),
-            "F" => "D",
+            "Type" => Object::name("NumberFormat"),
+            "U" => literal(unit),
+            "C" => Object::from(c),
+            "F" => Object::name("D"),
             "D" => denominator,
         }
     };
     dictionary! {
-        "Type" => "Measure",
-        "Subtype" => "RL",
-        "R" => Object::string_literal(scale.ratio()),
-        "X" => vec![Object::Dictionary(format(&scale.unit, scale.per_point()))],
-        "D" => vec![Object::Dictionary(format(&scale.unit, 1.0))],
-        "A" => vec![Object::Dictionary(format(&format!("sq {}", scale.unit), 1.0))],
+        "Type" => Object::name("Measure"),
+        "Subtype" => Object::name("RL"),
+        "R" => literal(scale.ratio()),
+        "X" => vec![Object::from(format(&scale.unit, scale.per_point()))],
+        "D" => vec![Object::from(format(&scale.unit, 1.0))],
+        "A" => vec![Object::from(format(&format!("sq {}", scale.unit), 1.0))],
     }
 }
 
 /// A scale from a `/Measure` dictionary: its x number format's unit and
 /// conversion (`/C`, real units per point), and decimals (`/D`).
 pub fn scale_of<P: Objects + ?Sized>(pdf: &P, measure: &Dictionary) -> Option<Scale> {
-    let deref = |o: &Object| match o {
-        Object::Reference(id) => pdf.get_object(*id).ok().cloned(),
-        o => Some(o.clone()),
+    let deref = |o: &Object| match o.as_reference() {
+        Some(id) => pdf.get_object(id).ok().cloned(),
+        None => Some(o.clone()),
     };
-    let x = deref(measure.get(b"X").ok()?)?;
-    let first = deref(x.as_array().ok()?.first()?)?;
-    let f = first.as_dict().ok()?;
+    let x = deref(measure.get(b"X")?)?;
+    let first = deref(x.as_array()?.first()?)?;
+    let f = first.as_dict()?;
     let unit = f
         .get(b"U")
-        .ok()
         .map(crate::file::pdf_text)
         .unwrap_or_else(|| "pt".into());
-    let c = f.get(b"C").ok()?.as_float().ok()?;
+    let c = f.get(b"C")?.as_number()?;
     let precision = f
         .get(b"D")
-        .ok()
-        .and_then(|d| d.as_i64().ok())
+        .and_then(Object::as_integer)
         .filter(|d| *d > 0)
         .map(|d| (d as f64).log10().round() as u8)
         .unwrap_or(2);
@@ -230,7 +228,7 @@ pub fn scale_of<P: Objects + ?Sized>(pdf: &P, measure: &Dictionary) -> Option<Sc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lopdf::Document as Pdf;
+    use crate::pdf::Document as Pdf;
 
     fn p(x: f32, y: f32) -> Pt {
         Pt { x, y }

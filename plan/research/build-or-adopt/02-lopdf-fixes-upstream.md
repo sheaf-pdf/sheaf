@@ -39,3 +39,6 @@ Area: Cross-cutting: the PDF object layer, writing, and Flate · Part of [build 
   xref-stream-once fix if it's still needed. Moving the vendored copy to
   0.46+ waits for between-milestone triage, as Greg ruled, and should
   drop the hunks upstream now has. High.
+- **Status (M18 slice 13, 2026-11-18):** **Superseded / closed.** `sheaf`
+  dropped `lopdf` and deleted `vendor/lopdf/` in M18 slices 8–13, moving onto
+  `pdf-objects`, `pdf-structure`, `pdf-filters` and `pdf-crypt`.

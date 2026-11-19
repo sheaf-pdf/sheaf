@@ -14,12 +14,12 @@
 use std::collections::BTreeMap;
 
 use futures::executor::block_on;
-use lopdf::{Document as Pdf, Object, ObjectId, dictionary};
 use sheaf_doc::content::PagOrigin;
 use sheaf_doc::export::Export;
 use sheaf_doc::forms::check;
 use sheaf_doc::forms::corpus::Corpus;
 use sheaf_doc::forms::fixture::{Form, source};
+use sheaf_doc::pdf::{Document as Pdf, Object, ObjectId, dictionary, literal};
 use sheaf_doc::realize::ViewInputs;
 use sheaf_doc::tx::fixture::{
     delete, header, remove_watermark, set_header, set_watermark, watermark,
@@ -44,7 +44,7 @@ fn crop_box(bytes: &[u8], page: usize) -> Vec<f64> {
         .as_array()
         .unwrap()
         .iter()
-        .map(|o| o.as_float().unwrap())
+        .map(|o| o.as_number().unwrap())
         .collect()
 }
 
@@ -145,9 +145,9 @@ fn annots_of(bytes: &[u8], page: usize) -> Vec<(ObjectId, String)> {
             let at = a.as_reference().unwrap();
             let d = pdf.get_dictionary(at).unwrap();
             let subtype = String::from_utf8_lossy(d.get(b"Subtype").unwrap().as_name().unwrap());
-            let name = d.get(b"T").and_then(|t| t.as_str()).unwrap_or_default();
+            let name = d.get(b"T").and_then(Object::as_bytes).unwrap_or_default();
             let rect = d.get(b"Rect").unwrap().as_array().unwrap();
-            let rect: Vec<f64> = rect.iter().map(|v| v.as_float().unwrap()).collect();
+            let rect: Vec<f64> = rect.iter().map(|v| v.as_number().unwrap()).collect();
             let name = String::from_utf8_lossy(name);
             (at, format!("{subtype} {name:?} {rect:?}"))
         })
@@ -160,13 +160,12 @@ fn on_their_pages(bytes: &[u8]) -> bool {
     pdf.get_pages().into_values().all(|page| {
         let annots = pdf.get_dictionary(page).unwrap().get(b"Annots");
         let annots = annots
-            .and_then(|a| pdf.dereference(a))
-            .map(|(_, a)| a.clone());
-        let annots = annots.ok().and_then(|a| a.as_array().ok().cloned());
+            .and_then(|a| pdf.dereference(a).ok())
+            .and_then(|(_, a)| a.as_array().map(<[Object]>::to_vec));
         (annots.unwrap_or_default().iter()).all(|a| {
             let d = pdf.get_dictionary(a.as_reference().unwrap()).unwrap();
             d.get(b"Subtype").unwrap().as_name().unwrap() != b"Widget"
-                || d.get(b"P").and_then(Object::as_reference).ok() == Some(page)
+                || d.get(b"P").and_then(Object::as_reference) == Some(page)
         })
     })
 }
@@ -284,17 +283,20 @@ fn tag_with_strays(form: &mut Form) {
         .unwrap()
         .as_array()
         .unwrap()
-        .clone();
+        .to_vec();
     let mut strays = Vec::new();
     for pair in nums.chunks(2) {
         let element = pair[1].as_reference().unwrap();
         let k = form.dict(element).get(b"K").unwrap().clone();
         let page = form.dict(element).get(b"Pg").unwrap().clone();
         let stray = form.pdf.add_object(dictionary! {
-            "Type" => "StructElem", "S" => "Form", "Pg" => page, "K" => k,
+            "Type" => Object::name("StructElem"),
+            "S" => Object::name("Form"),
+            "Pg" => page,
+            "K" => k,
         });
         strays.push(pair[0].clone());
-        strays.push(Object::Reference(stray));
+        strays.push(Object::from(stray));
     }
     form.dict(root)
         .set("ParentTree", dictionary! { "Nums" => strays });
@@ -398,43 +400,63 @@ fn tag_with_a_second_tree(form: &mut Form) {
     for (i, page) in form.pages.clone().into_iter().enumerate() {
         let top = form.pdf.new_object_id();
         let figure = form.pdf.new_object_id();
-        let mut kids = vec![Object::Integer(0)];
+        let mut kids = vec![Object::from(0)];
         let mut objrs = Vec::new();
         for w in form.annots(i) {
-            let key = form.dict(w).get(b"StructParent").unwrap().as_i64().unwrap();
-            let objr = dictionary! { "Type" => "OBJR", "Obj" => w, "Pg" => page };
-            objrs.push(Object::Dictionary(objr.clone()));
+            let key = form
+                .dict(w)
+                .get(b"StructParent")
+                .unwrap()
+                .as_integer()
+                .unwrap();
+            let objr = dictionary! { "Type" => Object::name("OBJR"), "Obj" => w, "Pg" => page };
+            objrs.push(Object::from(objr.clone()));
             let element = form.pdf.add_object(dictionary! {
-                "Type" => "StructElem", "S" => "Form", "P" => figure, "K" => objr,
+                "Type" => Object::name("StructElem"),
+                "S" => Object::name("Form"),
+                "P" => figure,
+                "K" => objr,
             });
-            kids.push(Object::Reference(element));
-            nums.push(Object::Integer(key));
-            nums.push(Object::Reference(element));
+            kids.push(Object::from(element));
+            nums.push(Object::from(key));
+            nums.push(Object::from(element));
         }
         form.pdf.objects.insert(
             figure,
             dictionary! {
-                "Type" => "StructElem", "S" => "Figure", "P" => top, "Pg" => page, "K" => kids,
-                "Alt" => Object::string_literal(format!("SHEAFALT {i}")),
+                "Type" => Object::name("StructElem"),
+                "S" => Object::name("Figure"),
+                "P" => top,
+                "Pg" => page,
+                "K" => kids,
+                "Alt" => literal(format!("SHEAFALT {i}")),
             }
             .into(),
         );
         form.pdf.objects.insert(
             top,
-            dictionary! { "Type" => "StructElem", "S" => "Part", "P" => stale, "K" => vec![figure.into()] }
-                .into(),
+            dictionary! {
+                "Type" => Object::name("StructElem"),
+                "S" => Object::name("Part"),
+                "P" => stale,
+                "K" => vec![figure.into()],
+            }
+            .into(),
         );
-        tops.push(Object::Reference(top));
+        tops.push(Object::from(top));
         let only = form.pdf.add_object(dictionary! {
-            "Type" => "StructElem", "S" => "Form", "ID" => Object::string_literal(format!("id{i}")),
-            "Alt" => Object::string_literal(format!("SHEAFID {i}")), "K" => objrs,
+            "Type" => Object::name("StructElem"),
+            "S" => Object::name("Form"),
+            "ID" => literal(format!("id{i}")),
+            "Alt" => literal(format!("SHEAFID {i}")),
+            "K" => objrs,
         });
-        ids.push(Object::string_literal(format!("id{i}")));
-        ids.push(Object::Reference(only));
+        ids.push(literal(format!("id{i}")));
+        ids.push(Object::from(only));
     }
     form.pdf.objects.insert(
         stale,
-        dictionary! { "Type" => "StructTreeRoot", "K" => tops }.into(),
+        dictionary! { "Type" => Object::name("StructTreeRoot"), "K" => tops }.into(),
     );
     let r = form.dict(root);
     r.set("ParentTree", dictionary! { "Nums" => nums });
@@ -553,13 +575,11 @@ fn direct_object_fields_are_pruned() {
         f.dict(id).remove(b"T");
     }
     let direct = dictionary! {
-        "T" => Object::string_literal("group"),
-        "Kids" => vec![Object::Reference(a), Object::Reference(b)],
+        "T" => literal("group"),
+        "Kids" => vec![Object::from(a), Object::from(b)],
     };
-    f.dict(f.acroform).set(
-        "Fields",
-        vec![Object::Dictionary(direct), Object::Reference(keep)],
-    );
+    f.dict(f.acroform)
+        .set("Fields", vec![Object::from(direct), Object::from(keep)]);
     let path = write(&dir, "form.pdf", &mut f);
     let mut doc = open(&path);
     let first = doc.state().order()[0];
@@ -568,7 +588,7 @@ fn direct_object_fields_are_pruned() {
         let what = format!("{strategy:?}");
         let fields = fields_of(&bytes).unwrap();
         assert_eq!(fields.len(), 1, "{what}: {fields:?}");
-        assert!(fields[0].as_reference().is_ok(), "{what}");
+        assert!(fields[0].as_reference().is_some(), "{what}");
         assert!(!holds(&bytes, b"LEAKVALUE123"), "{what}");
         assert_eq!(values(&bytes)["keep"], "KEPT", "{what}");
     }
@@ -582,15 +602,18 @@ fn page_templates_stay() {
     let dir = scratch("templates");
     let mut f = two_page_form();
     let template = f.pdf.add_object(dictionary! {
-        "Type" => "Page", "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Type" => Object::name("Page"),
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
     });
     let widget = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Widget", "FT" => "Tx", "P" => template,
-        "T" => Object::string_literal("spawned"),
+        "Type" => Object::name("Annot"),
+        "Subtype" => Object::name("Widget"),
+        "FT" => Object::name("Tx"),
+        "P" => template,
+        "T" => literal("spawned"),
         "Rect" => vec![100.into(), 700.into(), 300.into(), 730.into()],
     });
-    f.dict(template)
-        .set("Annots", vec![Object::Reference(widget)]);
+    f.dict(template).set("Annots", vec![Object::from(widget)]);
     let mut fields = f.fields();
     fields.push(widget);
     f.set_fields(&fields);
@@ -598,7 +621,7 @@ fn page_templates_stay() {
     f.dict(catalog).set(
         "Names",
         dictionary! { "Templates" => dictionary! {
-            "Names" => vec![Object::string_literal("extra"), Object::Reference(template)],
+            "Names" => vec![literal("extra"), Object::from(template)],
         } },
     );
     let path = write(&dir, "form.pdf", &mut f);
@@ -750,7 +773,7 @@ fn corpus_deleted_pages_leave_no_values() {
         for (i, &object) in objects.iter().enumerate() {
             pdf.get_dictionary_mut(object)
                 .unwrap()
-                .set("V", Object::string_literal(format!("SHEAFLEAK{i}")));
+                .set("V", literal(format!("SHEAFLEAK{i}")));
         }
         let path = dir.join("form.pdf");
         pdf.save(&path).unwrap();

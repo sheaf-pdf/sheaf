@@ -10,8 +10,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
+use crate::pdf::ObjectId;
 use in_progress::Progress;
-use lopdf::ObjectId;
 
 use super::Renamed;
 use crate::annot::{Annot, AnnotId, AnnotKind};
@@ -156,7 +156,7 @@ impl FileAnnots {
     }
 }
 
-/// What `src`'s pages hold, read through its [`LazyPdf`](lopdf::LazyPdf)
+/// What `src`'s pages hold, read through its [`LazyPdf`](crate::pdf::LazyPdf)
 /// in one pass over the page table's annotations; `p` counts its pages.
 pub(crate) fn read(src: &Source, p: &dyn Progress) -> FileAnnots {
     let pages = (src.pages().iter())

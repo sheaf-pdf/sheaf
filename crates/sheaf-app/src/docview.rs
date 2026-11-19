@@ -7514,16 +7514,16 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn a_combined_document_opens_in_its_window_as_made() {
-        use lopdf::{Object, dictionary};
         use sheaf_doc::forms::fixture::{Form, row};
+        use sheaf_doc::pdf::{Object, dictionary, literal};
         let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
         let form = |name: &str| {
             let mut f = Form::new(1);
             f.text("name", 0, row(0));
             let script = f.pdf.add_object(dictionary! {
-                "S" => "JavaScript", "JS" => Object::string_literal("var v;"),
+                "S" => Object::name("JavaScript"), "JS" => literal("var v;"),
             });
-            let names = vec![Object::string_literal("Init"), script.into()];
+            let names = vec![literal("Init"), script.into()];
             let catalog = f.catalog;
             f.dict(catalog).set(
                 "Names",
@@ -8020,7 +8020,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn remove_watermark_is_planned_and_counts_the_author_s() {
-        use lopdf::{Document as Pdf, Object, Stream, dictionary};
+        use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
         use sheaf_doc::tx::fixture::{set_watermark, watermark};
         use sheaf_edit::Z;
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -8036,17 +8036,19 @@ mod tests {
         let kids: Vec<Object> = (drawn.into_iter())
             .map(|content| {
                 let content = pdf.add_object(Stream::new(dictionary! {}, content.to_vec()));
-                let page =
-                    dictionary! { "Type" => "Page", "Parent" => root, "Contents" => content };
+                let page = dictionary! {
+                    "Type" => Object::name("Page"), "Parent" => root, "Contents" => content,
+                };
                 pdf.add_object(page).into()
             })
             .collect();
         let pages = dictionary! {
-            "Type" => "Pages", "Kids" => kids, "Count" => 2,
+            "Type" => Object::name("Pages"), "Kids" => kids, "Count" => 2,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         };
-        pdf.objects.insert(root, Object::Dictionary(pages));
-        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
+        pdf.objects.insert(root, Object::from(pages));
+        let catalog =
+            pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => root });
         pdf.trailer.set("Root", catalog);
         let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
         let path = dir.path().join("authored.pdf");
@@ -8247,7 +8249,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn remove_header_footer_is_planned_and_counts_the_author_s() {
-        use lopdf::{Document as Pdf, Object, Stream, dictionary};
+        use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
         use sheaf_doc::tx::fixture::{header, set_header};
         use std::sync::atomic::{AtomicBool, Ordering};
         // Two Letter pages, the first with a running head of the author's,
@@ -8255,7 +8257,9 @@ mod tests {
         let mut pdf = Pdf::with_version("1.7");
         let root = pdf.new_object_id();
         let font = pdf.add_object(dictionary! {
-            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name("Helvetica"),
         });
         let drawn: [&[u8]; 2] = [
             b"/Artifact <</Type /Pagination /Subtype /Header>> BDC \
@@ -8265,18 +8269,20 @@ mod tests {
         let kids: Vec<Object> = (drawn.into_iter())
             .map(|content| {
                 let content = pdf.add_object(Stream::new(dictionary! {}, content.to_vec()));
-                let page =
-                    dictionary! { "Type" => "Page", "Parent" => root, "Contents" => content };
+                let page = dictionary! {
+                    "Type" => Object::name("Page"), "Parent" => root, "Contents" => content,
+                };
                 pdf.add_object(page).into()
             })
             .collect();
         let pages = dictionary! {
-            "Type" => "Pages", "Kids" => kids, "Count" => 2,
+            "Type" => Object::name("Pages"), "Kids" => kids, "Count" => 2,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
         };
-        pdf.objects.insert(root, Object::Dictionary(pages));
-        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
+        pdf.objects.insert(root, Object::from(pages));
+        let catalog =
+            pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => root });
         pdf.trailer.set("Root", catalog);
         let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
         let path = dir.path().join("authored.pdf");
@@ -8435,18 +8441,18 @@ mod tests {
 
     /// A square another tool drew, by `author`, with its appearance.
     #[cfg(target_os = "linux")]
-    fn their_square(pdf: &mut lopdf::Document, author: &str) -> lopdf::ObjectId {
-        use lopdf::{Object, Stream, dictionary};
+    fn their_square(pdf: &mut sheaf_doc::pdf::Document, author: &str) -> sheaf_doc::pdf::ObjectId {
+        use sheaf_doc::pdf::{Object, Stream, dictionary, literal};
         let ap = pdf.add_object(Stream::new(
             dictionary! {
-                "Type" => "XObject", "Subtype" => "Form",
+                "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"),
                 "BBox" => vec![0.into(), 0.into(), 80.into(), 80.into()],
             },
             b"0 0.6 0 rg 0 0 80 80 re f".to_vec(),
         ));
         pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Square", "T" => Object::string_literal(author),
-            "NM" => Object::string_literal(format!("{author}'s")),
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Square"), "T" => literal(author),
+            "NM" => literal(format!("{author}'s")),
             "Rect" => vec![200.into(), 300.into(), 280.into(), 380.into()],
             "C" => vec![0.into(), 0.6.into(), 0.into()], "AP" => dictionary! { "N" => ap },
         })
@@ -8618,26 +8624,28 @@ mod tests {
     /// shows.
     #[cfg(target_os = "linux")]
     fn layered() -> Vec<u8> {
-        use lopdf::{Document as Pdf, Object, Stream, dictionary};
+        use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary, literal};
         let mut pdf = Pdf::with_version("1.7");
         let ocg = pdf.add_object(dictionary! {
-            "Type" => "OCG", "Name" => Object::string_literal("Notes"),
+            "Type" => Object::name("OCG"), "Name" => literal("Notes"),
         });
         let drawn = b"/OC /L0 BDC 0 0 1 rg 100 300 400 300 re f EMC".to_vec();
         let content = pdf.add_object(Stream::new(dictionary! {}, drawn));
         let root = pdf.new_object_id();
         let page = pdf.add_object(dictionary! {
-            "Type" => "Page", "Parent" => root, "Contents" => content,
+            "Type" => Object::name("Page"), "Parent" => root, "Contents" => content,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "Resources" => dictionary! { "Properties" => dictionary! { "L0" => ocg } },
         });
-        let kids = dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 };
-        pdf.objects.insert(root, Object::Dictionary(kids));
+        let kids = dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1,
+        };
+        pdf.objects.insert(root, Object::from(kids));
         let props = dictionary! {
             "OCGs" => vec![ocg.into()], "D" => dictionary! { "Order" => vec![ocg.into()] },
         };
         let catalog = pdf.add_object(dictionary! {
-            "Type" => "Catalog", "Pages" => root, "OCProperties" => props,
+            "Type" => Object::name("Catalog"), "Pages" => root, "OCProperties" => props,
         });
         pdf.trailer.set("Root", catalog);
         let mut bytes = Vec::new();
@@ -8872,14 +8880,14 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn a_print_preview_that_cant_be_made_is_tried_once() {
-        use lopdf::{Document as Pdf, Object, Stream, dictionary};
+        use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
         let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
         let path = dir.path().join("unread.pdf");
         let mut pdf = Pdf::load_mem(&said(1)).unwrap();
         let page = pdf.get_pages()[&1];
         let bad = pdf.add_object(Stream::new(dictionary! {}, b"0 0 9 9 re f EMC".to_vec()));
         let dict = pdf.get_dictionary_mut(page).unwrap();
-        dict.set("Contents", Object::Reference(bad));
+        dict.set("Contents", Object::from(bad));
         pdf.save(&path).unwrap();
         let (model, _) = as_the_view_opens(&path, false).unwrap();
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -8939,8 +8947,7 @@ mod tests {
     /// op committed on the UI thread, each Trim White of the last page
     /// measures it through the pool on its planner, its pages render from
     /// engines the one render worker opens, and no thread starts. A crop
-    /// makes no copy, so none is read by lopdf, whose first read started
-    /// rayon's pool until slice 15.
+    /// makes no copy, so none is read by a PDF reader.
     #[test]
     #[cfg(target_os = "linux")]
     fn the_thread_count_is_constant_across_20_inserts_and_crops() {
@@ -9222,28 +9229,32 @@ mod tests {
     /// A file of `n` Letter pages, each saying "page i".
     #[cfg(target_os = "linux")]
     fn said(n: usize) -> Vec<u8> {
-        use lopdf::{Document as Pdf, Object, Stream, dictionary};
+        use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
         let mut pdf = Pdf::with_version("1.7");
         let root = pdf.new_object_id();
         let font = pdf.add_object(dictionary! {
-            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name("Helvetica"),
         });
         let kids: Vec<Object> = (0..n)
             .map(|i| {
                 let content = format!("BT /F1 28 Tf 72 400 Td (page {i}) Tj ET").into_bytes();
                 let content = pdf.add_object(Stream::new(dictionary! {}, content));
-                let page =
-                    dictionary! { "Type" => "Page", "Parent" => root, "Contents" => content };
+                let page = dictionary! {
+                    "Type" => Object::name("Page"), "Parent" => root, "Contents" => content,
+                };
                 pdf.add_object(page).into()
             })
             .collect();
         let pages = dictionary! {
-            "Type" => "Pages", "Kids" => kids, "Count" => n as i64,
+            "Type" => Object::name("Pages"), "Kids" => kids, "Count" => n as i64,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
         };
-        pdf.objects.insert(root, Object::Dictionary(pages));
-        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
+        pdf.objects.insert(root, Object::from(pages));
+        let catalog =
+            pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => root });
         pdf.trailer.set("Root", catalog);
         let mut bytes = Vec::new();
         pdf.save_to(&mut bytes).unwrap();

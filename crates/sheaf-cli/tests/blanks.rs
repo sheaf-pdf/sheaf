@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use lopdf::{Document as Pdf, Object, Stream, dictionary};
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
 
 /// Pages: 0 text, 1 empty, 2 "intentionally left blank", 3 a link on an
 /// empty page, 4 a lone signature stroke, 5 another empty page.
@@ -13,7 +13,9 @@ fn mixed(dir: &std::path::Path) -> PathBuf {
     let mut pdf = Pdf::with_version("1.5");
     let pages_id = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     });
     let contents = [
         "BT /F1 12 Tf 72 700 Td (Statement of account for the year) Tj 0 -16 Td (More lines of real content here) Tj ET".to_string(),
@@ -29,13 +31,13 @@ fn mixed(dir: &std::path::Path) -> PathBuf {
         .map(|(i, c)| {
             let content = pdf.add_object(Stream::new(dictionary! {}, c.clone().into_bytes()));
             let mut page = dictionary! {
-                "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+                "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
                 "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
                 "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
             };
             if i == 3 {
                 let link = pdf.add_object(dictionary! {
-                    "Type" => "Annot", "Subtype" => "Link",
+                    "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"),
                     "Rect" => vec![100.into(), 100.into(), 200.into(), 120.into()],
                 });
                 page.set("Annots", vec![link.into()]);
@@ -46,9 +48,10 @@ fn mixed(dir: &std::path::Path) -> PathBuf {
     let n = kids.len() as i64;
     pdf.objects.insert(
         pages_id,
-        dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => n }.into(),
+        dictionary! { "Type" => Object::name("Pages"), "Kids" => kids, "Count" => n }.into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
     let path = dir.join("mixed.pdf");
     pdf.save(&path).unwrap();
@@ -118,14 +121,13 @@ fn removes_blanks_and_keeps_the_rejects() {
         String::from_utf8_lossy(&run.stderr)
     );
     assert_eq!(Pdf::load(&kept).unwrap().get_pages().len(), 3);
-    let rej = Pdf::load(&rejects).unwrap();
-    assert_eq!(rej.get_pages().len(), 3);
+    let rej = sheaf_doc::open::file(&rejects, None).unwrap().doc;
+    assert_eq!(rej.page_count(), 3);
     let titles: Vec<String> = rej
-        .get_toc()
-        .unwrap()
-        .toc
-        .into_iter()
-        .map(|t| t.title)
+        .state()
+        .outline_roots()
+        .iter()
+        .map(|id| rej.state().bookmark(*id).unwrap().title.to_string())
         .collect();
     assert_eq!(
         titles,

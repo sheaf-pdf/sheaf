@@ -2,7 +2,7 @@
 //! objects as its file numbers them, and so do the writers, the save
 //! paths and the readers of a file's facts; everything else names an
 //! object of a file through a source's types (`ObjRef`, `PageObj`,
-//! `FormRef`), never lopdf's `ObjectId`.
+//! `FormRef`), never `pdf::ObjectId`.
 //!
 //! sheaf-doc's modules are walked from `lib.rs` as the compiler finds
 //! them, each file parsed with `syn`, leaving out what only tests build:
@@ -26,6 +26,10 @@ use syn::{
 /// The files and directories (ending in `/`), from `src/`, that may name
 /// `ObjectId`, each with why.
 const ALLOWED: &[(&str, &str)] = &[
+    (
+        "pdf/",
+        "the single door to the PDF object and structure layer (M18 slice 1)",
+    ),
     (
         "source/",
         "a source's objects as its file numbers them, read lazily (§3.1)",
@@ -110,7 +114,7 @@ fn only_a_source_s_readers_and_writers_name_an_object_id() {
     let hits = walk.hits();
     assert!(
         hits.is_empty(),
-        "model-level code names lopdf's ObjectId (M10.5 §2, rule 7), or an alias of it \
+        "model-level code names pdf::ObjectId (M10.5 §2, rule 7), or an alias of it \
          ({:?}): name a source's object by an ObjRef or a PageObj, or allowlist a reader \
          of a file's facts with its reason:\n{}",
         walk.aliases,
@@ -168,31 +172,34 @@ mod probe_tests;
 #[cfg(any(test, feature = "fixtures"))]
 pub mod fixture;
 pub mod inline {
-    pub fn f(_: lopdf::ObjectId) {}
+    pub fn f(_: crate::pdf::ObjectId) {}
 }
 "#,
         ),
         (
             "model.rs",
-            r#"use lopdf::ObjectId as Oid;
+            r#"use crate::pdf::ObjectId as Oid;
 pub struct Held(Option<Oid>);
-pub fn ids() -> Vec<(u32, u16)> { vec![lopdf::ObjectId::default()] }
+pub fn ids() -> Vec<Oid> { vec![crate::pdf::ObjectId::new(1, 0)] }
 mod helpers;
 #[cfg(test)]
 mod tests {
-    use lopdf::ObjectId;
+    use crate::pdf::ObjectId;
 }
 #[cfg(all(test, target_os = "linux"))]
-fn linux(_: lopdf::ObjectId) {}
+fn linux(_: crate::pdf::ObjectId) {}
 #[cfg(not(test))]
-fn built(_: lopdf::ObjectId) {}
+fn built(_: crate::pdf::ObjectId) {}
 "#,
         ),
         ("model/helpers.rs", "pub fn g(_: ObjectId) {}\n"),
-        ("source/mod.rs", "pub struct ObjRef(lopdf::ObjectId);\n"),
-        ("probe_tests.rs", "use lopdf::ObjectId;\nmod deeper;\n"),
-        ("probe_tests/deeper.rs", "use lopdf::ObjectId;\n"),
-        ("fixture.rs", "use lopdf::ObjectId;\n"),
+        (
+            "source/mod.rs",
+            "pub struct ObjRef(crate::pdf::ObjectId);\n",
+        ),
+        ("probe_tests.rs", "use crate::pdf::ObjectId;\nmod deeper;\n"),
+        ("probe_tests/deeper.rs", "use crate::pdf::ObjectId;\n"),
+        ("fixture.rs", "use crate::pdf::ObjectId;\n"),
     ];
     let read = |path: &Path| {
         (files.iter())
@@ -202,7 +209,7 @@ fn built(_: lopdf::ObjectId) {}
     let walk = Walk::of(&read);
     // Not source/ (allowed), the modules only tests build (probe_tests
     // and what it declares, the fixtures), nor model.rs's tests and its
-    // Linux-only test helper; model.rs's line 2 names it renamed.
+    // Linux-only test helper; model.rs's line 1 names it renamed.
     assert_eq!(
         walk.hits(),
         [
@@ -230,11 +237,11 @@ fn an_alias_of_an_object_id_is_seen_through() {
         ("lib.rs", "pub mod model;\npub mod source;\n"),
         (
             "source/mod.rs",
-            r#"pub type Id = lopdf::ObjectId;
+            r#"pub type Id = crate::pdf::ObjectId;
 pub type Ids = Vec<(Id, u8)>;
 type Mine = ObjectId;
 #[cfg(test)]
-pub type Probe = lopdf::ObjectId;
+pub type Probe = crate::pdf::ObjectId;
 pub type Count = u32;
 "#,
         ),
@@ -242,7 +249,7 @@ pub type Count = u32;
             "model.rs",
             r#"use crate::source::Id;
 pub struct Held(crate::source::Ids);
-pub fn f() -> Count { crate::source::Id::default().1 }
+pub fn f() -> Count { crate::source::Id::new(1, 0).number }
 pub struct Probe;
 pub type Again = Held;
 pub type Renamed = Id;

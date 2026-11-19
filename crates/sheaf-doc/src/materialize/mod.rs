@@ -111,13 +111,12 @@ pub mod verify;
 pub(crate) mod watermark_tests;
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::pdf::{ByteSource as _, Object, ObjectId, Stream, XrefKind};
 use anyhow::{Context as _, Result};
 use in_progress::Progress;
-use lopdf::{ByteSource as _, Object, ObjectId, Stream, XrefKind};
 
 pub use key::ObjKey;
 #[cfg(any(test, feature = "fixtures"))]
@@ -222,7 +221,7 @@ pub(crate) fn append_onto_saved(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(changed()),
         Err(e) => return Err(stopped(anyhow::Error::new(e))),
     };
-    let base = lopdf::FileBytes::new(file).map_err(|e| stopped(e.into()))?;
+    let base = crate::pdf::FileBytes::new(file).map_err(|e| stopped(e.into()))?;
     if base.len() as u64 != record.stamp.len {
         return Err(changed());
     }
@@ -288,11 +287,8 @@ fn rewrite(
     };
     let stable = target.profile.numbering == Numbering::Stable;
     let raw = stable && src.base_sound() && same_crypt(crypt.as_ref(), src.crypt());
-    // Where the primary's objects are in its bytes, found while the graph
-    // is built and pruned, for those written as they were.
-    let spans = raw.then(|| Spans::find(src));
-    let loaded = graph::eager(src)?;
-    let in_use: HashSet<u32> = src.pdf().ids().map(|id| id.0).collect();
+    let (loaded, mut raw_copies) = graph::eager_with_raw(src, raw)?;
+    let in_use: HashSet<u32> = src.pdf().ids().map(|id| id.number).collect();
     let numbers = number::stable(&e, &input.target, src, &loaded, &in_use, prev)?;
     let owned = std::mem::take(&mut e.owned);
     // A source that used object streams writes them again (a hybrid's
@@ -309,8 +305,8 @@ fn rewrite(
     // containers take first, once nothing else has them.
     let mut reuse: Vec<u32> = match pack && stable {
         true => (loaded.objects.iter())
-            .filter(|(id, obj)| id.0 < crate::serialize::NUMBERS && objstm::is_container(obj))
-            .map(|(id, _)| id.0)
+            .filter(|(id, obj)| id.number < crate::serialize::NUMBERS && objstm::is_container(obj))
+            .map(|(id, _)| id.number)
             .collect(),
         false => Vec::new(),
     };
@@ -318,7 +314,7 @@ fn rewrite(
     if kind == XrefKind::Stream {
         version = version.max(PdfVersion::XREF_STREAMS);
     }
-    if crypt.as_deref().is_some_and(is_aes) {
+    if crypt.as_deref().is_some_and(Crypt::is_aes) {
         version = version.max(PdfVersion::AES);
     }
     let mut notes = std::mem::take(&mut e.notes);
@@ -331,7 +327,7 @@ fn rewrite(
     // The annotations the pages left out, where the graph has them: one
     // numbered past what a file may use moves.
     let removed: Vec<ObjectId> = (e.removed_annots.iter())
-        .filter_map(|r| match r.id.0 < crate::serialize::NUMBERS {
+        .filter_map(|r| match r.id.number < crate::serialize::NUMBERS {
             true => Some(r.id),
             false => numbers.get(&ObjKey::Base {
                 blob,
@@ -356,9 +352,12 @@ fn rewrite(
     // A container something still names keeps its number, so the
     // reference doesn't come to name a new one.
     reuse.retain(|&n| {
-        (graph.pdf.objects.range((n, 0)..=(n, u16::MAX)))
-            .next()
-            .is_none()
+        (graph
+            .pdf
+            .objects
+            .range(ObjectId::new(n, 0)..=ObjectId::new(n, u16::MAX)))
+        .next()
+        .is_none()
     });
     let encrypt = src.crypt().map(|c| c.at());
     let reads = |id| src.pdf().object_unkept(id).is_ok();
@@ -368,20 +367,27 @@ fn rewrite(
         start: numbers.start(),
     };
     verify::graph(&graph, &checked, &owned, &tree, stable, encrypt)?;
-    let mut spans = spans.map(Spans::join).unwrap_or_default();
     // What the emitter or `keep_only` changed, what `release_written`
     // let go of, or what names a moved object, is written anew.
     let changed = |id: ObjectId| {
         kept.modified.contains(&id) || released.contains(&id) || graph.followed.contains(&id)
     };
-    spans.retain(|&id, _| {
+    let keep_raw = |id: ObjectId| {
         graph.pdf.objects.contains_key(&id)
             && !graph.keys.contains_key(&id)
             && !graph.deferred.contains_key(&id)
             && !changed(id)
-    });
+    };
+    raw_copies.spans.retain(|&id, _| keep_raw(id));
+    raw_copies
+        .members
+        .retain(|&id, _| keep_raw(id) && pack && objstm::packable(id, &graph.pdf.objects[&id]));
     if stable {
-        let changed = |id| changed(id) || spans.contains_key(&id);
+        let changed = |id| {
+            changed(id)
+                || raw_copies.spans.contains_key(&id)
+                || raw_copies.members.contains_key(&id)
+        };
         verify::copied(&graph, src, &in_use, &changed)?;
     }
     match target.profile.private {
@@ -415,19 +421,22 @@ fn rewrite(
         let key = graph.key(id, blob);
         if let Some(d) = graph.deferred.get(&id) {
             let dict = (obj.as_stream().map(|s| s.dict.clone())).unwrap_or_default();
-            let data = (d.data)().with_context(|| format!("making object {} {}", id.0, id.1))?;
-            let made = Object::Stream(Stream::new(dict, data));
+            let data = (d.data)().with_context(|| format!("making object {id}"))?;
+            let made = Object::from(Stream::new(dict, data));
             return Ok((id, Body::Object(Cow::Owned(made), key)));
         }
-        if let Some(span) = spans.get(&id) {
+        if let Some(span) = raw_copies.spans.get(&id) {
             return Ok((id, Body::Raw(&bytes[span.clone()])));
+        }
+        if let Some(member) = raw_copies.members.get(&id) {
+            return Ok((id, Body::Member(member.as_slice(), Cow::Borrowed(obj), key)));
         }
         Ok((id, Body::Object(Cow::Borrowed(obj), key)))
     });
-    let past = written().map(|(id, _)| id.0 + 1).max().unwrap_or(1);
+    let past = written().map(|(id, _)| id.number + 1).max().unwrap_or(1);
     let encrypt_at = match &crypt {
-        Some(c) if stable && c.at().0 < crate::serialize::NUMBERS => c.at(),
-        _ => (past, 0),
+        Some(c) if stable && c.at().number < crate::serialize::NUMBERS => c.at(),
+        _ => ObjectId::new(past, 0),
     };
     let layout = Layout {
         trailer: &graph.pdf.trailer,
@@ -458,7 +467,7 @@ fn rewrite(
     verify::output(&checked, graph, &inputs)?;
 
     let present: BitSet = if stable {
-        (written().map(|(id, _)| id.0))
+        (written().map(|(id, _)| id.number))
             .filter(|n| in_use.contains(n))
             .collect()
     } else {
@@ -500,8 +509,7 @@ fn rewrite(
                 .pdf
                 .trailer
                 .get(b"Info")
-                .and_then(Object::as_reference)
-                .ok(),
+                .and_then(Object::as_reference),
             ..RootValues::of(&graph.pdf)
         }),
         tree: Arc::new(shape),
@@ -520,82 +528,12 @@ fn rewrite(
 
 /// The page tree of `pdf`, a Rewrite's graph, whose nodes hold nothing
 /// but their place in it.
-fn written_tree(pdf: &lopdf::Document) -> TreeShape {
+fn written_tree(pdf: &crate::pdf::Document) -> TreeShape {
     let mut tree = TreeShape::of(pdf);
     for node in &mut tree.nodes {
         node.from = None;
     }
     tree
-}
-
-/// Where an object is in its source's bytes.
-type Span = std::ops::Range<usize>;
-
-/// The search for where the primary's objects are in its bytes
-/// ([`raw_spans`]), on a thread of its own while the graph is built: told
-/// to stop and waited for when it's dropped unjoined, so a save that
-/// stops first (cancelled, or failing) leaves nothing reading the file.
-struct Spans {
-    stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<HashMap<ObjectId, Span>>>,
-}
-
-impl Spans {
-    fn find(src: &crate::store::Src) -> Spans {
-        let stop = Arc::new(AtomicBool::new(false));
-        let (src, halt) = (src.clone(), stop.clone());
-        let thread = std::thread::spawn(move || {
-            let ids: Vec<ObjectId> = src.pdf().ids().collect();
-            raw_spans(&src, &ids, &halt)
-        });
-        Spans {
-            stop,
-            thread: Some(thread),
-        }
-    }
-
-    fn join(mut self) -> HashMap<ObjectId, Span> {
-        let thread = self.thread.take().expect("joined once");
-        thread.join().expect("finding spans doesn't panic")
-    }
-}
-
-impl Drop for Spans {
-    fn drop(&mut self) {
-        if let Some(thread) = self.thread.take() {
-            self.stop.store(true, Ordering::Relaxed);
-            let _ = thread.join();
-        }
-    }
-}
-
-/// Where each of `ids`, objects of `src`, is in its bytes, those a write
-/// may copy as they are ([`Source::raw_span_whole`]): found on a thread
-/// per core (8 at most), each a parse of its object, until `stop`.
-///
-/// [`Source::raw_span_whole`]: crate::source::Source::raw_span_whole
-fn raw_spans(
-    src: &crate::source::Source,
-    ids: &[ObjectId],
-    stop: &AtomicBool,
-) -> HashMap<ObjectId, Span> {
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
-    let chunk = ids.len().div_ceil(threads).max(1024);
-    std::thread::scope(|s| {
-        let found: Vec<_> = (ids.chunks(chunk))
-            .map(|ids| {
-                s.spawn(move || {
-                    (ids.iter())
-                        .take_while(|_| !stop.load(Ordering::Relaxed))
-                        .filter_map(|&id| Some((id, src.raw_span_whole(id)?)))
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect();
-        (found.into_iter())
-            .flat_map(|f| f.join().expect("finding spans doesn't panic"))
-            .collect()
-    })
 }
 
 /// Whether a file encrypted with `a` is encrypted as one with `b` is,
@@ -607,15 +545,4 @@ fn same_crypt(a: Option<&Arc<Crypt>>, b: Option<&Arc<Crypt>>) -> bool {
         (Some(a), Some(b)) => Arc::ptr_eq(a, b),
         _ => false,
     }
-}
-
-/// Whether `crypt` encrypts with AES, which PDF 1.6 brought.
-fn is_aes(crypt: &Crypt) -> bool {
-    let filters = crypt.dict().get(b"CF").and_then(Object::as_dict);
-    (filters.iter().flat_map(|f| f.iter())).any(|(_, filter)| {
-        (filter.as_dict().ok())
-            .and_then(|f| f.get(b"CFM").ok())
-            .and_then(|m| m.as_name().ok())
-            .is_some_and(|m| m == b"AESV2" || m == b"AESV3")
-    })
 }

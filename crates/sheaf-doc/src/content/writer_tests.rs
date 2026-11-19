@@ -1,7 +1,7 @@
 //! The content writer: what each call writes, names bound at the end, and
 //! the same bytes from the same calls on any thread.
 
-use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StreamExt, dictionary};
 
 use super::*;
 use crate::annot::{Box2, Pt};
@@ -15,7 +15,7 @@ fn written(w: ContentWriter) -> (String, ResourceNeeds) {
 }
 
 fn list(subtype: &str) -> Dictionary {
-    dictionary! { "Type" => "Pagination", "Subtype" => Object::Name(subtype.into()) }
+    dictionary! { "Type" => Object::name("Pagination"), "Subtype" => Object::name(subtype) }
 }
 
 /// A name `Sh` and six base32 characters, counted up by one.
@@ -183,7 +183,10 @@ fn marked_content_names_its_list() {
     assert_eq!(
         gs.res,
         Res::dict(dictionary! {
-            "Type" => "ExtGState", "ca" => 0.5, "CA" => 1.0, "BM" => "Multiply",
+            "Type" => Object::name("ExtGState"),
+            "ca" => 0.5,
+            "CA" => 1.0,
+            "BM" => Object::name("Multiply"),
         })
     );
     assert!(!text.contains("<<"));
@@ -230,9 +233,9 @@ fn names_are_bound_at_the_end() {
     };
     for (bound, bumped) in [
         (list("Other").into(), true),
-        (Object::Reference(same), false),
+        (Object::from(same), false),
         (list("Header").into(), false),
-        (Object::Reference((99, 0)), true),
+        (Object::from(ObjectId::new(99, 0)), true),
     ] {
         let mut w = ContentWriter::new();
         draw(&mut w);
@@ -276,11 +279,11 @@ fn names_are_bound_at_the_end() {
 fn needs_are_one_a_resource_in_first_use_order() {
     let mut w = ContentWriter::new();
     w.font(&Std14::Helvetica, 9.0);
-    w.draw(Res::written((7, 0)));
+    w.draw(Res::written(ObjectId::new(7, 0)));
     w.font(&Std14::ZapfDingbats, 9.0);
     w.font(&Std14::Helvetica, 10.0);
-    w.draw(Res::written((7, 0)));
-    w.draw(Res::written((8, 0)));
+    w.draw(Res::written(ObjectId::new(7, 0)));
+    w.draw(Res::written(ObjectId::new(8, 0)));
     let (text, needs) = written(w);
     let kinds: Vec<_> = needs.0.iter().map(|n| (n.kind, &n.res.body)).collect();
     let font = |f: Std14| ResBody::Objects(f.resource().objects);
@@ -288,9 +291,9 @@ fn needs_are_one_a_resource_in_first_use_order() {
         kinds,
         [
             (ResKind::Font, &font(Std14::Helvetica)),
-            (ResKind::XObject, &ResBody::Written((7, 0))),
+            (ResKind::XObject, &ResBody::Written(ObjectId::new(7, 0))),
             (ResKind::Font, &font(Std14::ZapfDingbats)),
-            (ResKind::XObject, &ResBody::Written((8, 0))),
+            (ResKind::XObject, &ResBody::Written(ObjectId::new(8, 0))),
         ]
     );
     let name = |i: usize| String::from_utf8_lossy(&needs.0[i].name).into_owned();
@@ -318,7 +321,7 @@ fn place_form_honors_bbox_and_matrix() {
             w: 50.0,
             h: 200.0,
         };
-        w.place_form(Res::written((5, 0)), bbox, matrix, target);
+        w.place_form(Res::written(ObjectId::new(5, 0)), bbox, matrix, target);
         let (text, needs) = written(w);
         match needs.0.first() {
             Some(form) => text.replace(&*String::from_utf8_lossy(&form.name), "F"),
@@ -346,7 +349,7 @@ fn place_form_honors_bbox_and_matrix() {
     // An image fills its target.
     let mut w = ContentWriter::new();
     w.image(
-        Res::written((6, 0)),
+        Res::written(ObjectId::new(6, 0)),
         Box2 {
             x: 1.0,
             y: 2.0,
@@ -409,7 +412,7 @@ fn needs_are_written_once_and_bound() {
     w.end_marked();
     let (_, needs) = written(w);
     let mut pdf = Pdf::with_version("1.7");
-    let shared_fonts = pdf.add_object(dictionary! { "F1" => Object::Reference((1, 0)) });
+    let shared_fonts = pdf.add_object(dictionary! { "F1" => Object::from(ObjectId::new(1, 0)) });
     let mut res = ResObjects::default();
     let mut first = dictionary! { "Font" => shared_fonts };
     let mut second = Dictionary::new();
@@ -453,5 +456,5 @@ fn needs_are_written_once_and_bound() {
     assert_eq!(q.0, q.1);
     let q = q.0;
     let q = pdf.get_object(q).unwrap().as_stream().unwrap();
-    assert_eq!(q.content, b"q\n");
+    assert_eq!(q.decompressed_content().unwrap(), b"q\n");
 }

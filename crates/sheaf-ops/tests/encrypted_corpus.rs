@@ -14,9 +14,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use in_progress::NoProgress;
-use lopdf::Object;
 use sheaf_doc::forms::corpus::{Corpus, each_entry};
 use sheaf_doc::materialize::{Came, How};
+use sheaf_doc::pdf::{Object, StreamExt, Value};
 use sheaf_doc::serialize::crypt::Crypt;
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture::rotate;
@@ -57,18 +57,35 @@ type Outcome = Option<(String, Vec<(&'static str, Saved)>)>;
 /// How `crypt` encrypts: its version and revision, and its streams'
 /// method (`V2` is RC4, `AESV2` AES-128, `AESV3` AES-256).
 fn how(crypt: &Crypt) -> String {
-    let get = |key: &[u8]| crypt.dict().get(key).and_then(Object::as_i64).unwrap_or(0);
-    let method = crypt
-        .state()
-        .get_stream_filter()
-        .map(|filter| String::from_utf8_lossy(filter.method()).into_owned())
-        .unwrap_or_default();
+    let dict = crypt.dict();
+    let get = |key: &[u8]| dict.get(key).and_then(Object::as_integer).unwrap_or(0);
+    let stm_f = dict.get(b"StmF").and_then(Object::as_name);
+    let method = match stm_f {
+        Some(b"Identity") => "None".to_string(),
+        Some(name) => dict
+            .get(b"CF")
+            .and_then(Object::as_dict)
+            .and_then(|cf| cf.get(name))
+            .and_then(Object::as_dict)
+            .and_then(|f| f.get(b"CFM"))
+            .and_then(Object::as_name)
+            .map(|m| String::from_utf8_lossy(m).into_owned())
+            .unwrap_or_default(),
+        None if get(b"V") <= 2 => "V2".to_string(),
+        None => String::new(),
+    };
     format!("V{} R{} {method}", get(b"V"), get(b"R"))
 }
 
 /// `crypt`'s `/P` and `/ID[0]`.
 fn kept(crypt: &Crypt) -> (Option<Object>, Option<&[u8]>) {
-    (crypt.dict().get(b"P").ok().cloned(), crypt.first_id())
+    (
+        crypt
+            .dict()
+            .get(b"P")
+            .map(|o| Object::new(o.value().clone())),
+        crypt.first_id(),
+    )
 }
 
 /// What a file decrypts to: its first page's `/Rotate`, that page's
@@ -86,16 +103,16 @@ struct Decrypted {
 fn decrypted(src: &Source) -> Decrypted {
     let pdf = src.pdf();
     let read = |obj: &Object| pdf.dereference(obj).ok().map(|(_, obj)| obj.clone());
-    let data = |obj: Option<Object>| Some(obj?.as_stream().ok()?.content.clone());
+    let data = |obj: Option<Object>| Some(obj?.as_stream()?.raw_bytes().to_vec());
     let (mut content, mut page) = (Vec::new(), Vec::new());
     if let Some(facts) = src.page(0) {
         for &id in facts.contents.iter() {
-            match src.object(id).as_deref() {
+            match src.object(id).as_deref().map(Object::value) {
                 // A reference to an array of streams.
-                Ok(Object::Array(streams)) => {
+                Ok(Value::Array(streams)) => {
                     content.extend(streams.iter().map(|stream| data(read(stream))));
                 }
-                Ok(stream) => content.push(data(Some(stream.clone()))),
+                Ok(_) => content.push(data(src.object(id).ok().map(|o| (*o).clone()))),
                 Err(_) => content.push(None),
             }
         }
@@ -104,7 +121,7 @@ fn decrypted(src: &Source) -> Decrypted {
         }
     }
     let mut info = Vec::new();
-    if let Some(dict) = pdf.trailer().get(b"Info").ok().and_then(read) {
+    if let Some(dict) = pdf.trailer().get(b"Info").and_then(read) {
         strings(&dict, &mut info);
     }
     page.sort();
@@ -120,11 +137,11 @@ fn decrypted(src: &Source) -> Decrypted {
 /// Every string `obj` holds, in its arrays and dictionaries too, but not
 /// in what it refers to.
 fn strings(obj: &Object, out: &mut Vec<Vec<u8>>) {
-    match obj {
-        Object::String(text, _) => out.push(text.clone()),
-        Object::Array(items) => items.iter().for_each(|item| strings(item, out)),
-        Object::Dictionary(dict) => dict.iter().for_each(|(_, v)| strings(v, out)),
-        Object::Stream(stream) => stream.dict.iter().for_each(|(_, v)| strings(v, out)),
+    match obj.value() {
+        Value::String(text, _) => out.push(text.as_bytes().expect("decrypted string").to_vec()),
+        Value::Array(items) => items.iter().for_each(|item| strings(item, out)),
+        Value::Dict(dict) => dict.iter().for_each(|(_, v)| strings(v, out)),
+        Value::Stream(stream) => stream.dict.iter().for_each(|(_, v)| strings(v, out)),
         _ => {}
     }
 }

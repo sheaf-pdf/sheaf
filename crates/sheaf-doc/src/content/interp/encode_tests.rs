@@ -15,6 +15,7 @@ use super::*;
 use crate::content::fixture::{self, Fixture};
 use crate::content::{Balance, NameSet, balance, lex, names_used};
 use crate::geom::{Affine, Rect};
+use crate::pdf::StreamExt;
 use crate::source::Limits;
 
 /// An event as the round trip compares it: what it is, but for its
@@ -231,8 +232,13 @@ fn round_trip(f: &Fixture, content: &[u8], what: &str) -> Encoded {
         "{what}"
     );
     for (id, written) in &encoded.forms {
-        let form = f.pdf.get_object(*id).and_then(Object::as_stream).unwrap();
-        let own = form.dict.get(b"Resources").ok();
+        let form = f
+            .pdf
+            .get_object(*id)
+            .ok()
+            .and_then(Object::as_stream)
+            .unwrap();
+        let own = form.dict.get(b"Resources");
         let res = ResCx::read(&f.pdf, own.or(f.resources()));
         let data = form.decompressed_content().unwrap();
         assert_eq!(facts(&data, &res), facts(written, &res), "{what}: {id:?}");
@@ -409,8 +415,8 @@ fn pieces(f: &Fixture) -> Vec<Vec<u8>> {
     let lim = &Limits::DEFAULT;
     let res = ResCx::read(&f.pdf, f.resources());
     let forms = (f.pdf.objects.values())
-        .filter_map(|o| o.as_stream().ok())
-        .filter(|s| s.dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Form"))
+        .filter_map(Object::as_stream)
+        .filter(|s| s.dict.get(b"Subtype").and_then(Object::as_name) == Some(b"Form"))
         .map(|s| s.decompressed_content().unwrap());
     let mut pieces = Vec::new();
     for content in std::iter::once(f.content().into_bytes()).chain(forms) {

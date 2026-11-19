@@ -9,8 +9,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use lopdf::Document as Pdf;
 use serde::{Deserialize, Serialize};
+use sheaf_doc::pdf::Document as Pdf;
 use sheaf_doc::serialize::durable;
 use sheaf_doc::stamp_lib::{self, StampPage};
 

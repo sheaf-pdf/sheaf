@@ -62,7 +62,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use lopdf::{Dictionary, Object, ObjectId, Stream, dictionary};
+use crate::pdf::{Dictionary, Object, ObjectId, Stream, Value, dictionary, literal};
 
 use super::{Cx, Shown};
 use crate::annot::{self, Annot, AnnotId, AnnotKind, Emitted};
@@ -143,18 +143,18 @@ pub(crate) fn page(cx: &mut Cx, id: PageId, shown: &Shown, tags: bool) -> Option
     // What the primary's page lists that its copy 0 now leaves out.
     if shown.copy == 0 && shown.src.id() == cx.primary.id() {
         let written: HashSet<ObjectId> = (list.iter())
-            .filter_map(|entry| entry.as_reference().ok())
+            .filter_map(Object::as_reference)
             .filter_map(|r| cx.number_known(cx.syms.key(r)?))
             .collect();
         for entry in &base {
-            if let Object::Reference(r) = entry
-                && !written.contains(r)
+            if let Some(r) = entry.as_reference()
+                && !written.contains(&r)
             {
-                cx.left_out.push(*r);
+                cx.left_out.push(r);
             }
         }
     }
-    (!list.is_empty()).then_some(Object::Array(list))
+    (!list.is_empty()).then_some(Object::from(list))
 }
 
 /// Whether mark `m`'s thread parent is an annotation on page `id`.
@@ -170,9 +170,9 @@ pub(crate) fn base_annots(shown: &Shown) -> Vec<Object> {
         return Vec::new();
     };
     (pdf.get_dictionary(facts.id).ok())
-        .and_then(|d| d.get(b"Annots").ok())
+        .and_then(|d| d.get(b"Annots"))
         .and_then(|a| pdf.dereference(a).ok())
-        .and_then(|(_, a)| a.as_array().ok().cloned())
+        .and_then(|(_, a)| a.as_array().map(<[Object]>::to_vec))
         .unwrap_or_default()
 }
 
@@ -245,9 +245,9 @@ impl Page<'_> {
         let mut after: HashMap<Option<AnnotId>, Vec<Object>> = HashMap::new();
         let mut last = None;
         for (slot, entry) in self.base.iter().enumerate() {
-            let rec = match entry {
-                Object::Reference(r) => by_object.get(r),
-                _ => by_slot.get(&slot),
+            let rec = match entry.as_reference() {
+                Some(r) => by_object.get(&r),
+                None => by_slot.get(&slot),
             };
             if let Some(&aid) = rec {
                 if self.out.contains_key(&aid) {
@@ -277,8 +277,10 @@ impl Page<'_> {
     fn unmodeled(&self, cx: &mut Cx, entry: &Object) -> Option<Object> {
         let shown = self.shown;
         let pdf = shown.src.pdf();
-        let (_, dict) = pdf.dereference(entry).ok()?;
-        let dict = dict.as_dict().ok()?;
+        let (_, resolved) = pdf.dereference(entry).ok()?;
+        let Value::Dict(dict) = resolved.value() else {
+            return None;
+        };
         let widget = is(dict, b"Subtype", b"Widget");
         let link = is(dict, b"Subtype", b"Link");
         if is(dict, b"Subtype", b"Popup")
@@ -297,22 +299,22 @@ impl Page<'_> {
         let built = |cx: &mut Cx| -> Dictionary {
             let mut out = Dictionary::new();
             for (k, v) in dict.iter() {
-                match k.as_slice() {
+                match k {
                     b"StructParent" => {}
                     b"P" => out.set("P", cx.placeholder(ObjKey::Page(self.id))),
                     _ => {
                         let v = cx.sym(v, &scope);
-                        out.set(k.clone(), v);
+                        out.set(k, v);
                     }
                 }
             }
             out
         };
-        match entry {
-            Object::Reference(r) => {
+        match entry.as_reference() {
+            Some(r) => {
                 let key = ObjKey::Base {
                     blob: shown.src.id(),
-                    obj: *r,
+                    obj: r,
                     copy: shown.copy,
                 };
                 // An Append's saved file may have it already, its `/P` the
@@ -321,11 +323,11 @@ impl Page<'_> {
                 // renumbered, or another page that copy of its page).
                 if cx.closure.claim(key) && cx.writes(&key) {
                     let out = built(cx);
-                    cx.push(key, Object::Dictionary(out));
+                    cx.push(key, Object::from(out));
                 }
                 Some(cx.placeholder(key))
             }
-            _ => Some(Object::Dictionary(built(cx))),
+            None => Some(Object::from(built(cx))),
         }
     }
 
@@ -339,8 +341,8 @@ impl Page<'_> {
                 Ok(d) => (&r.src, d),
                 Err(_) => return (Vec::new(), None),
             },
-            None => match self.base.get(f.summary.slot) {
-                Some(Object::Dictionary(d)) => (&shown.src, d),
+            None => match self.base.get(f.summary.slot).map(Object::value) {
+                Some(Value::Dict(d)) => (&shown.src, d),
                 _ => return (Vec::new(), None),
             },
         };
@@ -359,11 +361,11 @@ impl Page<'_> {
             .filter(|&pid| cx.draws_id(pid))
             .map(ObjKey::Annot)
             .or_else(|| {
-                let irt = dict.get(b"IRT").ok()?.as_reference().ok()?;
+                let irt = dict.get(b"IRT")?.as_reference()?;
                 let pid = cx.annot_at(src, irt, f.copy)?;
                 cx.draws_id(pid).then_some(ObjKey::Annot(pid))
             });
-        let rect = (dict.get(b"Rect").ok())
+        let rect = (dict.get(b"Rect"))
             .and_then(|r| src.pdf().dereference(r).ok())
             .map(|(_, r)| r.clone());
         let key = ObjKey::Annot(aid);
@@ -389,7 +391,7 @@ impl Page<'_> {
         let mut popup = None;
         let mut out = Dictionary::new();
         for (k, v) in dict.iter() {
-            match k.as_slice() {
+            match k {
                 b"P" => out.set("P", cx.placeholder(ObjKey::Page(self.id))),
                 b"StructParent" if !self.tags => {}
                 b"IRT" | b"RT" if parent.is_none() => {}
@@ -402,29 +404,29 @@ impl Page<'_> {
                 }
                 _ => {
                     let v = cx.sym(v, &scope);
-                    out.set(k.clone(), v);
+                    out.set(k, v);
                 }
             }
         }
         if !dict.has(b"NM") && named() {
-            out.set("NM", Object::string_literal(name.as_str()));
+            out.set("NM", literal(name.as_str()));
         }
         if cx.strips() {
             private::strip_annot(&mut out);
         }
         cx.hidden(aid, &mut out);
         let Some(r) = &f.src else {
-            return (vec![Object::Dictionary(out)], rect);
+            return (vec![Object::from(out)], rect);
         };
         if cx.owned_at(key) == Some(r.id) && cx.unchanged(&out, dict) {
             cx.push_raw(key, r.clone());
         } else {
-            cx.push(key, Object::Dictionary(out));
+            cx.push(key, Object::from(out));
         }
         let mut entries = vec![cx.placeholder(key)];
         // Its pop-up after it, where the page listed it.
-        if let (Some(key), Ok(Object::Reference(at))) = (popup, dict.get(b"Popup"))
-            && self.base.contains(&Object::Reference(*at))
+        if let (Some(key), Some(at)) = (popup, dict.get(b"Popup").and_then(Object::as_reference))
+            && self.base.iter().any(|e| e.as_reference() == Some(at))
         {
             entries.push(cx.placeholder(key));
         }
@@ -441,13 +443,14 @@ impl Page<'_> {
         }
         let page = cx.number_known(ObjKey::Page(self.id));
         let p = match dict.get(b"P") {
-            Err(_) => true,
-            Ok(&Object::Reference(p)) => page == Some(p),
-            Ok(_) => false,
+            None => true,
+            Some(o) => o.as_reference().is_some_and(|p| page == Some(p)),
         };
         let irt = match (dict.get(b"IRT"), parent) {
-            (Err(_), _) => true,
-            (Ok(&Object::Reference(r)), Some(parent)) => cx.number_known(parent) == Some(r),
+            (None, _) => true,
+            (Some(o), Some(parent)) => o
+                .as_reference()
+                .is_some_and(|r| cx.number_known(parent) == Some(r)),
             _ => false,
         };
         p && irt
@@ -465,7 +468,7 @@ impl Page<'_> {
         scope: &Scope,
         own: bool,
     ) -> Option<ObjKey> {
-        let at = v.as_reference().ok()?;
+        let at = v.as_reference()?;
         let pdf = scope.src.pdf();
         let dict = pdf.get_dictionary(at).ok()?;
         if !is(dict, b"Subtype", b"Popup") {
@@ -476,13 +479,13 @@ impl Page<'_> {
         let owned = own && primary && cx.own(key, at);
         let mut out = Dictionary::new();
         for (k, v) in dict.iter() {
-            match k.as_slice() {
+            match k {
                 b"Parent" => out.set("Parent", cx.placeholder(ObjKey::Annot(aid))),
                 b"P" => out.set("P", cx.placeholder(ObjKey::Page(self.id))),
                 b"StructParent" if !self.tags => {}
                 _ => {
                     let v = cx.sym(v, scope);
-                    out.set(k.clone(), v);
+                    out.set(k, v);
                 }
             }
         }
@@ -493,7 +496,7 @@ impl Page<'_> {
             };
             cx.push_raw(key, raw);
         } else {
-            cx.push(key, Object::Dictionary(out));
+            cx.push(key, Object::from(out));
         }
         Some(key)
     }
@@ -535,7 +538,7 @@ impl Page<'_> {
         let ap = ObjKey::AnnotPart(aid, Part::Ap);
         if cx.writes(&ap) {
             let form = appearance.form(cx);
-            cx.push(ap, Object::Stream(form));
+            cx.push(ap, Object::from(form));
         }
         main.set("AP", dictionary! { "N" => cx.placeholder(ap) });
         if let Some((parent, rect)) = parent {
@@ -551,23 +554,23 @@ impl Page<'_> {
             main.set("Dest", dest);
         }
         cx.hidden(aid, &mut main);
-        let rect = main.get(b"Rect").ok().cloned();
-        cx.push(key, Object::Dictionary(main));
+        let rect = main.get(b"Rect").cloned();
+        cx.push(key, Object::from(main));
         let mut entries = vec![cx.placeholder(key)];
         // A replacement has one companion, its StrikeOut.
         if let Some((mut dict, appearance)) = companions.into_iter().next() {
             let ap = ObjKey::AnnotPart(aid, Part::CompanionAp);
             if cx.writes(&ap) {
                 let form = appearance.form(cx);
-                cx.push(ap, Object::Stream(form));
+                cx.push(ap, Object::from(form));
             }
             dict.set("AP", dictionary! { "N" => cx.placeholder(ap) });
             dict.set("IRT", cx.placeholder(key));
-            dict.set("RT", Object::Name(b"Group".to_vec()));
+            dict.set("RT", Object::name("Group"));
             dict.set("P", page);
             cx.hidden(aid, &mut dict);
             let part = ObjKey::AnnotPart(aid, Part::Companion);
-            cx.push(part, Object::Dictionary(dict));
+            cx.push(part, Object::from(dict));
             entries.push(cx.placeholder(part));
         }
         (entries, rect)
@@ -649,31 +652,30 @@ pub(crate) fn mark_kept<'b>(
     }
     let pdf = r.src.pdf();
     let dict = pdf.get_dictionary(r.id).ok()?;
-    let irt = dict.get(b"IRT").ok().and_then(|o| o.as_reference().ok());
+    let irt = dict.get(b"IRT").and_then(Object::as_reference);
     let threads = match (m.annot.thread_parent(), parent) {
         (None, _) => irt.is_none(),
         (Some(_), Some(parent)) => irt.is_some() && irt == parent,
         (Some(_), None) => false,
     };
     let p_kept = match dict.get(b"P") {
-        Err(_) => true,
-        Ok(&Object::Reference(p)) => page == Some(p),
-        Ok(_) => false,
+        None => true,
+        Some(o) => o.as_reference().is_some_and(|p| page == Some(p)),
     };
     if !threads || !p_kept || dict.has(b"Popup") {
         return None;
     }
     let mut companions = Vec::new();
     for entry in base {
-        let read = (entry.as_reference().ok()).and_then(|at| pdf.get_dictionary(at).ok());
+        let read = (entry.as_reference()).and_then(|at| pdf.get_dictionary(at).ok());
         let under = read.is_some_and(|d| {
-            d.get(b"IRT").ok() == Some(&Object::Reference(r.id)) && !d.has(b"SHEF_Annot")
+            d.get(b"IRT").and_then(Object::as_reference) == Some(r.id) && !d.has(b"SHEF_Annot")
         });
         if under && crate::file::is_ours(pdf, entry) {
             companions.push(entry);
         }
     }
-    let rect = (dict.get(b"Rect").ok())
+    let rect = (dict.get(b"Rect"))
         .and_then(|o| pdf.dereference(o).ok())
         .map(|(_, o)| o.clone());
     Some(Kept { companions, rect })
@@ -686,7 +688,7 @@ pub(crate) fn mark_kept<'b>(
 ///
 /// [`Closure::writes_page`]: crate::materialize::copy::Closure::writes_page
 pub(crate) fn leads_nowhere(
-    pdf: &lopdf::LazyPdf,
+    pdf: &crate::pdf::LazyPdf,
     dict: &Dictionary,
     written: impl Fn(ObjectId) -> bool,
 ) -> bool {
@@ -702,24 +704,23 @@ pub(crate) fn leads_nowhere(
 /// entry is a page of `pdf`, `Some(None)` when it's null or there's none,
 /// and None for anything else. A named destination is the name tree's to
 /// resolve.
-fn link_dest(pdf: &lopdf::LazyPdf, dict: &Dictionary) -> Option<Option<ObjectId>> {
+fn link_dest(pdf: &crate::pdf::LazyPdf, dict: &Dictionary) -> Option<Option<ObjectId>> {
     let deref = |o: &Object| pdf.dereference(o).ok().map(|(_, o)| o.clone());
     let dest = match dict.get(b"Dest") {
-        Ok(dest) => deref(dest),
-        Err(_) => (dict.get(b"A").ok().and_then(deref))
-            .filter(|a| a.as_dict().is_ok_and(|a| is(a, b"S", b"GoTo")))
-            .and_then(|a| a.as_dict().ok()?.get(b"D").ok().and_then(deref)),
+        Some(dest) => deref(dest),
+        None => (dict.get(b"A").and_then(deref))
+            .filter(|a| matches!(a.value(), Value::Dict(d) if is(d, b"S", b"GoTo")))
+            .and_then(|a| a.as_dict()?.get(b"D").and_then(deref)),
     };
     let dest = match dest {
-        Some(Object::Dictionary(d)) => d.get(b"D").ok().and_then(deref),
+        Some(o) if matches!(o.value(), Value::Dict(_)) => o.as_dict()?.get(b"D").and_then(deref),
         dest => dest,
     };
-    let Some(Object::Array(dest)) = dest else {
-        return None;
-    };
-    match dest.first() {
-        None | Some(Object::Null) => Some(None),
-        Some(Object::Reference(page)) if crate::materialize::copy::is_page_node(pdf, *page) => {
+    let dest = dest?;
+    let dest = dest.as_array()?;
+    match dest.first().map(Object::value) {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::Ref(page)) if crate::materialize::copy::is_page_node(pdf, *page) => {
             Some(Some(*page))
         }
         Some(_) => None,
@@ -763,8 +764,8 @@ impl LinkTo {
         };
         let dict = match &f.src {
             Some(r) => r.src.pdf().get_dictionary(r.id).ok().map(leads),
-            None => match base().get(f.summary.slot) {
-                Some(Object::Dictionary(d)) => Some(leads(d)),
+            None => match base().get(f.summary.slot).map(Object::value) {
+                Some(Value::Dict(d)) => Some(leads(d)),
                 _ => None,
             },
         };
@@ -784,9 +785,7 @@ pub(crate) fn dead_link(
 
 /// Whether `dict`'s `key` is the name `name`.
 pub(crate) fn is(dict: &Dictionary, key: &[u8], name: &[u8]) -> bool {
-    dict.get(key)
-        .and_then(Object::as_name)
-        .is_ok_and(|n| n == name)
+    dict.get(key).and_then(Object::as_name) == Some(name)
 }
 
 impl Cx<'_> {
@@ -826,14 +825,14 @@ impl Cx<'_> {
                     src: &at.src,
                     copy: 0,
                 };
-                let id = self.sym(&Object::Reference(at.id), &scope);
+                let id = self.sym(&Object::from(at.id), &scope);
                 crate::stamp_lib::form_frame(at.src.pdf(), at.id)
                     .map(|(bbox, matrix)| (id, bbox, matrix))
                     .ok_or_else(|| anyhow::anyhow!("a form with no box"))
             }
             FormRef::Blob(page) => blob_form(page.blob(), 0).map(|(objects, bbox, matrix)| {
                 let id = self.resource_of(objects);
-                (Object::Reference(id), bbox, matrix)
+                (Object::from(id), bbox, matrix)
             }),
             FormRef::Pinned(ap) => Ok(self.pinned(ap)),
         };
@@ -841,7 +840,7 @@ impl Cx<'_> {
             .and_then(|(id, bbox, matrix)| {
                 let id = id
                     .as_reference()
-                    .map_err(|_| anyhow::anyhow!("not an object"))?;
+                    .ok_or_else(|| anyhow::anyhow!("not an object"))?;
                 Ok(StampForm::written(id, bbox, matrix))
             })
             .inspect_err(said)
@@ -874,7 +873,7 @@ impl Cx<'_> {
         let bbox = drawn.bbox();
         let id = self.push_deferred(ObjKey::Pinned(ap.digest), |cx| {
             let mut dict = drawn.form_dict(cx);
-            dict.set("Filter", "FlateDecode");
+            dict.set("Filter", Object::name("FlateDecode"));
             let ap = ap.clone();
             let data = move || {
                 let drawn = annot::appearance(&ap.inputs.annot(), page);
@@ -885,7 +884,7 @@ impl Cx<'_> {
                 data: Arc::new(data),
             }
         });
-        (Object::Reference(id), bbox, Affine::IDENTITY)
+        (Object::from(id), bbox, Affine::IDENTITY)
     }
 
     /// Attachment `m`'s file as an embedded file stream in the file, from
@@ -910,12 +909,12 @@ impl Cx<'_> {
         }
         let stream = Stream::new(
             dictionary! {
-                "Type" => "EmbeddedFile",
+                "Type" => Object::name("EmbeddedFile"),
                 "Params" => dictionary! { "Size" => file.bytes().len() as i64 },
             },
             file.bytes().to_vec(),
         );
-        let made = self.resource_of(vec![Object::Stream(stream)]);
+        let made = self.resource_of(vec![Object::from(stream)]);
         self.files.insert(file.id(), made);
         Some(made)
     }
@@ -927,11 +926,11 @@ impl Cx<'_> {
     fn held_file(&mut self, stem: &str, file: crate::store::BlobId) -> Option<ObjectId> {
         let record = self.saved()?;
         let at = self.primary.annots().file(stem)?;
-        if !record.present.contains(at.0) {
+        if !record.present.contains(at.number) {
             return None;
         }
         let stream = self.primary.pdf().get_object(at).ok()?;
-        let data = crate::attachments::file_bytes(stream.as_stream().ok()?).ok()?;
+        let data = crate::attachments::file_bytes(stream.as_stream()?).ok()?;
         if crate::store::blob_id(&data) != file {
             return None;
         }
@@ -939,7 +938,7 @@ impl Cx<'_> {
             src: &self.primary.clone(),
             copy: 0,
         };
-        self.sym(&Object::Reference(at), &scope).as_reference().ok()
+        self.sym(&Object::from(at), &scope).as_reference()
     }
 
     /// `objects`, a resource's (the resource first; a reference `(i, 0)`
@@ -981,12 +980,12 @@ impl Cx<'_> {
         let AnnotKind::Connector { rect, .. } = &next.kind else {
             return None;
         };
-        Some(Object::Array(vec![
+        Some(Object::from(vec![
             self.placeholder(ObjKey::Page(page)),
-            Object::Name(b"XYZ".to_vec()),
+            Object::name("XYZ"),
             Object::from(rect.x - 36.0),
             Object::from(rect.bottom() + 36.0),
-            Object::Null,
+            Object::null(),
         ]))
     }
 }
@@ -1000,30 +999,16 @@ pub(crate) fn blob_form(
     index: u32,
 ) -> anyhow::Result<(Vec<Object>, crate::geom::Rect, crate::geom::Affine)> {
     let src = blob.source(&crate::source::Limits::DEFAULT)?;
-    let mut dst = lopdf::Document::new();
+    let mut dst = crate::pdf::Document::new();
     let form = (crate::stamp_lib::page_forms(&src, &[index], &mut dst)?).remove(0);
     let order: Vec<ObjectId> = std::iter::once(form.id)
         .chain(dst.objects.keys().copied().filter(|&id| id != form.id))
         .collect();
     let index: HashMap<ObjectId, u32> = (0..).zip(&order).map(|(i, &id)| (id, i)).collect();
-    fn follow(obj: &mut Object, index: &HashMap<ObjectId, u32>) {
-        match obj {
-            Object::Reference(r) => {
-                *obj = match index.get(r) {
-                    Some(&i) => Object::Reference((i, 0)),
-                    None => Object::Null,
-                }
-            }
-            Object::Array(items) => items.iter_mut().for_each(|o| follow(o, index)),
-            Object::Dictionary(d) => d.iter_mut().for_each(|(_, o)| follow(o, index)),
-            Object::Stream(s) => s.dict.iter_mut().for_each(|(_, o)| follow(o, index)),
-            _ => {}
-        }
-    }
     let objects = (order.iter())
         .map(|id| {
             let mut obj = dst.objects[id].clone();
-            follow(&mut obj, &index);
+            obj.renumber(|r| index.get(&r).map(|&i| ObjectId::new(i, 0)));
             obj
         })
         .collect();

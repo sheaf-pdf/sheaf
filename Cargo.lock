@@ -143,6 +143,7 @@ dependencies = [
  "cipher 0.5.2",
  "cpubits",
  "cpufeatures 0.3.1",
+ "zeroize",
 ]
 
 [[package]]
@@ -746,6 +747,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
 dependencies = [
  "hybrid-array",
+ "zeroize",
 ]
 
 [[package]]
@@ -755,15 +757,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a8894febbff9f758034a5b8e12d87918f56dfc64a8e1fe757d65e29041538d93"
 dependencies = [
  "generic-array",
-]
-
-[[package]]
-name = "block-padding"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "710f1dd022ef4e93f8a438b4ba958de7f64308434fa6a87104481645cc30068b"
-dependencies = [
- "hybrid-array",
 ]
 
 [[package]]
@@ -1024,8 +1017,10 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8cf2a2c93cd704877c0858356ed03480ff301ee950b43f1cbe4573b088bfa6c"
 dependencies = [
+ "block-buffer 0.12.1",
  "crypto-common 0.2.2",
  "inout 0.2.2",
+ "zeroize",
 ]
 
 [[package]]
@@ -1927,6 +1922,7 @@ dependencies = [
  "const-oid",
  "crypto-common 0.2.2",
  "ctutils",
+ "zeroize",
 ]
 
 [[package]]
@@ -2026,15 +2022,6 @@ name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
-
-[[package]]
-name = "ecb"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26f2a8b3e564eba0877223dc343703ad0385794e882e6d13f3a4dd5c6b1f41ac"
-dependencies = [
- "cipher 0.5.2",
-]
 
 [[package]]
 name = "either"
@@ -2617,7 +2604,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
 dependencies = [
  "color_quant",
- "weezl 0.1.12",
+ "weezl",
 ]
 
 [[package]]
@@ -3370,6 +3357,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27f864f10dfb56725ce5ce5472bc52252c8f93a4ab86327122cebf62c5f59a17"
 dependencies = [
  "typenum",
+ "zeroize",
 ]
 
 [[package]]
@@ -3736,7 +3724,7 @@ version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
- "block-padding 0.3.3",
+ "block-padding",
  "generic-array",
 ]
 
@@ -3746,7 +3734,6 @@ version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4250ce6452e92010fdf7268ccc5d14faa80bb12fc741938534c58f16804e03c7"
 dependencies = [
- "block-padding 0.4.2",
  "hybrid-array",
 ]
 
@@ -4132,33 +4119,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fae87c125b03c1d2c0150c90365d7d6bcc53fb73a9acaef207d2d065860f062"
 dependencies = [
  "imgref",
-]
-
-[[package]]
-name = "lopdf"
-version = "0.45.0"
-dependencies = [
- "aes 0.9.3",
- "bitflags 2.13.2",
- "brotli-decompressor",
- "cbc 0.2.1",
- "chrono",
- "ecb",
- "encoding_rs",
- "flate2",
- "getrandom 0.4.3",
- "indexmap",
- "itoa",
- "log",
- "md-5 0.11.0",
- "nom 8.0.0",
- "rand 0.10.3",
- "rangemap",
- "rayon",
- "sha2 0.11.0",
- "stringprep",
- "thiserror 2.0.21",
- "weezl 0.2.1",
 ]
 
 [[package]]
@@ -5338,20 +5298,91 @@ dependencies = [
 ]
 
 [[package]]
-name = "pdf-lint"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae8496f4f7282c17cdddd4e8cee756c28949e8c814d1b6bd87a0e2f4cbbfe23f"
+name = "pdf-color"
+version = "0.1.0-alpha.2"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#327bd44aaefa5cf6d16cec19696440793c191fe9"
 dependencies = [
- "anyhow",
+ "pdf-objects",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "pdf-content-streams"
+version = "0.1.0-alpha.1"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#327bd44aaefa5cf6d16cec19696440793c191fe9"
+dependencies = [
+ "memchr",
+ "pdf-color",
+ "pdf-filters",
+ "pdf-objects",
  "pdf-tokenizer",
+ "thiserror 2.0.21",
+ "tinyvec",
+ "twox-hash",
+]
+
+[[package]]
+name = "pdf-crypt"
+version = "0.1.0-alpha.3"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#327bd44aaefa5cf6d16cec19696440793c191fe9"
+dependencies = [
+ "aes 0.9.3",
+ "cbc 0.2.1",
+ "getrandom 0.4.3",
+ "hmac 0.13.0",
+ "md-5 0.11.0",
+ "rand_core 0.10.1",
+ "rc4",
+ "sha2 0.11.0",
+ "stringprep",
+ "thiserror 2.0.21",
+ "unicode-normalization",
+ "zeroize",
+]
+
+[[package]]
+name = "pdf-filters"
+version = "0.1.0-alpha.3"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#327bd44aaefa5cf6d16cec19696440793c191fe9"
+dependencies = [
+ "miniz_oxide 0.9.1",
+ "thiserror 2.0.21",
+ "zlib-rs",
+]
+
+[[package]]
+name = "pdf-objects"
+version = "0.1.0-alpha.3"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#327bd44aaefa5cf6d16cec19696440793c191fe9"
+dependencies = [
+ "memchr",
+ "pdf-tokenizer",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "pdf-structure"
+version = "0.1.0-alpha.1"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#327bd44aaefa5cf6d16cec19696440793c191fe9"
+dependencies = [
+ "libc",
+ "pdf-crypt",
+ "pdf-filters",
+ "pdf-objects",
+ "pdf-tokenizer",
+ "same-file",
+ "sha2 0.11.0",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "pdf-tokenizer"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a2a366e8b944154ce8ce6a531f3e9ea3e5c3788e05cc2e25b98558362cb2a73"
+version = "0.2.2"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#327bd44aaefa5cf6d16cec19696440793c191fe9"
+dependencies = [
+ "memchr",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "pdfium-render"
@@ -6060,6 +6091,15 @@ checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
+]
+
+[[package]]
+name = "rc4"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "840038b674daa9f7a7957440d937951d15c0143c056e631e529141fd780e0c92"
+dependencies = [
+ "cipher 0.5.2",
 ]
 
 [[package]]
@@ -6778,7 +6818,6 @@ dependencies = [
  "image",
  "instance-handoff",
  "log",
- "lopdf",
  "regex",
  "resvg",
  "schemars",
@@ -6814,7 +6853,6 @@ dependencies = [
  "in-progress",
  "indicatif",
  "log",
- "lopdf",
  "schemars",
  "serde_json",
  "sheaf-doc",
@@ -6835,17 +6873,18 @@ dependencies = [
  "der",
  "env_logger",
  "fastrand",
- "flate2",
  "hayro-cmap",
- "hmac 0.13.0",
  "im",
  "image",
  "in-progress",
  "log",
- "lopdf",
  "md-5 0.11.0",
  "num-bigint",
- "pdf-lint",
+ "pdf-content-streams",
+ "pdf-crypt",
+ "pdf-filters",
+ "pdf-objects",
+ "pdf-structure",
  "proc-macro2",
  "proptest",
  "quick-xml",
@@ -6901,7 +6940,6 @@ dependencies = [
  "futures",
  "image",
  "log",
- "lopdf",
  "oar-ocr",
  "ort",
  "serde",
@@ -6926,8 +6964,6 @@ dependencies = [
  "image",
  "in-progress",
  "log",
- "lopdf",
- "pdf-lint",
  "regex",
  "serde",
  "serde_json",
@@ -6952,7 +6988,6 @@ dependencies = [
  "http-body-util",
  "in-progress",
  "log",
- "lopdf",
  "regex",
  "semver",
  "serde",
@@ -7000,7 +7035,6 @@ dependencies = [
  "image",
  "in-progress",
  "log",
- "lopdf",
  "parking_lot",
  "pdfium-render",
  "sheaf-doc",
@@ -7549,7 +7583,7 @@ dependencies = [
  "flate2",
  "half",
  "quick-error",
- "weezl 0.1.12",
+ "weezl",
  "zune-jpeg",
 ]
 
@@ -8768,12 +8802,6 @@ name = "weezl"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
-
-[[package]]
-name = "weezl"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4ca08e5ef825b65b056d9efbd95c8750683f0a6d0466d02e96dc2e4e360f3d2"
 
 [[package]]
 name = "wgpu"

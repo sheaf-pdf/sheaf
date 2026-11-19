@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use lopdf::Object;
+use crate::pdf::{Object, ObjectId, literal};
 
 use super::*;
 use crate::forms::corpus::Corpus;
@@ -12,7 +12,7 @@ use crate::source::Limits;
 use crate::store::{BlobKind, Store};
 
 /// One signature field, `Sig`, on a page with a text field, `a.b`.
-fn signable() -> (Form, lopdf::ObjectId) {
+fn signable() -> (Form, ObjectId) {
     let mut f = Form::new(1);
     let b = f.text("b", 0, row(1));
     f.group("a", &[b]);
@@ -68,7 +68,7 @@ fn a_certification_s_p_and_its_default() {
         assert_eq!(read_back(&mut f).signed, [certified(p as u8)], "P={p}");
     }
     // No /P is 2; one past 1–3 is 1.
-    for (p, reads) in [(None, 2), (Some(Object::Integer(7)), 1)] {
+    for (p, reads) in [(None, 2), (Some(Object::from(7_i64)), 1)] {
         let (mut f, sig) = signable();
         f.certify(sig, 3);
         let v = f.pdf.get_dictionary(sig).unwrap().get(b"V").unwrap();
@@ -170,7 +170,7 @@ fn field_mdp_locks_and_lock_p() {
 #[test]
 fn an_unreadable_signature_asks() {
     let (mut f, sig) = signable();
-    f.dict(sig).set("V", Object::Reference((9999, 0)));
+    f.dict(sig).set("V", Object::from(ObjectId::new(9999, 0)));
     f.dict(f.acroform).set("SigFlags", 3);
     let sigs = read_back(&mut f);
     let unreadable = Signature {
@@ -186,7 +186,7 @@ fn an_unreadable_signature_asks() {
     // A value that's no dictionary, as a form's root may pass down to
     // every field, signs nothing.
     let (mut f, sig) = signable();
-    f.dict(sig).set("V", Object::string_literal(""));
+    f.dict(sig).set("V", literal(""));
     assert_eq!(read_back(&mut f).signed, []);
     // A damaged form's: one stands for them.
     let (mut f, sig) = signable();
@@ -214,7 +214,9 @@ impl Signature {
     }
 }
 
-/// 1263925's signature dictionary doesn't decrypt.
+/// 1263925's `/SigRef` `/DigestValue` is unpadded, which broke lopdf's
+/// object decryption; pdf-structure reads the signature dictionary and
+/// its `/FieldMDP` lock cleanly (as qpdf and pyHanko do).
 #[test]
 fn the_corpus_s_undecryptable_signature_asks() {
     let Some(corpus) = Corpus::or_skip() else {
@@ -227,10 +229,8 @@ fn the_corpus_s_undecryptable_signature_asks() {
     };
     let sigs = read_back_bytes(bytes);
     assert_eq!(sigs.signed.len(), 1);
-    // Its field's, read where the form is whole.
-    assert!(sigs.signed[0].unreadable && !sigs.signed[0].field.is_empty());
-    let impact = sig_impact(&sigs, Pending::Append, SigClass::FILL, &BTreeSet::new());
-    assert_eq!(impact[0].verdict, Verdict::Invalid);
+    assert!(!sigs.signed[0].unreadable && !sigs.signed[0].field.is_empty());
+    assert!(!sigs.signed[0].locks.is_empty());
 }
 
 fn read_back_bytes(bytes: Vec<u8>) -> Signatures {
@@ -372,5 +372,5 @@ fn the_corpus_s_signatures() {
     eprintln!(
         "{files} files: {signatures} signatures, {certified} certifying; usage rights in {rights}"
     );
-    assert_eq!(unreadable, ["forms/safedocs/1263925.pdf"]);
+    assert!(unreadable.is_empty(), "{unreadable:?}");
 }

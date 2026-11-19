@@ -10,7 +10,7 @@
 //! [`materialize::save_with`]: crate::materialize::save_with
 //! [`materialize::write_file`]: crate::materialize::write_file
 
-use lopdf::{Object, StringFormat};
+use crate::pdf::{Object, literal};
 
 #[cfg(any(test, feature = "fixtures"))]
 pub use whole::{rewrite, rewrite_to_path};
@@ -68,13 +68,13 @@ mod whole {
 /// (`file::is_pdf_doc_ascii`), otherwise UTF-16BE with BOM.
 pub fn text_string(s: &str) -> Object {
     if crate::file::is_pdf_doc_ascii(s) {
-        Object::String(s.as_bytes().to_vec(), StringFormat::Literal)
+        literal(s.as_bytes())
     } else {
         let mut bytes = vec![0xFE, 0xFF];
         for u in s.encode_utf16() {
             bytes.extend_from_slice(&u.to_be_bytes());
         }
-        Object::String(bytes, StringFormat::Hexadecimal)
+        Object::hex(bytes)
     }
 }
 

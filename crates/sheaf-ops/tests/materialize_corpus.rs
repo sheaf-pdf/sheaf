@@ -12,8 +12,8 @@
 //!   fourth file (and of those that once failed) inserted twice into the
 //!   1040 write too: a copy never brings its file's catalog or form along,
 //!   nor stops on a signature it can't decrypt;
-//! - `pool/safedocs/2932/2932995.pdf`, whose first page's logo lopdf's
-//!   writer recolours, renders the same written.
+//! - `pool/safedocs/2932/2932995.pdf`, whose first page's logo an older
+//!   writer recoloured, renders the same written.
 //!
 //! The identity Rewrite's counts are asserted against the baseline
 //! ([`IDENTITY`]), when the corpus is the one they were counted on (its
@@ -27,13 +27,13 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use lopdf::{LazyPdf, Object, ObjectId};
 use sheaf_doc::Document;
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::{Finding, Report};
 use sheaf_doc::materialize::{
     Output, Profile, SaveInput, SaveTarget, materialize, plan as save_plan,
 };
+use sheaf_doc::pdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, StreamExt, Value};
 use sheaf_doc::source::Limits;
 use sheaf_doc::tx::fixture::{delete, duplicate, file};
 use sheaf_edit::{Bring, FormBring, Op, OutlineBring, Rotation};
@@ -65,40 +65,35 @@ fn opened(path: &Path) -> Option<Document> {
 /// Whether `a` and `b` are the same object as values: strings by their
 /// bytes, whatever their form.
 fn same(a: &Object, b: &Object) -> bool {
-    match (a, b) {
-        (Object::String(x, _), Object::String(y, _)) => x == y,
-        (Object::Array(x), Object::Array(y)) => {
+    match (a.value(), b.value()) {
+        (Value::String(x, _), Value::String(y, _)) => x.as_bytes() == y.as_bytes(),
+        (Value::Array(x), Value::Array(y)) => {
             x.len() == y.len() && x.iter().zip(y).all(|(x, y)| same(x, y))
         }
-        (Object::Dictionary(x), Object::Dictionary(y)) => {
-            x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_ok_and(|w| same(v, w)))
+        (Value::Dict(x), Value::Dict(y)) => {
+            x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| same(v, w)))
         }
-        (Object::Stream(x), Object::Stream(y)) => {
-            let dict = |d: &lopdf::Dictionary| {
+        (Value::Stream(x), Value::Stream(y)) => {
+            let dict = |d: &Dictionary| {
                 let mut d = d.clone();
                 d.remove(b"Length");
-                Object::Dictionary(d)
+                Object::from(d)
             };
-            same(&dict(&x.dict), &dict(&y.dict)) && x.content == y.content
+            same(&dict(&x.dict), &dict(&y.dict)) && x.raw_bytes() == y.raw_bytes()
         }
-        (x, y) => x == y,
+        _ => a.eq_value(b),
     }
 }
 
 /// What an object is, for telling whether a number still names it: its
 /// kind and, for a dictionary, its `/Type` and `/Subtype`.
 fn kind(obj: &Object) -> (u8, Option<Vec<u8>>, Option<Vec<u8>>) {
-    let dict = match obj {
-        Object::Dictionary(d) => Some(d),
-        Object::Stream(s) => Some(&s.dict),
-        _ => None,
-    };
-    let name =
-        |k: &[u8]| -> Option<Vec<u8>> { dict?.get(k).ok()?.as_name().ok().map(<[u8]>::to_vec) };
-    let tag = match obj {
-        Object::Dictionary(_) => 0,
-        Object::Stream(_) => 1,
-        Object::Array(_) => 2,
+    let dict = obj.as_dict();
+    let name = |k: &[u8]| -> Option<Vec<u8>> { dict?.get(k)?.as_name().map(<[u8]>::to_vec) };
+    let tag = match obj.value() {
+        Value::Dict(_) => 0,
+        Value::Stream(_) => 1,
+        Value::Array(_) => 2,
         _ => 3,
     };
     (tag, name(b"Type"), name(b"Subtype"))
@@ -130,7 +125,7 @@ fn identity(entry: &Entry, corpus: &Corpus) -> Option<Identity> {
     let src = doc.primary();
     let before = src.pdf();
     let after = match LazyPdf::open(
-        Arc::from(written.bytes.as_slice()),
+        Arc::<[u8]>::from(written.bytes.as_slice()),
         src.password(),
         &Limits::DEFAULT.reader,
     ) {
@@ -154,18 +149,17 @@ fn identity(entry: &Entry, corpus: &Corpus) -> Option<Identity> {
         };
         // An object stream held the file's objects: a packed Rewrite gives
         // its number to an object stream of its own, or to nothing.
-        let objstm = |obj: &Object| obj.type_name().is_ok_and(|t| t == b"ObjStm");
+        let objstm =
+            |obj: &Object| obj.as_dict().and_then(Dictionary::type_name) == Some(b"ObjStm");
         if objstm(was) {
             if !objstm(is) {
-                out.failed
-                    .push(format!("{} {} was an object stream", id.0, id.1));
+                out.failed.push(format!("{id} was an object stream"));
             }
             continue;
         }
         out.survived += 1;
         if kind(was) != kind(is) {
-            out.failed
-                .push(format!("{} {} is another object", id.0, id.1));
+            out.failed.push(format!("{id} is another object"));
             continue;
         }
         if !same(was, is) {
@@ -178,8 +172,13 @@ fn identity(entry: &Entry, corpus: &Corpus) -> Option<Identity> {
                 out.raw += 1;
             } else if sound {
                 out.failed
-                    .push(format!("{} {} was left alone and written anew", id.0, id.1));
+                    .push(format!("{id} was left alone and written anew"));
             }
+        } else if let (Some((_, a)), Some((_, b))) =
+            (before.member_bytes(id), after.member_bytes(id))
+            && a == b
+        {
+            out.raw += 1;
         }
     }
     Some(out)
@@ -200,13 +199,21 @@ fn identity(entry: &Entry, corpus: &Corpus) -> Option<Identity> {
 /// of them written changed before; and 0092321's fields no longer copy
 /// its two catalogs as kids, nor the usage rights (`/Perms`, `/UR3`)
 /// only those copies reached, which a Rewrite's own catalog drops: 15
-/// objects, 14 of them copied as they were, 1 changed.
+/// objects, 14 of them copied as they were, 1 changed. M18 slice 8 moved
+/// them to 4,388, 2,267,675, 921,586 and 431: 4422502's damaged trailer
+/// has no `/Root` under `pdf-structure` (closing F29), incremental `type
+/// 0` free entries (0150632, 3170869, …) drop freed objects the old reader
+/// kept,
+/// and 2,121 streams with multi-EOL whitespace before `endstream` copy
+/// verbatim. M18 slice 9 moved `raw` to 2,246,369 (99.1% of surviving
+/// primary objects): unchanged object-stream members copy into new
+/// containers as their decoded bytes without re-serialization.
 const IDENTITY: Baseline = Baseline {
     manifest: 4392,
-    files: 4389,
-    survived: 2_269_688,
-    raw: 919_465,
-    changed: 432,
+    files: 4388,
+    survived: 2_267_675,
+    raw: 2_246_369,
+    changed: 431,
 };
 
 struct Baseline {
@@ -274,7 +281,37 @@ fn the_same_document_writes_the_same_bytes_twice_and_from_two_threads() {
             let two = s.spawn(|| written(&doc).ok().map(|o| o.bytes));
             [one.join().unwrap(), two.join().unwrap()]
         });
-        let alike = again == first && a.as_ref() == Some(&first) && b.as_ref() == Some(&first);
+        let alike = if doc.primary().crypt().is_some_and(|c| c.is_aes()) {
+            // Production AES saves draw fresh 16-byte OS CSPRNG IVs per
+            // ISO 32000-2 §7.6.3.2 & §7.6.3.3; all four writes must decrypt
+            // to semantically equal object graphs.
+            let (Some(a), Some(b)) = (a, b) else {
+                return Some(false);
+            };
+            let Ok(base_pdf) = Pdf::load_mem(&first) else {
+                return Some(false);
+            };
+            let non_xref = |obj: &Object| {
+                !obj.as_stream()
+                    .is_some_and(|s| s.dict.type_name() == Some(b"XRef"))
+            };
+            let base_objs: std::collections::BTreeMap<_, _> = base_pdf
+                .objects
+                .iter()
+                .filter(|(_, o)| non_xref(o))
+                .collect();
+            [&again, &a, &b].into_iter().all(|bytes| {
+                Pdf::load_mem(bytes).is_ok_and(|pdf| {
+                    let objs: Vec<_> = pdf.objects.iter().filter(|(_, o)| non_xref(o)).collect();
+                    objs.len() == base_objs.len()
+                        && objs
+                            .into_iter()
+                            .all(|(id, obj)| base_objs.get(id).is_some_and(|o| o.eq_value(obj)))
+                })
+            })
+        } else {
+            again == first && a.as_ref() == Some(&first) && b.as_ref() == Some(&first)
+        };
         Some(alike)
     });
     let mut files = 0;

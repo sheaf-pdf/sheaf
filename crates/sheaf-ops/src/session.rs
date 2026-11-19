@@ -425,7 +425,10 @@ mod tests {
         assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
         let saved = std::fs::read(&path).unwrap();
         assert_eq!(
-            lopdf::Document::load_mem(&saved).unwrap().get_pages().len(),
+            sheaf_doc::pdf::Document::load_mem(&saved)
+                .unwrap()
+                .get_pages()
+                .len(),
             2
         );
         // A file named for the ops, inserted by its name.

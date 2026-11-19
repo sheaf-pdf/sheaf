@@ -3,7 +3,7 @@
 Status: open · Part of [M18: the PDF layer](../README.md) · in sheaf
 
 **What:** sheaf's content reads through pdf-content-streams
-([slice 16](s16-pdf-content-streams-operators.md)), and its own lexer goes.
+([slice 16](../../complete/m18-pdf-layer/s16-pdf-content-streams-operators.md)), and its own lexer goes.
 
 - `content/lex.rs`, `lex::steps`, `balance.rs`, `marked.rs` and
   `names.rs` go; `page.rs` keeps reading a page's `/Contents` and hands

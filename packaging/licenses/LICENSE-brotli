@@ -1,8 +1,8 @@
 The brotli crate (https://github.com/dropbox/rust-brotli, BSD-3-Clause AND
 MIT) decompresses hayro-cmap's bundle of CMaps (LICENSE-cmap-resources), and
 brotli-decompressor (BSD-3-Clause/MIT), alloc-no-stdlib and alloc-stdlib
-(BSD-3-Clause) with it; lopdf decompresses /BrotliDecode streams with
-brotli-decompressor too. Their notices follow unmodified: brotli's
+(BSD-3-Clause) with it; pdf-filters decompresses /BrotliDecode streams with
+brotli too. Their notices follow unmodified: brotli's
 LICENSE.BSD-3-Clause, which is brotli-decompressor's and alloc-no-stdlib's
 LICENSE as well, then its LICENSE.MIT.
 

@@ -1,9 +1,8 @@
 [workspace]
 resolver = "3"
-# Plugins build for wasm32-wasip2 in their own workspaces. vendor/lopdf is
-# a patched dependency, not one of ours (its SHEAF.md). fuzz/ builds on
+# Plugins build for wasm32-wasip2 in their own workspaces. fuzz/ builds on
 # nightly, with libFuzzer.
-exclude = ["plugins", "crates/sheaf-plugin/tests/fixtures", "vendor/lopdf", "fuzz"]
+exclude = ["plugins", "crates/sheaf-plugin/tests/fixtures", "fuzz"]
 members = [
     "crates/sheaf-util",
     "crates/sheaf-edit",
@@ -64,7 +63,8 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features =
 
 # PDF engines. NOTE: the `pdfium` crate (newinnovations) is GPL-3 — do not use it.
 pdfium-render = "0.9.4"
-lopdf = "0.45"
+# One Flate backend across the workspace (D4, B26): zlib-rs.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 
 anyhow = "1.0"
 thiserror = "2.0"
@@ -92,11 +92,14 @@ in-progress = "0.1"
 # sheaf-pdf/instance-handoff. Pinned exactly, as its README asks: until
 # 0.1.0 a later alpha may change the API and what two builds share.
 instance-handoff = "=0.1.0-alpha.2"
-# The Arlington checker sheaf's tests hold what it writes to: sheaf's own,
-# extracted and published as sheaf-pdf/pdf-lint. Apache-2.0 only, so a
-# dev-dependency only, never in a shipped build. Pinned exactly, and
-# bumped together with CI's setup-pdf-lint `version`.
-pdf-lint = "=0.1.0"
+# The PDF family, from sheaf-pdf/pdf-lint main (M18): MIT OR Apache-2.0.
+# pdf-lint itself (Apache-2.0) runs as a standalone CLI oracle in tests,
+# never linked as a library.
+pdf-objects = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main" }
+pdf-filters = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", features = ["zlib-rs"] }
+pdf-crypt = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main" }
+pdf-structure = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", features = ["zlib-rs"] }
+pdf-content-streams = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main" }
 
 # Zed's workspace patches for crates GPUI uses, mirrored from the
 # [patch.crates-io] of Zed's Cargo.toml at the snapshot's rev.
@@ -125,18 +128,6 @@ xim-ctext = { git = "https://github.com/zed-industries/xim-rs.git", rev = "16f35
 # layout, and baselines). This is taffy's v0.15.0 tag. Drop it once Zed pins
 # a later taffy that gpui-pre resolves too, or gpui-pre keeps Zed's `=`.
 taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "eb6450694f33e2b7413e40677f230ff63f0fc194" }
-
-# Not Zed's. lopdf 0.45.0 reads an earlier revision of some hybrid-reference
-# files (plan/complete/m10-forms/s02-field-model-form-facts.md, the note).
-# vendor/lopdf is lopdf's main at
-# 39492cb, which fixes that (#598) and brings 22 other commits since 0.45.0,
-# a refactor of the reader, writer and encryption code among them. sheaf's
-# patch on top adds LazyPdf (each object read when it's asked for, under
-# caps), reads each cross-reference stream once, reads reals as f64s and
-# encrypts and decrypts each string and stream as ISO 32000 has it.
-# vendor/lopdf/SHEAF.md has the details, and why the way back to crates.io
-# is now upstreaming the patch.
-lopdf = { path = "vendor/lopdf" }
 
 [profile.dev]
 # GPUI and PDFium bindings are unusably slow unoptimized; mirror Zed's approach.

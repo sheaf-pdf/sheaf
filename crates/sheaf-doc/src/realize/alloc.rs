@@ -20,8 +20,8 @@
 
 use std::collections::HashMap;
 
+use crate::pdf::ObjectId;
 use anyhow::{Context as _, Result, bail};
-use lopdf::ObjectId;
 
 use crate::materialize::ObjKey;
 use crate::serialize::NUMBERS;
@@ -56,7 +56,7 @@ impl Numbers {
     /// object: the one it took the first time, or the next.
     pub(crate) fn number(&mut self, key: ObjKey) -> Result<ObjectId> {
         if let Some(&n) = self.by_key.get(&key) {
-            return Ok((n, 0));
+            return Ok(ObjectId::new(n, 0));
         }
         if self.next >= NUMBERS {
             bail!("the source's overlays have used every number a file may");
@@ -64,6 +64,6 @@ impl Numbers {
         let n = self.next;
         self.next += 1;
         self.by_key.insert(key, n);
-        Ok((n, 0))
+        Ok(ObjectId::new(n, 0))
     }
 }

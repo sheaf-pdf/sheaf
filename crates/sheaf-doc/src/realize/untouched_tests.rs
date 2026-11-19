@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use lopdf::{Object, dictionary};
+use crate::pdf::{Object, dictionary};
 use sheaf_edit::{Rotation, Turn};
 
 use super::fixture::{every_input, hiding, layer, their_comment};
@@ -272,9 +272,9 @@ fn the_predicate_agrees_with_the_emission_in_every_case() {
     let mut f = theirs();
     let last = f.pages[2];
     let link = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Link",
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"),
         "Rect" => vec![200.into(), 200.into(), 300.into(), 220.into()],
-        "Dest" => vec![last.into(), Object::Name(b"Fit".to_vec())],
+        "Dest" => vec![last.into(), Object::name("Fit")],
         "Border" => vec![0.into(), 0.into(), 2.into()],
     });
     let mut annots = f.annots(0);
@@ -358,7 +358,7 @@ fn a_group_opens_as_the_base_and_its_section() {
     assert_eq!(opened.segments.len(), 2);
     assert!(Arc::ptr_eq(&opened.segments[0], src.bytes()));
     let whole: Arc<[u8]> = opened.segments.concat().into();
-    let pdf = lopdf::LazyPdf::open(whole, None, &lopdf::ReadLimits::DEFAULT).unwrap();
+    let pdf = crate::pdf::LazyPdf::open(whole, None, &crate::pdf::ReadLimits::DEFAULT).unwrap();
     assert!(pdf.xref().size > src.xref().size);
     assert_eq!(pdf.xref().sections, src.xref().sections + 1);
     d.commit_ops(vec![header("Final")], "Header").unwrap();

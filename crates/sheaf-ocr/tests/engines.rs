@@ -6,7 +6,7 @@
 //! exactly the path the app uses.
 
 #[cfg(any(feature = "tesseract", feature = "oar"))]
-use lopdf::{Document as Pdf, Object, Stream, dictionary};
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
 #[cfg(any(feature = "tesseract", feature = "oar"))]
 use sheaf_edit::Rotation;
 use sheaf_image::raster::PixelFormat;
@@ -24,25 +24,28 @@ fn sample_pdf() -> std::path::PathBuf {
     let path = dir.join("sample.pdf");
     let mut pdf = Pdf::with_version("1.5");
     let pages_id = pdf.new_object_id();
-    let font = pdf.add_object(
-        dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" },
-    );
+    let font = pdf.add_object(dictionary! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
+    });
     let content = pdf.add_object(Stream::new(
         dictionary! {},
         b"BT /F1 24 Tf 72 700 Td (Hello World 1234) Tj ET".to_vec(),
     ));
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+        "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
     });
     pdf.objects.insert(
         pages_id,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => vec![Object::Reference(page)], "Count" => 1,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![Object::from(page)], "Count" => 1,
         }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
     pdf.save(&path).unwrap();
     path
@@ -143,9 +146,11 @@ fn text_page() -> image::RgbImage {
     let path = dir.join("lines.pdf");
     let mut pdf = Pdf::with_version("1.5");
     let pages_id = pdf.new_object_id();
-    let font = pdf.add_object(
-        dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" },
-    );
+    let font = pdf.add_object(dictionary! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
+    });
     let mut ops = String::from("BT /F1 14 Tf 72 720 Td 18 TL\n");
     for i in 0..30 {
         ops.push_str(&format!(
@@ -155,17 +160,18 @@ fn text_page() -> image::RgbImage {
     ops.push_str("ET");
     let content = pdf.add_object(Stream::new(dictionary! {}, ops.into_bytes()));
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+        "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
     });
     pdf.objects.insert(
         pages_id,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => vec![Object::Reference(page)], "Count" => 1,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![Object::from(page)], "Count" => 1,
         }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
     pdf.save(&path).unwrap();
     let bytes = sheaf_util::read_file(&path).unwrap();

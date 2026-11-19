@@ -28,11 +28,10 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use futures::executor::block_on;
-use lopdf::xref::XrefType;
-use lopdf::{Document as Pdf, Stream, dictionary};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::geom::Geom;
 use sheaf_doc::materialize::How;
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, XrefKind, dictionary};
 use sheaf_doc::realize::{EngineKey, GroupKey, ViewInputs};
 use sheaf_doc::serialize::fixture::revision_cut_out;
 use sheaf_doc::store::BlobKind;
@@ -53,11 +52,15 @@ use common::{file, opened, ready, views, written};
 fn turned() -> Vec<u8> {
     let mut pdf = Pdf::with_version("1.5");
     let pages = pdf.new_object_id();
-    let font = dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" };
+    let font = dictionary! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
+    };
     let content = b"BT /F1 18 Tf 0 1 -1 0 300 200 Tm (Inserted upright) Tj ET".to_vec();
     let content = pdf.add_object(Stream::new(dictionary! {}, content));
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page",
+        "Type" => Object::name("Page"),
         "Parent" => pages,
         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         "CropBox" => vec![36.into(), 48.5.into(), 560.into(), 740.into()],
@@ -67,9 +70,13 @@ fn turned() -> Vec<u8> {
     });
     pdf.objects.insert(
         pages,
-        dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1,
+        }
+        .into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
@@ -175,7 +182,7 @@ fn word(text: &str, x: f32, y: f32, w: f32) -> OcrWord {
 /// characters within 1/16 pt.
 #[test]
 fn chars_come_from_each_page_s_realization() {
-    let mut d = opened(file(4, XrefType::CrossReferenceTable), "a.pdf", None);
+    let mut d = opened(file(4, XrefKind::Table), "a.pdf", None);
     let [p0, p1, p2, p3] = [0, 1, 2, 3].map(|i| d.page(i).unwrap());
     let kind = BlobKind::file(Path::new("turned.pdf"), None);
     let inserted = d.store().open(turned().into(), kind).unwrap();
@@ -268,7 +275,7 @@ fn chars_come_from_each_page_s_realization() {
 /// too, reads as the saved file's page does.
 #[test]
 fn a_refused_source_s_text_comes_from_its_groups() {
-    let bytes = revision_cut_out(file(3, XrefType::CrossReferenceTable));
+    let bytes = revision_cut_out(file(3, XrefKind::Table));
     let refused = PdfiumEngine::open_bytes(bytes.clone().into(), None).err();
     assert!(OpenError::is_refused(&refused.expect("PDFium refuses it")));
     let mut d = opened(bytes, "refused.pdf", None);
@@ -357,7 +364,7 @@ fn literal(query: &str) -> Query {
 /// source PDFium refuses is searched through its groups.
 #[test]
 fn a_search_walks_the_document_s_order() {
-    let mut d = opened(file(4, XrefType::CrossReferenceTable), "a.pdf", None);
+    let mut d = opened(file(4, XrefKind::Table), "a.pdf", None);
     let [p0, p1, p2, p3] = [0, 1, 2, 3].map(|i| d.page(i).unwrap());
     let kind = BlobKind::file(Path::new("turned.pdf"), None);
     let inserted = d.store().open(turned().into(), kind).unwrap();
@@ -418,7 +425,7 @@ fn a_search_walks_the_document_s_order() {
     // nothing has tried it yet, and read from its group (the walk's
     // fallback); the pages after it view their groups.
     let mut d = opened(
-        revision_cut_out(file(3, XrefType::CrossReferenceTable)),
+        revision_cut_out(file(3, XrefKind::Table)),
         "refused.pdf",
         None,
     );
@@ -449,7 +456,7 @@ fn a_search_walks_the_document_s_order() {
 /// to what was read finds it kept.
 #[test]
 fn chars_are_cached_by_render_key() {
-    let mut d = opened(file(2, XrefType::CrossReferenceTable), "a.pdf", None);
+    let mut d = opened(file(2, XrefKind::Table), "a.pdf", None);
     let [p0, p1] = [0, 1].map(|i| d.page(i).unwrap());
     let screen = ViewInputs::screen();
     let text = Text::new(views(), Budget::Screen);
@@ -492,7 +499,7 @@ fn chars_are_cached_by_render_key() {
 /// of before the refusal is known among them.
 #[test]
 fn plugin_text_reads_the_page_as_the_file_will_draw_it() {
-    let mut d = opened(file(3, XrefType::CrossReferenceTable), "a.pdf", None);
+    let mut d = opened(file(3, XrefKind::Table), "a.pdf", None);
     let [p0, p1, p2] = [0, 1, 2].map(|i| d.page(i).unwrap());
     let seen = vec![
         word("Total", 300.0, 600.0, 50.0),
@@ -521,7 +528,7 @@ fn plugin_text_reads_the_page_as_the_file_will_draw_it() {
     }
 
     let mut d = opened(
-        revision_cut_out(file(2, XrefType::CrossReferenceTable)),
+        revision_cut_out(file(2, XrefKind::Table)),
         "refused.pdf",
         None,
     );

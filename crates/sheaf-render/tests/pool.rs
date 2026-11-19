@@ -25,8 +25,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use futures::StreamExt;
 use futures::channel::mpsc;
 use futures::executor::block_on;
-use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_doc::forms::fixture::{Form, row};
+use sheaf_doc::pdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_doc::serialize::fixture::{USER, encrypted, form, rc4_aes_128_and_aes_256};
 use sheaf_edit::Rotation;
 use sheaf_image::raster::{PixelFormat, Raster};
@@ -73,26 +73,31 @@ fn pdf(n: usize) -> Arc<[u8]> {
     let mut pdf = Pdf::with_version("1.7");
     let root = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     });
     let kids: Vec<Object> = (0..n)
         .map(|i| {
             let content =
                 format!("0 0 1 rg 60 600 200 120 re f BT /F1 28 Tf 72 400 Td (page {i}) Tj ET");
             let content = pdf.add_object(Stream::new(dictionary! {}, content.into_bytes()));
-            let page = dictionary! { "Type" => "Page", "Parent" => root, "Contents" => content };
+            let page = dictionary! {
+                "Type" => Object::name("Page"), "Parent" => root, "Contents" => content,
+            };
             pdf.add_object(page).into()
         })
         .collect();
     pdf.objects.insert(
         root,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => kids, "Count" => n as i64,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => kids, "Count" => n as i64,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
         }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => root });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
@@ -111,15 +116,19 @@ fn scans(n: usize) -> Arc<[u8]> {
                 .collect();
             let image = pdf.add_object(Stream::new(
                 dictionary! {
-                    "Type" => "XObject", "Subtype" => "Image", "Width" => 400, "Height" => 400,
-                    "ColorSpace" => "DeviceRGB", "BitsPerComponent" => 8,
+                    "Type" => Object::name("XObject"),
+                    "Subtype" => Object::name("Image"),
+                    "Width" => 400,
+                    "Height" => 400,
+                    "ColorSpace" => Object::name("DeviceRGB"),
+                    "BitsPerComponent" => 8,
                 },
                 pixels,
             ));
             let content = b"q 500 0 0 500 56 146 cm /Im0 Do Q".to_vec();
             let content = pdf.add_object(Stream::new(dictionary! {}, content));
             let page = dictionary! {
-                "Type" => "Page", "Parent" => root, "Contents" => content,
+                "Type" => Object::name("Page"), "Parent" => root, "Contents" => content,
                 "Resources" => dictionary! { "XObject" => dictionary! { "Im0" => image } },
             };
             pdf.add_object(page).into()
@@ -127,12 +136,13 @@ fn scans(n: usize) -> Arc<[u8]> {
         .collect();
     pdf.objects.insert(
         root,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => kids, "Count" => n as i64,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => kids, "Count" => n as i64,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => root });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
@@ -972,11 +982,16 @@ enum Annots {
 }
 
 /// Annotation `d` at `rect`, its appearance a box of `color` filling it.
-fn with_appearance(f: &mut Form, d: lopdf::Dictionary, rect: [i64; 4], color: &str) -> ObjectId {
+fn with_appearance(
+    f: &mut Form,
+    d: sheaf_doc::pdf::Dictionary,
+    rect: [i64; 4],
+    color: &str,
+) -> ObjectId {
     let [x0, y0, x1, y1] = rect;
     let ap = f.pdf.add_object(Stream::new(
         dictionary! {
-            "Type" => "XObject", "Subtype" => "Form",
+            "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"),
             "BBox" => vec![0.into(), 0.into(), (x1 - x0).into(), (y1 - y0).into()],
         },
         format!("{color} rg 0 0 {} {} re f", x1 - x0, y1 - y0).into_bytes(),
@@ -996,9 +1011,10 @@ fn annotated(annots: Annots, width: f32, height: f32) -> Arc<[u8]> {
     f.dict(f.pages[0]).set("MediaBox", media);
     let field = f.text("name", 0, row(1));
     f.fill(field, "Ann");
-    let square = dictionary! { "Type" => "Annot", "Subtype" => "Square" };
+    let square =
+        dictionary! { "Type" => Object::name("Annot"), "Subtype" => Object::name("Square") };
     let square = with_appearance(&mut f, square, [300, 300, 380, 380], "0 0.6 0");
-    let link = dictionary! { "Type" => "Annot", "Subtype" => "Link" };
+    let link = dictionary! { "Type" => Object::name("Annot"), "Subtype" => Object::name("Link") };
     let link = with_appearance(&mut f, link, [300, 500, 400, 520], "1 0 1");
     let listed = match annots {
         Annots::All => vec![field, square, link],

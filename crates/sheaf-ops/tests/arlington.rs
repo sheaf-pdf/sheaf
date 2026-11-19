@@ -5,16 +5,19 @@
 //! copy, print's file with its markup and without, Remove Blanks'
 //! rejects), Combine's file, the comment summary, pages made of images
 //! and of a scan, blank pages, and the stamp library's stamps. Each is
-//! checked with pdf-lint (sheaf-pdf/pdf-lint), against the model it
-//! embeds, which it corrects where the model contradicts ISO 32000-2. Each
-//! file is read as pdf-lint reads one, from its bytes, so what a writer
-//! gets wrong below its objects is found too (a `/Length` that doesn't end
-//! at `endstream`, a key written twice), and qpdf decodes what's packed
-//! into object streams or encrypted: `PDF_LINT_QPDF` names one, else it's
-//! the one on the `PATH`, and a test that needs it and finds none fails,
-//! saying so ([`lint::read`]). What the version checked at deprecates is a
-//! finding, and a field merged with its widget is checked as both tables
-//! ([`lint::options`]).
+//! checked with pdf-lint (sheaf-pdf/pdf-lint, 0.2.0+, run as a standalone
+//! CLI binary), against the model it embeds, which it corrects where the
+//! model contradicts ISO 32000-2, plus its content, font, color-space,
+//! tree, page-tree, XMP and linearization checks. Each file is read as
+//! pdf-lint reads one, from its bytes, decoding object streams,
+//! cross-reference streams and content streams and decrypting what's
+//! encrypted itself, so what a writer gets wrong below its objects is
+//! found too (a `/Length` that doesn't end at `endstream`, a key written
+//! twice). `SHEAF_PDF_LINT` names the binary, else `~/.local/share/sheaf-tools/pdf-lint/pdf-lint`
+//! (`just setup-pdf-lint`), else `pdf-lint` on the `PATH`, and a run that
+//! finds none at 0.2.0 or newer fails, saying so ([`lint::check`]). What
+//! the version checked at deprecates is a finding, and a field merged with
+//! its widget is checked as both tables ([`lint::options`]).
 //!
 //! What's held is what sheaf wrote ([`lint::written`]): an Append's
 //! section, or the objects a Rewrite or an export derived, never a copy
@@ -27,6 +30,11 @@
 //! the file written, is that file's, carried ([`answered`]); a reader's
 //! finding in the file's own structure (its cross-references, header and
 //! `%%EOF`) in what sheaf wrote is never carried ([`lint::own_structure`]).
+//! An Append onto a file that was linearized as first written voids that
+//! linearization by PDF's own rule (ISO 32000-2 F.1, Table F.1; `plan/between/`
+//! item 4), which pdf-lint reports in the newest trailer (`Rule::Updated`);
+//! `answered` excuses `Rule::Updated` on an Append and never on a Rewrite,
+//! export or file made whole.
 //! Any other fails its test unless `arlington_allowed.tsv` holds it for a
 //! backlog entry, and a row there that no test needs fails too. Each test
 //! names the tables it must have checked, so one that holds the wrong
@@ -34,10 +42,9 @@
 //! (its cross-references a stream, or a hybrid's) packs objects into
 //! object streams of its own, built whole and held, unless the encryption
 //! it writes doesn't pack ([`packs`]): each test checks one as
-//! `ObjectStream` exactly when what it saved packed. pdf-lint's walk
-//! leaves object streams out, and [`lint::check`] holds them to the table
-//! beside it. The encrypted forms are written with a table and with a
-//! stream, so packed object streams are checked encrypted too.
+//! `ObjectStream` exactly when what it saved packed. The encrypted forms
+//! are written with a table and with a stream, so packed object streams
+//! are checked encrypted too.
 //!
 //! The recovery sidecar isn't here: its record isn't kept, and the
 //! emission that writes it is a save's, an Append's section or a
@@ -66,18 +73,16 @@ use std::sync::Arc;
 
 use common::{How, StrategyKind, scratch};
 use in_progress::NoProgress;
-use lint::{check, options, own_structure, read, written};
-use lopdf::xref::XrefType;
-use lopdf::{LazyPdf, Object, ObjectId, XrefKind, dictionary};
-use pdf_lint::{
-    Allowance, Allowances, Finding, Hold, Made, Options, Report, Rule, Unlisted, Version,
-    file_version,
+use lint::{
+    Allowance, Allowances, Finding, Hold, Made, Options, Report, Rule, Unlisted, Version, check,
+    file_version, options, own_structure, read, written,
 };
 use sheaf_doc::export::{Export, ExportFrom, Out, PRINT_ANSWERS, materialized};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::fixture::{Form, every_kind, every_mark_kind, mark_blobs, note};
 use sheaf_doc::labels::LabelSpec;
 use sheaf_doc::materialize::{Encryption, ObjKey};
+use sheaf_doc::pdf::{LazyPdf, Object, ObjectId, Value, XrefKind, dictionary, literal};
 use sheaf_doc::serialize::fixture as crypt;
 use sheaf_doc::source::OpenError;
 use sheaf_doc::store::{BlobKind, Origin};
@@ -115,6 +120,9 @@ struct Checked {
     /// Rewrite or an export of a file that used them does ([`packs`]): its
     /// object streams are held, and checked as `ObjectStream`.
     packs: bool,
+    /// Whether what wrote it was an incremental update (`StrategyKind::Append`),
+    /// which intentionally voids a source's first-revision linearization.
+    appended: bool,
 }
 
 /// Whether a Rewrite or an export of `doc`'s file, written encrypted as
@@ -158,6 +166,7 @@ fn checked(
         version,
         sources: files_read(store, version),
         packs: false,
+        appended: false,
     }
 }
 
@@ -201,6 +210,7 @@ fn held(doc: &mut Document, how: Option<How>, path: &Path) -> Checked {
         version,
         sources: files_read(doc.store(), version),
         packs: strategy == StrategyKind::Rewrite && packs(doc, Encryption::Keep),
+        appended: strategy == StrategyKind::Append,
     }
 }
 
@@ -294,7 +304,7 @@ fn clean_against(checked: &Checked, tables: &[&str], allowances: &Allowances) {
     let sources: Vec<&Report> = checked.sources.iter().collect();
     let (what, report) = (&checked.what, &checked.report);
     println!("{what}: {report}");
-    let beyond = answered(report, &sources);
+    let beyond = answered(report, &sources, checked.appended);
     let left = left(&beyond, checked.version, allowances);
     println!(
         "{} findings: {} carried from the files read, {} allowed",
@@ -327,9 +337,15 @@ fn clean_against(checked: &Checked, tables: &[&str], allowances: &Allowances) {
 /// all of those in an object it built, and of those in one it merged over
 /// a source's dictionary, any that no object of the files read, `sources`,
 /// has a like one of (`Report::beyond`; matching each object to its own
-/// source is backlog B46's).
-fn answered<'a>(report: &'a Report, sources: &[&Report]) -> Vec<&'a Finding> {
-    report.beyond(sources)
+/// source is backlog B46's), except `Rule::Updated` in the merged trailer
+/// of an `Append` (`appended`), which by ISO 32000-2 F.1 Table F.1 voids a
+/// source's first-revision linearization.
+fn answered<'a>(report: &'a Report, sources: &[&Report], appended: bool) -> Vec<&'a Finding> {
+    report
+        .beyond(sources)
+        .into_iter()
+        .filter(|f| !(appended && f.made == Made::Merged && f.rule == Rule::Updated))
+        .collect()
 }
 
 /// The findings of `beyond`, in a file of `version` a test made, that no
@@ -588,17 +604,17 @@ fn pages(how: How) {
     let mut f = Form::new(3);
     let comment = f.pdf.new_object_id();
     let popup = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Popup", "Parent" => comment,
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Popup"), "Parent" => comment,
         "Rect" => vec![300.into(), 600.into(), 500.into(), 700.into()],
     });
     let page = f.pages[0];
     f.pdf.objects.insert(
         comment,
         dictionary! {
-            "Type" => "Annot", "Subtype" => "Text", "P" => page, "Popup" => popup,
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "P" => page, "Popup" => popup,
             "Rect" => vec![72.into(), 600.into(), 92.into(), 620.into()],
-            "Contents" => Object::string_literal("Theirs"),
-            "NM" => Object::string_literal("theirs"),
+            "Contents" => literal("Theirs"),
+            "NM" => literal("theirs"),
         }
         .into(),
     );
@@ -723,7 +739,7 @@ fn apart(mut f: Form, to: &str) -> Form {
             let widget = f.pdf.add_object(widget);
             let field = f.dict(*at);
             field.set("Kids", vec![widget.into()]);
-            let button = field.get(b"FT").and_then(Object::as_name).ok() == Some(b"Btn");
+            let button = field.get(b"FT").and_then(Object::as_name) == Some(b"Btn");
             if button && !field.has(b"Ff") {
                 field.set("Ff", 2);
             }
@@ -732,7 +748,7 @@ fn apart(mut f: Form, to: &str) -> Form {
         f.set_annots(page, &annots);
     }
     let top = f.fields()[0];
-    f.dict(top).set("T", Object::string_literal(to));
+    f.dict(top).set("T", literal(to));
     f
 }
 
@@ -799,7 +815,7 @@ fn old(name: &str, how: How) -> Checked {
     let dir = scratch(&format!("arlington-{name}"));
     let mut f = Form::new(1);
     f.pdf.version = "1.3".into();
-    f.pdf.reference_table.cross_reference_type = XrefType::CrossReferenceTable;
+    f.pdf.xref_kind = XrefKind::Table;
     let path = common::write(&dir, "old.pdf", &mut f);
     let mut doc = common::open(&path);
     let p0 = doc.page(0).unwrap();
@@ -908,7 +924,7 @@ fn every_allowance_names_an_open_backlog_entry() {
 #[test]
 fn a_merged_objects_finding_is_carried_from_any_object_of_a_source() {
     let missing = |n: u32, made: Made| Finding {
-        object: Some((n, 0)),
+        object: Some(ObjectId::new(n, 0)),
         made,
         path: format!("Root/Pages/Kids[{n}]"),
         table: "PageObject".to_string(),
@@ -925,8 +941,32 @@ fn a_merged_objects_finding_is_carried_from_any_object_of_a_source() {
         findings: vec![missing(9, Made::Merged)],
         ..Report::default()
     };
-    let answered = answered(&written, &[&another_page]);
+    let answered = answered(&written, &[&another_page], false);
     assert_eq!(answered, [&missing(4, Made::Built)]);
+}
+
+/// An Append onto a file that was linearized as first written voids its
+/// linearization (`Rule::Updated` in the merged trailer), which `answered`
+/// excuses only on an Append; a Rewrite clears `/Linearized` and would fail
+/// if `Rule::Updated` appeared in it.
+#[test]
+fn an_append_voids_first_revision_linearization_and_a_rewrite_never_excuses_it() {
+    let voided = Finding {
+        object: None,
+        made: Made::Merged,
+        path: "trailer".to_string(),
+        table: "FileTrailer".to_string(),
+        key: "-".to_string(),
+        rule: Rule::Updated,
+        value: "the file was linearized as first written, its first 1024 bytes; the update after it, its section at byte 1024, voids that: it's read as an ordinary file (ISO 32000-2, F.1, Table F.1)".to_string(),
+        at: None,
+    };
+    let report = Report {
+        findings: vec![voided.clone()],
+        ..Report::default()
+    };
+    assert!(answered(&report, &[], true).is_empty());
+    assert_eq!(answered(&report, &[], false), [&voided]);
 }
 
 /// A fault in the file's own structure that sheaf wrote is sheaf's even
@@ -940,7 +980,7 @@ fn a_fault_in_the_structure_sheaf_writes_is_never_carried() {
     for how in [How::Appended, How::Rewritten] {
         let dir = scratch(&format!("arlington-rows-{how:?}"));
         let mut f = Form::new(1);
-        f.pdf.reference_table.cross_reference_type = XrefType::CrossReferenceTable;
+        f.pdf.xref_kind = XrefKind::Table;
         let path = dir.join("form.pdf");
         std::fs::write(&path, misshapen(&f.bytes(), 0)).unwrap();
         let mut doc = common::open(&path);
@@ -965,7 +1005,10 @@ fn a_fault_in_the_structure_sheaf_writes_is_never_carried() {
         );
         let sources: Vec<&Report> = sources.iter().collect();
         let answered = Report {
-            findings: answered(&report, &sources).into_iter().cloned().collect(),
+            findings: answered(&report, &sources, append)
+                .into_iter()
+                .cloned()
+                .collect(),
             ..Report::default()
         };
         assert_eq!(rows(&answered), 1, "{strategy:?}: {report}");
@@ -1020,17 +1063,19 @@ fn the_fonts_widths_are_allowed_only_where_pdf_2_0_asks_for_them() {
         ("2.0", "NotAStandardFont", true),
         ("2.0", "Helvetica", true),
     ] {
-        let mut pdf = lopdf::Document::with_version(version);
+        let mut pdf = sheaf_doc::pdf::Document::with_version(version);
         let pages = pdf.new_object_id();
         let font = pdf.add_object(dictionary! {
-            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => base_font,
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name(base_font),
         });
-        let content = pdf.add_object(lopdf::Stream::new(
+        let content = pdf.add_object(sheaf_doc::pdf::Stream::new(
             dictionary! {},
             b"BT /F1 12 Tf (A) Tj ET".to_vec(),
         ));
         let page = pdf.add_object(dictionary! {
-            "Type" => "Page",
+            "Type" => Object::name("Page"),
             "Parent" => pages,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
@@ -1038,11 +1083,12 @@ fn the_fonts_widths_are_allowed_only_where_pdf_2_0_asks_for_them() {
         });
         pdf.objects.insert(
             pages,
-            Object::Dictionary(dictionary! {
-                "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1,
+            Object::from(dictionary! {
+                "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1,
             }),
         );
-        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        let catalog =
+            pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages });
         pdf.trailer.set("Root", catalog);
         let mut bytes = Vec::new();
         pdf.save_to(&mut bytes).unwrap();
@@ -1053,7 +1099,7 @@ fn the_fonts_widths_are_allowed_only_where_pdf_2_0_asks_for_them() {
             |_| Hold::All(Made::Built),
             &Store::new(),
         );
-        let fonts: Vec<&Finding> = (answered(&checked.report, &[]).into_iter())
+        let fonts: Vec<&Finding> = (answered(&checked.report, &[], false).into_iter())
             .filter(|f| f.table == "FontType1")
             .collect();
         assert_eq!(fonts.len(), 4, "{}: {}", checked.what, checked.report);
@@ -1285,11 +1331,13 @@ fn summary_held(summary: &Document, layout: Layout) {
         panic!("a save holds the objects it wrote");
     };
     let named = |id: &ObjectId, key: &[u8], value: &[u8]| {
-        let dict = match pdf.get(*id) {
-            Ok(Object::Dictionary(d) | Object::Stream(lopdf::Stream { dict: d, .. })) => d,
-            _ => return false,
+        let Ok(obj) = pdf.get(*id) else {
+            return false;
         };
-        dict.get(key).and_then(Object::as_name).ok() == Some(value)
+        let Some(dict) = obj.as_dict() else {
+            return false;
+        };
+        dict.get(key).and_then(Object::as_name) == Some(value)
     };
     let forms: Vec<ObjectId> = pdf
         .ids()
@@ -1308,12 +1356,9 @@ fn summary_held(summary: &Document, layout: Layout) {
         .get(&ObjKey::Page(summary.page(0).unwrap()))
         .unwrap();
     let contents = pdf.get_dictionary(page).unwrap().get(b"Contents").unwrap();
-    let mut own: Vec<ObjectId> = match contents {
-        Object::Reference(id) => vec![*id],
-        Object::Array(streams) => streams
-            .iter()
-            .filter_map(|s| s.as_reference().ok())
-            .collect(),
+    let mut own: Vec<ObjectId> = match contents.value() {
+        Value::Ref(id) => vec![*id],
+        Value::Array(streams) => streams.iter().filter_map(Object::as_reference).collect(),
         other => panic!("the page's content is {other:?}"),
     };
     if layout == Layout::CommentsOnly {
@@ -1416,25 +1461,37 @@ fn a_scan_holds() {
     );
 }
 
-/// Files sheaf makes whole, every object in them its own: blank pages,
-/// and a document of no pages whose `/Info` gives its title, as the
-/// comment summary starts from.
+/// Files sheaf makes whole, every object in them its own: blank pages
+/// (held whole, including catalog and page tree), and the `/Info` object of
+/// the internal zero-page seed `memory::titled` that the comment summary
+/// starts from before inserting pages.
 #[test]
 fn files_made_whole_hold() {
     let blank = sheaf_doc::memory::blank_pages(612.0, 792.0, 2).unwrap();
+    let blank_checked = checked(
+        "Blank pages",
+        blank.as_slice(),
+        None,
+        |_| Hold::All(Made::Built),
+        &Store::new(),
+    );
+    clean(
+        &blank_checked,
+        &["Catalog", "PageTreeNodeRoot", "PageObject", "Resource"],
+    );
+
     let titled = sheaf_doc::memory::titled(&Store::new(), "Title").unwrap();
-    let files = [
-        (
-            "Blank pages",
-            blank.as_slice(),
-            &["PageTreeNodeRoot", "PageObject", "Resource"][..],
-        ),
-        ("Titled", titled.bytes(), &["Catalog", "DocInfo"][..]),
-    ];
-    for (what, bytes, tables) in files {
-        let checked = checked(what, bytes, None, |_| Hold::All(Made::Built), &Store::new());
-        clean(&checked, tables);
-    }
+    let titled_checked = checked(
+        "Titled",
+        titled.bytes(),
+        None,
+        |pdf| {
+            let info = pdf.trailer().get(b"Info").unwrap().as_reference().unwrap();
+            Hold::Only(BTreeMap::from([(info, Made::Built)]))
+        },
+        &Store::new(),
+    );
+    clean(&titled_checked, &["DocInfo"]);
 }
 
 /// A picture with transparency added to the stamp library (Add from
@@ -1587,6 +1644,8 @@ struct SaveChecked {
     report: Report,
     /// Findings carried from the form, by rule.
     carried: BTreeMap<Rule, usize>,
+    /// First-revision linearizations voided by an Append (`Rule::Updated`).
+    voided: usize,
     /// Findings an allowance holds, each named by its allowance.
     allowed: Vec<String>,
     /// Findings neither carried nor allowed: failures.
@@ -1601,7 +1660,7 @@ impl SaveChecked {
         let objects: usize = r.checked.values().sum();
         let carried: usize = self.carried.values().sum();
         let (allowed, left) = (self.allowed.len(), self.left.len());
-        let findings = carried + allowed + left;
+        let findings = carried + self.voided + allowed + left;
         let tables: Vec<String> = (r.checked.iter())
             .map(|(table, n)| format!("{table}={n}"))
             .collect();
@@ -1737,7 +1796,12 @@ fn saves_of(
     let (report, version) = save_checked(doc, from, strategy, &bytes)?;
     let what = format!("as planned, {strategy:?}");
     let held = (&*doc, file, allowances);
-    saves.push(sorted_out(what, (report, version), held, &mut sources));
+    saves.push(sorted_out(
+        what,
+        (report, version, strategy == StrategyKind::Append),
+        held,
+        &mut sources,
+    ));
     let from = section_start(doc);
     let pages = doc.state().page_count();
     let (what, bytes) = if pages > 1 {
@@ -1756,9 +1820,14 @@ fn saves_of(
         let bytes = std::fs::read(&copy).map_err(|e| format!("reading the copy: {e}"))?;
         ("of one page, a Rewrite to a copy", bytes)
     };
-    let checked = save_checked(doc, from, StrategyKind::Rewrite, &bytes)?;
+    let (report, version) = save_checked(doc, from, StrategyKind::Rewrite, &bytes)?;
     let held = (&*doc, file, allowances);
-    saves.push(sorted_out(what.into(), checked, held, &mut sources));
+    saves.push(sorted_out(
+        what.into(),
+        (report, version, false),
+        held,
+        &mut sources,
+    ));
     Ok(FormChecked { saves, untexted })
 }
 
@@ -1803,7 +1872,7 @@ fn given(doc: &mut Document) -> Result<Option<&'static str>, String> {
 /// by version.
 fn sorted_out(
     what: String,
-    (mut report, version): (Report, Version),
+    (mut report, version, appended): (Report, Version, bool),
     (doc, file, allowances): (&Document, &str, &Allowances),
     sources: &mut BTreeMap<Version, Vec<Report>>,
 ) -> SaveChecked {
@@ -1819,9 +1888,15 @@ fn sorted_out(
     for finding in &report.findings {
         *carried.entry(finding.rule).or_default() += 1;
     }
+    let uncarried = report.beyond(&sources);
+    let mut voided = 0usize;
     let (mut allowed, mut left) = (Vec::new(), Vec::new());
-    for finding in answered(&report, &sources) {
+    for finding in uncarried {
         *carried.entry(finding.rule).or_default() -= 1;
+        if appended && finding.made == Made::Merged && finding.rule == Rule::Updated {
+            voided += 1;
+            continue;
+        }
         match allowances.allows(finding, version, Some(file)) {
             Some(allowance) => allowed.push(named(allowance)),
             None => left.push(format!("{what}: {finding}")),
@@ -1833,6 +1908,7 @@ fn sorted_out(
         what,
         report,
         carried,
+        voided,
         allowed,
         left,
     }
@@ -1860,6 +1936,7 @@ struct Totals {
     deprecated: BTreeMap<(String, String), usize>,
     ignored: BTreeMap<(String, String), usize>,
     carried: BTreeMap<Rule, usize>,
+    voided: usize,
     allowed: BTreeMap<String, usize>,
     no_table: usize,
     ties: usize,
@@ -1898,6 +1975,7 @@ impl Totals {
             for (rule, n) in save.carried {
                 *self.carried.entry(rule).or_default() += n;
             }
+            self.voided += save.voided;
             for allowance in save.allowed {
                 *self.allowed.entry(allowance).or_default() += 1;
             }
@@ -1964,6 +2042,9 @@ impl Totals {
         }
         for (rule, n) in &self.carried {
             println!("  carried from the form, {rule}: {n}");
+        }
+        if self.voided > 0 {
+            println!("  voided linearization on Append: {}", self.voided);
         }
         for (allowance, n) in &self.allowed {
             println!("  allowed by {allowance}: {n}");

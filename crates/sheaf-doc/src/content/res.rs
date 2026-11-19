@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use lopdf::{Dictionary, Object, ObjectId};
+use crate::pdf::{Dictionary, Object, ObjectId, StreamExt, Value};
 
 use super::FontRes;
 
@@ -57,13 +57,13 @@ impl Res {
     /// A dictionary that reaches nothing else: an ExtGState or a property
     /// list.
     pub fn dict(dict: Dictionary) -> Res {
-        Res::of([Object::Dictionary(dict)])
+        Res::of([Object::from(dict)])
     }
 
     /// Object `id`, already written: named by its number.
     pub fn written(id: ObjectId) -> Res {
         Res {
-            id: ResId::of(&[Object::Reference(id)]),
+            id: ResId::of(&[Object::from(id)]),
             body: ResBody::Written(id),
         }
     }
@@ -82,45 +82,45 @@ impl From<FontRes> for Res {
 /// only when they're equal: each part tagged with its kind, and each run
 /// of bytes and each list with its length.
 fn feed(out: &mut Vec<u8>, object: &Object) {
-    match object {
-        Object::Null => out.push(b'n'),
-        Object::Boolean(b) => out.extend([b'b', u8::from(*b)]),
-        Object::Integer(i) => {
+    match object.value() {
+        Value::Null => out.push(b'n'),
+        Value::Bool(b) => out.extend([b'b', u8::from(*b)]),
+        Value::Integer(i) => {
             out.push(b'i');
             out.extend(i.to_le_bytes());
         }
-        Object::Real(r) => {
+        Value::Real(r) => {
             out.push(b'r');
             out.extend(r.to_bits().to_le_bytes());
         }
-        Object::Name(name) => {
+        Value::Name(name) => {
             out.push(b'/');
-            run(out, name);
+            run(out, name.as_bytes());
         }
-        Object::String(s, _) => {
+        Value::String(s, _) => {
             out.push(b'(');
-            run(out, s);
+            run(out, s.as_bytes().unwrap_or(b""));
         }
-        Object::Array(items) => {
+        Value::Array(items) => {
             out.push(b'[');
             out.extend((items.len() as u64).to_le_bytes());
             for item in items {
                 feed(out, item);
             }
         }
-        Object::Dictionary(d) => {
+        Value::Dict(d) => {
             out.push(b'<');
             dict(out, d);
         }
-        Object::Stream(s) => {
+        Value::Stream(s) => {
             out.push(b's');
             dict(out, &s.dict);
-            run(out, &s.content);
+            run(out, s.raw_bytes());
         }
-        Object::Reference((number, generation)) => {
+        Value::Ref(id) => {
             out.push(b'R');
-            out.extend(number.to_le_bytes());
-            out.extend(generation.to_le_bytes());
+            out.extend(id.number.to_le_bytes());
+            out.extend(id.generation.to_le_bytes());
         }
     }
 }

@@ -6,8 +6,8 @@
 
 use std::path::Path;
 
-use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::{Document, FixedCount, FlatOutlineItem, Store};
 use sheaf_edit::DestView;
@@ -135,19 +135,20 @@ fn two_pages() -> Vec<u8> {
     for rotate in [0, 90] {
         let content = pdf.add_object(Stream::new(dictionary! {}, Vec::new()));
         let mut page = dictionary! {
-            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+            "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         };
         if rotate != 0 {
             page.set("Rotate", rotate);
         }
-        kids.push(Object::Reference(pdf.add_object(page)));
+        kids.push(Object::from(pdf.add_object(page)));
     }
     pdf.objects.insert(
         pages_id,
-        Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => 2 }),
+        Object::from(dictionary! { "Type" => Object::name("Pages"), "Kids" => kids, "Count" => 2 }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();

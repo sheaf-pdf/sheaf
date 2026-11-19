@@ -23,7 +23,7 @@ pub mod integrity;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use lopdf::{Dictionary, LazyPdf, Object, ObjectId};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, Value};
 
 use super::{Field, FieldKind, FileForm};
 use crate::attachments::{Objects, resolve};
@@ -279,10 +279,10 @@ pub fn read(src: &Source) -> Signatures {
         checked: 0,
     };
     let perms = (pdf.catalog().ok())
-        .and_then(|c| c.get(b"Perms").ok())
+        .and_then(|c| c.get(b"Perms"))
         .and_then(|p| resolve(pdf, p))
-        .and_then(|p| p.as_dict().ok());
-    let perm = |key: &[u8]| perms.and_then(|p| p.get(key).ok());
+        .and_then(Object::as_dict);
+    let perm = |key: &[u8]| perms.and_then(|p| p.get(key));
     let certification = perm(b"DocMDP");
     let mut signed = Vec::new();
     let mut certified = false;
@@ -291,8 +291,8 @@ pub fn read(src: &Source) -> Signatures {
             continue;
         };
         let lock = (pdf.dictionary(f.object))
-            .and_then(|d| d.get(b"Lock").ok())
-            .map(|l| resolve(pdf, l).and_then(|l| l.as_dict().ok()));
+            .and_then(|d| d.get(b"Lock"))
+            .map(|l| resolve(pdf, l).and_then(Object::as_dict));
         let certifies = certification.is_some_and(|c| same_object(c, v));
         let Some(sig) = r.signature(f.name.clone(), v, certifies, lock) else {
             continue;
@@ -315,9 +315,12 @@ pub fn read(src: &Source) -> Signatures {
         signed.push(Signature::unreadable(String::new(), false));
     }
     let rights = [perm(b"UR3"), perm(b"UR")].into_iter().flatten();
-    let usage_rights = (rights.filter_map(|s| resolve(pdf, s)?.as_dict().ok()))
-        .next()
-        .map(|sig| r.usage_rights(sig));
+    let usage_rights = (rights.filter_map(|s| match resolve(pdf, s)?.value() {
+        Value::Dict(d) => Some(d),
+        _ => None,
+    }))
+    .next()
+    .map(|sig| r.usage_rights(sig));
     Signatures {
         signed,
         usage_rights,
@@ -331,8 +334,8 @@ fn value_of<'a>(pdf: &'a LazyPdf, form: &FileForm, f: &Field) -> Option<&'a Obje
     // Up at most as many nodes as there are, should parents loop.
     for _ in 0..=form.nodes.len() {
         let node = form.nodes.get(at?.0 as usize)?;
-        if let Some(v) = pdf.dictionary(node.object).and_then(|d| d.get(b"V").ok()) {
-            return (!matches!(v, Object::Null)).then_some(v);
+        if let Some(v) = pdf.dictionary(node.object).and_then(|d| d.get(b"V")) {
+            return (!v.is_null()).then_some(v);
         }
         at = node.parent;
     }
@@ -341,7 +344,7 @@ fn value_of<'a>(pdf: &'a LazyPdf, form: &FileForm, f: &Field) -> Option<&'a Obje
 
 /// Whether `a` and `b` are references to the same object.
 fn same_object(a: &Object, b: &Object) -> bool {
-    matches!((a, b), (Object::Reference(a), Object::Reference(b)) if a == b)
+    a.as_reference().is_some() && a.as_reference() == b.as_reference()
 }
 
 /// `sig`'s `/Reference` entries, each None when it can't be read. A list
@@ -352,12 +355,12 @@ fn references<'p>(
     sig: &'p Dictionary,
     limits: &FormLimits,
 ) -> Vec<Option<&'p Dictionary>> {
-    let Ok(list) = sig.get(b"Reference") else {
+    let Some(list) = sig.get(b"Reference") else {
         return Vec::new();
     };
-    match resolve(pdf, list) {
-        Some(Object::Array(items)) if items.len() <= limits.items => (items.iter())
-            .map(|r| resolve(pdf, r).and_then(|r| r.as_dict().ok()))
+    match resolve(pdf, list).and_then(Object::as_array) {
+        Some(items) if items.len() <= limits.items => (items.iter())
+            .map(|r| resolve(pdf, r).and_then(Object::as_dict))
             .collect(),
         _ => vec![None],
     }
@@ -366,9 +369,9 @@ fn references<'p>(
 /// What a signature's `/P` permits: 2 when `params` says none, and 1 when
 /// it's past 1–3 or can't be read.
 fn permits(p: Option<&Object>) -> u8 {
-    match p.map(Object::as_i64) {
+    match p.map(Object::as_integer) {
         None => 2,
-        Some(Ok(p @ 1..=3)) => p as u8,
+        Some(Some(p @ 1..=3)) => p as u8,
         Some(_) => 1,
     }
 }
@@ -404,9 +407,9 @@ impl Reader<'_> {
         lock: Option<Option<&Dictionary>>,
     ) -> Option<Signature> {
         let pdf = self.pdf;
-        let dict = match resolve(pdf, v) {
-            Some(Object::Dictionary(d)) if d.has(b"ByteRange") => d,
-            Some(Object::Dictionary(_)) | None => {
+        let dict = match resolve(pdf, v).map(Object::value) {
+            Some(Value::Dict(d)) if d.has(b"ByteRange") => d,
+            Some(Value::Dict(_)) | None => {
                 return Some(Signature::unreadable(field, certifies));
             }
             Some(_) => return None,
@@ -426,17 +429,17 @@ impl Reader<'_> {
                 sig.locks.push(Lock::All);
                 continue;
             };
-            let params = r.get(b"TransformParams").ok();
-            let params = params.map(|p| resolve(pdf, p).and_then(|p| p.as_dict().ok()));
+            let params = r.get(b"TransformParams");
+            let params = params.map(|p| resolve(pdf, p).and_then(Object::as_dict));
             match r.get(b"TransformMethod").and_then(Object::as_name) {
-                Ok(b"DocMDP") => {
+                Some(b"DocMDP") => {
                     let p = match params {
                         None => 2,
-                        Some(params) => params.map_or(1, |d| permits(d.get(b"P").ok())),
+                        Some(params) => params.map_or(1, |d| permits(d.get(b"P"))),
                     };
                     doc_mdp = Some(doc_mdp.map_or(p, |q: u8| q.min(p)));
                 }
-                Ok(b"FieldMDP") => sig.locks.push(self.lock(params.flatten())),
+                Some(b"FieldMDP") => sig.locks.push(self.lock(params.flatten())),
                 _ => {}
             }
         }
@@ -447,7 +450,7 @@ impl Reader<'_> {
         }
         if let Some(lock) = lock {
             sig.locks.push(self.lock(lock));
-            if let Some(p) = lock.and_then(|l| l.get(b"P").ok()) {
+            if let Some(p) = lock.and_then(|l| l.get(b"P")) {
                 let p = permits(Some(p));
                 sig.p = Some(sig.p.map_or(p, |q| q.min(p)));
             }
@@ -459,7 +462,7 @@ impl Reader<'_> {
     /// another field's `/V` made of the same object, or a new one, which
     /// can't be checked past the caps' signatures.
     fn check(&mut self, v: &Object, dict: &Dictionary) -> Arc<Check> {
-        let id = v.as_reference().ok();
+        let id = v.as_reference();
         if let Some(check) = id.and_then(|id| self.checks.get(&id)) {
             return check.clone();
         }
@@ -484,12 +487,16 @@ impl Reader<'_> {
         };
         let names = || {
             let pdf = self.pdf;
-            let list = resolve(pdf, d.get(b"Fields").ok()?)?.as_array().ok()?;
+            let list = resolve(pdf, d.get(b"Fields")?)?.as_array()?;
             if list.len() > self.limits.entries {
                 return None;
             }
             let names: Option<Vec<String>> = (list.iter())
-                .map(|n| resolve(pdf, n).filter(|n| n.as_str().is_ok()).map(pdf_text))
+                .map(|n| {
+                    resolve(pdf, n)
+                        .filter(|n| n.as_bytes().is_some())
+                        .map(pdf_text)
+                })
                 .collect();
             let names = names?;
             let bytes: usize = names.iter().map(String::len).sum();
@@ -498,8 +505,8 @@ impl Reader<'_> {
             fits.then_some((names, bytes))
         };
         let read = match d.get(b"Action").and_then(Object::as_name) {
-            Ok(b"Include") => names().map(|(n, b)| (Lock::Include(n), b)),
-            Ok(b"Exclude") => names().map(|(n, b)| (Lock::Exclude(n), b)),
+            Some(b"Include") => names().map(|(n, b)| (Lock::Include(n), b)),
+            Some(b"Exclude") => names().map(|(n, b)| (Lock::Exclude(n), b)),
             _ => None,
         };
         match read {
@@ -518,21 +525,23 @@ impl Reader<'_> {
         let mut rights = UsageRights::default();
         for r in references(pdf, sig, self.limits).into_iter().flatten() {
             let method = r.get(b"TransformMethod").and_then(Object::as_name);
-            if !matches!(method, Ok(b"UR3" | b"UR")) {
+            if !matches!(method, Some(b"UR3" | b"UR")) {
                 continue;
             }
-            let Some(params) = (r.get(b"TransformParams").ok())
+            let Some(params) = r
+                .get(b"TransformParams")
                 .and_then(|p| resolve(pdf, p))
-                .and_then(|p| p.as_dict().ok())
+                .and_then(Object::as_dict)
             else {
                 continue;
             };
             let names = |key: &[u8]| -> Vec<&[u8]> {
-                let list = (params.get(key).ok())
+                let list = params
+                    .get(key)
                     .and_then(|l| resolve(pdf, l))
-                    .and_then(|l| l.as_array().ok());
+                    .and_then(Object::as_array);
                 (list.into_iter().flatten())
-                    .filter_map(|n| resolve(pdf, n)?.as_name().ok())
+                    .filter_map(|n| resolve(pdf, n)?.as_name())
                     .collect()
             };
             rights.fill_in |= names(b"Form").contains(&&b"FillIn"[..]);

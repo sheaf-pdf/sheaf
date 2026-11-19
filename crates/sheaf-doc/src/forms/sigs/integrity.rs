@@ -53,6 +53,7 @@ use std::fmt;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
+use crate::pdf::{Dictionary, Object};
 use cms::cert::x509::Certificate;
 use cms::cert::x509::ext::pkix::SubjectKeyIdentifier;
 use cms::content_info::ContentInfo;
@@ -60,7 +61,6 @@ use cms::signed_data::{EncapsulatedContentInfo, SignerIdentifier, SignerInfo, Si
 use cms::spki::AlgorithmIdentifierOwned;
 use der::asn1::{ObjectIdentifier, OctetString, UintRef};
 use der::{Any, Decode, EncodingRules, Reader, SliceReader, Tag, Tagged};
-use lopdf::{Dictionary, Object};
 use num_bigint::BigUint;
 
 use crate::attachments::{Objects, resolve};
@@ -163,15 +163,23 @@ pub(crate) fn signed<P: Objects + ?Sized>(
     sig: &Dictionary,
     limits: &FormLimits,
 ) -> Result<Signed, Unchecked> {
-    let contents = match sig.get(b"Contents").ok().and_then(|c| resolve(pdf, c)) {
-        Some(Object::String(s, _)) if s.len() <= limits.cms => s.clone(),
+    let contents = match sig
+        .get(b"Contents")
+        .and_then(|c| resolve(pdf, c))
+        .and_then(Object::as_bytes)
+    {
+        Some(s) if s.len() <= limits.cms => s.to_vec(),
         _ => return Err(Unchecked::Contents),
     };
-    let ranges = match sig.get(b"ByteRange").ok().and_then(|r| resolve(pdf, r)) {
-        Some(Object::Array(a)) if a.len() % 2 == 0 && a.len() <= 2 * MAX_RANGES => a,
+    let ranges = match sig
+        .get(b"ByteRange")
+        .and_then(|r| resolve(pdf, r))
+        .and_then(Object::as_array)
+    {
+        Some(a) if a.len() % 2 == 0 && a.len() <= 2 * MAX_RANGES => a,
         _ => return Err(Unchecked::ByteRange),
     };
-    let number = |o: &Object| u64::try_from(o.as_i64().ok()?).ok();
+    let number = |o: &Object| u64::try_from(o.as_integer()?).ok();
     let ranges = (ranges.chunks(2))
         .map(|pair| Some((number(&pair[0])?, number(&pair[1])?)))
         .collect::<Option<Vec<_>>>()

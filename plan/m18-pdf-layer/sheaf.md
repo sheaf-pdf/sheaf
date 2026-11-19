@@ -71,7 +71,7 @@ sheaf already copies unchanged objects as they were, within limits:
 ### pdf-tokenizer
 
 - **Replaces:** the scanning under lopdf's object parser, through
-  pdf-objects, and under pdf-content-streams' scanner if [slice 18](slices/s18-one-scanner.md)
+  pdf-objects, and under pdf-content-streams' scanner if [slice 18](../complete/m18-pdf-layer/s18-one-scanner.md)
   proves it.
 - **Differences to absorb above it:** sheaf's content lexer follows
   PDFium, the tokenizer ISO.
@@ -99,7 +99,7 @@ sheaf already copies unchanged objects as they were, within limits:
     is its start, each value owned with its span; what it lacks is
     what an edit does to a span (a changed value has none, so it's
     written anew), and the calls sheaf makes on lopdf's types
-    ([slice 1](slices/s01-one-door-for-lopdf.md)'s inventory).
+    ([slice 1](../complete/m18-pdf-layer/s01-one-door-for-lopdf.md)'s inventory).
   - Reals at f64, dictionary order kept, a key written twice visible
     (`object.rs` keeps every entry; a lookup takes the last, as
     readers do).
@@ -116,7 +116,7 @@ sheaf already copies unchanged objects as they were, within limits:
     Up predictor (`serialize/xref.rs`).
   - **Both Flate backends** (Greg, 2026-10-27), zlib-rs and
     miniz_oxide, the caller naming one
-    ([slice 6](slices/s06-pdf-filters-and-pdf-crypt-for-writing.md)):
+    ([slice 6](../complete/m18-pdf-layer/s06-pdf-filters-and-pdf-crypt-for-writing.md)):
     sheaf zlib-rs, for speed, pdf-lint miniz_oxide.
     [D4](../research/build-or-adopt/decisions.md#d4-one-flate-backend-for-the-workspace)
     is ruled: zlib-rs in every sheaf build, so the same input gives the
@@ -184,7 +184,7 @@ sheaf already copies unchanged objects as they were, within limits:
 
 - **Replaces:** `content/lex.rs` and its `steps`, `balance.rs`,
   `marked.rs`, `names.rs` and `page.rs`'s joining of a page's streams
-  ([slices 16](slices/s16-pdf-content-streams-operators.md) and
+  ([slices 16](../complete/m18-pdf-layer/s16-pdf-content-streams-operators.md) and
   [17](slices/s17-sheaf-s-content-on-pdf-content-streams.md)); then
   `writer.rs`, `res.rs` and `splice.rs` ([slice 19](slices/s19-pdf-content-streams-writing.md)).
 - **A correction to the notes:** they say content is shared by the
@@ -243,10 +243,9 @@ sheaf already copies unchanged objects as they were, within limits:
 
 ## pdf-lint without qpdf
 
-pdf-lint 0.2.0 (unreleased) decodes and decrypts through pdf-filters and
+pdf-lint 0.2.0-rc.1 decodes and decrypts through pdf-filters and
 pdf-crypt, and keeps qpdf for its own tests; its archives hold none.
-Once it's out, a bump of sheaf's dev-dependency lets sheaf's tests read
-through pdf-lint alone, and drops `PDF_LINT_QPDF` and the macOS
-`OPENSSL_MODULES` step PR #58 added (the bundled qpdf loads OpenSSL's
-legacy provider only from the Homebrew path it was built against). It
-needs no M18 slice and waits only for the release and the pause.
+sheaf's Arlington tests now run the `pdf-lint` 0.2.0-rc.1 CLI binary as a
+separate process (`sheaf-pdf/setup-pdf-lint@v1` in CI, `just setup-pdf-lint`
+locally), dropping the `pdf-lint` library dependency, `PDF_LINT_QPDF`, the
+macOS `OPENSSL_MODULES` step PR #58 added, and the 17 `B63` allowances.

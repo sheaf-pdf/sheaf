@@ -52,7 +52,7 @@ use std::fmt;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use lopdf::{Dictionary, LazyPdf, Object, ObjectId, Stream};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, Stream, StreamExt, Value};
 
 use super::append::refs;
 use super::emit::AllowedDrops;
@@ -321,11 +321,11 @@ struct Walk<'a> {
 
 impl<'a> Walk<'a> {
     fn new(s: &'a Section<'a>) -> Walk<'a> {
-        let mut linked: HashSet<u32> = s.trailer.iter().map(|id| id.0).collect();
+        let mut linked: HashSet<u32> = s.trailer.iter().map(|id| id.number).collect();
         for (id, (_, obj)) in s.objects {
-            linked.insert(id.0);
+            linked.insert(id.number);
             refs(obj, &mut |r| {
-                linked.insert(r.0);
+                linked.insert(r.number);
             });
         }
         Walk {
@@ -364,8 +364,8 @@ impl<'a> Walk<'a> {
     /// user's.
     fn examine(&mut self, item: Item, next: &mut VecDeque<Item>) {
         let s = self.s;
-        if self.seen.contains(&item.id.0) {
-            if let (Some(page), Some(&key)) = (item.page, self.blocks.get(&item.id.0)) {
+        if self.seen.contains(&item.id.number) {
+            if let (Some(page), Some(&key)) = (item.page, self.blocks.get(&item.id.number)) {
                 self.pages.entry(page).or_insert(key);
             }
             return;
@@ -373,15 +373,17 @@ impl<'a> Walk<'a> {
         // A live redraw's block may go, unread.
         let key = self.key(item.id);
         if self.allowed.contains(&key) {
-            self.seen.insert(item.id.0);
+            self.seen.insert(item.id.number);
             return;
         }
         let obj = match s.old.object_unkept(item.id) {
             Ok(obj) => obj,
             // Not in the file: nothing of it is readable there.
-            Err(lopdf::Error::MissingXrefEntry | lopdf::Error::ObjectNotFound(_)) => return,
+            Err(crate::pdf::Error::MissingXrefEntry | crate::pdf::Error::ObjectNotFound(_)) => {
+                return;
+            }
             Err(_) => {
-                self.seen.insert(item.id.0);
+                self.seen.insert(item.id.number);
                 self.unread.get_or_insert(self.key(item.id));
                 return;
             }
@@ -393,7 +395,7 @@ impl<'a> Walk<'a> {
         if !s.objects.contains_key(&item.id) && (page || kind == Some(b"Catalog")) {
             return;
         }
-        self.seen.insert(item.id.0);
+        self.seen.insert(item.id.number);
         if let Some(a) = self.mark_of(&key) {
             self.marks.entry(a).or_insert(key);
             return;
@@ -405,7 +407,7 @@ impl<'a> Walk<'a> {
         // annotations' are the file's own, their words read as any
         // stream's are.
         if let ObjKey::Base { .. } = key
-            && let Ok(stream) = obj.as_stream()
+            && let Some(stream) = obj.as_stream()
             && let Some(marker) = Marker::of(&stream.dict)
         {
             let isolates = || {
@@ -417,7 +419,7 @@ impl<'a> Walk<'a> {
                 (Marker::Isolate, _) => {}
                 (Marker::Gen { id, .. }, Some(page)) if s.saved.state.backs(id, page) => {
                     self.pages.entry(page).or_insert(key);
-                    self.blocks.insert(item.id.0, key);
+                    self.blocks.insert(item.id.number, key);
                     return;
                 }
                 (Marker::Gen { .. } | Marker::Ocr(_) | Marker::Flat(_), _) => {}
@@ -434,7 +436,7 @@ impl<'a> Walk<'a> {
             ) => return,
             (ObjKey::Block(_), Some(page)) => {
                 self.pages.entry(page).or_insert(key);
-                self.blocks.insert(item.id.0, key);
+                self.blocks.insert(item.id.number, key);
                 return;
             }
             (ObjKey::Generators, _) => {
@@ -458,8 +460,8 @@ impl<'a> Walk<'a> {
             _ => None,
         };
         for (id, how) in children(&obj, &item.how, &resources) {
-            let block = page.is_some() && self.blocks.contains_key(&id.0);
-            if !self.linked.contains(&id.0) && (!self.seen.contains(&id.0) || block) {
+            let block = page.is_some() && self.blocks.contains_key(&id.number);
+            if !self.linked.contains(&id.number) && (!self.seen.contains(&id.number) || block) {
                 next.push_back(Item { id, how, page });
             }
         }
@@ -471,18 +473,18 @@ impl<'a> Walk<'a> {
         let keys = self.keys.get_or_init(|| {
             let saved = &self.s.saved;
             let mut keys: HashMap<u32, ObjKey> = (saved.record.map.keys.iter())
-                .map(|(&k, &at)| (at.0, k))
+                .map(|(&k, &at)| (at.number, k))
                 .collect();
             for (a, rec) in saved.state.annots() {
                 if let AnnotBody::Mark(m) = &rec.body
                     && let Some(r) = m.src.as_ref().filter(|r| r.src.id() == self.s.primary)
                 {
-                    keys.entry(r.id.0).or_insert(ObjKey::Annot(a));
+                    keys.entry(r.id.number).or_insert(ObjKey::Annot(a));
                 }
             }
             keys
         });
-        keys.get(&id.0).copied().unwrap_or(ObjKey::Base {
+        keys.get(&id.number).copied().unwrap_or(ObjKey::Base {
             blob: self.s.primary,
             obj: id,
             copy: 0,
@@ -633,7 +635,7 @@ fn bag(
 ) -> Option<TextBag> {
     let mut bag = TextBag::default();
     strings(obj, &mut bag);
-    if let Object::Stream(stream) = obj {
+    if let Some(stream) = obj.as_stream() {
         bag.extend(&stream_text(objects, stream, how, lim, resources, fonts)?);
     }
     Some(bag)
@@ -658,10 +660,10 @@ fn stream_text(
     );
     let mut bag = TextBag::default();
     if subtype == Some(b"Image") || kind == Some(b"EmbeddedFile") {
-        bag.add_hash(sheaf_util::checksum(&stream.content));
+        bag.add_hash(sheaf_util::checksum(stream.raw_bytes()));
         return Some(bag);
     }
-    let pattern = dict.get(b"PatternType").and_then(Object::as_i64).ok() == Some(1);
+    let pattern = dict.get(b"PatternType").and_then(Object::as_integer) == Some(1);
     let content = match how {
         _ if subtype == Some(b"Form") || pattern => Some(resources(dict)),
         Use::Content(res) => Some(res.clone()),
@@ -686,11 +688,15 @@ fn stream_text(
 /// Adds the text of every string in `obj` to `bag`, a stream's
 /// dictionary's but not its data.
 fn strings(obj: &Object, bag: &mut TextBag) {
-    match obj {
-        Object::String(s, _) => bag.add(&text_string(s)),
-        Object::Array(items) => items.iter().for_each(|o| strings(o, bag)),
-        Object::Dictionary(d) => d.iter().for_each(|(_, o)| strings(o, bag)),
-        Object::Stream(s) => s.dict.iter().for_each(|(_, o)| strings(o, bag)),
+    match obj.value() {
+        Value::String(s, _) => {
+            if let Some(bytes) = s.as_bytes() {
+                bag.add(&text_string(bytes));
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|o| strings(o, bag)),
+        Value::Dict(d) => d.iter().for_each(|(_, o)| strings(o, bag)),
+        Value::Stream(s) => s.dict.iter().for_each(|(_, o)| strings(o, bag)),
         _ => {}
     }
 }
@@ -707,7 +713,7 @@ fn children(
     resources: &dyn Fn(&Dictionary) -> Option<Object>,
 ) -> Vec<(ObjectId, Use)> {
     let mut out = Vec::new();
-    let held = matches!(how, Use::Content(_) | Use::Text) && !matches!(obj, Object::Stream(_));
+    let held = matches!(how, Use::Content(_) | Use::Text) && obj.as_stream().is_none();
     let Some(dict) = dict_of(obj).filter(|_| !held) else {
         let how = if held { how.clone() } else { Use::Object };
         refs(obj, &mut |r| out.push((r, how.clone())));
@@ -716,10 +722,10 @@ fn children(
     let page = name_of(Some(dict), b"Type") == Some(b"Page");
     let type3 = name_of(Some(dict), b"Subtype") == Some(b"Type3");
     for (key, value) in dict.iter() {
-        let how = match key.as_slice() {
+        let how = match key {
             b"Parent" | b"P" | b"IRT" => continue,
             b"Contents" if page => Use::Content(resources(dict)),
-            b"CharProcs" if type3 => Use::Content(dict.get(b"Resources").ok().cloned()),
+            b"CharProcs" if type3 => Use::Content(dict.get(b"Resources").cloned()),
             b"JS" | b"RC" | b"XFA" => Use::Text,
             b"Kids" => Use::Kid,
             _ => Use::Object,
@@ -731,16 +737,12 @@ fn children(
 
 /// The dictionary `obj` is, or a stream's.
 fn dict_of(obj: &Object) -> Option<&Dictionary> {
-    match obj {
-        Object::Dictionary(d) => Some(d),
-        Object::Stream(s) => Some(&s.dict),
-        _ => None,
-    }
+    obj.as_dict()
 }
 
 /// The name `dict` has at `key`.
 fn name_of<'d>(dict: Option<&'d Dictionary>, key: &[u8]) -> Option<&'d [u8]> {
-    dict?.get(key).and_then(Object::as_name).ok()
+    dict?.get(key).and_then(Object::as_name)
 }
 
 /// A page's `/Resources`, or the nearest of its nodes', as `objects` reads
@@ -749,11 +751,14 @@ fn inherited(objects: &impl ReadObjects, page: &Dictionary) -> Option<Object> {
     let mut at = page;
     // A loop of nodes is no deeper than this.
     for _ in 0..64 {
-        if let Ok(res) = at.get(b"Resources") {
+        if let Some(res) = at.get(b"Resources") {
             return Some(res.clone());
         }
-        let parent = at.get(b"Parent").and_then(Object::as_reference).ok()?;
-        at = objects.object(parent).ok()?.as_dict().ok()?;
+        let parent = at.get(b"Parent").and_then(Object::as_reference)?;
+        at = match objects.object(parent).ok()?.value() {
+            Value::Dict(d) => d,
+            _ => return None,
+        };
     }
     None
 }
@@ -765,14 +770,14 @@ struct Joined<'a> {
 }
 
 impl ReadObjects for Joined<'_> {
-    fn object(&self, id: ObjectId) -> lopdf::Result<&Object> {
+    fn object(&self, id: ObjectId) -> crate::pdf::Result<&Object> {
         match self.section.get(&id) {
             Some((_, obj)) => Ok(obj),
             None => ReadObjects::object(self.old, id),
         }
     }
 
-    fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> lopdf::Result<R> {
+    fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> crate::pdf::Result<R> {
         match self.section.get(&id) {
             Some((_, obj)) => Ok(read(obj)),
             None => ReadObjects::read(self.old, id, read),
@@ -879,8 +884,8 @@ fn form_says(form: &FormRef, bag: &mut TextBag) {
 /// A source's object's identity as one hash.
 fn at_hash(at: &ObjRef) -> u128 {
     let mut bytes = blob_hash(at.src.id()).to_be_bytes().to_vec();
-    bytes.extend(at.id.0.to_be_bytes());
-    bytes.extend(at.id.1.to_be_bytes());
+    bytes.extend(at.id.number.to_be_bytes());
+    bytes.extend(at.id.generation.to_be_bytes());
     sheaf_util::checksum(&bytes)
 }
 

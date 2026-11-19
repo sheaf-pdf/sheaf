@@ -27,7 +27,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use lopdf::{Dictionary, Object, ObjectId, dictionary};
+use crate::pdf::{Dictionary, Object, ObjectId, StreamExt, Value, dictionary};
 
 use super::encoding::{Encoding, glyph_text};
 use super::predefined::{self, Collection, Split};
@@ -805,8 +805,8 @@ struct ProgramHeights {
 /// 32, nonsymbolic, where it gives none, and 0 where they're no number.
 fn flags(objects: &impl ReadObjects, descriptor: &Dictionary) -> i64 {
     match descriptor.get(b"Flags") {
-        Ok(f) => integer(objects, f).unwrap_or(0),
-        Err(_) => 32,
+        Some(f) => integer(objects, f).unwrap_or(0),
+        None => 32,
     }
 }
 
@@ -872,7 +872,7 @@ fn type3(
     for (code, slot) in procs.iter_mut().enumerate() {
         let id = encoded
             .glyph_name(code as u8)
-            .and_then(|name| char_procs?.get(name).ok()?.as_reference().ok());
+            .and_then(|name| char_procs?.get(name)?.as_reference());
         let Some(id) = id else {
             continue;
         };
@@ -1021,7 +1021,7 @@ fn first_operator(data: &[u8], lim: &Limits) -> Option<CharProc> {
             Tok::Op(op) => {
                 let n = |i: usize| {
                     let o = operands.get(operands.len().checked_sub(i + 1)?)?;
-                    Some(lex::object(o, depth)?.as_float().ok()? as f32)
+                    Some(lex::object(o, depth)?.as_number()? as f32)
                 };
                 return match op {
                     b"d0" => Some(CharProc {
@@ -1057,22 +1057,32 @@ fn type0(
     // PDFium reads a Type0 font with one CIDFont, and no other.
     let cid_font = get_array(objects, font, b"DescendantFonts")
         .filter(|fonts| fonts.len() == 1)
-        .and_then(|fonts| direct(objects, &fonts[0])?.as_dict().ok());
+        .and_then(|fonts| match direct(objects, &fonts[0])?.value() {
+            Value::Dict(d) => Some(d),
+            _ => None,
+        });
     let descendant = match cid_font.and_then(|f| get_name(objects, f, b"Subtype")) {
         Some(b"CIDFontType0") => Descendant::CidFontType0,
         _ => Descendant::CidFontType2,
     };
-    let (codes, vertical) = match font.get(b"Encoding").ok().map(|e| (e, direct(objects, e))) {
-        Some((_, Some(Object::Name(n)))) if n == b"Identity-H" => (Codes::Identity, false),
-        Some((_, Some(Object::Name(n)))) if n == b"Identity-V" => (Codes::Identity, true),
-        Some((Object::Reference(id), Some(Object::Stream(_)))) => {
-            let map = CidMap::read(objects, *id, lim, &mut approx.codes, budget)?;
+    let (codes, vertical) = match font
+        .get(b"Encoding")
+        .map(|e| (e, direct(objects, e).map(Object::value)))
+    {
+        Some((_, Some(Value::Name(n)))) if n.as_bytes() == b"Identity-H" => {
+            (Codes::Identity, false)
+        }
+        Some((_, Some(Value::Name(n)))) if n.as_bytes() == b"Identity-V" => (Codes::Identity, true),
+        Some((e, Some(Value::Stream(_)))) if e.as_reference().is_some() => {
+            let id = e.as_reference().unwrap();
+            let map = CidMap::read(objects, id, lim, &mut approx.codes, budget)?;
             let vertical = map.vertical;
             (Codes::Embedded(map), vertical)
         }
         // A predefined CMap writes vertically where its name ends in V,
         // as PDFium reads it.
-        Some((_, Some(Object::Name(n)))) => {
+        Some((_, Some(Value::Name(n)))) => {
+            let n = n.as_bytes();
             let known = predefined::scheme(n).zip(predefined::bundled(n));
             let codes = match known {
                 Some((scheme, map)) => Codes::Predefined { map, scheme },
@@ -1120,8 +1130,11 @@ fn type0(
     let outlines = match face {
         Some(face) => {
             approx.boxes = !face.exact();
-            let to_gid = match cid_font.and_then(|f| f.get(b"CIDToGIDMap").ok()) {
-                Some(&Object::Reference(id)) if is_stream(objects, id) => {
+            let to_gid = match cid_font
+                .and_then(|f| f.get(b"CIDToGIDMap"))
+                .and_then(Object::as_reference)
+            {
+                Some(id) if is_stream(objects, id) => {
                     Some(decompressed(objects, id, budget)?.unwrap_or_default())
                 }
                 _ => None,
@@ -1136,9 +1149,9 @@ fn type0(
     // Identity's collection is the one its CIDFont orders.
     let ordered = || {
         let info = get_dict(objects, cid_font?, b"CIDSystemInfo")?;
-        let ordering = match direct(objects, info.get(b"Ordering").ok()?)? {
-            Object::String(s, _) => s.as_slice(),
-            Object::Name(n) => n.as_slice(),
+        let ordering = match direct(objects, info.get(b"Ordering")?)?.value() {
+            Value::String(s, _) => s.as_bytes()?,
+            Value::Name(n) => n.as_bytes(),
             _ => return None,
         };
         Collection::ordered(ordering)
@@ -1189,7 +1202,7 @@ fn type0(
 
 /// Whether object `id` is a stream.
 pub(super) fn is_stream(objects: &impl ReadObjects, id: ObjectId) -> bool {
-    matches!(objects.read(id, |o| o.as_stream().is_ok()), Ok(true))
+    matches!(objects.read(id, |o| o.as_stream().is_some()), Ok(true))
 }
 
 /// A font's heights, as PDFium bounds a character (`cpdf_textpage.cpp`'s
@@ -1299,7 +1312,7 @@ fn metrics_array<const N: usize>(
         let Some(item) = direct(objects, item) else {
             continue;
         };
-        if let Object::Array(list) = item {
+        if let Some(list) = item.as_array() {
             let (Some(start), None) = (first.take(), last) else {
                 return out;
             };
@@ -1454,9 +1467,9 @@ impl CidMap {
                 break;
             }
             let read = objects.read(id, |o| {
-                let stream = o.as_stream().ok()?;
+                let stream = o.as_stream()?;
                 let data = stream.decompressed_content_with_limit(*budget);
-                Some((data, stream.dict.get(b"UseCMap").ok().cloned()))
+                Some((data, stream.dict.get(b"UseCMap").cloned()))
             });
             let Ok(Some((data, uses))) = read else {
                 *unknown = true;
@@ -1467,9 +1480,9 @@ impl CidMap {
                 break;
             };
             chain.push(data);
-            match uses {
-                Some(Object::Reference(id)) => next = Some(id),
-                Some(Object::Name(name)) => base = Some(name),
+            match uses.as_ref().map(Object::value) {
+                Some(Value::Ref(id)) => next = Some(*id),
+                Some(Value::Name(name)) => base = Some(name.as_bytes().to_vec()),
                 _ => {}
             }
         }
@@ -1523,11 +1536,12 @@ impl CidMap {
         unknown: &mut bool,
     ) {
         let depth = lim.content.depth;
-        let code = |operand: &[u8]| match lex::object(operand, depth)? {
-            Object::String(s, _) if (1..=4).contains(&s.len()) => Some(number(&s)),
-            _ => None,
+        let code = |operand: &[u8]| {
+            let s = lex::object(operand, depth)?;
+            let s = s.as_bytes()?;
+            (1..=4).contains(&s.len()).then(|| number(s))
         };
-        let cid = |operand: &[u8]| u32::try_from(lex::object(operand, depth)?.as_i64().ok()?).ok();
+        let cid = |operand: &[u8]| u32::try_from(lex::object(operand, depth)?.as_integer()?).ok();
         let _ = lex::steps(data, &ResCx::none(), lim, |step| {
             let args: Vec<&[u8]> = step.args().collect();
             match step.tok {
@@ -1551,7 +1565,7 @@ impl CidMap {
                 }
                 Tok::Op(b"def") if step.name(1).as_deref() == Some(&b"WMode"[..]) => {
                     let mode = step.arg(0).and_then(|m| lex::object(m, depth));
-                    self.vertical = mode.and_then(|m| m.as_i64().ok()).is_some_and(|m| m != 0);
+                    self.vertical = mode.and_then(|m| m.as_integer()).is_some_and(|m| m != 0);
                 }
                 Tok::Op(b"usecmap") => {
                     if let Some(name) = step.name(0) {
@@ -1582,10 +1596,7 @@ impl CidMap {
 /// A `codespacerange`'s ranges, from its operands: pairs of strings of
 /// one length, 1 to 4 bytes.
 fn codespace<'a>(args: &'a [&[u8]], depth: usize) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)> + 'a {
-    let string = move |operand: &[u8]| match lex::object(operand, depth)? {
-        Object::String(s, _) => Some(s),
-        _ => None,
-    };
+    let string = move |operand: &[u8]| lex::object(operand, depth)?.as_bytes().map(<[u8]>::to_vec);
     args.as_chunks::<2>().0.iter().filter_map(move |&[lo, hi]| {
         let (lo, hi) = (string(lo)?, string(hi)?);
         (lo.len() == hi.len() && (1..=4).contains(&lo.len())).then_some((lo, hi))
@@ -1648,7 +1659,7 @@ fn decompressed(
     budget: &mut usize,
 ) -> Result<Option<Vec<u8>>, TooLarge> {
     let read = objects.read(id, |o| {
-        let stream = o.as_stream().ok()?;
+        let stream = o.as_stream()?;
         Some(stream.decompressed_content_with_limit(*budget))
     });
     match read {
@@ -1660,7 +1671,7 @@ fn decompressed(
 /// `decoded`, a stream's content decompressed within `budget`, charged to
 /// it: None where it can't be decoded.
 pub(super) fn charged(
-    decoded: lopdf::Result<Vec<u8>>,
+    decoded: crate::pdf::Result<Vec<u8>>,
     budget: &mut usize,
 ) -> Result<Option<Vec<u8>>, TooLarge> {
     match decoded {
@@ -1668,9 +1679,7 @@ pub(super) fn charged(
             *budget = budget.saturating_sub(data.len());
             Ok(Some(data))
         }
-        Err(lopdf::Error::Decompress(lopdf::DecompressError::MemoryLimitExceeded { .. })) => {
-            Err(TooLarge)
-        }
+        Err(crate::pdf::Error::Limit(crate::pdf::Limit::Decompressed)) => Err(TooLarge),
         Err(_) => Ok(None),
     }
 }
@@ -1704,16 +1713,15 @@ struct Encoded<'a> {
 impl<'a> Encoded<'a> {
     /// `font`'s encoding, `own` its base where it names none it knows.
     fn read(objects: &'a impl ReadObjects, font: &'a Dictionary, own: Option<Encoding>) -> Self {
-        let encoding = font.get(b"Encoding").ok().and_then(|e| direct(objects, e));
-        let (base, differences) = match encoding {
-            Some(Object::Name(n)) => (Encoding::named(n).or(own), None),
-            Some(Object::Dictionary(d)) => {
-                let base = d.get(b"BaseEncoding").ok().and_then(|b| b.as_name().ok());
+        let encoding = font.get(b"Encoding").and_then(|e| direct(objects, e));
+        let (base, differences) = match encoding.map(Object::value) {
+            Some(Value::Name(n)) => (Encoding::named(n.as_bytes()).or(own), None),
+            Some(Value::Dict(d)) => {
+                let base = d.get(b"BaseEncoding").and_then(Object::as_name);
                 let differences = d
                     .get(b"Differences")
-                    .ok()
                     .and_then(|o| direct(objects, o))
-                    .and_then(|o| o.as_array().ok());
+                    .and_then(Object::as_array);
                 (base.and_then(Encoding::named).or(own), differences)
             }
             _ => (own, None),
@@ -1721,11 +1729,11 @@ impl<'a> Encoded<'a> {
         let mut names: [Option<&[u8]>; 256] = [None; 256];
         let mut code = 0;
         for item in differences.into_iter().flatten() {
-            match item {
-                Object::Integer(c) => code = *c,
-                Object::Name(n) => {
+            match item.value() {
+                Value::Integer(c) => code = *c,
+                Value::Name(n) => {
                     if let Some(slot) = usize::try_from(code).ok().and_then(|c| names.get_mut(c)) {
-                        *slot = Some(n);
+                        *slot = Some(n.as_bytes());
                     }
                     code = code.saturating_add(1);
                 }
@@ -1759,7 +1767,7 @@ fn get_name<'a>(
     dict: &'a Dictionary,
     key: &[u8],
 ) -> Option<&'a [u8]> {
-    direct(objects, dict.get(key).ok()?)?.as_name().ok()
+    direct(objects, dict.get(key)?)?.as_name()
 }
 
 /// The dictionary `dict`'s `key` is, its reference followed.
@@ -1768,7 +1776,10 @@ fn get_dict<'a>(
     dict: &'a Dictionary,
     key: &[u8],
 ) -> Option<&'a Dictionary> {
-    direct(objects, dict.get(key).ok()?)?.as_dict().ok()
+    match direct(objects, dict.get(key)?)?.value() {
+        Value::Dict(d) => Some(d),
+        _ => None,
+    }
 }
 
 /// The array `dict`'s `key` is, its reference followed.
@@ -1777,19 +1788,18 @@ fn get_array<'a>(
     dict: &'a Dictionary,
     key: &[u8],
 ) -> Option<&'a [Object]> {
-    let array = direct(objects, dict.get(key).ok()?)?.as_array().ok()?;
-    Some(array.as_slice())
+    direct(objects, dict.get(key)?)?.as_array()
 }
 
 /// The whole number `dict`'s `key` is ([`whole`]).
 fn get_whole(objects: &impl ReadObjects, dict: &Dictionary, key: &[u8]) -> Option<f32> {
-    whole(objects, dict.get(key).ok()?)
+    whole(objects, dict.get(key)?)
 }
 
 /// A number, cut to its whole part and kept within an `i32`, as PDFium
 /// reads one where it wants a whole one.
 fn integer(objects: &impl ReadObjects, o: &Object) -> Option<i64> {
-    let n = direct(objects, o)?.as_float().ok()?;
+    let n = direct(objects, o)?.as_number()?;
     Some(n.trunc().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i64)
 }
 
@@ -1800,7 +1810,7 @@ fn whole(objects: &impl ReadObjects, o: &Object) -> Option<f32> {
 
 /// A number, as written.
 fn number_of(objects: &impl ReadObjects, o: &Object) -> Option<f32> {
-    let n = direct(objects, o)?.as_float().ok()? as f32;
+    let n = direct(objects, o)?.as_number()? as f32;
     n.is_finite().then_some(n)
 }
 
@@ -1884,8 +1894,8 @@ impl Fonts {
         lim: &Limits,
         budget: &mut usize,
     ) -> Result<Option<Arc<Foreign>>, TooLarge> {
-        let &Object::Reference(id) = font else {
-            let Ok(dict) = font.as_dict() else {
+        let Some(id) = font.as_reference() else {
+            let Value::Dict(dict) = font.value() else {
                 return Ok(None);
             };
             return Ok(Some(Arc::new(self.read(objects, dict, lim, budget)?)));
@@ -1894,7 +1904,7 @@ impl Fonts {
             *budget = budget.checked_sub(known.cost).ok_or(TooLarge)?;
             return Ok(Some(known.clone()));
         }
-        let Some(dict) = objects.object(id).ok().and_then(|o| o.as_dict().ok()) else {
+        let Some(Value::Dict(dict)) = objects.object(id).ok().map(Object::value) else {
             return Ok(None);
         };
         let foreign = Arc::new(Foreign {
@@ -1909,10 +1919,12 @@ impl Fonts {
     pub fn stock(&self) -> Arc<Foreign> {
         let read = || {
             let helvetica = dictionary! {
-                "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
-                "Encoding" => "WinAnsiEncoding",
+                "Type" => Object::name("Font"),
+                "Subtype" => Object::name("Type1"),
+                "BaseFont" => Object::name("Helvetica"),
+                "Encoding" => Object::name("WinAnsiEncoding"),
             };
-            let none = lopdf::Document::new();
+            let none = crate::pdf::Document::new();
             let read = Foreign::read(&none, &helvetica, &Limits::DEFAULT, &mut 0);
             Arc::new(read.expect("a font by name alone has no stream to decompress"))
         };
@@ -1987,12 +1999,15 @@ impl FontScope<'_> {
             return Ok(font);
         }
         let written = resources
-            .and_then(|r| direct(objects, r)?.as_dict().ok())
+            .and_then(|r| direct(objects, r)?.as_dict())
             .and_then(|r| get_dict(objects, r, b"Font"))
-            .and_then(|f| f.get(name).ok());
+            .and_then(|f| f.get(name));
         let font = match written {
-            Some(Object::Reference(id)) if self.charged.contains_key(id) => {
-                self.charged.get(id).copied()
+            Some(w)
+                if w.as_reference()
+                    .is_some_and(|id| self.charged.contains_key(&id)) =>
+            {
+                self.charged.get(&w.as_reference().unwrap()).copied()
             }
             Some(written) => match self.fonts.get(objects, written, lim, budget)? {
                 Some(read) => {
@@ -2061,11 +2076,7 @@ impl Decoder {
         lim: &Limits,
         budget: &mut usize,
     ) -> Result<Decoder, TooLarge> {
-        let cmap = match font
-            .get(b"ToUnicode")
-            .ok()
-            .and_then(|o| o.as_reference().ok())
-        {
+        let cmap = match font.get(b"ToUnicode").and_then(Object::as_reference) {
             Some(id) => decompressed(objects, id, budget)?.map(|bytes| CMap::parse(&bytes, lim)),
             None => None,
         };
@@ -2076,10 +2087,7 @@ impl Decoder {
     }
 
     fn new(objects: &impl ReadObjects, font: &Dictionary, cmap: CMap) -> Decoder {
-        let name = |key: &[u8]| {
-            let object = direct(objects, font.get(key).ok()?)?;
-            object.as_name().ok()
-        };
+        let name = |key: &[u8]| direct(objects, font.get(key)?)?.as_name();
         if name(b"Subtype") == Some(b"Type0") {
             let identity = matches!(name(b"Encoding"), Some(b"Identity-H" | b"Identity-V"));
             return Decoder {
@@ -2171,10 +2179,7 @@ impl CMap {
     fn parse(bytes: &[u8], lim: &Limits) -> CMap {
         let mut cmap = CMap::default();
         let depth = lim.content.depth;
-        let string = |operand: &[u8]| match lex::object(operand, depth)? {
-            Object::String(s, _) => Some(s),
-            _ => None,
-        };
+        let string = |operand: &[u8]| lex::object(operand, depth)?.as_bytes().map(<[u8]>::to_vec);
         let code = |operand: &[u8]| {
             let s = string(operand)?;
             (1..=4).contains(&s.len()).then(|| number(&s))
@@ -2200,15 +2205,14 @@ impl CMap {
                         if lo > hi {
                             continue;
                         }
-                        match lex::object(text, depth) {
-                            Some(Object::String(s, _)) => {
-                                cmap.ranges.push((lo, hi, utf16(&s).chars().collect()));
+                        match lex::object(text, depth).as_ref().map(Object::value) {
+                            Some(Value::String(s, _)) => {
+                                if let Some(b) = s.as_bytes() {
+                                    cmap.ranges.push((lo, hi, utf16(b).chars().collect()));
+                                }
                             }
-                            Some(Object::Array(items)) => {
-                                let texts = items.iter().filter_map(|i| match i {
-                                    Object::String(s, _) => Some(utf16(s)),
-                                    _ => None,
-                                });
+                            Some(Value::Array(items)) => {
+                                let texts = items.iter().filter_map(|i| Some(utf16(i.as_bytes()?)));
                                 for (c, text) in (lo..=hi).zip(texts) {
                                     cmap.chars.insert(c, text);
                                 }
@@ -2247,9 +2251,9 @@ impl CMap {
 
 /// A `bfchar` destination's text: a string's UTF-16, or a glyph name's.
 fn destination(operand: &[u8], depth: usize) -> Option<String> {
-    match lex::object(operand, depth)? {
-        Object::String(s, _) => Some(utf16(&s)),
-        Object::Name(n) => glyph_text(std::str::from_utf8(&n).ok()?, false),
+    match lex::object(operand, depth)?.value() {
+        Value::String(s, _) => Some(utf16(s.as_bytes()?)),
+        Value::Name(n) => glyph_text(std::str::from_utf8(n.as_bytes()).ok()?, false),
         _ => None,
     }
 }

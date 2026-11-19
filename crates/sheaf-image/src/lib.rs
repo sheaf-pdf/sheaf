@@ -2,7 +2,7 @@
 //!
 //! The boundary is the point of the crate. It may depend on image codecs,
 //! `imageproc` and a barcode library (rxing, which reads and writes
-//! pixels only), never on `lopdf`, pdfium, an OCR engine or model, or
+//! pixels only), never on `sheaf-doc`, pdfium, an OCR engine or model, or
 //! gpui. Code that needs a document page, a model or a window belongs in
 //! `sheaf-ops`, `sheaf-ocr` or the app, which call in here.
 //!

@@ -45,8 +45,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use crate::pdf::{Object, ObjectId, Value};
 use anyhow::Result;
-use lopdf::{Object, ObjectId};
 
 use super::append::refs;
 use super::copy;
@@ -439,25 +439,24 @@ impl Walk<'_> {
         let levels = (self.levels.entry(blob)).or_insert_with(|| copy::document_level(pdf));
         let seen = self.seen.entry((blob, copy)).or_default();
         let mut next: Vec<ObjectId> = Vec::new();
-        let read = match root {
-            Object::Reference(r) => match pdf.object_unkept(*r) {
+        let read = match root.as_reference() {
+            Some(r) => match pdf.object_unkept(r) {
                 Ok(read) => Some(read),
                 // Copied as null.
                 Err(_) => return false,
             },
-            _ => None,
+            None => None,
         };
-        let dict = match read.as_deref().unwrap_or(root) {
-            Object::Dictionary(d) => Some(d),
-            Object::Stream(s) => Some(&s.dict),
-            other => {
-                refs(other, &mut |r| next.push(r));
+        let resolved = read.as_deref().unwrap_or(root);
+        let dict = match resolved.value() {
+            Value::Dict(d) => Some(d),
+            Value::Stream(s) => Some(&s.dict),
+            _ => {
+                refs(resolved, &mut |r| next.push(r));
                 None
             }
         };
-        for (_, v) in
-            (dict.into_iter().flat_map(|d| d.iter())).filter(|(k, _)| !own.contains(&k.as_slice()))
-        {
+        for (_, v) in (dict.into_iter().flat_map(|d| d.iter())).filter(|(k, _)| !own.contains(k)) {
             refs(v, &mut |r| next.push(r));
         }
         while let Some(r) = next.pop() {
@@ -467,8 +466,8 @@ impl Walk<'_> {
             let Ok(obj) = pdf.object_unkept(r) else {
                 continue;
             };
-            let kind = match &*obj {
-                Object::Dictionary(d) => d.get(b"Type").and_then(Object::as_name).ok(),
+            let kind = match obj.value() {
+                Value::Dict(d) => d.get(b"Type").and_then(Object::as_name),
                 _ => None,
             };
             match kind {
@@ -909,8 +908,7 @@ impl<'a> Deps<'a> {
             };
             let page = ObjKey::Page(id);
             let again = written(page);
-            if !anew(again, src.id(), 0)
-                && walk.reaches(src, 0, &Object::Reference(facts.id), PAGE_OWN)
+            if !anew(again, src.id(), 0) && walk.reaches(src, 0, &Object::from(facts.id), PAGE_OWN)
             {
                 return Some(page);
             }
@@ -940,26 +938,29 @@ impl<'a> Deps<'a> {
             let facts = src.annots();
             let read: HashSet<usize> = facts.on(shown.index).iter().map(|a| a.slot).collect();
             for (slot, entry) in base.iter().enumerate() {
-                let by_record = match entry {
-                    Object::Reference(r) => held.contains(r),
-                    _ => slots.contains(&slot),
+                let by_record = match entry.as_reference() {
+                    Some(r) => held.contains(&r),
+                    None => slots.contains(&slot),
                 };
                 if by_record || read.contains(&slot) || crate::file::is_ours(src.pdf(), entry) {
                     continue;
                 }
                 let popup = (src.pdf().dereference(entry).ok())
-                    .and_then(|(_, d)| d.as_dict().ok())
+                    .and_then(|(_, d)| match d.value() {
+                        Value::Dict(d) => Some(d),
+                        _ => None,
+                    })
                     .is_some_and(|d| annots::is(d, b"Subtype", b"Popup"));
                 // Written again with its page: one written straight into
                 // `/Annots`, and one of its own the file has, as what the
                 // file has of its source is copied again.
-                let key = match entry {
-                    Object::Reference(r) => ObjKey::Base {
+                let key = match entry.as_reference() {
+                    Some(r) => ObjKey::Base {
                         blob: src.id(),
-                        obj: *r,
+                        obj: r,
                         copy: shown.copy,
                     },
-                    _ => page,
+                    None => page,
                 };
                 if !popup
                     && !anew(again, src.id(), shown.copy)
@@ -982,9 +983,11 @@ impl<'a> Deps<'a> {
                     }
                     let page_again = written(ObjKey::Page(rec.page));
                     let (root, again) = match &f.src {
-                        Some(r) => (Object::Reference(r.id), written(key)),
+                        Some(r) => (Object::from(r.id), written(key)),
                         None => match annots::base_annots(shown).get(f.summary.slot) {
-                            Some(d @ Object::Dictionary(_)) => (d.clone(), page_again),
+                            Some(d) if matches!(d.value(), Value::Dict(_)) => {
+                                (d.clone(), page_again)
+                            }
                             _ => continue,
                         },
                     };
@@ -992,9 +995,10 @@ impl<'a> Deps<'a> {
                     // gone with it when that's written again, else the
                     // file's as it was.
                     let pdf = src.pdf();
-                    let dict = match &root {
-                        Object::Reference(r) => pdf.get_dictionary(*r).ok(),
-                        d => d.as_dict().ok(),
+                    let dict = match root.value() {
+                        Value::Ref(r) => pdf.get_dictionary(*r).ok(),
+                        Value::Dict(d) => Some(d),
+                        _ => None,
                     };
                     let nowhere = f.summary.subtype == "Link"
                         && dict.is_some_and(|d| {
@@ -1019,7 +1023,7 @@ impl<'a> Deps<'a> {
                     let merged = merged_widget(now, w.field) == Some(a);
                     let again = written(key) || (merged && written(ObjKey::Field(w.field)));
                     if !anew(again, r.src.id(), copy)
-                        && walk.reaches(&r.src, copy, &Object::Reference(r.id), ANNOT_OWN)
+                        && walk.reaches(&r.src, copy, &Object::from(r.id), ANNOT_OWN)
                     {
                         return Some(key);
                     }
@@ -1031,7 +1035,7 @@ impl<'a> Deps<'a> {
                         continue;
                     };
                     if !anew(written(key), r.src.id(), 0)
-                        && walk.reaches(&r.src, 0, &Object::Reference(r.id), ANNOT_OWN)
+                        && walk.reaches(&r.src, 0, &Object::from(r.id), ANNOT_OWN)
                     {
                         return Some(key);
                     }
@@ -1045,7 +1049,7 @@ impl<'a> Deps<'a> {
             };
             let copy = node.inst.copy;
             if !anew(written(key), r.src.id(), copy)
-                && walk.reaches(&r.src, copy, &Object::Reference(r.id), FIELD_OWN)
+                && walk.reaches(&r.src, copy, &Object::from(r.id), FIELD_OWN)
             {
                 return Some(key);
             }
@@ -1064,7 +1068,7 @@ impl<'a> Deps<'a> {
             && let Ok(catalog) = src.pdf().catalog()
         {
             let catalog = catalog.clone();
-            for (_, v) in (catalog.iter()).filter(|(k, _)| !CATALOG_OWNED.contains(&k.as_slice())) {
+            for (_, v) in (catalog.iter()).filter(|(k, _)| !CATALOG_OWNED.contains(k)) {
                 if walk.reaches_by(src, 0, v, &[], Relinking::went) {
                     return Some(ObjKey::Catalog);
                 }
@@ -1106,20 +1110,17 @@ fn parent_of(rec: &AnnotRec) -> Option<String> {
 
 /// The page link `id` of `pdf` goes to: its `/Dest`'s, or its GoTo
 /// action's, when that's an explicit destination.
-fn dest_page(pdf: &lopdf::LazyPdf, id: ObjectId) -> Option<ObjectId> {
+fn dest_page(pdf: &crate::pdf::LazyPdf, id: ObjectId) -> Option<ObjectId> {
     let link = pdf.get_dictionary(id).ok()?;
     let dest = match link.get(b"Dest") {
-        Ok(dest) => dest,
-        Err(_) => {
-            let (_, action) = pdf.dereference(link.get(b"A").ok()?).ok()?;
-            action.as_dict().ok()?.get(b"D").ok()?
+        Some(dest) => dest,
+        None => {
+            let (_, action) = pdf.dereference(link.get(b"A")?).ok()?;
+            action.as_dict()?.get(b"D")?
         }
     };
     let (_, dest) = pdf.dereference(dest).ok()?;
-    match dest.as_array().ok()?.first()? {
-        Object::Reference(page) => Some(*page),
-        _ => None,
-    }
+    dest.as_array()?.first()?.as_reference()
 }
 
 /// An outline's places: each bookmark's, and its root's (first, last and

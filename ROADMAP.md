@@ -36,10 +36,11 @@ Then [M10](plan/m10-forms/README.md) slices 6–17, Fill & Sign
 ([M12](plan/m12-signatures/README.md) slice 1), [M11](plan/m11-security/README.md),
 then M16, M10 slices 18–29 and the rest, in an order still open.
 
-**[M18](plan/m18-pdf-layer/README.md), the PDF layer, has started**
-(2026-10-27): a coherent family of PDF crates, split from pdf-lint,
-under both tools. Slice 2 goes first, in pdf-lint's workspace, by
-pdf-lint's agent; sheaf's slices start when Greg says.
+**[M18](plan/m18-pdf-layer/README.md), the PDF layer, is in progress**
+(2026-10-27; slices 1–13, 16, 18 and 20 done): sheaf now reads and writes
+through `pdf-objects`, `pdf-structure`, `pdf-filters` (`zlib-rs`) and
+`pdf-crypt`, `lopdf` is gone, and `pdf-lint` 0.2.0-rc.1 runs as a CLI
+oracle; `s14`, `s17`, `s19`, `s21` and `s15` remain.
 
 Deferred: [M5](plan/m05-scan/README.md)'s scanners and separator sheets (no
 scanners to test against), PAdES signing (RustCrypto's cms 0.3 round).
@@ -67,7 +68,7 @@ M0–M4 (spikes, viewer, organizer, markup, polish) made v0.1: see
 | [M15](plan/m15-automation/README.md) | **Automation**: batch actions, CLI, parity audit | Acrobat Pro + PDFlyer parity | Sketched; CLI groundwork shipped | Batch: each step's milestone. Parity audit: last |
 | [M16](plan/m16-agent/README.md) | **Agent tools (MCP)**: `sheaf mcp`, through which an agent reads a document as a plugin does and builds transactions from ops, with approval | Agents work on documents through sheaf's own ops | Sketched | Nothing unbuilt |
 | [M17](plan/m17-accessibility/README.md) | **Accessibility**: sheaf with a screen reader and the keyboard; PDF/UA documents | People who use assistive technology can use sheaf and read what it writes | Sketched; its first slice goes early | Documents: M14's PDF/A validator, if PDF/UA's rules share it (open) |
-| [M18](plan/m18-pdf-layer/README.md) | **The PDF layer**: a coherent family of PDF crates split from pdf-lint (pdf-objects, pdf-structure, pdf-filters, pdf-crypt, pdf-content-streams, pdf-semantics), which pdf-lint and sheaf both read and write through; lopdf goes | One family of crates under both tools; sheaf copies more of what didn't change | In progress: slice 2 first, in pdf-lint's workspace | Nothing unbuilt |
+| [M18](plan/m18-pdf-layer/README.md) | **The PDF layer**: a coherent family of PDF crates split from pdf-lint (pdf-objects, pdf-structure, pdf-filters, pdf-crypt, pdf-content-streams, pdf-semantics), which pdf-lint and sheaf both read and write through; lopdf goes | One family of crates under both tools; sheaf copies more of what didn't change | In progress: slices 1–13, 16, 18, 20 done (`lopdf` gone) | Nothing unbuilt |
 
 **Depends on** lists the unbuilt work a milestone needs first, or the part
 named after "for". Finished work isn't listed. "(open)" marks an edge that

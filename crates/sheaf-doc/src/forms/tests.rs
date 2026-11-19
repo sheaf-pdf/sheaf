@@ -2,7 +2,7 @@
 //! one for each problem it looks for. And on the corpus's 1040-ES, when
 //! the corpus is there.
 
-use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
+use crate::pdf::{Document as Pdf, Object, ObjectId, Stream, StreamExt, dictionary, literal};
 
 use super::check::{Finding, Report, check, check_latest};
 use super::corpus::{Corpus, parse_manifest};
@@ -74,9 +74,9 @@ fn widgets_on_two_pages_or_with_the_wrong_page() {
     let page2 = f.pages[1];
     f.dict(wrong).set("P", page2);
     let null = f.text("null", 0, row(7));
-    f.dict(null).set("P", Object::Null);
+    f.dict(null).set("P", Object::null());
     let gone = f.text("gone", 0, row(8));
-    f.dict(gone).set("P", (999, 0));
+    f.dict(gone).set("P", ObjectId::new(999, 0));
     // /P is optional.
     let unset = f.text("unset", 0, row(9));
     f.dict(unset).remove(b"P");
@@ -96,7 +96,7 @@ fn widgets_on_no_page() {
     f.fill(stray, "LEAKVALUE123");
     let annots: Vec<_> = f.annots(0).into_iter().filter(|&a| a != stray).collect();
     f.set_annots(0, &annots);
-    f.dict(stray).set("P", Object::Null);
+    f.dict(stray).set("P", Object::null());
     // Bug 5's stray: in the file and in /Fields, on no page.
     assert_findings(
         &checked(&f.bytes()),
@@ -113,13 +113,12 @@ fn widgets_on_page_templates() {
     let annots: Vec<_> = f.annots(0).into_iter().filter(|&a| a != spawned).collect();
     f.set_annots(0, &annots);
     let template = f.pdf.add_object(dictionary! {
-        "Type" => "Page",
+        "Type" => Object::name("Page"),
         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
-        "Annots" => vec![Object::Reference(spawned)],
+        "Annots" => vec![Object::from(spawned)],
     });
     f.dict(spawned).set("P", template);
-    let templates =
-        dictionary! { "Names" => vec![Object::string_literal("extra"), template.into()] };
+    let templates = dictionary! { "Names" => vec![literal("extra"), template.into()] };
     f.dict(f.catalog)
         .set("Names", dictionary! { "Templates" => templates });
     let report = checked(&f.bytes());
@@ -160,23 +159,19 @@ fn kids_whose_parent_is_another_field() {
 fn fonts_da_names_that_dr_lacks() {
     let mut f = every_kind();
     let arial = f.text("arial", 0, row(6));
-    f.dict(arial)
-        .set("DA", Object::string_literal("/ArialMT 9 Tf 0 g"));
+    f.dict(arial).set("DA", literal("/ArialMT 9 Tf 0 g"));
     // No /DA of its own: the form's names the font.
     let plain = f.text("plain", 0, row(7));
     f.dict(plain).remove(b"DA");
     let also = f.text("also", 0, row(8));
     f.dict(also).remove(b"DA");
-    f.dict(f.acroform).set(
-        "DA",
-        Object::string_literal("/HelveticaLTStd-Bold 0 Tf 0 g"),
-    );
+    f.dict(f.acroform)
+        .set("DA", literal("/HelveticaLTStd-Bold 0 Tf 0 g"));
     // Nor does a kid of a parent field that has one.
     let kid = f.text("kid", 1, row(5));
     f.dict(kid).remove(b"DA");
     let parent = f.group("parent", &[kid]);
-    f.dict(parent)
-        .set("DA", Object::string_literal("/Courier 9 Tf 0 g"));
+    f.dict(parent).set("DA", literal("/Courier 9 Tf 0 g"));
     let report = checked(&f.bytes());
     assert_findings(
         &report,
@@ -200,15 +195,14 @@ fn names_are_compared_as_bytes() {
     let mut f = Form::new(1);
     let cb = f.check_box("cb", 0, row(0), true);
     let d = f.dict(cb);
-    let states = d.get_mut(b"AP").and_then(|ap| ap.as_dict_mut()).unwrap();
-    let states = states.get_mut(b"N").and_then(|n| n.as_dict_mut()).unwrap();
+    let states = d.get_mut(b"AP").and_then(Object::as_dict_mut).unwrap();
+    let states = states.get_mut(b"N").and_then(Object::as_dict_mut).unwrap();
     let on = states.remove(b"Yes").unwrap();
     states.set(oui.clone(), on);
-    d.set("V", Object::Name(oui.clone()));
-    d.set("AS", Object::Name(oui));
+    d.set("V", Object::name(oui.clone()));
+    d.set("AS", Object::name(oui));
     let text = f.text("text", 0, row(1));
-    f.dict(text)
-        .set("DA", Object::string_literal("/F#E9 10 Tf 0 g"));
+    f.dict(text).set("DA", literal("/F#E9 10 Tf 0 g"));
     let helv = f.helv;
     let dr = f
         .dict(f.acroform)
@@ -233,24 +227,22 @@ fn full_names_more_than_one_field_has() {
 fn values_with_no_appearance() {
     let mut f = Form::new(1);
     let bare = f.text("bare", 0, row(0));
-    f.dict(bare)
-        .set("V", Object::string_literal("shown only by PDFium"));
+    f.dict(bare).set("V", literal("shown only by PDFium"));
     let drawn = f.text("drawn", 0, row(1));
     f.fill(drawn, "drawn");
     // Checked, and showing its off state.
     let off = f.check_box("box", 0, row(2), false);
-    f.dict(off).set("V", Object::Name(b"Yes".to_vec()));
+    f.dict(off).set("V", Object::name(b"Yes"));
     // An empty value needs nothing.
     let empty = f.text("empty", 0, row(3));
-    f.dict(empty).set("V", Object::string_literal(""));
+    f.dict(empty).set("V", literal(""));
     // Nor does a hidden widget (scripts keep values there); one that
     // isn't viewed is still printed.
     let hidden = f.text("hidden", 0, row(4));
-    f.dict(hidden)
-        .set("V", Object::string_literal("for scripts"));
+    f.dict(hidden).set("V", literal("for scripts"));
     f.dict(hidden).set("F", 4 | 2);
     let noview = f.text("noview", 0, row(5));
-    f.dict(noview).set("V", Object::string_literal("printed"));
+    f.dict(noview).set("V", literal("printed"));
     f.dict(noview).set("F", 4 | 32);
     let report = checked(&f.bytes());
     assert_findings(
@@ -276,7 +268,7 @@ fn the_latest_revision_is_checked_alone() {
     let (page, form) = (f.pages[0], f.acroform);
     let original = f.bytes();
     let unlinked = append_revision(&original, &[page, form], |pdf| {
-        let annots = vec![Object::Reference(kept)];
+        let annots = vec![Object::from(kept)];
         pdf.get_dictionary_mut(page)
             .unwrap()
             .set("Annots", annots.clone());
@@ -290,8 +282,11 @@ fn the_latest_revision_is_checked_alone() {
 
     let stray = append_revision(&original, &[page], |pdf| {
         let lost = pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Widget", "FT" => "Tx",
-            "T" => Object::string_literal("lost"), "P" => page,
+            "Type" => Object::name("Annot"),
+            "Subtype" => Object::name("Widget"),
+            "FT" => Object::name("Tx"),
+            "T" => literal("lost"),
+            "P" => page,
             "Rect" => vec![0.into(), 0.into(), 10.into(), 10.into()],
         });
         let annots = vec![kept.into(), gone.into(), lost.into()];
@@ -316,7 +311,7 @@ fn values_an_earlier_revision_holds() {
     // Reader appends: a replaced value, and a cleared one.
     let saved = append_revision(&original, &[name, gone], |pdf| {
         let d = pdf.get_dictionary_mut(name).unwrap();
-        d.set("V", Object::string_literal("This client"));
+        d.set("V", literal("This client"));
         pdf.get_dictionary_mut(gone).unwrap().remove(b"V");
     });
     let report = checked(&saved);
@@ -333,7 +328,7 @@ fn values_an_earlier_revision_holds() {
     // are stale: the check doesn't look inside them.)
     let filled = append_revision(&original, &[empty], |pdf| {
         let d = pdf.get_dictionary_mut(empty).unwrap();
-        d.set("V", Object::string_literal("New"));
+        d.set("V", literal("New"));
     });
     let report = checked(&filled);
     assert_findings(&report, &[Finding::NoAppearance(vec!["empty".into()])]);
@@ -367,7 +362,7 @@ fn an_eof_in_a_stream_or_a_trailer_written_twice_isnt_a_revision() {
     f.fill(name, "Ann Lee");
     let attached = Form::new(1).bytes();
     let attached = f.pdf.add_object(Stream::new(
-        dictionary! { "Type" => "EmbeddedFile" },
+        dictionary! { "Type" => Object::name("EmbeddedFile") },
         attached,
     ));
     f.dict(f.catalog).set("Attached", attached);
@@ -396,7 +391,7 @@ fn an_xfa_copy_that_no_longer_fits() {
         .widgets_of(form1)
         .into_iter()
         .filter(|&k| k != combo)
-        .map(Object::Reference)
+        .map(Object::from)
         .collect();
     f.dict(form1).set("Kids", kids);
     let annots: Vec<_> = f.annots(1).into_iter().filter(|&a| a != combo).collect();
@@ -433,7 +428,7 @@ fn the_fixtures_xfa_escapes_values() {
     let acroform = f.pdf.get_dictionary(f.acroform).unwrap();
     let xfa = acroform.get(b"XFA").unwrap().as_array().unwrap();
     let datasets = f.pdf.get_object(xfa[5].as_reference().unwrap());
-    let datasets = &datasets.unwrap().as_stream().unwrap().content;
+    let datasets = datasets.unwrap().as_stream().unwrap().raw_bytes();
     let datasets = String::from_utf8_lossy(datasets);
     assert!(
         datasets.contains("<name>Lee &amp; &lt;Co&gt;</name>"),
@@ -490,7 +485,7 @@ fn signatures_fit_their_revision() {
     // An append leaves the signed revision whole.
     let appended = append_revision(&signed, &[name], |pdf| {
         let d = pdf.get_dictionary_mut(name).unwrap();
-        d.set("TU", Object::string_literal("Your name"));
+        d.set("TU", literal("Your name"));
     });
     assert_findings(&checked(&appended), &[]);
 
@@ -527,7 +522,7 @@ fn a_signature_whose_bytes_changed_is_found() {
     assert_findings(&checked(&signed), &[]);
     let appended = append_revision(&signed, &[name], |pdf| {
         let d = pdf.get_dictionary_mut(name).unwrap();
-        d.set("TU", Object::string_literal("Your name"));
+        d.set("TU", literal("Your name"));
     });
     assert_findings(&checked(&appended), &[]);
     let mut changed = signed.clone();
@@ -583,13 +578,11 @@ fn sig_flags_with_nothing_to_flag() {
 fn damaged_trees_are_reported_not_followed() {
     // A cycle through /Kids and /Parent.
     let mut f = Form::new(1);
-    let a = f
+    let a = f.pdf.add_object(dictionary! { "T" => literal("a") });
+    let b = f
         .pdf
-        .add_object(dictionary! { "T" => Object::string_literal("a") });
-    let b = f.pdf.add_object(
-        dictionary! { "T" => Object::string_literal("b"), "Kids" => vec![Object::Reference(a)] },
-    );
-    f.dict(a).set("Kids", vec![Object::Reference(b)]);
+        .add_object(dictionary! { "T" => literal("b"), "Kids" => vec![Object::from(a)] });
+    f.dict(a).set("Kids", vec![Object::from(b)]);
     f.dict(a).set("Parent", b);
     f.dict(b).set("Parent", a);
     f.set_fields(&[a]);
@@ -601,10 +594,8 @@ fn damaged_trees_are_reported_not_followed() {
 
     // A field that is its own kid and parent.
     let mut f = Form::new(1);
-    let a = f
-        .pdf
-        .add_object(dictionary! { "T" => Object::string_literal("a") });
-    f.dict(a).set("Kids", vec![Object::Reference(a)]);
+    let a = f.pdf.add_object(dictionary! { "T" => literal("a") });
+    f.dict(a).set("Kids", vec![Object::from(a)]);
     f.dict(a).set("Parent", a);
     f.set_fields(&[a]);
     assert!(matches!(
@@ -617,8 +608,8 @@ fn damaged_trees_are_reported_not_followed() {
     let mut below = f.text("leaf", 0, row(0));
     for i in 0..10_000 {
         let up = f.pdf.add_object(dictionary! {
-            "T" => Object::string_literal(format!("n{i}")),
-            "Kids" => vec![Object::Reference(below)],
+            "T" => literal(format!("n{i}")),
+            "Kids" => vec![Object::from(below)],
         });
         f.dict(below).set("Parent", up);
         below = up;
@@ -637,7 +628,7 @@ fn damaged_trees_are_reported_not_followed() {
     let mut f = Form::new(1);
     let fields: Vec<ObjectId> = (0..=100_000)
         .map(|i| {
-            let t = Object::string_literal(format!("f{i}"));
+            let t = literal(format!("f{i}"));
             f.pdf.add_object(dictionary! { "T" => t })
         })
         .collect();
@@ -685,12 +676,15 @@ fn names_past_the_limit_are_damage() {
     f.xfa();
     let xfa = f.pdf.get_dictionary(f.acroform).unwrap().get(b"XFA");
     let template = xfa.unwrap().as_array().unwrap()[3].as_reference().unwrap();
-    let Object::Stream(s) = f.pdf.get_object_mut(template).unwrap() else {
-        panic!()
-    };
-    let xml = String::from_utf8(s.content.clone()).unwrap();
+    let s = f
+        .pdf
+        .get_object_mut(template)
+        .unwrap()
+        .as_stream_mut()
+        .unwrap();
+    let xml = String::from_utf8(s.raw_bytes().to_vec()).unwrap();
     let long = format!(r#"<subform name="{}">"#, "n".repeat(70_000));
-    s.set_content(xml.replace(r#"<subform name="form1">"#, &long).into_bytes());
+    s.set_plain_content(xml.replace(r#"<subform name="form1">"#, &long).into_bytes());
     assert_findings(&checked(&f.bytes()), &[]);
 }
 
@@ -700,12 +694,11 @@ fn text_from_the_file_prints_escaped() {
     let sig = f.signature("sig\u{1b}[2J", 0, row(0));
     f.sign(sig);
     let text = f.text("text", 0, row(1));
-    f.dict(text)
-        .set("DA", Object::string_literal("/F#1B 10 Tf 0 g"));
+    f.dict(text).set("DA", literal("/F#1B 10 Tf 0 g"));
     let packet = f
         .pdf
         .add_object(Stream::new(dictionary! {}, b"<x/>".to_vec()));
-    let xfa = vec![Object::string_literal("pre\u{1b}[31mamble"), packet.into()];
+    let xfa = vec![literal("pre\u{1b}[31mamble"), packet.into()];
     f.dict(f.acroform).set("XFA", xfa);
     // Rewritten, so the signature is stale and named.
     let mut pdf = Pdf::load_mem(&f.bytes()).unwrap();
@@ -724,22 +717,16 @@ fn text_from_the_file_prints_escaped() {
 
 #[test]
 fn encrypted_forms_are_read_with_their_password() {
-    use lopdf::{EncryptionState, EncryptionVersion, Permissions, StringFormat};
+    use crate::pdf::Permissions;
+    use crate::pdf::test_crypt::{CipherKind, TestEncryption};
     let mut f = every_kind();
     let bare = f.text("bare", 0, row(6));
-    f.dict(bare)
-        .set("V", Object::string_literal("no appearance"));
+    f.dict(bare).set("V", literal("no appearance"));
     let mut pdf = Pdf::load_mem(&f.bytes()).unwrap();
-    let id = Object::String(b"0123456789abcdef".to_vec(), StringFormat::Hexadecimal);
+    let id = Object::hex(b"0123456789abcdef");
     pdf.trailer.set("ID", vec![id.clone(), id]);
-    let state = EncryptionState::try_from(EncryptionVersion::V2 {
-        document: &pdf,
-        owner_password: "owner",
-        user_password: "secret",
-        key_length: 128,
-        permissions: Permissions::default(),
-    })
-    .unwrap();
+    let state = TestEncryption::new(CipherKind::Rc4_128, "secret", "owner")
+        .with_permissions(Permissions::NONE);
     pdf.encrypt(&state).unwrap();
     let mut encrypted = Vec::new();
     pdf.save_to(&mut encrypted).unwrap();

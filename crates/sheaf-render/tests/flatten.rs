@@ -17,9 +17,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use lopdf::{Object, Stream, dictionary};
 use sheaf_doc::export::{Export, printed};
 use sheaf_doc::forms::fixture::Form;
+use sheaf_doc::pdf::{Object, Stream, dictionary, literal};
 use sheaf_doc::tx::Actor;
 use sheaf_doc::tx::fixture::{add, flatten, set_watermark, watermark};
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2};
@@ -62,15 +62,15 @@ fn annotated(path: &Path) {
     for (name, flags, x) in [("printed", 4, 72), ("hidden", 6, 300)] {
         let form = f.pdf.add_object(Stream::new(
             dictionary! {
-                "Type" => "XObject", "Subtype" => "Form",
+                "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"),
                 "BBox" => vec![0.into(), 0.into(), 50.into(), 25.into()],
             },
             b"0 0 1 rg 0 0 50 25 re f 1 0 0 RG 4 w 10 10 m 40 15 l S".to_vec(),
         ));
         let square = f.pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Square", "P" => page, "F" => flags,
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Square"), "P" => page, "F" => flags,
             "Rect" => vec![x.into(), 400.into(), (x + 100).into(), 450.into()],
-            "NM" => Object::string_literal(name), "AP" => dictionary! { "N" => form },
+            "NM" => literal(name), "AP" => dictionary! { "N" => form },
         });
         let mut annots = f.annots(0);
         annots.push(square);

@@ -637,3 +637,79 @@ Entries move here when they close, saying where they went. IDs are never reused.
 - **Deferred** (Greg, 2026-10-22): revisit after more milestones, since
   what sheaf needs from this layer may change as later scopes dig in.
   Upstream fixes go ahead meanwhile.
+
+### B63: pdf-lint shows a long UTF-16 string two ways in an encrypted file
+
+- **Closed:** 2026-11-17. Fixed in pdf-lint 0.2.0-rc.1, which decrypts
+  and decodes strings natively through pdf-crypt and pdf-structure
+  without qpdf's JSON output; all 17 rows removed from
+  `crates/sheaf-ops/tests/arlington_allowed.tsv`.
+- **Found:** 2026-10-26, Claude, during the pdf-lint item's slice 1
+  (the corpus tier on pdf-lint)
+- **Where:** pdf-lint 0.1.0, `src/check.rs`'s `render` (a finding's
+  value) and `src/bytes.rs`'s `decrypt`, as
+  `crates/sheaf-ops/tests/arlington.rs`'s carried rule
+  (`Report::beyond`) meets them
+- **Severity:** annoyance (a bug in pdf-lint; sheaf's tests only)
+- **What happens:** a finding's value shows a string as its first 80
+  bytes, decoded, when pdf-lint's reader read it (`Str::Bytes`: in plain
+  view, or from an object stream it tokenized), and as its first 80
+  characters when qpdf decrypted it (`Str::Text`: an encrypted file's
+  strings in plain view, which qpdf's JSON gives as text). A UTF-16
+  string over 39 characters then shows two ways, so a finding in an
+  object moved into an object stream, or out of one, isn't like the
+  file's. In 17 encrypted forms whose pages have an InDesign
+  `/PieceInfo` (its `/DocumentID` is such a string) and no
+  `/LastModified`, the `special: PageObject/PieceInfo` finding of a page
+  sheaf merged isn't carried: 43 findings in 19 saves, a Rewrite packing
+  the page or an Append writing it in plain view.
+- **Expected:** the same string shows the same way however it was read:
+  cut by characters after decoding, or kept as bytes.
+- **Repro:** `qpdf --object-streams=generate
+  ../pdf-corpus/forms/safedocs/0160577.pdf packed.pdf`, then `pdf-lint`
+  on both: the source's `/DocumentID` shows as
+  `(xmp.did:2668fca9-4d9e-4ecf-894e-43134b35d2db)`, the packed file's as
+  `(xmp.did:2668fca9-4d9e-4ecf-894e-43134b3)`, and `pdf-lint --baseline`
+  doesn't carry it. In sheaf, `just tier-arlington` without the 17
+  `B63` rows.
+- **Notes:** pdf-lint is Greg's to change upstream. Held by 17 rows of
+  `crates/sheaf-ops/tests/arlington_allowed.tsv`, one per form; they go
+  when a pdf-lint release with the fix is taken.
+
+## F29: Research: how the Arlington tier holds a damaged form pdf-lint reads nothing of
+
+- **Closed:** 2026-11-18. Resolved in M18 slice 8: sheaf and pdf-lint
+  0.2.0-rc.1 both read through `pdf-structure`'s `Recovery::Verified`
+  (`1819139.pdf` recovered by both, `4422502.pdf`'s trailer lacking `/Root`
+  refused by both), so `arlington_allowed.tsv` needs no `F29` row.
+- **Found:** 2026-10-26, Claude, during the pdf-lint item's slice 1
+  (the corpus tier on pdf-lint)
+- **What:** decide, on merit, how `just tier-arlington` checks a save of
+  a damaged form whose `startxref` names no cross-reference.
+- **Overlap:** the [pdf-lint item](pdf-lint.md); B46.
+
+
+### B26: The Flate backend depends on which crates are in the build
+
+- **Closed:** 2026-11-18. Fixed in M18 slice 12: workspace `Cargo.toml`
+  declares `flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }`,
+  `sheaf-doc` dropped its direct `flate2` dependency, and every PDF stream
+  compression and decompression call goes through `pdf-filters` with
+  `Backend::ZlibRs` (D4).
+- **Found:** 2026-10-23, the build-or-adopt audit
+- **Where:** `flate2` feature unification: `crates/sheaf-app/Cargo.toml:38`
+  (`zip` with `deflate-flate2-zlib-rs`) against `flate2 = "1"` everywhere
+  else
+- **Severity:** annoyance (output differs between builds)
+
+## F19: Wipe file keys, not only passwords
+
+- **Closed:** 2026-11-18. Done in M18 slices 12–13: `lopdf::EncryptionState`
+  and `serialize::crypt`'s raw `Hmac<Sha256>` are gone; `pdf_crypt::Handler`
+  keeps file encryption keys, password buffers, and cipher states in
+  `Zeroizing` memory wiped on drop, and compares keys via constant-time
+  `KeyCheck`.
+- **Found:** 2026-10-23, the build-or-adopt audit
+- **What:** keep an encrypted file's key in `Zeroizing` memory from
+  derivation to drop.
+- **Overlap:** F13; M12.

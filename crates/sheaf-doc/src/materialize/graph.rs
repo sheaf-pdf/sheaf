@@ -10,8 +10,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use crate::pdf::{Document as Pdf, Object, ObjectId, Stream, Value};
 use anyhow::{Context, Result, bail};
-use lopdf::{Document as Pdf, Object, ObjectId, Stream};
 
 use super::emit::{Emission, SymObject, Syms};
 use super::key::ObjKey;
@@ -26,7 +26,13 @@ use crate::store::BlobId;
 /// matter. A save that writes it encrypts with the source's
 /// [`crypt`](crate::source::Source::crypt).
 pub fn eager(src: &Source) -> Result<Pdf> {
-    crate::file::load_pdf_mem(src.bytes(), src.password())
+    Ok(src.pdf().to_document()?)
+}
+
+/// [`eager`], plus first-parse verbatim copy candidates when `want_raw` is
+/// `true` (M18 slice 9).
+pub fn eager_with_raw(src: &Source, want_raw: bool) -> Result<(Pdf, crate::pdf::RawCopies)> {
+    Ok(src.pdf().to_document_and_raw(want_raw)?)
 }
 
 /// A Rewrite's objects: the primary's, the emitted ones over them.
@@ -80,14 +86,20 @@ impl Graph {
             }
             self.pdf.objects.insert(at, obj);
         }
-        let mut trailer = Object::Dictionary(std::mem::take(&mut self.pdf.trailer));
+        let mut trailer = Object::from(std::mem::take(&mut self.pdf.trailer));
         follow(&mut trailer, &mut |r| numbers.get(&r).copied());
-        if let Object::Dictionary(trailer) = trailer {
+        if let Value::Dict(trailer) = trailer.into_value() {
             self.pdf.trailer = trailer;
         }
         self.keys = keys;
         self.deferred = deferred;
-        self.pdf.max_id = self.pdf.objects.keys().map(|id| id.0).max().unwrap_or(0);
+        self.pdf.max_id = self
+            .pdf
+            .objects
+            .keys()
+            .map(|id| id.number)
+            .max()
+            .unwrap_or(0);
     }
 
     /// Each primary object numbered past what a file may use moved to the
@@ -98,7 +110,10 @@ impl Graph {
     fn relocate(&mut self, primary: BlobId, numbers: &Numbers) -> Result<usize> {
         use crate::serialize::NUMBERS;
         let objects = &mut self.pdf.objects;
-        let high: Vec<ObjectId> = objects.range((NUMBERS, 0)..).map(|(&id, _)| id).collect();
+        let high: Vec<ObjectId> = objects
+            .range(ObjectId::new(NUMBERS, 0)..)
+            .map(|(&id, _)| id)
+            .collect();
         if high.is_empty() {
             return Ok(0);
         }
@@ -116,18 +131,18 @@ impl Graph {
             };
             let at = numbers
                 .get(&key)
-                .with_context(|| format!("object {} {} has no number", id.0, id.1))?;
+                .with_context(|| format!("object {id} has no number"))?;
             moved.insert(id, at);
             taken.push((at, key, obj));
         }
-        let mut to = |r: ObjectId| match r.0 < NUMBERS {
+        let mut to = |r: ObjectId| match r.number < NUMBERS {
             true => Some(r),
             false => moved.get(&r).copied(),
         };
         for (&id, obj) in objects.iter_mut() {
             let mut named = false;
             follow(obj, &mut |r| {
-                named |= r.0 >= NUMBERS;
+                named |= r.number >= NUMBERS;
                 to(r)
             });
             if named {
@@ -140,9 +155,9 @@ impl Graph {
             objects.insert(at, obj);
             self.keys.insert(at, key);
         }
-        let mut trailer = Object::Dictionary(std::mem::take(&mut self.pdf.trailer));
+        let mut trailer = Object::from(std::mem::take(&mut self.pdf.trailer));
         follow(&mut trailer, &mut to);
-        if let Object::Dictionary(trailer) = trailer {
+        if let Value::Dict(trailer) = trailer.into_value() {
             self.pdf.trailer = trailer;
         }
         Ok(count)
@@ -161,7 +176,7 @@ pub fn rewrite_graph(
     primary: &Source,
     mut pdf: Pdf,
 ) -> Result<Graph> {
-    if let Ok(at) = pdf.trailer.get(b"Encrypt").and_then(Object::as_reference) {
+    if let Some(at) = pdf.trailer.get(b"Encrypt").and_then(Object::as_reference) {
         pdf.objects.remove(&at);
     }
     pdf.trailer.remove(b"Encrypt");
@@ -187,20 +202,16 @@ pub fn rewrite_graph(
                 obj
             }
             SymObject::Deferred(d) => {
-                let mut dict = Object::Dictionary(d.dict.clone());
+                let mut dict = Object::from(d.dict.clone());
                 resolve(&mut dict, syms, numbers);
-                let Object::Dictionary(dict) = dict else {
+                let Value::Dict(dict) = dict.into_value() else {
                     unreachable!("a dictionary resolves to one")
                 };
                 graph.deferred.insert(at, d);
-                Object::Stream(Stream::new(dict, Vec::new()))
+                Object::from(Stream::new(dict, Vec::new()))
             }
             SymObject::Raw(r) if r.src.id() == primary.id() && r.id == at => continue,
-            SymObject::Raw(r) => bail!(
-                "object {} {} of another file can't be written as it is",
-                r.id.0,
-                r.id.1
-            ),
+            SymObject::Raw(r) => bail!("object {} of another file can't be written as it is", r.id),
         };
         graph.pdf.objects.insert(at, obj);
         graph.keys.insert(at, key);
@@ -212,7 +223,7 @@ pub fn rewrite_graph(
     // but for what a full write leaves out, which nothing names.
     let last = (graph.pdf.objects.iter())
         .filter(|(_, obj)| !crate::serialize::full::left_out(obj))
-        .map(|(id, _)| id.0)
+        .map(|(id, _)| id.number)
         .max()
         .unwrap_or(0);
     graph.pdf.max_id = last.max(numbers.start() - 1);
@@ -237,22 +248,23 @@ pub fn release_written(
         let annots = match pdf
             .get_dictionary(page)
             .ok()
-            .and_then(|d| d.get(b"Annots").ok())
+            .and_then(|d| d.get(b"Annots"))
+            .map(Object::value)
         {
-            Some(Object::Reference(r)) => *r,
-            Some(Object::Array(_)) => page,
+            Some(Value::Ref(r)) => *r,
+            Some(Value::Array(_)) => page,
             _ => continue,
         };
-        let list = match pdf.objects.get_mut(&annots) {
-            Some(Object::Array(list)) => list,
-            Some(Object::Dictionary(d)) => match d.get_mut(b"Annots") {
-                Ok(Object::Array(list)) => list,
-                _ => continue,
+        let list = match pdf.objects.get_mut(&annots).map(Object::value_mut) {
+            Some(Value::Array(list)) => list,
+            Some(Value::Dict(d)) => match d.get_mut(b"Annots").and_then(Object::as_array_mut) {
+                Some(list) => list,
+                None => continue,
             },
             _ => continue,
         };
         let was = list.len();
-        list.retain(|a| a.as_reference().map_or(true, |r| !written.contains(&r)));
+        list.retain(|a| a.as_reference().is_none_or(|r| !written.contains(&r)));
         if list.len() != was {
             changed.insert(annots);
         }
@@ -298,7 +310,7 @@ pub fn page_uses(
 /// Object `id`, met on page `i`'s walk, put on `stack` to go into when
 /// it's unused or another page's alone, and its use changed.
 fn meet(uses: &mut HashMap<u32, Use>, stack: &mut Vec<ObjectId>, id: ObjectId, i: u32) {
-    let used = uses.entry(id.0).or_insert(Use::None);
+    let used = uses.entry(id.number).or_insert(Use::None);
     *used = match *used {
         Use::None => Use::Page(i),
         Use::Page(j) if j != i => Use::Shared,
@@ -320,25 +332,14 @@ fn resolve(obj: &mut Object, syms: &Syms, numbers: &Numbers) {
 /// `obj` with each reference `to` gives a number for at that number, and
 /// any other null.
 fn follow(obj: &mut Object, to: &mut dyn FnMut(ObjectId) -> Option<ObjectId>) {
-    match obj {
-        Object::Reference(r) => {
-            *obj = match to(*r) {
-                Some(id) => Object::Reference(id),
-                None => Object::Null,
-            }
-        }
-        Object::Array(items) => items.iter_mut().for_each(|o| follow(o, to)),
-        Object::Dictionary(d) => d.iter_mut().for_each(|(_, o)| follow(o, to)),
-        Object::Stream(s) => s.dict.iter_mut().for_each(|(_, o)| follow(o, to)),
-        _ => {}
-    }
+    obj.renumber(to);
 }
 
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
 
-    use lopdf::dictionary;
+    use crate::pdf::dictionary;
 
     use super::*;
     use crate::materialize::append::refs;
@@ -363,37 +364,43 @@ mod tests {
     /// every page names as its `/Parent`, isn't walked.
     #[test]
     fn page_uses_descends_each_object_at_most_twice() {
-        let root = (5000, 0);
-        let pages: Vec<ObjectId> = (1..=1000).map(|n| (n, 0)).collect();
+        let root = ObjectId::new(5000, 0);
+        let pages: Vec<ObjectId> = (1..=1000).map(|n| ObjectId::new(n, 0)).collect();
         let mut objects = HashMap::new();
         for (i, &page) in pages.iter().enumerate() {
             let next = pages.get(i + 1).copied().unwrap_or(pages[0]);
-            let dest = Object::Array(vec![next.into(), "Fit".into()]);
-            let page_dict =
-                dictionary! { "Parent" => root, "Contents" => (1001, 0), "Dest" => dest };
-            objects.insert(page, Object::Dictionary(page_dict));
+            let dest = Object::from(vec![Object::from(next), Object::name("Fit")]);
+            let page_dict = dictionary! {
+                "Parent" => root,
+                "Contents" => ObjectId::new(1001, 0),
+                "Dest" => dest,
+            };
+            objects.insert(page, Object::from(page_dict));
         }
         for n in 1001..=2000 {
-            let link = dictionary! { "Next" => (n + 1, 0), "Page" => (1, 0) };
-            objects.insert((n, 0), Object::Dictionary(link));
+            let link = dictionary! {
+                "Next" => ObjectId::new(n + 1, 0),
+                "Page" => ObjectId::new(1, 0),
+            };
+            objects.insert(ObjectId::new(n, 0), Object::from(link));
         }
         let kids: Vec<Object> = pages.iter().map(|&p| p.into()).collect();
-        objects.insert(root, Object::Dictionary(dictionary! { "Kids" => kids }));
+        objects.insert(root, Object::from(dictionary! { "Kids" => kids }));
         let stop: HashSet<ObjectId> = pages.iter().copied().chain([root]).collect();
         let walked = RefCell::default();
         let uses = page_uses(&pages, &stop, counted(&objects, &walked));
         let walked = walked.into_inner();
         for (i, page) in (0..).zip(&pages) {
-            assert_eq!(uses[&page.0], Use::Page(i));
+            assert_eq!(uses[&page.number], Use::Page(i));
             assert_eq!(walked[page], 1, "page {i}");
         }
         for n in 1001..=2000 {
             assert_eq!(uses[&n], Use::Shared, "{n}");
-            assert_eq!(walked[&(n, 0)], 2, "{n}");
+            assert_eq!(walked[&ObjectId::new(n, 0)], 2, "{n}");
         }
         assert_eq!(uses[&2001], Use::Shared, "named, if not there");
-        assert_eq!(walked[&(2001, 0)], 2);
-        assert!(!uses.contains_key(&root.0) && !walked.contains_key(&root));
+        assert_eq!(walked[&ObjectId::new(2001, 0)], 2);
+        assert!(!uses.contains_key(&root.number) && !walked.contains_key(&root));
         assert_eq!(uses.len(), 2001);
     }
 
@@ -403,10 +410,10 @@ mod tests {
     /// order, the shared, then what no page reaches.
     #[test]
     fn page_uses_sorts_objects_by_their_pages() {
-        let r = |n: u32| Object::Reference((n, 0));
+        let r = |n: u32| Object::from(ObjectId::new(n, 0));
         let page = |contents, resources, annots: Vec<Object>| {
-            Object::Dictionary(dictionary! {
-                "Type" => "Page",
+            Object::from(dictionary! {
+                "Type" => Object::name("Page"),
                 "Parent" => r(1),
                 "Contents" => r(contents),
                 "Resources" => r(resources),
@@ -416,26 +423,26 @@ mod tests {
         let objects: HashMap<ObjectId, Object> = [
             (
                 50,
-                dictionary! { "Type" => "Catalog", "Pages" => r(1) }.into(),
+                dictionary! { "Type" => Object::name("Catalog"), "Pages" => r(1) }.into(),
             ),
             (1, dictionary! { "Kids" => vec![r(2), r(3), r(4)] }.into()),
             (2, page(10, 11, vec![r(12)])),
             (3, page(20, 11, vec![r(21)])),
             (4, page(30, 31, vec![])),
-            (10, Object::Integer(10)),
+            (10, Object::from(10)),
             (11, dictionary! { "Font" => r(13) }.into()),
             (
                 12,
-                dictionary! { "P" => r(2), "Dest" => vec![r(3), "Fit".into()] }.into(),
+                dictionary! { "P" => r(2), "Dest" => vec![r(3), Object::name("Fit")] }.into(),
             ),
             (13, dictionary! { "Back" => r(11) }.into()),
-            (20, Object::Integer(20)),
+            (20, Object::from(20)),
             (
                 21,
                 dictionary! { "P" => r(3), "Parent" => r(1), "Popup" => r(22) }.into(),
             ),
             (22, dictionary! { "Parent" => r(21) }.into()),
-            (30, Object::Integer(30)),
+            (30, Object::from(30)),
             (31, dictionary! { "Loop" => r(32) }.into()),
             (
                 32,
@@ -444,10 +451,10 @@ mod tests {
             (40, dictionary! { "Orphan" => r(10) }.into()),
         ]
         .into_iter()
-        .map(|(n, obj)| ((n, 0), obj))
+        .map(|(n, obj)| (ObjectId::new(n, 0), obj))
         .collect();
-        let pages = [(2, 0), (3, 0), (4, 0)];
-        let stop: HashSet<ObjectId> = pages.iter().copied().chain([(1, 0)]).collect();
+        let pages = [2, 3, 4].map(|n| ObjectId::new(n, 0));
+        let stop: HashSet<ObjectId> = pages.iter().copied().chain([ObjectId::new(1, 0)]).collect();
         let uses = page_uses(&pages, &stop, |id, to| {
             if let Some(obj) = objects.get(&id) {
                 refs(obj, to);
@@ -472,8 +479,8 @@ mod tests {
         ];
         assert_eq!(got, want);
         let all = objects.keys().map(|id| {
-            let used = got.iter().find(|(n, _)| *n == id.0).map(|&(_, u)| u);
-            (id.0, used.unwrap_or(Use::None))
+            let used = got.iter().find(|(n, _)| *n == id.number).map(|&(_, u)| u);
+            (id.number, used.unwrap_or(Use::None))
         });
         assert_eq!(
             group(all),

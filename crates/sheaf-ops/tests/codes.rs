@@ -9,8 +9,8 @@ mod common;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_image::codes::fixture::{Degradation::Threshold, degrade};
 use sheaf_image::codes::{self, Code, PageCodes, Patch, Reader as _, Symbology};
 use sheaf_render::Renderer;
@@ -80,8 +80,10 @@ fn real_text_page() -> Vec<u8> {
     let mut pdf = Pdf::with_version("1.7");
     let font = |pdf: &mut Pdf, name: &str| {
         pdf.add_object(dictionary! {
-            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => name,
-            "Encoding" => "WinAnsiEncoding",
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name(name),
+            "Encoding" => Object::name("WinAnsiEncoding"),
         })
     };
     let (regular, bold) = (
@@ -91,17 +93,18 @@ fn real_text_page() -> Vec<u8> {
     let pages = pdf.new_object_id();
     let contents = pdf.add_object(Stream::new(dictionary! {}, content.into_bytes()));
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page", "Parent" => pages, "Contents" => contents,
+        "Type" => Object::name("Page"), "Parent" => pages, "Contents" => contents,
         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         "Resources" => dictionary! { "Font" => dictionary! { "F1" => regular, "F2" => bold } },
     });
     pdf.objects.insert(
         pages,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1,
         }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();

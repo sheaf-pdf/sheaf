@@ -6,8 +6,8 @@
 
 use std::path::Path;
 
+use crate::pdf::{Document as Pdf, LazyPdf, Object, StreamExt, XrefKind, dictionary, literal};
 use in_progress::NoProgress;
-use lopdf::{Document as Pdf, LazyPdf, Object, StringFormat, XrefKind, dictionary};
 use sheaf_edit::{OutlinePolicy, PageNumbering, Rotation, Turn};
 
 use super::*;
@@ -81,9 +81,9 @@ fn run_it(e: Export) -> Result<Exported, ExportError> {
 }
 
 /// The subtypes of the annotations `pdf`'s page `page` lists, sorted.
-fn subtypes(pdf: &Pdf, page: lopdf::ObjectId) -> Vec<String> {
+fn subtypes(pdf: &Pdf, page: crate::pdf::ObjectId) -> Vec<String> {
     let dict = pdf.get_dictionary(page).unwrap();
-    let Ok(annots) = dict.get(b"Annots") else {
+    let Some(annots) = dict.get(b"Annots") else {
         return Vec::new();
     };
     let annots = pdf.dereference(annots).unwrap().1.as_array().unwrap();
@@ -110,31 +110,31 @@ fn clean_copy_strips_markup_only() {
         let mut pdf = Pdf::load(&a_path).unwrap();
         let page0 = pdf.get_pages()[&1];
         let rect = |a: f32, b: f32, c: f32, d: f32| {
-            Object::Array(vec![a.into(), b.into(), c.into(), d.into()])
+            Object::from(vec![a.into(), b.into(), c.into(), d.into()])
         };
         let note = pdf.new_object_id();
         let popup = pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Popup", "Rect" => rect(0.0, 0.0, 100.0, 100.0), "Parent" => note,
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Popup"), "Rect" => rect(0.0, 0.0, 100.0, 100.0), "Parent" => note,
         });
         pdf.objects.insert(
             note,
-            Object::Dictionary(dictionary! {
-                "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(10.0, 700.0, 30.0, 720.0),
-                "Contents" => Object::String(b"reviewer note".to_vec(), StringFormat::Literal),
+            Object::from(dictionary! {
+                "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "Rect" => rect(10.0, 700.0, 30.0, 720.0),
+                "Contents" => literal(b"reviewer note"),
                 "Popup" => popup,
             }),
         );
         let link = pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Link", "Rect" => rect(0.0, 0.0, 50.0, 20.0),
-            "Dest" => Object::Array(vec![page0.into(), Object::Name(b"Fit".to_vec())]),
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"), "Rect" => rect(0.0, 0.0, 50.0, 20.0),
+            "Dest" => Object::from(vec![page0.into(), Object::name("Fit")]),
         });
         let field = pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Widget", "FT" => "Tx", "T" => Object::String(b"name".to_vec(), StringFormat::Literal),
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Widget"), "FT" => Object::name("Tx"), "T" => literal(b"name"),
             "Rect" => rect(100.0, 100.0, 300.0, 120.0),
         });
         pdf.get_dictionary_mut(page0).unwrap().set(
             "Annots",
-            Object::Array(vec![note.into(), popup.into(), link.into(), field.into()]),
+            Object::from(vec![note.into(), popup.into(), link.into(), field.into()]),
         );
         pdf.save(&a_path).unwrap();
     }
@@ -188,11 +188,11 @@ fn clean_copy_strips_markup_only() {
     assert_eq!(subtypes(&pdf, pages[&1]), ["Link", "Widget"]);
     assert!(!pdf.get_dictionary(pages[&2]).unwrap().has(b"Annots"));
     let rotate = pdf.get_dictionary(pages[&2]).unwrap().get(b"Rotate");
-    assert_eq!(rotate.unwrap().as_i64().unwrap(), 90);
+    assert_eq!(rotate.unwrap().as_integer().unwrap(), 90);
     // Nothing markup-shaped survives anywhere in the file.
     for obj in pdf.objects.values() {
-        if let Ok(d) = obj.as_dict()
-            && let Ok(s) = d.get(b"Subtype").and_then(|s| s.as_name())
+        if let Some(d) = obj.as_dict()
+            && let Some(s) = d.get(b"Subtype").and_then(Object::as_name)
         {
             assert!(
                 !matches!(s, b"Text" | b"Popup" | b"Stamp"),
@@ -200,7 +200,7 @@ fn clean_copy_strips_markup_only() {
                 String::from_utf8_lossy(s)
             );
         }
-        if let Ok(d) = obj.as_dict() {
+        if let Some(d) = obj.as_dict() {
             assert!(!d.has(b"SHEF_Annot"));
         }
     }
@@ -371,7 +371,7 @@ fn print_flattens_or_drops_markup() {
     let annots = with.get_page_annotations(first).unwrap_or_default();
     assert!(annots.is_empty());
     assert!(content.contains(" Do"), "{content}");
-    assert!(with.catalog().unwrap().get(b"Outlines").is_err());
+    assert!(with.catalog().unwrap().get(b"Outlines").is_none());
     assert!(!with.is_encrypted());
     let without = print(&[ids[1]], false);
     let only = without.get_pages()[&1];
@@ -392,8 +392,8 @@ fn flattened_copy_burns_marks_into_content() {
     let name = f.text("Name", 0, [100.0, 600.0, 300.0, 620.0]);
     f.fill(name, "Ada");
     let link = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Link",
-        "Rect" => Object::Array(vec![0.into(), 0.into(), 50.into(), 20.into()]),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"),
+        "Rect" => Object::from(vec![0.into(), 0.into(), 50.into(), 20.into()]),
     });
     let mut annots = f.annots(0);
     annots.push(link);
@@ -412,11 +412,14 @@ fn flattened_copy_burns_marks_into_content() {
     // Only the link remains as an annotation, and the form has no field.
     assert_eq!(subtypes(&pdf, page), ["Link"]);
     assert!(annots_read(&bytes).sheaf().is_empty());
-    let fields = (pdf.catalog().unwrap().get(b"AcroForm").ok())
+    let fields = pdf
+        .catalog()
+        .unwrap()
+        .get(b"AcroForm")
         .and_then(|f| pdf.dereference(f).ok())
         .and_then(|(_, f)| {
-            let fields = f.as_dict().ok()?.get(b"Fields").ok()?;
-            fields.as_array().ok().cloned()
+            let fields = f.as_dict()?.get(b"Fields")?;
+            fields.as_array().map(<[Object]>::to_vec)
         });
     assert_eq!(fields.unwrap_or_default(), []);
     // The content draws a form for each, which the page's resources name:
@@ -687,12 +690,12 @@ fn exports_of_a_stream_file_pack_and_of_a_table_don_t() {
             );
             let xref = pdf.xref().max_stream;
             let last = (pdf.ids())
-                .filter(|id| !containers.contains(id) && Some(id.0) != xref)
-                .map(|id| id.0)
+                .filter(|id| !containers.contains(id) && Some(id.number) != xref)
+                .map(|id| id.number)
                 .max()
                 .unwrap();
             assert!(
-                containers.iter().all(|c| c.0 > last),
+                containers.iter().all(|c| c.number > last),
                 "{what}: {containers:?}, objects to {last}"
             );
         }

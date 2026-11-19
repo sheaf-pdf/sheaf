@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use futures::executor::block_on;
-use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::materialize::AskAnswers;
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::realize::ViewInputs;
 use sheaf_doc::serialize::fixture::revision_cut_out;
 use sheaf_doc::store::BlobKind;
@@ -46,7 +46,9 @@ fn mixed() -> Vec<u8> {
     let mut pdf = Pdf::with_version("1.5");
     let pages_id = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     });
     let contents = [
         "BT /F1 12 Tf 72 700 Td (Statement of account for the year) Tj 0 -16 Td (More lines of real content here) Tj ET".to_string(),
@@ -62,13 +64,13 @@ fn mixed() -> Vec<u8> {
         .map(|(i, c)| {
             let content = pdf.add_object(Stream::new(dictionary! {}, c.clone().into_bytes()));
             let mut page = dictionary! {
-                "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+                "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
                 "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
                 "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
             };
             if i == 3 {
                 let link = pdf.add_object(dictionary! {
-                    "Type" => "Annot", "Subtype" => "Link",
+                    "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"),
                     "Rect" => vec![100.into(), 100.into(), 200.into(), 120.into()],
                 });
                 page.set("Annots", vec![link.into()]);
@@ -79,9 +81,10 @@ fn mixed() -> Vec<u8> {
     let n = kids.len() as i64;
     pdf.objects.insert(
         pages_id,
-        dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => n }.into(),
+        dictionary! { "Type" => Object::name("Pages"), "Kids" => kids, "Count" => n }.into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();

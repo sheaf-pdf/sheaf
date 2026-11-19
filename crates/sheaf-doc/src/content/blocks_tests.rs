@@ -6,7 +6,9 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
+use crate::pdf::{
+    Dictionary, Document as Pdf, Object, ObjectId, Stream, StreamExt, dictionary, literal,
+};
 
 use super::*;
 use crate::source::Limits;
@@ -34,9 +36,12 @@ fn span_of(s: &[u8], part: &[u8]) -> SpanAcross {
 #[test]
 fn marked_ranges_have_their_lists() {
     let mut pdf = Pdf::with_version("1.7");
-    let ocg = pdf.add_object(dictionary! { "Type" => "OCG" });
+    let ocg = pdf.add_object(dictionary! { "Type" => Object::name("OCG") });
     let resources: Object = dictionary! {
-        "Properties" => dictionary! { "P0" => dictionary! { "Subtype" => "Header" }, "oc1" => ocg },
+        "Properties" => dictionary! {
+            "P0" => dictionary! { "Subtype" => Object::name("Header") },
+            "oc1" => ocg,
+        },
     }
     .into();
     let props = PropertiesDict::read(&pdf, Some(&resources));
@@ -56,30 +61,23 @@ fn marked_ranges_have_their_lists() {
     let Some(Props::Inline(list)) = &m[0].props else {
         panic!("{:?}", m[0].props)
     };
-    assert_eq!(
-        list.get(b"Subtype").unwrap(),
-        &Object::Name(b"Footer".to_vec())
-    );
+    assert_eq!(list.get(b"Subtype").unwrap(), &Object::name(b"Footer"));
     assert_eq!(
         list.get(b"A").unwrap(),
-        &Object::Array(vec![
-            1.into(),
-            Object::string_literal("b)"),
-            Object::String(vec![10], lopdf::StringFormat::Hexadecimal),
-        ])
+        &Object::from(vec![1.into(), literal("b)"), Object::hex(vec![10]),])
     );
     // Named lists, found or not.
     assert_eq!(
         m[1].props,
         Some(Props::Named(
             b"oc1".to_vec(),
-            Some(dictionary! { "Type" => "OCG" })
+            Some(dictionary! { "Type" => Object::name("OCG") })
         ))
     );
     assert_eq!(m[2].props, None);
     assert_eq!(
         m[3].props.as_ref().and_then(Props::dict),
-        Some(&dictionary! { "Subtype" => "Header" })
+        Some(&dictionary! { "Subtype" => Object::name("Header") })
     );
     assert_eq!(m[4].props, Some(Props::Named(b"None".to_vec(), None)));
 }
@@ -425,7 +423,7 @@ fn content_with(c: &Concat, groups: &[Vec<SpanAcross>], rewrites: &[Rewrite]) ->
 /// escape, and a dictionary inside it, whose own keys are its own.
 #[test]
 fn a_list_is_written_again_without_its_keys() {
-    // As lopdf wrote them, with no space between entries.
+    // With no space between entries.
     let s: &[u8] = b"/Artifact <</Type/Pagination/Subtype/Watermark/SHEF_Gen true\
         /SHEF_OcrBlock({\"path\":\"/home/me/logo.png\"})>> BDC\nq\n/GS0 gs Q\nEMC\n";
     let (rewrite, made) = rewritten(&[s]).unwrap();
@@ -543,7 +541,7 @@ fn blocks_of(
         .iter()
         .map(|(dict, data)| pdf.add_object(Stream::new(dict.clone(), data.to_vec())))
         .collect();
-    let resources = Object::Dictionary(resources);
+    let resources = Object::from(resources);
     let blocks =
         PageBlocks::read(&*pdf, &ids, Some(&resources), LIM, &DrawnForms::default()).unwrap();
     (blocks, ids)
@@ -561,21 +559,23 @@ fn origins(blocks: &PageBlocks) -> Vec<(PaginationKind, PagOrigin)> {
 fn sheafs_blocks_are_found_by_their_markers() {
     let mut pdf = Pdf::with_version("1.7");
     let gen_list = dictionary! {
-        "Type" => "Pagination", "Subtype" => "Header", "SHEF_Gen" => Object::string_literal("g1f"),
+        "Type" => Object::name("Pagination"),
+        "Subtype" => Object::name("Header"),
+        "SHEF_Gen" => literal("g1f"),
     };
     let resources = dictionary! { "Properties" => dictionary! {
         "ShP0" => gen_list,
-        "ShP1" => dictionary! { "SHEF_OcrBlock" => Object::string_literal("b2a") },
+        "ShP1" => dictionary! { "SHEF_OcrBlock" => literal("b2a") },
     } };
     let block = |k: &str, key: &str, id: &str| {
-        dictionary! { "SHEF_Block" => dictionary! { "K" => k, key => Object::string_literal(id) } }
+        dictionary! { "SHEF_Block" => dictionary! { "K" => Object::name(k), key => literal(id) } }
     };
     let gen_stream: &[u8] = b"/Artifact /ShP0 BDC (Head) Tj EMC";
     let (blocks, ids) = blocks_of(
         &mut pdf,
         &[
             (
-                dictionary! { "SHEF_Block" => dictionary! { "K" => "Isolate" } },
+                dictionary! { "SHEF_Block" => dictionary! { "K" => Object::name("Isolate") } },
                 b"q q",
             ),
             (
@@ -583,7 +583,7 @@ fn sheafs_blocks_are_found_by_their_markers() {
                 b"0 g /Artifact /ShP0 BDC (merged) Tj EMC /ShOCR /ShP1 BDC EMC",
             ),
             (
-                dictionary! { "SHEF_Block" => dictionary! { "K" => "Isolate" } },
+                dictionary! { "SHEF_Block" => dictionary! { "K" => Object::name("Isolate") } },
                 b"Q Q",
             ),
             (block("Gen", "G", "g1f"), gen_stream),
@@ -675,14 +675,19 @@ fn a_block_id_round_trips() {
 fn acrobat_resources(pdf: &mut Pdf, private: &str, inner: &[u8]) -> Dictionary {
     let piece = pdf.add_object(dictionary! {
         "ADBE_CompoundType" => dictionary! {
-            "DocSettings" => dictionary! {}, "Private" => Object::Name(private.as_bytes().to_vec()),
+            "DocSettings" => dictionary! {},
+            "Private" => Object::name(private),
         },
     });
     let form = |pdf: &mut Pdf, extra: Dictionary, content: &[u8]| {
         let mut dict = dictionary! {
-            "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(), 0.into(), 9.into(), 9.into()],
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
+            "BBox" => vec![0.into(), 0.into(), 9.into(), 9.into()],
         };
-        dict.extend(&extra);
+        for (k, v) in &extra {
+            dict.set(k, v.clone());
+        }
         pdf.add_object(Stream::new(dict, content.to_vec()))
     };
     let xi0 = form(
@@ -762,17 +767,28 @@ fn a_pages_blocks_are_read_once_and_name_the_page() {
     let unended = pdf.add_object(Stream::new(dictionary! {}, b"/A BMC".to_vec()));
     let kids: Vec<Object> = [good, unended]
         .map(|c| {
-            pdf.add_object(dictionary! { "Type" => "Page", "Parent" => pages, "Contents" => c })
-                .into()
+            pdf.add_object(dictionary! {
+                "Type" => Object::name("Page"),
+                "Parent" => pages,
+                "Contents" => c,
+            })
+            .into()
         })
         .to_vec();
     pdf.objects.insert(
         pages,
-        dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => 2,
-        "MediaBox" => vec![0.into(), 0.into(), 9.into(), 9.into()] }
+        dictionary! {
+            "Type" => Object::name("Pages"),
+            "Kids" => kids,
+            "Count" => 2,
+            "MediaBox" => vec![0.into(), 0.into(), 9.into(), 9.into()],
+        }
         .into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    let catalog = pdf.add_object(dictionary! {
+        "Type" => Object::name("Catalog"),
+        "Pages" => pages,
+    });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
@@ -802,11 +818,13 @@ fn forms_are_read_once_and_within_the_pages_cap() {
     let mut pdf = Pdf::with_version("1.7");
     let form = |pdf: &mut Pdf, content: Vec<u8>| {
         let dict = dictionary! {
-            "Type" => "XObject", "Subtype" => "Form", "Resources" => dictionary! {},
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
+            "Resources" => dictionary! {},
             "BBox" => vec![0.into(), 0.into(), 9.into(), 9.into()],
         };
         let mut stream = Stream::new(dict, content);
-        stream.compress().unwrap();
+        stream.compress();
         pdf.add_object(stream)
     };
     let big = form(&mut pdf, b"0 0 m 9 9 l S\n".repeat(600_000));
@@ -817,7 +835,7 @@ fn forms_are_read_once_and_within_the_pages_cap() {
         draws.extend(format!("/X{i} Do ").bytes());
     }
     let page = pdf.add_object(Stream::new(dictionary! {}, draws.clone()));
-    let resources = Object::Dictionary(dictionary! { "XObject" => names });
+    let resources = Object::from(dictionary! { "XObject" => names });
     let known = DrawnForms::default();
     let started = std::time::Instant::now();
     for _ in 0..50 {
@@ -847,7 +865,7 @@ fn forms_are_read_once_and_within_the_pages_cap() {
     assert_eq!(fresh.nested_known(big), Some(true));
     // The page's share spent on the first form, the second isn't read.
     let small = [0, 1].map(|_| form(&mut pdf, b"0 0 m 9 9 l S\n".repeat(20)));
-    let resources = Object::Dictionary(dictionary! {
+    let resources = Object::from(dictionary! {
         "XObject" => dictionary! { "A" => small[0], "B" => small[1] },
     });
     let content = [&b"/A Do /B Do %"[..], &[b'-'; 400]].concat();

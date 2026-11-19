@@ -14,8 +14,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use common::{ok, run, scratch};
-use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_doc::content::Marker;
+use sheaf_doc::pdf::{Document as Pdf, Object, ObjectId, Stream, Value, dictionary};
 
 /// Each page's heading, the words OCR must find there, and its body: the
 /// size it's set in and enough ordinary lines for orientation detection
@@ -149,7 +149,7 @@ fn scan_ocr_finds_the_words_in_one_block_a_page_and_one_font() {
             .into_iter()
             .filter(|&id| {
                 (pdf.get_object(id).ok())
-                    .and_then(|o| Marker::of(&o.as_stream().ok()?.dict))
+                    .and_then(|o| Marker::of(&o.as_stream()?.dict))
                     .is_some_and(|m| matches!(m, Marker::Ocr(_)))
             })
             .count();
@@ -158,7 +158,7 @@ fn scan_ocr_finds_the_words_in_one_block_a_page_and_one_font() {
         let font = (pdf.dereference(resources).unwrap().1.as_dict().unwrap())
             .get(b"Font")
             .unwrap();
-        for (_, f) in pdf.dereference(font).unwrap().1.as_dict().unwrap() {
+        for (_, f) in pdf.dereference(font).unwrap().1.as_dict().unwrap().iter() {
             fonts.insert(f.as_reference().unwrap());
         }
     }
@@ -174,12 +174,12 @@ fn scan_ocr_finds_the_words_in_one_block_a_page_and_one_font() {
 /// The ids of `page`'s content streams.
 fn contents(pdf: &Pdf, page: ObjectId) -> Vec<ObjectId> {
     let contents = pdf.get_dictionary(page).unwrap().get(b"Contents").unwrap();
-    match contents {
-        Object::Reference(id) => match pdf.get_object(*id).unwrap() {
-            Object::Array(items) => items.iter().map(|o| o.as_reference().unwrap()).collect(),
+    match contents.value() {
+        Value::Ref(id) => match pdf.get_object(*id).unwrap().value() {
+            Value::Array(items) => items.iter().map(|o| o.as_reference().unwrap()).collect(),
             _ => vec![*id],
         },
-        Object::Array(items) => items.iter().map(|o| o.as_reference().unwrap()).collect(),
+        Value::Array(items) => items.iter().map(|o| o.as_reference().unwrap()).collect(),
         other => panic!("/Contents is {other:?}"),
     }
 }
@@ -190,7 +190,9 @@ fn letters(dir: &Path) -> PathBuf {
     let mut pdf = Pdf::with_version("1.7");
     let pages_id = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     });
     let kids: Vec<Object> = PAGES
         .iter()
@@ -202,7 +204,7 @@ fn letters(dir: &Path) -> PathBuf {
             }
             let content = pdf.add_object(Stream::new(dictionary! {}, content.into_bytes()));
             pdf.add_object(dictionary! {
-                "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+                "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
                 "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
                 "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
             })
@@ -211,9 +213,10 @@ fn letters(dir: &Path) -> PathBuf {
         .collect();
     pdf.objects.insert(
         pages_id,
-        dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => 3 }.into(),
+        dictionary! { "Type" => Object::name("Pages"), "Kids" => kids, "Count" => 3 }.into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
     let path = dir.join("letters.pdf");
     pdf.save(&path).unwrap();

@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::pdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
 use in_progress::NoProgress;
-use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
 use sheaf_edit::{Rotation, Turn};
 
 use super::append;
@@ -73,25 +73,32 @@ pub(super) fn text_file(pages: usize) -> Vec<u8> {
     let mut pdf = Pdf::with_version("1.7");
     let root = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
     });
     let kids: Vec<Object> = (0..pages)
         .map(|n| {
             let text = format!("BT /F1 24 Tf 72 72 Td (page {n}) Tj ET");
             let content = pdf.add_object(Stream::new(dictionary! {}, text.into_bytes()));
-            let page = dictionary! { "Type" => "Page", "Parent" => root, "Contents" => content };
+            let page = dictionary! {
+                "Type" => Object::name("Page"),
+                "Parent" => root,
+                "Contents" => content,
+            };
             pdf.add_object(page).into()
         })
         .collect();
     pdf.objects.insert(
         root,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => kids, "Count" => pages as i64,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"), "Kids" => kids, "Count" => pages as i64,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
         }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => root });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
@@ -546,14 +553,14 @@ fn marked_in(path: &Path) -> usize {
     let pdf = Pdf::load(path).unwrap();
     let page = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
     let contents = pdf.dereference(page.get(b"Contents").unwrap()).unwrap().1;
-    let entries = match contents {
-        Object::Array(a) => a.clone(),
-        _ => vec![page.get(b"Contents").unwrap().clone()],
+    let entries = match contents.as_array() {
+        Some(a) => a.to_vec(),
+        None => vec![page.get(b"Contents").unwrap().clone()],
     };
     (entries.iter())
         .filter(|e| {
             (pdf.dereference(e).ok()).is_some_and(|(_, o)| {
-                (o.as_stream()).is_ok_and(|s| super::ocr_tests::ocr_block(&s.dict).is_some())
+                (o.as_stream()).is_some_and(|s| super::ocr_tests::ocr_block(&s.dict).is_some())
             })
         })
         .count()
@@ -654,17 +661,20 @@ fn form_file(
     let form = pdf.add_object(form_stream(font, shows));
     let content = pdf.add_object(Stream::new(dictionary! {}, b"q /Fm0 Do Q".to_vec()));
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page", "Parent" => root, "Contents" => content,
+        "Type" => Object::name("Page"), "Parent" => root, "Contents" => content,
         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         "Resources" => dictionary! { "XObject" => dictionary! { "Fm0" => form } },
     });
     pdf.objects.insert(
         root,
-        Object::Dictionary(
-            dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 },
-        ),
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"),
+            "Kids" => vec![page.into()],
+            "Count" => 1,
+        }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => root });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
@@ -693,7 +703,7 @@ fn to_unicode(cmap: &str) -> Stream {
 /// at `font`.
 fn form_stream(font: ObjectId, shows: &str) -> Stream {
     let dict = dictionary! {
-        "Type" => "XObject", "Subtype" => "Form",
+        "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"),
         "BBox" => vec![0.into(), 0.into(), 300.into(), 100.into()],
         "Resources" => dictionary! { "Font" => dictionary! { "F" => font } },
     };
@@ -715,7 +725,7 @@ fn checked(
     let mut objects = BTreeMap::new();
     let mut next = old.xref().size;
     let mut add = |objects: &mut BTreeMap<ObjectId, (ObjKey, Object)>, obj: Object| {
-        let at = (next, 0);
+        let at = ObjectId::new(next, 0);
         let key = ObjKey::Res(ResId(u128::from(next)));
         next += 1;
         objects.insert(at, (key, obj));
@@ -787,7 +797,7 @@ fn an_isolating_stream_that_draws_is_read() {
     let (open, close) = (ids[0], ids[2]);
     let mut stream = pdf.get_object(open).unwrap().as_stream().unwrap().clone();
     stream.dict.remove(b"Filter");
-    stream.set_content(b"q BT /F1 12 Tf 72 300 Td (Secret) Tj ET".to_vec());
+    stream.set_bytes(b"q BT /F1 12 Tf 72 300 Td (Secret) Tj ET".to_vec());
     pdf.objects.insert(open, stream.into());
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
@@ -802,7 +812,7 @@ fn an_isolating_stream_that_draws_is_read() {
         let mut dict = old.get_dictionary(page).unwrap().clone();
         let left: Vec<Object> = (ids.iter())
             .filter(|&&c| c != gone)
-            .map(|&c| Object::Reference(c))
+            .map(|&c| Object::from(c))
             .collect();
         dict.set("Contents", left);
         check_of(&old, &doc, page, BTreeMap::new(), dict)
@@ -824,8 +834,8 @@ fn an_isolating_stream_that_draws_is_read() {
 
 fn helvetica() -> Dictionary {
     dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
-        "Encoding" => "WinAnsiEncoding",
+        "Type" => Object::name("Font"), "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica"),
+        "Encoding" => Object::name("WinAnsiEncoding"),
     }
 }
 
@@ -860,7 +870,7 @@ fn an_unlinked_form_s_text_is_read() {
 fn an_unknown_encoding_counts_as_differing() {
     let dir = scratch();
     let symbolic = dictionary! {
-        "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "ABCDEF+Wingdings",
+        "Type" => Object::name("Font"), "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("ABCDEF+Wingdings"),
     };
     let (path, doc, page, _) = form_file(&dir, symbolic.clone(), None, "(secret)");
     let known = [(helvetica(), None, "(secret)")];
@@ -877,8 +887,8 @@ fn a_re_subset_font_with_the_same_text_passes() {
     let dir = scratch();
     let subset = |name: &str| {
         dictionary! {
-            "Type" => "Font", "Subtype" => "Type0", "BaseFont" => name,
-            "Encoding" => "Identity-H",
+            "Type" => Object::name("Font"), "Subtype" => Object::name("Type0"), "BaseFont" => Object::name(name),
+            "Encoding" => Object::name("Identity-H"),
         }
     };
     let first = "1 begincodespacerange <0000> <FFFF> endcodespacerange\n\
@@ -936,7 +946,7 @@ fn an_allowed_live_redraw_s_old_block_may_go() {
     let mut dict = old.get_dictionary(facts.id).unwrap().clone();
     let left: Vec<Object> = (facts.contents.iter())
         .filter(|&&c| c != block)
-        .map(|&c| Object::Reference(c))
+        .map(|&c| Object::from(c))
         .collect();
     dict.set("Contents", left);
     let objects = BTreeMap::from([(facts.id, (ObjKey::Page(first), dict.into()))]);

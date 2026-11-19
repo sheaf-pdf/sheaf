@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use lopdf::ObjectId;
+use crate::pdf::ObjectId;
 
 use super::field::{FieldKind, Value};
 use super::read::FileForm;

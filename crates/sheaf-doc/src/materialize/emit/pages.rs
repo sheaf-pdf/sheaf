@@ -29,8 +29,8 @@
 //! - **What sheaf draws** over the page ([`super::content`]) goes into its
 //!   `/Contents` and `/Resources` last.
 
+use crate::pdf::{Dictionary, LazyPdf, Object};
 use anyhow::{Context as _, Result};
-use lopdf::{Dictionary, LazyPdf, Object};
 
 use super::{Cx, RotatePolicy, Shown};
 use crate::geom::{Geom, Rect};
@@ -53,20 +53,20 @@ pub(crate) fn page(
     let facts = (src.page(index)).with_context(|| format!("its file has no page {index}"))?;
     let pdf = src.pdf();
     let none = Dictionary::new();
-    let base = match pdf.get(facts.id) {
-        Ok(Object::Dictionary(d)) => d,
-        Ok(Object::Stream(s)) => &s.dict,
-        _ => &none,
-    };
+    let base = pdf
+        .get(facts.id)
+        .ok()
+        .and_then(Object::as_dict)
+        .unwrap_or(&none);
     let primary = src.id() == cx.primary.id();
     let shared = Scope { src: &src, copy: 0 };
     let was = &facts.geom;
     let mut out = Dictionary::new();
-    out.set("Type", Object::Name(b"Page".to_vec()));
+    out.set("Type", Object::name("Page"));
     out.set("Parent", cx.placeholder(parent));
     let mut untagged = false;
     for (key, value) in base.iter() {
-        let keep = match key.as_slice() {
+        let keep = match key {
             b"Type" | b"Parent" => false,
             // The records' ([`super::annots`]).
             b"Annots" => false,
@@ -85,7 +85,7 @@ pub(crate) fn page(
         };
         if keep {
             let value = cx.sym(value, &shared);
-            out.set(key.clone(), value);
+            out.set(key, value);
         }
     }
     let shown = cx.shown[&id].clone();
@@ -93,10 +93,8 @@ pub(crate) fn page(
         out.set("Annots", annots);
     }
     // Required, and inherited from nowhere when it's None.
-    let resources = (facts.resources.as_deref()).map_or_else(
-        || Object::Dictionary(Dictionary::new()),
-        |r| cx.sym(r, &shared),
-    );
+    let resources = (facts.resources.as_deref())
+        .map_or_else(|| Object::from(Dictionary::new()), |r| cx.sym(r, &shared));
     out.set("Resources", resources);
     let boxes_kept = geom.media == was.media && geom.crop == was.crop;
     let as_read = |key: &[u8]| boxes_kept.then(|| effective(pdf, base, facts, key))?;
@@ -115,7 +113,7 @@ pub(crate) fn page(
     // crop what's under them: a page with no crop of its own says so.
     if cx.saved().is_some()
         && !out.has(b"CropBox")
-        && let Ok(media) = out.get(b"MediaBox").cloned()
+        && let Some(media) = out.get(b"MediaBox").cloned()
     {
         out.set("CropBox", media);
     }
@@ -123,10 +121,10 @@ pub(crate) fn page(
     // says it, however it says it (a 135 reads as 90); an overlay keeps the
     // base page's, whatever the state says.
     let own = match cx.rotate() {
-        RotatePolicy::Model => (base.get(b"Rotate").ok().cloned())
+        RotatePolicy::Model => (base.get(b"Rotate").cloned())
             .filter(|_| cx.saved().is_some() && geom.rotate == was.rotate),
         RotatePolicy::KeepBase => {
-            Some(effective(pdf, base, facts, b"Rotate").unwrap_or(Object::Integer(0)))
+            Some(effective(pdf, base, facts, b"Rotate").unwrap_or_else(|| Object::from(0i64)))
         }
     };
     match own {
@@ -147,29 +145,34 @@ pub(crate) fn page(
         out.set("UserUnit", geom.user_unit);
     }
 
-    let contents = out.get(b"Contents").ok().cloned();
+    let contents = out.get(b"Contents").cloned();
     super::content::page(cx, id, def, geom, pos, &mut out);
-    if out.get(b"Contents").ok() != contents.as_ref() {
+    let same_contents = match (out.get(b"Contents"), contents.as_ref()) {
+        (Some(a), Some(b)) => a.eq_value(b),
+        (None, None) => true,
+        _ => false,
+    };
+    if !same_contents {
         out.remove(b"Thumb");
     }
     if untagged {
         let name = cx.file_name(id);
         cx.untagged(&src, &name);
     }
-    cx.push(ObjKey::Page(id), Object::Dictionary(out));
+    cx.push(ObjKey::Page(id), Object::from(out));
     Ok(())
 }
 
 /// Page `facts`' value of the inheritable `key`, its `base` dictionary's
 /// or else the nearest on its `/Parent` chain's, references followed.
 fn effective(pdf: &LazyPdf, base: &Dictionary, facts: &PageFacts, key: &[u8]) -> Option<Object> {
-    let value = base.get(key).ok().or_else(|| {
-        (facts.parents()).find_map(|node| pdf.get_dictionary(node).ok()?.get(key).ok())
-    })?;
+    let value = base
+        .get(key)
+        .or_else(|| (facts.parents()).find_map(|node| pdf.get_dictionary(node).ok()?.get(key)))?;
     Some(pdf.dereference(value).ok()?.1.clone())
 }
 
 /// A box as written.
 fn rect(r: Rect) -> Object {
-    Object::Array([r.x0, r.y0, r.x1, r.y1].map(Object::from).to_vec())
+    Object::from([r.x0, r.y0, r.x1, r.y1].map(Object::from).to_vec())
 }

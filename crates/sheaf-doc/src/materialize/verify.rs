@@ -73,8 +73,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, StreamExt, Value};
 use anyhow::{Result, bail};
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
 
 use super::Note;
 use super::graph::Graph;
@@ -105,10 +105,9 @@ pub(crate) fn private(graph: &Graph) -> Result<()> {
         n => format!(" and {} more", n - 1),
     };
     bail!(
-        "it would hold sheaf's private data: {} in object {} {}{more}",
+        "it would hold sheaf's private data: {} in object {}{more}",
         String::from_utf8_lossy(&first.name),
-        first.at.0,
-        first.at.1,
+        first.at,
     )
 }
 
@@ -125,10 +124,9 @@ pub(crate) fn private_left(graph: &Graph) -> Option<Note> {
         n => format!(" and {} more", n - 1),
     };
     Some(Note(format!(
-        "some of sheaf's private data couldn't be taken out: {} in object {} {}{more}",
+        "some of sheaf's private data couldn't be taken out: {} in object {}{more}",
         String::from_utf8_lossy(&first.name),
-        first.at.0,
-        first.at.1,
+        first.at,
     )))
 }
 
@@ -157,12 +155,9 @@ pub(crate) fn graph(
 ) -> Result<()> {
     if stable {
         for (&at, &key) in &graph.keys {
-            if primary.in_use.contains(&at.0) && !key.is_root() && owned.get(&key) != Some(&at) {
-                bail!(
-                    "{key:?} would be written over the file's object {} {}",
-                    at.0,
-                    at.1
-                );
+            if primary.in_use.contains(&at.number) && !key.is_root() && owned.get(&key) != Some(&at)
+            {
+                bail!("{key:?} would be written over the file's object {at}");
             }
         }
     }
@@ -184,7 +179,7 @@ pub(crate) fn copied(
 ) -> Result<()> {
     let own: Vec<(&ObjectId, &Object)> = (graph.pdf.objects.iter())
         .filter(|&(id, obj)| {
-            in_use.contains(&id.0)
+            in_use.contains(&id.number)
                 && !graph.keys.contains_key(id)
                 && !graph.deferred.contains_key(id)
                 && !super::super::serialize::full::left_out(obj)
@@ -209,11 +204,7 @@ pub(crate) fn copied(
             .min()
     });
     if let Some(id) = differs {
-        bail!(
-            "the file's object {} {} would be written with other content",
-            id.0,
-            id.1
-        );
+        bail!("the file's object {id} would be written with other content");
     }
     Ok(())
 }
@@ -235,8 +226,9 @@ fn links(
     // file hasn't got: a reference to anything else was the input's. A
     // save gives no number past what a file may use.
     let given = |n: u32| n >= primary.start && n < crate::serialize::NUMBERS;
-    let lost =
-        |r: ObjectId| !resolves(r) && (given(r.0) || (in_use.contains(&r.0) && (primary.reads)(r)));
+    let lost = |r: ObjectId| {
+        !resolves(r) && (given(r.number) || (in_use.contains(&r.number) && (primary.reads)(r)))
+    };
     // What nothing reaches was pruned: every object is reached, and so is
     // every page among them. On a thread per core (8 at most).
     let all: Vec<(&ObjectId, &Object)> = objects.iter().collect();
@@ -270,103 +262,81 @@ fn links(
     let mut reached = BTreeSet::new();
     for (pages, dangling) in found {
         if let Some((id, r)) = dangling {
-            bail!(
-                "object {} {} refers to {} {}, which the file hasn't got",
-                id.0,
-                id.1,
-                r.0,
-                r.1
-            );
+            bail!("object {id} refers to {r}, which the file hasn't got");
         }
         reached.extend(pages);
     }
     let mut trailer_refs = Vec::new();
-    refs(&Object::Dictionary(graph.pdf.trailer.clone()), &mut |r| {
+    refs(&Object::from(graph.pdf.trailer.clone()), &mut |r| {
         trailer_refs.push(r)
     });
     if let Some(r) = trailer_refs.into_iter().find(|&r| lost(r)) {
-        bail!(
-            "the trailer refers to {} {}, which the file hasn't got",
-            r.0,
-            r.1
-        );
+        bail!("the trailer refers to {r}, which the file hasn't got");
     }
     let templates = templates(&graph.pdf);
     if let Some(stray) = reached
         .iter()
         .find(|id| !tree.contains(id) && !templates.contains(id))
     {
-        bail!(
-            "the file reaches page {} {}, which it doesn't keep",
-            stray.0,
-            stray.1
-        );
+        bail!("the file reaches page {stray}, which it doesn't keep");
     }
     if let Some(missing) = tree.iter().find(|id| !reached.contains(id)) {
-        bail!(
-            "page {} {} of the tree isn't in the file",
-            missing.0,
-            missing.1
-        );
+        bail!("page {missing} of the tree isn't in the file");
     }
     Ok(())
 }
 
 /// Each reference in `obj`, to `to`.
 fn refs(obj: &Object, to: &mut dyn FnMut(ObjectId)) {
-    match obj {
-        Object::Reference(r) => to(*r),
-        Object::Array(items) => items.iter().for_each(|o| refs(o, to)),
-        Object::Dictionary(d) => d.iter().for_each(|(_, o)| refs(o, to)),
-        Object::Stream(s) => s.dict.iter().for_each(|(_, o)| refs(o, to)),
-        _ => {}
+    for r in obj.references() {
+        to(r);
     }
 }
 
 /// Whether `obj` is a page or a node of a page tree.
 fn is_page_node(obj: &Object) -> bool {
-    let Object::Dictionary(d) = obj else {
-        return false;
-    };
-    (d.get(b"Type").ok())
-        .and_then(|t| t.as_name().ok())
-        .is_some_and(|t| t == b"Page" || t == b"Pages")
+    matches!(
+        obj.value(),
+        Value::Dict(d) if matches!(d.type_name(), Some(b"Page" | b"Pages"))
+    )
 }
 
 /// The pages `pdf`'s `/Names /Templates` names.
 fn templates(pdf: &Pdf) -> HashSet<ObjectId> {
     let mut out = HashSet::new();
     let deref = |o: &Object| -> Option<Object> {
-        match o {
-            Object::Reference(r) => pdf.objects.get(r).cloned(),
-            o => Some(o.clone()),
+        match o.value() {
+            Value::Ref(r) => pdf.objects.get(r).cloned(),
+            _ => Some(o.clone()),
         }
     };
     let tree = (pdf.catalog().ok())
-        .and_then(|c| c.get(b"Names").ok())
+        .and_then(|c| c.get(b"Names"))
         .and_then(deref)
-        .and_then(|n| {
-            n.as_dict()
-                .ok()
-                .and_then(|n| n.get(b"Templates").ok().cloned())
+        .and_then(|n| match n.value() {
+            Value::Dict(d) => d.get(b"Templates").cloned(),
+            _ => None,
         });
     let mut stack: Vec<(Object, u32)> = tree.into_iter().map(|t| (t, 0)).collect();
     let mut seen = HashSet::new();
     while let Some((node, depth)) = stack.pop() {
-        if depth > 32 || node.as_reference().is_ok_and(|r| !seen.insert(r)) {
+        if depth > 32 || node.as_reference().is_some_and(|r| !seen.insert(r)) {
             continue;
         }
-        let Some(Object::Dictionary(d)) = deref(&node) else {
+        let Some(resolved) = deref(&node) else {
             continue;
         };
-        if let Some(Object::Array(pairs)) = d.get(b"Names").ok().and_then(deref) {
-            out.extend(
-                pairs
-                    .chunks(2)
-                    .filter_map(|p| p.get(1)?.as_reference().ok()),
-            );
+        let Value::Dict(d) = resolved.value() else {
+            continue;
+        };
+        if let Some(names_obj) = d.get(b"Names").and_then(deref)
+            && let Some(pairs) = names_obj.as_array()
+        {
+            out.extend(pairs.chunks(2).filter_map(|p| p.get(1)?.as_reference()));
         }
-        if let Some(Object::Array(kids)) = d.get(b"Kids").ok().and_then(deref) {
+        if let Some(kids_obj) = d.get(b"Kids").and_then(deref)
+            && let Value::Array(kids) = kids_obj.into_value()
+        {
             stack.extend(kids.into_iter().map(|k| (k, depth + 1)));
         }
     }
@@ -501,21 +471,17 @@ pub(crate) fn section(s: &Section) -> Result<()> {
     let map = &s.record.map;
     let mut moved = None;
     for (&at, (key, _)) in s.objects {
-        if at.0 >= s.start || map.keys.get(key) == Some(&at) {
+        if at.number >= s.start || map.keys.get(key) == Some(&at) {
             continue;
         }
         let owned = key.of_state()
             && s.owned.get(key) == Some(&at)
-            && (!s.mapped.contains(&at.0)
+            && (!s.mapped.contains(&at.number)
                 || moved
                     .get_or_insert_with(|| Moved::new(s))
                     .from(key, at, s.target));
         if !owned {
-            bail!(
-                "{key:?} would be written over the file's object {} {}",
-                at.0,
-                at.1
-            );
+            bail!("{key:?} would be written over the file's object {at}");
         }
     }
     let encrypt = s.record.crypt.as_ref().map(|c| c.at());
@@ -528,8 +494,10 @@ pub(crate) fn section(s: &Section) -> Result<()> {
     let resolves = |r: ObjectId| {
         s.objects.contains_key(&r)
             || Some(r) == encrypt
-            || (!given(r.0)
-                && (s.mapped.contains(&r.0) || s.record.present.contains(r.0) || !(s.used)(r.0)))
+            || (!given(r.number)
+                && (s.mapped.contains(&r.number)
+                    || s.record.present.contains(r.number)
+                    || !(s.used)(r.number)))
     };
     for (&id, (_, obj)) in s.objects {
         let mut dangling = None;
@@ -539,13 +507,7 @@ pub(crate) fn section(s: &Section) -> Result<()> {
             }
         });
         if let Some(r) = dangling {
-            bail!(
-                "object {} {} refers to {} {}, which neither the section nor the file has",
-                id.0,
-                id.1,
-                r.0,
-                r.1
-            );
+            bail!("object {id} refers to {r}, which neither the section nor the file has");
         }
     }
     Ok(())
@@ -557,17 +519,17 @@ pub(crate) fn section(s: &Section) -> Result<()> {
 /// encrypted wrong.
 #[cfg(debug_assertions)]
 pub(crate) fn reads_back_section(
-    file: impl lopdf::ByteSource + 'static,
+    file: impl crate::pdf::ByteSource + 'static,
     password: Option<&str>,
     objects: &BTreeMap<ObjectId, (ObjKey, Object)>,
 ) -> Result<()> {
-    let read = lopdf::LazyPdf::open(file, password, &crate::source::Limits::DEFAULT.reader)?;
+    let read = crate::pdf::LazyPdf::open(file, password, &crate::source::Limits::DEFAULT.reader)?;
     for (&id, (_, obj)) in objects {
         let Ok(back) = read.object_unkept(id) else {
-            bail!("object {} {} doesn't read back", id.0, id.1);
+            bail!("object {id} doesn't read back");
         };
         if !plain_eq(obj, &back, false) {
-            bail!("object {} {} reads back otherwise", id.0, id.1);
+            bail!("object {id} reads back otherwise");
         }
     }
     Ok(())
@@ -657,8 +619,8 @@ fn shown(items: &[&str]) -> String {
 #[cfg(debug_assertions)]
 fn reads_back(out: &Written, graph: &Graph) -> Result<()> {
     use std::sync::Arc;
-    let read = lopdf::LazyPdf::open(
-        Arc::from(out.bytes),
+    let read = crate::pdf::LazyPdf::open(
+        Arc::<[u8]>::from(out.bytes),
         out.password,
         &crate::source::Limits::DEFAULT.reader,
     )?;
@@ -667,11 +629,11 @@ fn reads_back(out: &Written, graph: &Graph) -> Result<()> {
             continue;
         }
         let Ok(back) = read.object_unkept(id) else {
-            bail!("object {} {} doesn't read back", id.0, id.1);
+            bail!("object {id} doesn't read back");
         };
         let deferred = graph.deferred.contains_key(&id);
         if !plain_eq(obj, &back, deferred) {
-            bail!("object {} {} reads back otherwise", id.0, id.1);
+            bail!("object {id} reads back otherwise");
         }
     }
     Ok(())
@@ -682,35 +644,44 @@ fn reads_back(out: &Written, graph: &Graph) -> Result<()> {
 /// `/Length`, and by their data unless `deferred`.
 fn plain_eq(a: &Object, b: &Object, deferred: bool) -> bool {
     fn dict_eq(a: &Dictionary, b: &Dictionary, skip: &[&[u8]]) -> bool {
-        let keys = |d: &Dictionary| -> BTreeSet<Vec<u8>> {
-            (d.iter().map(|(k, _)| k.clone()))
-                .filter(|k| !skip.contains(&k.as_slice()))
+        fn keys<'d>(d: &'d Dictionary, skip: &[&[u8]]) -> BTreeSet<&'d [u8]> {
+            d.iter()
+                .map(|(k, _)| k)
+                .filter(|k| !skip.contains(k))
                 .collect()
-        };
-        keys(a) == keys(b)
+        }
+        keys(a, skip) == keys(b, skip)
             && (a.iter())
-                .filter(|(k, _)| !skip.contains(&k.as_slice()))
-                .all(|(k, v)| b.get(k).is_ok_and(|w| plain_eq(v, w, false)))
+                .filter(|(k, _)| !skip.contains(k))
+                .all(|(k, v)| b.get(k).is_some_and(|w| plain_eq(v, w, false)))
     }
-    match (a, b) {
-        (Object::String(x, _), Object::String(y, _)) => x == y,
-        (Object::Array(x), Object::Array(y)) => {
+    match (a.value(), b.value()) {
+        (Value::Null, Value::Null) => true,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::Integer(x), Value::Integer(y)) => x == y,
+        (Value::Name(x), Value::Name(y)) => x == y,
+        (Value::Ref(x), Value::Ref(y)) => x == y,
+        // Broken `0 g R` references in a source are written out as `null`
+        // (ISO 32000-2 §7.3.10; `non_zero_ref`).
+        (Value::Ref(x), Value::Null) if x.number == 0 => true,
+        (Value::String(x, _), Value::String(y, _)) => x == y,
+        (Value::Array(x), Value::Array(y)) => {
             x.len() == y.len() && x.iter().zip(y).all(|(x, y)| plain_eq(x, y, false))
         }
-        (Object::Dictionary(x), Object::Dictionary(y)) => dict_eq(x, y, &[]),
-        (Object::Stream(x), Object::Stream(y)) => {
+        (Value::Dict(x), Value::Dict(y)) => dict_eq(x, y, &[]),
+        (Value::Stream(x), Value::Stream(y)) => {
             let skip: &[&[u8]] = if deferred {
                 &[b"Length", b"Filter", b"DecodeParms"]
             } else {
                 &[b"Length"]
             };
-            dict_eq(&x.dict, &y.dict, skip) && (deferred || x.content == y.content)
+            dict_eq(&x.dict, &y.dict, skip) && (deferred || x.raw_bytes() == y.raw_bytes())
         }
-        (Object::Real(x), Object::Real(y)) => (x - y).abs() <= 1e-9 * x.abs().max(1.0),
-        (Object::Integer(x), Object::Real(y)) | (Object::Real(y), Object::Integer(x)) => {
+        (Value::Real(x), Value::Real(y)) => (x - y).abs() <= 1e-9 * x.abs().max(1.0),
+        (Value::Integer(x), Value::Real(y)) | (Value::Real(y), Value::Integer(x)) => {
             *x as f64 == *y
         }
-        (x, y) => x == y,
+        _ => false,
     }
 }
 
@@ -757,14 +728,14 @@ mod section_tests {
         let (_, doc) = opened(&dir, "a.pdf", &Form::new(1).bytes());
         let _ = std::fs::remove_dir_all(&dir);
         let mut record = SaveRecord::clone(doc.saved_record().unwrap());
-        let at = ObjectId::from((40, 0));
+        let at = ObjectId::new(40, 0);
         let map = std::sync::Arc::make_mut(&mut record.map);
         for &k in listed {
             map.keys.insert(k, at);
         }
-        let objects = BTreeMap::from([(at, (key, Object::Null))]);
+        let objects = BTreeMap::from([(at, (key, Object::null()))]);
         let owned = BTreeMap::from([(key, at)]);
-        let mapped = HashSet::from([at.0]);
+        let mapped = HashSet::from([at.number]);
         section(&Section {
             objects: &objects,
             record: &record,
@@ -809,10 +780,10 @@ mod section_tests {
         let _ = std::fs::remove_dir_all(&dir);
         let record = doc.saved_record().unwrap();
         assert!(record.xref.size < 100);
-        let at = ObjectId::from((100, 0));
-        let obj = Object::Dictionary(lopdf::dictionary! { "A" => to });
+        let at = ObjectId::new(100, 0);
+        let obj = Object::from(crate::pdf::dictionary! { "A" => to });
         let objects = BTreeMap::from([(at, (ObjKey::Annot(AnnotId(7)), obj))]);
-        let mapped = (record.map.keys.values()).map(|id| id.0).collect();
+        let mapped = (record.map.keys.values()).map(|id| id.number).collect();
         let used = |n: u32| record.present.contains(n);
         section(&Section {
             objects: &objects,
@@ -834,10 +805,10 @@ mod section_tests {
     /// or past what a file may use, does.
     #[test]
     fn a_reference_to_a_number_the_section_gave_and_doesn_t_write_fails() {
-        assert!(!refers((101, 0)));
-        assert!(!refers((100, 3)));
-        assert!(refers((100, 0)));
-        assert!(refers((99, 0)));
-        assert!(refers((crate::serialize::NUMBERS, 0)));
+        assert!(!refers(ObjectId::new(101, 0)));
+        assert!(!refers(ObjectId::new(100, 3)));
+        assert!(refers(ObjectId::new(100, 0)));
+        assert!(refers(ObjectId::new(99, 0)));
+        assert!(refers(ObjectId::new(crate::serialize::NUMBERS, 0)));
     }
 }

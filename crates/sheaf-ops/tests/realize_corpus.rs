@@ -50,11 +50,11 @@ use std::io::{BufRead, BufReader, Read as _};
 use std::path::Path;
 use std::sync::Arc;
 
-use lopdf::Object;
 use sheaf_doc::export::{Export, ExportFrom, Out};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::{FieldKind, Value};
 use sheaf_doc::model::{FieldNode, Terminal};
+use sheaf_doc::pdf::Object;
 use sheaf_doc::prim::{Key, Prim, Val};
 use sheaf_doc::realize::{EngineKey, PageView, Realizer, ViewInputs, emission_is_base, untouched};
 use sheaf_doc::serialize::crypt::Crypt;
@@ -118,12 +118,23 @@ fn inventory(corpus: &Corpus) -> Vec<(String, bool)> {
 /// How `crypt` encrypts: its version and revision, and its streams'
 /// method (`V2` is RC4, `AESV2` AES-128, `AESV3` AES-256).
 fn algorithm(crypt: &Crypt) -> String {
-    let get = |key: &[u8]| crypt.dict().get(key).and_then(Object::as_i64).unwrap_or(0);
-    let method = crypt
-        .state()
-        .get_stream_filter()
-        .map(|filter| String::from_utf8_lossy(filter.method()).into_owned())
-        .unwrap_or_default();
+    let dict = crypt.dict();
+    let get = |key: &[u8]| dict.get(key).and_then(Object::as_integer).unwrap_or(0);
+    let stm_f = dict.get(b"StmF").and_then(Object::as_name);
+    let method = match stm_f {
+        Some(b"Identity") => "None".to_string(),
+        Some(name) => dict
+            .get(b"CF")
+            .and_then(Object::as_dict)
+            .and_then(|cf| cf.get(name))
+            .and_then(Object::as_dict)
+            .and_then(|f| f.get(b"CFM"))
+            .and_then(Object::as_name)
+            .map(|m| String::from_utf8_lossy(m).into_owned())
+            .unwrap_or_default(),
+        None if get(b"V") <= 2 => "V2".to_string(),
+        None => String::new(),
+    };
     let bits = get(b"Length");
     format!("V{} R{} {method} {bits}", get(b"V"), get(b"R"))
 }
@@ -357,8 +368,8 @@ fn check(path: &Path, tier: Tier, set: Set) -> Outcome {
     let src = d.primary().clone();
     let xref = src.xref();
     out.classes.insert(match xref.kind {
-        lopdf::XrefKind::Table => "classic table",
-        lopdf::XrefKind::Stream => "xref stream",
+        sheaf_doc::pdf::XrefKind::Table => "classic table",
+        sheaf_doc::pdf::XrefKind::Stream => "xref stream",
     });
     for (class, is) in [
         ("hybrid", xref.hybrid),

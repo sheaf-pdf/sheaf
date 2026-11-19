@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use lopdf::{Object, StringFormat, dictionary};
+use crate::pdf::{Object, ObjectId, dictionary};
 use sha2::Digest as _;
 
 use super::*;
@@ -298,14 +298,14 @@ fn byte_ranges_are_hashed_as_given_and_cut_at_the_end() {
 /// the caps.
 #[test]
 fn a_byte_range_that_isn_t_pairs_is_unknown() {
-    let pdf = lopdf::Document::with_version("1.7");
+    let pdf = crate::pdf::Document::with_version("1.7");
     let limits = Limits::DEFAULT.forms;
     let sig = |range: Vec<Object>, contents: Object| {
         let dict = dictionary! { "ByteRange" => range, "Contents" => contents };
         signed(&pdf, &dict, &limits).map(|s| s.ranges)
     };
-    let hex = || Object::String(vec![0; 4], StringFormat::Hexadecimal);
-    let n = |v: i64| Object::Integer(v);
+    let hex = || Object::hex(vec![0; 4]);
+    let n = |v: i64| Object::from(v);
     let pairs = |count: usize| (0..2 * count as i64).map(n).collect::<Vec<_>>();
     assert_eq!(
         sig(vec![n(0), n(1), n(2), n(3)], hex()),
@@ -315,8 +315,8 @@ fn a_byte_range_that_isn_t_pairs_is_unknown() {
     let bad = [
         vec![n(0), n(1), n(2)],
         vec![n(0), n(-1)],
-        vec![n(0), Object::Real(1.0)],
-        vec![n(0), Object::Reference((1, 0))],
+        vec![n(0), Object::from(1.0_f64)],
+        vec![n(0), Object::from(ObjectId::new(1, 0))],
         pairs(MAX_RANGES + 1),
     ];
     for range in bad {
@@ -331,7 +331,7 @@ fn a_byte_range_that_isn_t_pairs_is_unknown() {
         Ok(MAX_RANGES)
     );
     assert_eq!(sig(vec![n(0), n(1)], n(7)), Err(Unchecked::Contents));
-    let long = Object::String(vec![0; limits.cms + 1], StringFormat::Hexadecimal);
+    let long = Object::hex(vec![0; limits.cms + 1]);
     assert_eq!(sig(vec![n(0), n(1)], long), Err(Unchecked::Contents));
 }
 

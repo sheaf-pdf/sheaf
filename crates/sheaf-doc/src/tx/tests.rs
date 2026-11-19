@@ -1345,17 +1345,17 @@ fn an_op_is_named_as_op_json_names_it() {
 /// takes the part, which it draws. Adopted alone, it does.
 #[test]
 fn a_grouped_part_is_not_adopted_beside_its_comment() {
-    use lopdf::{Object, dictionary};
+    use crate::pdf::{Object, dictionary, literal};
     let mut f = crate::forms::fixture::Form::new(1);
     let rect = |x: i64| vec![x.into(), 10.into(), (x + 20).into(), 30.into()];
     let text = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "FreeText", "Rect" => rect(10),
-        "NM" => Object::string_literal("g1"), "Contents" => Object::string_literal("text"),
-        "DA" => Object::string_literal("/Helv 12 Tf 0 g"),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("FreeText"), "Rect" => rect(10),
+        "NM" => literal("g1"), "Contents" => literal("text"),
+        "DA" => literal("/Helv 12 Tf 0 g"),
     });
     let part = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Square", "Rect" => rect(40),
-        "IRT" => text, "RT" => "Group", "NM" => Object::string_literal("g2"),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Square"), "Rect" => rect(40),
+        "IRT" => text, "RT" => Object::name("Group"), "NM" => literal("g2"),
     });
     f.set_annots(0, &[text, part]);
     let mut d = opened(f.bytes(), "a.pdf");
@@ -1394,13 +1394,13 @@ fn a_grouped_part_is_not_adopted_beside_its_comment() {
 /// page is.
 #[test]
 fn an_adopted_comment_keeps_its_thread_on_its_page() {
-    use lopdf::{Object, dictionary};
+    use crate::pdf::{Object, dictionary, literal};
     let mut f = crate::forms::fixture::Form::new(2);
     let rect = |x: i64| vec![x.into(), 10.into(), (x + 20).into(), 30.into()];
-    let mut note = |nm: &str, irt: Option<lopdf::ObjectId>| {
+    let mut note = |nm: &str, irt: Option<crate::pdf::ObjectId>| {
         let mut dict = dictionary! {
-            "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(10),
-            "NM" => Object::string_literal(nm), "Contents" => Object::string_literal(nm),
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "Rect" => rect(10),
+            "NM" => literal(nm), "Contents" => literal(nm),
         };
         if let Some(irt) = irt {
             dict.set("IRT", irt);

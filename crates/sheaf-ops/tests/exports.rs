@@ -35,7 +35,6 @@ use std::sync::Arc;
 
 use common::{How, holds, nothing_found, scratch, told};
 use in_progress::NoProgress;
-use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::export::{
     Export, ExportError, ExportFrom, Gate, Out, PRINT_ANSWERS, preflight, run,
 };
@@ -43,6 +42,9 @@ use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::fixture::{Form, append_revision, note, row};
 use sheaf_doc::forms::{Report, check};
 use sheaf_doc::materialize::{AskAnswers, SaveRecord};
+use sheaf_doc::pdf::{
+    Dictionary, Document as Pdf, Object, Stream, StreamExt, Value, dictionary, literal,
+};
 use sheaf_doc::tx::fixture as fx;
 use sheaf_doc::{Actor, Document, PageId};
 use sheaf_edit::{BatesSpec, HeaderFooterSpec};
@@ -93,18 +95,19 @@ fn prepared(bytes: &[u8], field: &str) -> Vec<u8> {
     let form = catalog.get(b"AcroForm").unwrap().as_reference().unwrap();
     let mut ids = vec![page, form];
     let page_dict = pdf.get_dictionary(page).unwrap();
-    let annots_at = page_dict
-        .get(b"Annots")
-        .ok()
-        .and_then(|a| a.as_reference().ok());
+    let annots_at = page_dict.get(b"Annots").and_then(Object::as_reference);
     ids.extend(annots_at);
     append_revision(&bytes, &ids, |pdf| {
         // What the watermark draws with: its own names alone (the page has
         // an `/F1` of its own).
         let bold = pdf.add_object(dictionary! {
-            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica-Bold",
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name("Helvetica-Bold"),
         });
-        let gs = pdf.add_object(dictionary! { "Type" => "ExtGState", "ca" => 0.3, "CA" => 0.3 });
+        let gs = pdf.add_object(dictionary! {
+            "Type" => Object::name("ExtGState"), "ca" => 0.3, "CA" => 0.3,
+        });
         let drawn_with = dictionary! {
             "Font" => dictionary! { "WmF" => bold },
             "ExtGState" => dictionary! { "WmGs" => gs },
@@ -115,7 +118,11 @@ fn prepared(bytes: &[u8], field: &str) -> Vec<u8> {
             content.extend_from_slice(b" 0 0 20 20 re f");
             let bbox = vec![0.into(), 0.into(), 20.into(), 20.into()];
             let stream = Stream::new(
-                dictionary! { "Type" => "XObject", "Subtype" => "Form", "BBox" => bbox },
+                dictionary! {
+                    "Type" => Object::name("XObject"),
+                    "Subtype" => Object::name("Form"),
+                    "BBox" => bbox,
+                },
                 content,
             );
             pdf.add_object(stream)
@@ -135,7 +142,7 @@ fn prepared(bytes: &[u8], field: &str) -> Vec<u8> {
         {
             let ap = appearance(pdf, fill);
             let square = pdf.add_object(dictionary! {
-                "Type" => "Annot", "Subtype" => "Square", "Rect" => rect(i as i64),
+                "Type" => Object::name("Annot"), "Subtype" => Object::name("Square"), "Rect" => rect(i as i64),
                 "F" => flags, "C" => vec![1.into(), 0.into(), 0.into()],
                 "AP" => dictionary! { "N" => ap },
             });
@@ -143,17 +150,18 @@ fn prepared(bytes: &[u8], field: &str) -> Vec<u8> {
         }
         let (yes, off) = (appearance(pdf, CHECKED), appearance(pdf, b"1 g"));
         let check = pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Widget", "FT" => "Btn",
-            "T" => Object::string_literal("sheafcheck"), "Rect" => rect(3), "F" => 4, "P" => page,
-            "V" => "Yes", "DA" => Object::string_literal("/ZaDb 0 Tf 0 g"),
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Widget"), "FT" => Object::name("Btn"),
+            "T" => literal("sheafcheck"), "Rect" => rect(3), "F" => 4, "P" => page,
+            "V" => Object::name("Yes"), "DA" => literal("/ZaDb 0 Tf 0 g"),
             "AP" => dictionary! { "N" => dictionary! { "Yes" => yes, "Off" => off } },
         });
         added.push(check.into());
         let d = pdf.get_dictionary_mut(page).unwrap();
         let mut contents = Vec::new();
-        match d.get(b"Contents").unwrap() {
-            Object::Array(a) => contents.extend(a.iter().cloned()),
-            c => contents.push(c.clone()),
+        let c = d.get(b"Contents").unwrap();
+        match c.value() {
+            Value::Array(a) => contents.extend(a.iter().cloned()),
+            _ => contents.push(c.clone()),
         }
         contents.push(watermark.into());
         d.set("Contents", contents);
@@ -163,9 +171,9 @@ fn prepared(bytes: &[u8], field: &str) -> Vec<u8> {
                 .cloned()
                 .unwrap_or_default();
             for (name, object) in names.as_dict().unwrap().iter() {
-                have.set(name.clone(), object.clone());
+                have.set(name, object.clone());
             }
-            resources.set(kind.clone(), have);
+            resources.set(kind, have);
         }
         let annots = match annots_at {
             Some(at) => pdf.get_object_mut(at).unwrap(),
@@ -377,17 +385,17 @@ fn drawn_on(bytes: &[u8], index: u32) -> Vec<Vec<u8>> {
     let page = pdf.get_pages()[&(index + 1)];
     let resources = pdf.get_dictionary(page).unwrap().get(b"Resources").unwrap();
     let resources = pdf.dereference(resources).unwrap().1.as_dict().unwrap();
-    let Ok(xobjects) = resources.get(b"XObject") else {
+    let Some(xobjects) = resources.get(b"XObject") else {
         return Vec::new();
     };
     let xobjects = pdf.dereference(xobjects).unwrap().1.as_dict().unwrap();
     (xobjects.iter())
         .filter_map(|(_, x)| {
-            let stream = pdf.dereference(x).ok()?.1.as_stream().ok()?;
+            let stream = pdf.dereference(x).ok()?.1.as_stream()?;
             Some(
                 stream
                     .decompressed_content()
-                    .unwrap_or(stream.content.clone()),
+                    .unwrap_or_else(|_| stream.raw_bytes().to_vec()),
             )
         })
         .collect()
@@ -416,7 +424,7 @@ fn placed_marks(bytes: &[u8]) -> Vec<&'static str> {
 fn has_xfa(bytes: &[u8]) -> bool {
     let pdf = Pdf::load_mem(bytes).unwrap();
     let catalog = pdf.catalog().unwrap();
-    let Ok(form) = catalog.get(b"AcroForm") else {
+    let Some(form) = catalog.get(b"AcroForm") else {
         return false;
     };
     let form = pdf.dereference(form).unwrap().1.as_dict().unwrap();

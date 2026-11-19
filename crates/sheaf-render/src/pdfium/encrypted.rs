@@ -10,8 +10,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use lopdf::Object;
 use sheaf_doc::materialize::How;
+use sheaf_doc::pdf::Object;
 use sheaf_doc::serialize::fixture::{
     BOOKMARK, FIELD, FORM_SECRETS, PREFIX, USER, VALUE, edited, encrypted, form, in_clear,
     object_streams_encrypted, object_streams_of, rc4_40, rc4_aes_128_and_aes_256, written,
@@ -104,7 +104,7 @@ fn source(bytes: &[u8]) -> Src {
 fn kept(bytes: &[u8]) -> (Object, Vec<u8>) {
     let src = source(bytes);
     let crypt = src.crypt().expect("encrypted");
-    let p = crypt.dict().get(b"P").unwrap().clone();
+    let p = Object::new(crypt.dict().get(b"P").unwrap().value().clone());
     (p, crypt.first_id().expect("an /ID").to_vec())
 }
 

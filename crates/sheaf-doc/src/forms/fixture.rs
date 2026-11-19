@@ -24,8 +24,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::LazyLock;
 
-use lopdf::content::{Content, Operation};
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StringFormat, dictionary};
+use crate::pdf::content::{Content, Operation};
+use crate::pdf::{
+    Dictionary, Document as Pdf, Object, ObjectId, Stream, StringFormat, Value, dictionary, literal,
+};
 use sheaf_edit::Rotation;
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Pt};
@@ -65,29 +67,32 @@ impl Form {
         let mut pdf = Pdf::with_version("1.7");
         let pages_id = pdf.new_object_id();
         let helv = pdf.add_object(dictionary! {
-            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
-            "Encoding" => "WinAnsiEncoding",
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name("Helvetica"),
+            "Encoding" => Object::name("WinAnsiEncoding"),
         });
         let zadb = pdf.add_object(dictionary! {
-            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "ZapfDingbats",
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name("ZapfDingbats"),
         });
         let mut ids = Vec::new();
         for i in 0..pages {
             let content = Content {
                 operations: vec![
                     Operation::new("BT", vec![]),
-                    Operation::new("Tf", vec!["F1".into(), 18.into()]),
+                    Operation::new("Tf", vec![Object::name("F1"), 18.into()]),
                     Operation::new("Td", vec![72.into(), 740.into()]),
-                    Operation::new(
-                        "Tj",
-                        vec![Object::string_literal(format!("Page {}", i + 1))],
-                    ),
+                    Operation::new("Tj", vec![literal(format!("Page {}", i + 1))]),
                     Operation::new("ET", vec![]),
                 ],
             };
             let c = pdf.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
             ids.push(pdf.add_object(dictionary! {
-                "Type" => "Page", "Parent" => pages_id, "Contents" => c,
+                "Type" => Object::name("Page"),
+                "Parent" => pages_id,
+                "Contents" => c,
                 "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
                 "Resources" => dictionary! { "Font" => dictionary! { "F1" => helv } },
             }));
@@ -95,18 +100,19 @@ impl Form {
         pdf.objects.insert(
             pages_id,
             dictionary! {
-                "Type" => "Pages", "Count" => pages as i64,
-                "Kids" => ids.iter().map(|&i| Object::Reference(i)).collect::<Vec<_>>(),
+                "Type" => Object::name("Pages"),
+                "Count" => pages as i64,
+                "Kids" => ids.iter().map(|&i| Object::from(i)).collect::<Vec<_>>(),
             }
             .into(),
         );
         let acroform = pdf.add_object(dictionary! {
             "Fields" => Vec::<Object>::new(),
             "DR" => dictionary! { "Font" => dictionary! { "Helv" => helv, "ZaDb" => zadb } },
-            "DA" => Object::string_literal("/Helv 0 Tf 0 g"),
+            "DA" => literal("/Helv 0 Tf 0 g"),
         });
         let catalog = pdf.add_object(dictionary! {
-            "Type" => "Catalog", "Pages" => pages_id, "AcroForm" => acroform,
+            "Type" => Object::name("Catalog"), "Pages" => pages_id, "AcroForm" => acroform,
         });
         pdf.trailer.set("Root", catalog);
         Form {
@@ -128,9 +134,9 @@ impl Form {
     pub fn text(&mut self, name: &str, page: usize, rect: Rect) -> ObjectId {
         let id = self.widget(page, rect);
         let d = self.dict(id);
-        d.set("FT", "Tx");
-        d.set("T", Object::string_literal(name));
-        d.set("DA", Object::string_literal("/Helv 10 Tf 0 g"));
+        d.set("FT", Object::name("Tx"));
+        d.set("T", literal(name));
+        d.set("DA", literal("/Helv 10 Tf 0 g"));
         self.add_field(id);
         id
     }
@@ -141,12 +147,12 @@ impl Form {
         let ap = self.states(rect, "Yes");
         let state = if on { "Yes" } else { "Off" };
         let d = self.dict(id);
-        d.set("FT", "Btn");
-        d.set("T", Object::string_literal(name));
-        d.set("DA", Object::string_literal("/ZaDb 0 Tf 0 g"));
+        d.set("FT", Object::name("Btn"));
+        d.set("T", literal(name));
+        d.set("DA", literal("/ZaDb 0 Tf 0 g"));
         d.set("AP", ap);
-        d.set("V", Object::Name(state.into()));
-        d.set("AS", Object::Name(state.into()));
+        d.set("V", Object::name(state));
+        d.set("AS", Object::name(state));
         self.add_field(id);
         id
     }
@@ -163,10 +169,11 @@ impl Form {
     ) -> ObjectId {
         let value = chosen.map_or("Off".to_string(), |i| i.to_string());
         let field = self.pdf.add_object(dictionary! {
-            "FT" => "Btn", "T" => Object::string_literal(name),
+            "FT" => Object::name("Btn"),
+            "T" => literal(name),
             "Ff" => RADIO | NO_TOGGLE_TO_OFF,
-            "DA" => Object::string_literal("/ZaDb 0 Tf 0 g"),
-            "V" => Object::Name(value.into_bytes()),
+            "DA" => literal("/ZaDb 0 Tf 0 g"),
+            "V" => Object::name(value.as_bytes()),
         });
         let mut kids = Vec::new();
         for (i, &rect) in rects.iter().enumerate() {
@@ -180,8 +187,8 @@ impl Form {
             let d = self.dict(w);
             d.set("Parent", field);
             d.set("AP", ap);
-            d.set("AS", Object::Name(state.into_bytes()));
-            kids.push(Object::Reference(w));
+            d.set("AS", Object::name(state.as_bytes()));
+            kids.push(Object::from(w));
         }
         self.dict(field).set("Kids", kids);
         self.add_field(field);
@@ -199,10 +206,10 @@ impl Form {
     ) -> ObjectId {
         let id = self.widget(page, rect);
         let d = self.dict(id);
-        d.set("FT", "Ch");
-        d.set("T", Object::string_literal(name));
-        d.set("DA", Object::string_literal("/Helv 10 Tf 0 g"));
-        let options: Vec<Object> = options.iter().map(|o| Object::string_literal(*o)).collect();
+        d.set("FT", Object::name("Ch"));
+        d.set("T", literal(name));
+        d.set("DA", literal("/Helv 10 Tf 0 g"));
+        let options: Vec<Object> = options.iter().map(|o| literal(*o)).collect();
         d.set("Opt", options);
         if combo {
             d.set("Ff", COMBO);
@@ -216,14 +223,11 @@ impl Form {
         let id = self.widget(page, rect);
         let ap = self.text_appearance(rect, caption);
         let d = self.dict(id);
-        d.set("FT", "Btn");
+        d.set("FT", Object::name("Btn"));
         d.set("Ff", PUSH_BUTTON);
-        d.set("T", Object::string_literal(name));
-        d.set("DA", Object::string_literal("/Helv 10 Tf 0 g"));
-        d.set(
-            "MK",
-            dictionary! { "CA" => Object::string_literal(caption) },
-        );
+        d.set("T", literal(name));
+        d.set("DA", literal("/Helv 10 Tf 0 g"));
+        d.set("MK", dictionary! { "CA" => literal(caption) });
         d.set("AP", dictionary! { "N" => ap });
         self.add_field(id);
         id
@@ -234,8 +238,8 @@ impl Form {
         let id = self.widget(page, rect);
         let ap = self.appearance(rect, Vec::new());
         let d = self.dict(id);
-        d.set("FT", "Sig");
-        d.set("T", Object::string_literal(name));
+        d.set("FT", Object::name("Sig"));
+        d.set("T", literal(name));
         d.set("AP", dictionary! { "N" => ap });
         self.add_field(id);
         id
@@ -244,7 +248,7 @@ impl Form {
     /// Fill a text or choice field: `/V`, and on each widget an appearance
     /// that draws it.
     pub fn fill(&mut self, field: ObjectId, value: &str) {
-        self.dict(field).set("V", Object::string_literal(value));
+        self.dict(field).set("V", literal(value));
         for w in self.widgets_of(field) {
             let rect = self.rect_of(w);
             let ap = self.text_appearance(rect, value);
@@ -258,7 +262,7 @@ impl Form {
     }
 
     pub fn set_fields(&mut self, fields: &[ObjectId]) {
-        let fields: Vec<Object> = fields.iter().map(|&f| Object::Reference(f)).collect();
+        let fields: Vec<Object> = fields.iter().map(|&f| Object::from(f)).collect();
         self.dict(self.acroform).set("Fields", fields);
     }
 
@@ -268,25 +272,25 @@ impl Form {
     }
 
     pub fn set_annots(&mut self, page: usize, annots: &[ObjectId]) {
-        let annots: Vec<Object> = annots.iter().map(|&a| Object::Reference(a)).collect();
+        let annots: Vec<Object> = annots.iter().map(|&a| Object::from(a)).collect();
         self.dict(self.pages[page]).set("Annots", annots);
     }
 
     /// The widgets of `field`: its kids, or itself.
     pub fn widgets_of(&self, field: ObjectId) -> Vec<ObjectId> {
         let d = self.pdf.get_dictionary(field).expect("a field");
-        match d.get(b"Kids").and_then(|k| k.as_array()) {
-            Ok(kids) => kids.iter().filter_map(|k| k.as_reference().ok()).collect(),
-            Err(_) => vec![field],
+        match d.get(b"Kids").and_then(Object::as_array) {
+            Some(kids) => kids.iter().filter_map(Object::as_reference).collect(),
+            None => vec![field],
         }
     }
 
     /// Put `fields` under a new field `name` (no `/T` clash checks): they
     /// leave `/Fields`, and it joins.
     pub fn group(&mut self, name: &str, fields: &[ObjectId]) -> ObjectId {
-        let kids: Vec<Object> = fields.iter().map(|&f| Object::Reference(f)).collect();
+        let kids: Vec<Object> = fields.iter().map(|&f| Object::from(f)).collect();
         let parent = self.pdf.add_object(dictionary! {
-            "T" => Object::string_literal(name), "Kids" => kids,
+            "T" => literal(name), "Kids" => kids,
         });
         for &f in fields {
             self.dict(f).set("Parent", parent);
@@ -314,7 +318,7 @@ impl Form {
             self.xfa_node(f, &mut template, &mut data);
         }
         let packet = |pdf: &mut Pdf, xml: String| {
-            Object::Reference(pdf.add_object(Stream::new(dictionary! {}, xml.into_bytes())))
+            Object::from(pdf.add_object(Stream::new(dictionary! {}, xml.into_bytes())))
         };
         let preamble = packet(
             &mut self.pdf,
@@ -334,13 +338,13 @@ impl Form {
         );
         let postamble = packet(&mut self.pdf, "</xdp:xdp>".into());
         let xfa = vec![
-            Object::string_literal("preamble"),
+            literal("preamble"),
             preamble,
-            Object::string_literal("template"),
+            literal("template"),
             template,
-            Object::string_literal("datasets"),
+            literal("datasets"),
             datasets,
-            Object::string_literal("postamble"),
+            literal("postamble"),
             postamble,
         ];
         self.dict(self.acroform).set("XFA", xfa);
@@ -369,26 +373,27 @@ impl Form {
     /// (`/Annots`, when there are some), and `/SigFlags`' AppendOnly (2).
     pub fn usage_rights_for(&mut self, form: &[&str], annots: &[&str]) {
         let names = |names: &[&str]| -> Vec<Object> {
-            (names.iter())
-                .map(|n| Object::Name(n.as_bytes().to_vec()))
-                .collect()
+            (names.iter()).map(|n| Object::name(n.as_bytes())).collect()
         };
         let mut params = dictionary! {
-            "Type" => "TransformParams", "V" => "2.2",
+            "Type" => Object::name("TransformParams"),
+            "V" => Object::name("2.2"),
             "Form" => names(form),
-            "Document" => vec![Object::Name(b"FullSave".to_vec())],
+            "Document" => vec![Object::name(b"FullSave")],
         };
         if !annots.is_empty() {
             params.set("Annots", names(annots));
         }
         let sig = self.signature_dict(dictionary! {
-            "Type" => "SigRef", "TransformMethod" => "UR3", "TransformParams" => params,
+            "Type" => Object::name("SigRef"),
+            "TransformMethod" => Object::name("UR3"),
+            "TransformParams" => params,
         });
         self.perm("UR3", sig);
         let flags = self
             .dict(self.acroform)
             .get(b"SigFlags")
-            .and_then(Object::as_i64);
+            .and_then(Object::as_integer);
         self.dict(self.acroform)
             .set("SigFlags", flags.unwrap_or(0) | 2);
     }
@@ -406,8 +411,13 @@ impl Form {
     /// filling in and comments), and `/Perms /DocMDP`.
     pub fn certify(&mut self, field: ObjectId, p: i64) {
         let sig = self.signature_dict(dictionary! {
-            "Type" => "SigRef", "TransformMethod" => "DocMDP",
-            "TransformParams" => dictionary! { "Type" => "TransformParams", "P" => p, "V" => "1.2" },
+            "Type" => Object::name("SigRef"),
+            "TransformMethod" => Object::name("DocMDP"),
+            "TransformParams" => dictionary! {
+                "Type" => Object::name("TransformParams"),
+                "P" => p,
+                "V" => Object::name("1.2"),
+            },
         });
         self.dict(field).set("V", sig);
         self.perm("DocMDP", sig);
@@ -420,20 +430,25 @@ impl Form {
     /// PDF 2.0's `/P` when `p` is some), and a `/V` whose FieldMDP
     /// reference says the same.
     pub fn sign_locking(&mut self, field: ObjectId, action: &str, fields: &[&str], p: Option<i64>) {
-        let mut params =
-            dictionary! { "Type" => "TransformParams", "Action" => action, "V" => "1.2" };
+        let mut params = dictionary! {
+            "Type" => Object::name("TransformParams"),
+            "Action" => Object::name(action),
+            "V" => Object::name("1.2"),
+        };
         if action != "All" {
-            let names: Vec<Object> = fields.iter().map(|&f| Object::string_literal(f)).collect();
+            let names: Vec<Object> = fields.iter().map(|&f| literal(f)).collect();
             params.set("Fields", names);
         }
         let mut lock = params.clone();
-        lock.set("Type", "SigFieldLock");
+        lock.set("Type", Object::name("SigFieldLock"));
         lock.remove(b"V");
         if let Some(p) = p {
             lock.set("P", p);
         }
         let sig = self.signature_dict(dictionary! {
-            "Type" => "SigRef", "TransformMethod" => "FieldMDP", "TransformParams" => params,
+            "Type" => Object::name("SigRef"),
+            "TransformMethod" => Object::name("FieldMDP"),
+            "TransformParams" => params,
         });
         let d = self.dict(field);
         d.set("V", sig);
@@ -460,29 +475,42 @@ impl Form {
         let mut elements = Vec::new();
         let mut nums = Vec::new();
         for (i, page) in self.pages.clone().into_iter().enumerate() {
-            self.dict(page).set("Tabs", "S");
+            self.dict(page).set("Tabs", Object::name("S"));
             for w in self.annots(i) {
                 let key = nums.len() as i64 / 2;
                 let element = self.pdf.add_object(dictionary! {
-                    "Type" => "StructElem", "S" => "Form", "P" => document, "Pg" => page,
-                    "K" => dictionary! { "Type" => "OBJR", "Obj" => w, "Pg" => page },
+                    "Type" => Object::name("StructElem"),
+                    "S" => Object::name("Form"),
+                    "P" => document,
+                    "Pg" => page,
+                    "K" => dictionary! {
+                        "Type" => Object::name("OBJR"),
+                        "Obj" => w,
+                        "Pg" => page,
+                    },
                 });
                 self.dict(w).set("StructParent", key);
-                elements.push(Object::Reference(element));
-                nums.push(Object::Integer(key));
-                nums.push(Object::Reference(element));
+                elements.push(Object::from(element));
+                nums.push(Object::from(key));
+                nums.push(Object::from(element));
             }
         }
         let next = nums.len() as i64 / 2;
         self.pdf.objects.insert(
             document,
-            dictionary! { "Type" => "StructElem", "S" => "Document", "P" => root, "K" => elements }
-                .into(),
+            dictionary! {
+                "Type" => Object::name("StructElem"),
+                "S" => Object::name("Document"),
+                "P" => root,
+                "K" => elements,
+            }
+            .into(),
         );
         self.pdf.objects.insert(
             root,
             dictionary! {
-                "Type" => "StructTreeRoot", "K" => document,
+                "Type" => Object::name("StructTreeRoot"),
+                "K" => document,
                 "ParentTree" => dictionary! { "Nums" => nums },
                 "ParentTreeNextKey" => next,
             }
@@ -529,7 +557,10 @@ impl Form {
     fn widget(&mut self, page: usize, rect: Rect) -> ObjectId {
         let r: Vec<Object> = rect.iter().map(|&v| Object::from(v)).collect();
         let id = self.pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Widget", "Rect" => r, "F" => 4,
+            "Type" => Object::name("Annot"),
+            "Subtype" => Object::name("Widget"),
+            "Rect" => r,
+            "F" => 4,
             "P" => self.pages[page],
         });
         let mut annots = self.annots(page);
@@ -549,11 +580,11 @@ impl Form {
             .pdf
             .get_dictionary(w)
             .ok()
-            .and_then(|d| d.get(b"Rect").ok())
-            .and_then(|r| r.as_array().ok())
+            .and_then(|d| d.get(b"Rect"))
+            .and_then(Object::as_array)
             .map(|r| {
                 r.iter()
-                    .filter_map(|v| v.as_float().ok())
+                    .filter_map(Object::as_number)
                     .map(|v| v as f32)
                     .collect()
             })
@@ -567,7 +598,8 @@ impl Form {
         let (w, h) = (rect[2] - rect[0], rect[3] - rect[1]);
         self.pdf.add_object(Stream::new(
             dictionary! {
-                "Type" => "XObject", "Subtype" => "Form",
+                "Type" => Object::name("XObject"),
+                "Subtype" => Object::name("Form"),
                 "BBox" => vec![0.into(), 0.into(), Object::from(w), Object::from(h)],
                 "Resources" => dictionary! { "Font" => dictionary! { "Helv" => self.helv } },
             },
@@ -581,12 +613,12 @@ impl Form {
         let h = rect[3] - rect[1];
         let content = Content {
             operations: vec![
-                Operation::new("BMC", vec![Object::Name(b"Tx".to_vec())]),
+                Operation::new("BMC", vec![Object::name(b"Tx")]),
                 Operation::new("BT", vec![]),
-                Operation::new("Tf", vec!["Helv".into(), 10.into()]),
+                Operation::new("Tf", vec![Object::name("Helv"), 10.into()]),
                 Operation::new("g", vec![0.into()]),
                 Operation::new("Td", vec![2.into(), Object::from((h - 7.0) / 2.0)]),
-                Operation::new("Tj", vec![Object::string_literal(text)]),
+                Operation::new("Tj", vec![literal(text)]),
                 Operation::new("ET", vec![]),
                 Operation::new("EMC", vec![]),
             ],
@@ -609,13 +641,15 @@ impl Form {
     /// `/Contents`, and `reference` (a `/SigRef`) if it isn't empty.
     fn signature_dict(&mut self, reference: Dictionary) -> ObjectId {
         let mut sig = dictionary! {
-            "Type" => "Sig", "Filter" => "Adobe.PPKLite", "SubFilter" => "adbe.pkcs7.detached",
+            "Type" => Object::name("Sig"),
+            "Filter" => Object::name("Adobe.PPKLite"),
+            "SubFilter" => Object::name("adbe.pkcs7.detached"),
             "ByteRange" => vec![0.into(), 9_999_999_999i64.into(), 9_999_999_999i64.into(), 9_999_999_999i64.into()],
-            "Contents" => Object::String(vec![0; CONTENTS_LEN], StringFormat::Hexadecimal),
-            "M" => Object::string_literal("D:20261015120000Z"),
+            "Contents" => Object::hex(vec![0; CONTENTS_LEN]),
+            "M" => literal("D:20261015120000Z"),
         };
         if !reference.is_empty() {
-            sig.set("Reference", vec![Object::Dictionary(reference)]);
+            sig.set("Reference", vec![Object::from(reference)]);
         }
         let id = self.pdf.add_object(sig);
         self.signatures.push(id);
@@ -653,12 +687,14 @@ impl Form {
             data.push_str(&format!("</{bare}>"));
             return;
         }
-        let value = match d.get(b"V") {
-            Ok(Object::Name(n)) if n != b"Off" => String::from_utf8_lossy(n).into_owned(),
-            Ok(v @ Object::String(..)) => crate::file::pdf_text(v),
+        let value = match d.get(b"V").map(|v| (v, v.value())) {
+            Some((_, Value::Name(n))) if n.as_bytes() != b"Off" => {
+                String::from_utf8_lossy(n.as_bytes()).into_owned()
+            }
+            Some((v, Value::String(..))) => crate::file::pdf_text(v),
             _ => String::new(),
         };
-        let flags = d.get(b"Ff").and_then(|f| f.as_i64()).unwrap_or(0);
+        let flags = d.get(b"Ff").and_then(Object::as_integer).unwrap_or(0);
         // A tooltip, as the IRS forms' XFA copies have where the AcroForm
         // has none.
         let assist = format!("<assist><toolTip>Tip for {bare}</toolTip></assist>");
@@ -1048,19 +1084,18 @@ pub fn every_fact() -> Form {
     let catalog = f.catalog;
     f.dict(catalog).set(
         "PageLabels",
-        dictionary! { "Nums" => vec![0.into(), dictionary! { "S" => "r" }.into()] },
+        dictionary! { "Nums" => vec![0.into(), dictionary! { "S" => Object::name("r") }.into()] },
     );
     let pages = f.pages.clone();
     let mut third = f.dict(pages[2]).clone();
     crate::generate::fixture::sheaf_header(&mut f.pdf, &mut third);
     *f.dict(pages[2]) = third;
     let json = crate::generate::fixture::SHEAF_HEADER_JSON;
-    f.dict(catalog)
-        .set("SHEF_Generators", Object::string_literal(json));
+    f.dict(catalog).set("SHEF_Generators", literal(json));
     let item = |title: &str, page: ObjectId| {
         dictionary! {
-            "Title" => Object::string_literal(title),
-            "Dest" => vec![page.into(), "Fit".into()],
+            "Title" => literal(title),
+            "Dest" => vec![page.into(), Object::name("Fit")],
         }
     };
     let mut closed = item("A", pages[0]);
@@ -1081,8 +1116,8 @@ pub fn outline_tree(f: &mut Form, items: Vec<(u16, Dictionary)>) -> Vec<ObjectId
     let closed: Vec<bool> = (dicts.iter())
         .map(|d| {
             d.get(b"Count")
-                .and_then(Object::as_i64)
-                .is_ok_and(|c| c < 0)
+                .and_then(Object::as_integer)
+                .is_some_and(|c| c < 0)
         })
         .collect();
     // The items a level below `at` (None: the root).
@@ -1133,7 +1168,7 @@ pub fn outline_tree(f: &mut Form, items: Vec<(u16, Dictionary)>) -> Vec<ObjectId
             at.set("Count", count as i64);
         }
     };
-    let mut outlines = dictionary! { "Type" => "Outlines" };
+    let mut outlines = dictionary! { "Type" => Object::name("Outlines") };
     link(&mut dicts, None, &mut outlines);
     for i in 0..ids.len() {
         link(&mut dicts, Some(i), &mut outlines);
@@ -1155,8 +1190,8 @@ pub fn outlined(pages: usize, items: &[(&str, usize, u16)]) -> Vec<u8> {
     let items = (items.iter())
         .map(|&(title, page, depth)| {
             let item = dictionary! {
-                "Title" => Object::string_literal(title),
-                "Dest" => vec![ids[page].into(), "Fit".into()],
+                "Title" => literal(title),
+                "Dest" => vec![ids[page].into(), Object::name("Fit")],
             };
             (depth, item)
         })
@@ -1213,7 +1248,7 @@ pub fn stated_squares() -> (Vec<u8>, Vec<Stated>) {
         ([RED, OFF], dictionary! {}, Some([0, 0, 255])),
         (
             [RED, GREEN],
-            dictionary! { "V" => "Green" },
+            dictionary! { "V" => Object::name("Green") },
             Some([0, 255, 0]),
         ),
     ];
@@ -1224,7 +1259,8 @@ pub fn stated_squares() -> (Vec<u8>, Vec<Stated>) {
         let mut normal = Dictionary::new();
         for (state, fill) in states {
             let dict = dictionary! {
-                "Type" => "XObject", "Subtype" => "Form",
+                "Type" => Object::name("XObject"),
+                "Subtype" => Object::name("Form"),
                 "BBox" => vec![0.into(), 0.into(), 200.into(), 20.into()],
             };
             let ops = format!("{fill} 0 0 200 20 re f").into_bytes();
@@ -1232,13 +1268,16 @@ pub fn stated_squares() -> (Vec<u8>, Vec<Stated>) {
         }
         let rect = row(i);
         let mut dict = dictionary! {
-            "Type" => "Annot", "Subtype" => "Square", "P" => page, "F" => 4,
+            "Type" => Object::name("Annot"),
+            "Subtype" => Object::name("Square"),
+            "P" => page,
+            "F" => 4,
             "Rect" => rect.iter().map(|&v| Object::from(v)).collect::<Vec<_>>(),
-            "NM" => Object::string_literal(format!("stated{i}")),
+            "NM" => literal(format!("stated{i}")),
             "AP" => dictionary! { "N" => normal },
         };
         for (k, v) in extra.iter() {
-            dict.set(k.clone(), v.clone());
+            dict.set(k, v.clone());
         }
         let id = f.pdf.add_object(dict);
         let mut annots = f.annots(0);
@@ -1292,14 +1331,24 @@ pub fn mark_stamp_pdf() -> Vec<u8> {
         b"0 0 1 rg 0 0 20 20 re f".to_vec(),
     ));
     let page = pdf.add_object(dictionary! {
-        "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+        "Type" => Object::name("Page"),
+        "Parent" => pages_id,
+        "Contents" => content,
         "MediaBox" => vec![0.into(), 0.into(), 100.into(), 50.into()],
     });
     pdf.objects.insert(
         pages_id,
-        dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        dictionary! {
+            "Type" => Object::name("Pages"),
+            "Kids" => vec![page.into()],
+            "Count" => 1,
+        }
+        .into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let catalog = pdf.add_object(dictionary! {
+        "Type" => Object::name("Catalog"),
+        "Pages" => pages_id,
+    });
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
@@ -1326,20 +1375,20 @@ pub fn write_marks(pdf: &mut Pdf, page: &mut Dictionary, marks: &[Mark]) {
     use crate::serialize::built::{WriteCx, to_pdf_in};
     let mut cx = WriteCx::new();
     let mut list: Vec<Object> = (page.get(b"Annots").and_then(Object::as_array))
-        .cloned()
+        .map(<[Object]>::to_vec)
         .unwrap_or_default();
     let rect_of = |pdf: &Pdf, d: &Dictionary| {
-        (d.get(b"Rect").ok())
+        d.get(b"Rect")
             .and_then(|r| pdf.dereference(r).ok())
             .map_or_else(
-                || Object::Array(vec![Object::Integer(0); 4]),
+                || Object::from(vec![Object::from(0_i64); 4]),
                 |(_, o)| o.clone(),
             )
     };
     // What a reply may name: what's on the page, then each mark written.
     let mut named: std::collections::HashMap<String, (ObjectId, Object)> = (list.iter())
         .filter_map(|e| {
-            let id = e.as_reference().ok()?;
+            let id = e.as_reference()?;
             let d = pdf.get_dictionary(id).ok()?;
             Some((crate::file::thread_name(d), (id, rect_of(pdf, d))))
         })
@@ -1349,13 +1398,13 @@ pub fn write_marks(pdf: &mut Pdf, page: &mut Dictionary, marks: &[Mark]) {
     for m in marks {
         let written = to_pdf_in(m, pdf, &mut cx);
         let rect = rect_of(pdf, &written.main);
-        let id = pdf.add_object(Object::Dictionary(written.main));
+        let id = pdf.add_object(Object::from(written.main));
         list.push(id.into());
         named.insert(m.annot.name(), (id, rect));
         for mut part in written.companions {
             part.set("IRT", id);
-            part.set("RT", Object::Name(b"Group".to_vec()));
-            list.push(pdf.add_object(Object::Dictionary(part)).into());
+            part.set("RT", Object::name(b"Group"));
+            list.push(pdf.add_object(Object::from(part)).into());
         }
     }
     let mut pending = threads;
@@ -1371,7 +1420,7 @@ pub fn write_marks(pdf: &mut Pdf, page: &mut Dictionary, marks: &[Mark]) {
                 main.set("Rect", rect);
             }
             let rect = rect_of(pdf, &main);
-            let id = pdf.add_object(Object::Dictionary(main));
+            let id = pdf.add_object(Object::from(main));
             list.push(id.into());
             named.insert(m.annot.name(), (id, rect));
         }
@@ -1598,15 +1647,40 @@ pub fn every_mark_kind() -> Vec<Annot> {
 /// `bytes` with an incremental update appended: `change` edits a copy of
 /// each object in `ids` (and anything it adds) in the new revision.
 pub fn append_revision(bytes: &[u8], ids: &[ObjectId], change: impl FnOnce(&mut Pdf)) -> Vec<u8> {
+    let src = source(bytes.to_vec());
+    let mut base = crate::serialize::append::Base::over(&src).expect("the previous revision");
     let prev = Pdf::load_mem(bytes).expect("the previous revision");
-    let mut doc = lopdf::IncrementalDocument::create_from(bytes.to_vec(), prev);
+    let mut next = Pdf::with_version(prev.version.clone());
+    next.trailer = prev.trailer.clone();
+    next.max_id = base.size.saturating_sub(1);
     for &id in ids {
-        doc.opt_clone_object_to_new_document(id)
-            .expect("an object in the previous revision");
+        let obj = prev
+            .objects
+            .get(&id)
+            .expect("an object in the previous revision")
+            .clone();
+        next.objects.insert(id, obj);
     }
-    change(&mut doc.new_document);
-    let mut out = Vec::new();
-    doc.save_to(&mut out).expect("writing the update");
+    change(&mut next);
+    if let Some(root) = next.trailer.get(b"Root").and_then(Object::as_reference) {
+        base.root = root;
+    }
+    let objects: BTreeMap<ObjectId, (crate::materialize::ObjKey, Object)> = next
+        .objects
+        .into_iter()
+        .map(|(id, obj)| (id, (crate::materialize::ObjKey::Built(id), obj)))
+        .collect();
+    let xref_number = objects
+        .keys()
+        .last()
+        .map_or(base.size, |id| id.number.saturating_add(1).max(base.size));
+    let Some(update) = crate::serialize::append::section(&base, &objects, xref_number, None)
+        .expect("writing the update")
+    else {
+        return bytes.to_vec();
+    };
+    let mut out = bytes.to_vec();
+    out.extend_from_slice(&update.bytes);
     out
 }
 
@@ -1632,12 +1706,12 @@ pub fn hybrid_reference_encrypted(encrypt: &Dictionary, id: &[u8]) -> Vec<u8> {
     // Its strings in hex, so it's text.
     let mut hex = encrypt.clone();
     for (_, value) in hex.iter_mut() {
-        if let Object::String(_, format) = value {
-            *format = StringFormat::Hexadecimal;
+        if let Value::String(_, format) = value.value_mut() {
+            *format = Some(StringFormat::Hex);
         }
     }
     let mut dict = Vec::new();
-    crate::serialize::object::write(&mut dict, &Object::Dictionary(hex))
+    crate::pdf::write::write(&mut dict, &Object::from(hex))
         .expect("an encryption dictionary writes");
     let dict = String::from_utf8(dict).expect("hex strings, names and numbers");
     let hex: String = id.iter().map(|b| format!("{b:02X}")).collect();
@@ -1806,9 +1880,9 @@ fn hybrid_section(
 
 /// The references in an array under `key`.
 fn refs(d: Option<&Dictionary>, key: &[u8]) -> Vec<ObjectId> {
-    d.and_then(|d| d.get(key).ok())
-        .and_then(|a| a.as_array().ok())
-        .map(|a| a.iter().filter_map(|o| o.as_reference().ok()).collect())
+    d.and_then(|d| d.get(key))
+        .and_then(Object::as_array)
+        .map(|a| a.iter().filter_map(Object::as_reference).collect())
         .unwrap_or_default()
 }
 

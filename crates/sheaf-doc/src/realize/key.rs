@@ -563,7 +563,7 @@ impl Feed for BlobRef {
 impl Feed for ObjRef {
     fn feed(&self, sum: &mut Sum) {
         let ObjRef { src, id } = self;
-        sum.feed(src).feed(id);
+        sum.feed(src).feed(&id.number).feed(&id.generation);
     }
 }
 

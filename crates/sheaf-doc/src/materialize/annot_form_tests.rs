@@ -8,8 +8,8 @@
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, dictionary, literal};
 use in_progress::NoProgress;
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, dictionary};
 use sheaf_edit::{Rotation, Turn};
 
 use super::graph::Graph;
@@ -42,7 +42,7 @@ fn marked(marks: &[Annot]) -> Vec<u8> {
 fn annots_on(src: &Src, index: u32) -> Vec<(Option<ObjectId>, Dictionary)> {
     let pdf = src.pdf();
     let page = pdf.get_dictionary(src.page(index).unwrap().id).unwrap();
-    let Ok(list) = page.get(b"Annots") else {
+    let Some(list) = page.get(b"Annots") else {
         return Vec::new();
     };
     let list = pdf.dereference(list).unwrap().1.as_array().unwrap();
@@ -64,7 +64,7 @@ fn marks(d: &Document, index: usize) -> Vec<Annot> {
 
 /// `key` of `d` as a name, if it is one.
 fn name<'a>(d: &'a Dictionary, key: &[u8]) -> Option<&'a [u8]> {
-    d.get(key).ok().and_then(|n| n.as_name().ok())
+    d.get(key).and_then(Object::as_name)
 }
 
 fn mark(id: u64, kind: AnnotKind) -> Annot {
@@ -175,10 +175,7 @@ fn a_replacement_saves_its_strike_grouped_and_reopens_as_one_mark() {
     let (caret, strike) = (&list[0], &list[1]);
     assert_eq!(name(&caret.1, b"Subtype"), Some(b"Caret".as_slice()));
     assert_eq!(name(&strike.1, b"Subtype"), Some(b"StrikeOut".as_slice()));
-    assert_eq!(
-        strike.1.get(b"IRT").unwrap(),
-        &Object::Reference(caret.0.unwrap())
-    );
+    assert_eq!(strike.1.get(b"IRT").unwrap().as_reference(), caret.0);
     assert_eq!(name(&strike.1, b"RT"), Some(b"Group".as_slice()));
     assert!(!(strike.1.iter()).any(|(k, _)| crate::private::is_private(k)));
     let back = open(&out.bytes, None);
@@ -238,9 +235,9 @@ fn replied() -> Vec<u8> {
     let main = crate::serialize::built::to_pdf(&note, &mut f.pdf).main;
     let main = f.pdf.add_object(main);
     let reply = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Text", "IRT" => main, "NM" => Object::string_literal("r1"),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "IRT" => main, "NM" => literal("r1"),
         "Rect" => vec![100.into(), 700.into(), 120.into(), 720.into()],
-        "Contents" => Object::string_literal("their reply"),
+        "Contents" => literal("their reply"),
     });
     f.set_annots(0, &[main, reply]);
     f.bytes()
@@ -268,8 +265,8 @@ fn a_reply_follows_its_mark_given_a_fresh_id() {
         let (reply, mark) = (&list[0], &list[1]);
         assert!(mark.1.has(b"SHEF_Annot"));
         assert_eq!(
-            reply.1.get(b"IRT").unwrap(),
-            &Object::Reference(mark.0.unwrap()),
+            reply.1.get(b"IRT").unwrap().as_reference(),
+            mark.0,
             "page {index}"
         );
     }
@@ -292,22 +289,22 @@ fn popped() -> Vec<u8> {
     let rect = || vec![100.into(), 100.into(), 150.into(), 150.into()];
     let comment = f.pdf.new_object_id();
     let popup = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Popup", "Parent" => comment, "P" => page, "Rect" => rect(),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Popup"), "Parent" => comment, "P" => page, "Rect" => rect(),
     });
     f.pdf.objects.insert(
         comment,
         dictionary! {
-            "Type" => "Annot", "Subtype" => "Square", "P" => page, "Rect" => rect(),
-            "NM" => Object::string_literal("c1"), "Contents" => Object::string_literal("THEIRNOTE"),
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Square"), "P" => page, "Rect" => rect(),
+            "NM" => literal("c1"), "Contents" => literal("THEIRNOTE"),
             "Popup" => popup,
         }
         .into(),
     );
     let screen = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Screen", "P" => page, "Rect" => rect(),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Screen"), "P" => page, "Rect" => rect(),
     });
     let stray = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Widget", "P" => page, "Rect" => rect(),
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Widget"), "P" => page, "Rect" => rect(),
     });
     let bare = f.pdf.add_object(dictionary! { "Rect" => rect() });
     f.set_annots(0, &[comment, popup, screen, stray, bare]);
@@ -358,17 +355,11 @@ fn pop_ups_go_with_their_comments_and_the_rest_stays() {
     let mine: HashSet<ObjectId> = objects(&original).into_iter().collect();
     assert!(objects(&copy).iter().all(|at| !mine.contains(at)));
     let (comment, popup) = (&copy[0], &copy[1]);
-    assert_eq!(
-        popup.1.get(b"Parent").unwrap(),
-        &Object::Reference(comment.0.unwrap())
-    );
-    assert_eq!(
-        comment.1.get(b"Popup").unwrap(),
-        &Object::Reference(popup.0.unwrap())
-    );
+    assert_eq!(popup.1.get(b"Parent").unwrap().as_reference(), comment.0);
+    assert_eq!(comment.1.get(b"Popup").unwrap().as_reference(), popup.0);
     let copy_page = now.page(1).unwrap().id;
     for (_, d) in &copy[..4] {
-        assert_eq!(d.get(b"P").unwrap(), &Object::Reference(copy_page));
+        assert_eq!(d.get(b"P").unwrap().as_reference(), Some(copy_page));
     }
 
     d.commit_ops(vec![fx::delete_named(first, &["c1"])], "delete")
@@ -409,8 +400,8 @@ fn a_connector_leads_to_the_next_of_its_group() {
     for (index, to) in [(0, pages[1]), (1, pages[0])] {
         let list = annots_on(&now, index);
         let dest = list[0].1.get(b"Dest").unwrap().as_array().unwrap();
-        assert_eq!(dest[0], Object::Reference(to), "page {index}");
-        assert_eq!(dest[1], Object::Name(b"XYZ".to_vec()));
+        assert_eq!(dest[0].as_reference(), Some(to), "page {index}");
+        assert_eq!(dest[1].as_name(), Some(b"XYZ".as_slice()));
     }
 }
 
@@ -421,9 +412,9 @@ fn tagged_form() -> Vec<u8> {
     f.text("name", 0, row(0));
     let page = f.pages[0];
     let comment = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Square", "P" => page,
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Square"), "P" => page,
         "Rect" => vec![300.into(), 300.into(), 350.into(), 350.into()],
-        "Contents" => Object::string_literal("tagged comment"),
+        "Contents" => literal("tagged comment"),
     });
     let mut list = f.annots(0);
     list.push(comment);
@@ -465,20 +456,9 @@ fn reached(pdf: &Pdf, from: ObjectId, skip: &HashSet<ObjectId>) -> BTreeSet<Obje
         if skip.contains(&id) || !seen.insert(id) {
             continue;
         }
-        let mut refs = Vec::new();
-        fn walk(o: &Object, out: &mut Vec<ObjectId>) {
-            match o {
-                Object::Reference(r) => out.push(*r),
-                Object::Array(a) => a.iter().for_each(|o| walk(o, out)),
-                Object::Dictionary(d) => d.iter().for_each(|(_, o)| walk(o, out)),
-                Object::Stream(s) => s.dict.iter().for_each(|(_, o)| walk(o, out)),
-                _ => {}
-            }
-        }
         if let Ok(o) = pdf.get_object(id) {
-            walk(o, &mut refs);
+            stack.extend(o.references());
         }
-        stack.extend(refs);
     }
     seen
 }
@@ -510,8 +490,8 @@ fn a_duplicated_merged_field_is_one_object_a_copy() {
         );
         assert!(!dict.has(b"Kids"));
         assert_eq!(
-            dict.get(b"P").unwrap(),
-            &Object::Reference(pages[index as usize])
+            dict.get(b"P").unwrap().as_reference(),
+            Some(pages[index as usize])
         );
         objects.push(at.unwrap());
     }
@@ -571,7 +551,7 @@ fn one_form_inserted_twice_is_two_instances_sharing_nothing_of_their_own() {
     let mut skip: HashSet<ObjectId> = reached(&pdf, acroform, &HashSet::new())
         .into_iter()
         .filter(|&id| {
-            let shared = Object::Dictionary(dictionary! { "DR" => dr.clone() });
+            let shared = Object::from(dictionary! { "DR" => dr.clone() });
             reached_in(&pdf, &shared).contains(&id)
         })
         .collect();
@@ -600,22 +580,14 @@ fn one_form_inserted_twice_is_two_instances_sharing_nothing_of_their_own() {
 /// The objects `obj` reaches in `pdf`.
 fn reached_in(pdf: &Pdf, obj: &Object) -> BTreeSet<ObjectId> {
     let mut out = BTreeSet::new();
-    fn walk(pdf: &Pdf, o: &Object, out: &mut BTreeSet<ObjectId>) {
-        match o {
-            Object::Reference(r) => {
-                if out.insert(*r)
-                    && let Ok(o) = pdf.get_object(*r)
-                {
-                    walk(pdf, o, out);
-                }
-            }
-            Object::Array(a) => a.iter().for_each(|o| walk(pdf, o, out)),
-            Object::Dictionary(d) => d.iter().for_each(|(_, o)| walk(pdf, o, out)),
-            Object::Stream(s) => s.dict.iter().for_each(|(_, o)| walk(pdf, o, out)),
-            _ => {}
+    let mut stack: Vec<ObjectId> = obj.references().collect();
+    while let Some(r) = stack.pop() {
+        if out.insert(r)
+            && let Ok(o) = pdf.get_object(r)
+        {
+            stack.extend(o.references());
         }
     }
-    walk(pdf, obj, &mut out);
     out
 }
 
@@ -630,11 +602,11 @@ fn a_field_left_with_no_widgets_goes() {
     let mut f = Form::new(2);
     f.text("kept", 0, row(0));
     let radio = f.radio("gone", 1, &[row(0), row(1)], Some(1));
-    f.dict(radio).set("TU", Object::string_literal("SHEAFGONE"));
+    f.dict(radio).set("TU", literal("SHEAFGONE"));
     f.group("parent", &[radio]);
     let hidden = f.pdf.add_object(dictionary! {
-        "FT" => "Tx", "T" => Object::string_literal("hidden"),
-        "V" => Object::string_literal("SHEAFHIDDEN"),
+        "FT" => Object::name("Tx"), "T" => literal("hidden"),
+        "V" => literal("SHEAFHIDDEN"),
     });
     let fields: Vec<ObjectId> = f.fields().into_iter().chain([hidden]).collect();
     f.set_fields(&fields);
@@ -689,7 +661,7 @@ fn a_node_whose_kids_another_holds_goes() {
     f.group("real", &[kept]);
     f.text("other", 1, row(0));
     let stray = f.pdf.add_object(dictionary! {
-        "T" => Object::string_literal("stray"), "Kids" => vec![kept.into()],
+        "T" => literal("stray"), "Kids" => vec![kept.into()],
     });
     let fields: Vec<ObjectId> = f.fields().into_iter().chain([stray]).collect();
     f.set_fields(&fields);
@@ -729,13 +701,12 @@ fn a_field_s_widget_on_a_page_template_stays_its_kid() {
     };
     f.set_annots(0, &[shown]);
     let template = f.pdf.add_object(dictionary! {
-        "Type" => "Page",
+        "Type" => Object::name("Page"),
         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
-        "Annots" => vec![Object::Reference(spawned)],
+        "Annots" => vec![Object::from(spawned)],
     });
     f.dict(spawned).set("P", template);
-    let templates =
-        dictionary! { "Names" => vec![Object::string_literal("extra"), template.into()] };
+    let templates = dictionary! { "Names" => vec![literal("extra"), template.into()] };
     let catalog = f.catalog;
     f.dict(catalog)
         .set("Names", dictionary! { "Templates" => templates });
@@ -745,11 +716,7 @@ fn a_field_s_widget_on_a_page_template_stays_its_kid() {
     let pdf = lazy(&out.bytes, None);
     let field = (pdf.ids())
         .filter_map(|id| pdf.get_dictionary(id).ok())
-        .find(|d| {
-            d.get(b"T")
-                .and_then(Object::as_str)
-                .is_ok_and(|t| t == b"r")
-        })
+        .find(|d| d.get(b"T").and_then(Object::as_bytes) == Some(b"r"))
         .expect("the radio field");
     let kids: Vec<Dictionary> = (field.get(b"Kids").unwrap().as_array().unwrap().iter())
         .map(|k| {
@@ -760,15 +727,8 @@ fn a_field_s_widget_on_a_page_template_stays_its_kid() {
         .collect();
     assert_eq!(kids.len(), 2);
     let on_template = (kids.iter())
-        .filter(|k| {
-            k.get(b"Subtype")
-                .and_then(Object::as_name)
-                .is_ok_and(|s| s == b"Widget")
-        })
-        .filter_map(|k| {
-            pdf.get_dictionary(k.get(b"P").ok()?.as_reference().ok()?)
-                .ok()
-        })
+        .filter(|k| k.get(b"Subtype").and_then(Object::as_name) == Some(b"Widget"))
+        .filter_map(|k| pdf.get_dictionary(k.get(b"P")?.as_reference()?).ok())
         .filter(|p| !p.has(b"Parent"))
         .count();
     assert_eq!(on_template, 1, "the template's widget is the field's kid");
@@ -789,13 +749,13 @@ fn owned_keys_form() -> Vec<u8> {
     let catalog = f.catalog;
     f.dict(catalog).set(
         "PageLabels",
-        dictionary! { "Nums" => vec![0.into(), dictionary! { "S" => "r" }.into()] },
+        dictionary! { "Nums" => vec![0.into(), dictionary! { "S" => Object::name("r") }.into()] },
     );
     let pages = f.pages.clone();
     let item = |title: &str, page: ObjectId| {
         dictionary! {
-            "Title" => Object::string_literal(title),
-            "Dest" => vec![page.into(), "Fit".into()],
+            "Title" => literal(title),
+            "Dest" => vec![page.into(), Object::name("Fit")],
         }
     };
     crate::forms::fixture::outline_tree(
@@ -1118,14 +1078,14 @@ fn a_copy_doesnt_bring_its_file_s_catalog_or_form() {
     let pdf = now.pdf();
     let written = pdf.trailer().get(b"Root").unwrap().as_reference().unwrap();
     let data = (copy.iter())
-        .filter_map(|(_, w)| pdf.dereference(w.get(b"V").ok()?).ok())
-        .filter_map(|(_, v)| v.as_dict().ok()?.get(b"Reference").ok()?.as_array().ok())
-        .filter_map(|r| r[0].as_dict().ok()?.get(b"Data").ok()?.as_reference().ok())
+        .filter_map(|(_, w)| pdf.dereference(w.get(b"V")?).ok())
+        .filter_map(|(_, v)| v.as_dict()?.get(b"Reference")?.as_array())
+        .filter_map(|r| r[0].as_dict()?.get(b"Data")?.as_reference())
         .collect::<Vec<_>>();
     assert_eq!(data, [written]);
     let form = pdf.catalog().unwrap().get(b"AcroForm").unwrap();
-    let parrent = (copy.iter()).filter_map(|(_, w)| w.get(b"Parrent").ok());
-    assert!(parrent.into_iter().all(|p| p == form));
+    let parrent = (copy.iter()).filter_map(|(_, w)| w.get(b"Parrent"));
+    assert!(parrent.into_iter().all(|p| p.eq_value(form)));
 
     let mut d = open(&bytes(&file("A", 1, false)), None);
     let other = add(&d, &before, "signed.pdf");
@@ -1144,16 +1104,18 @@ fn a_copy_doesnt_bring_its_file_s_catalog_or_form() {
 fn the_post_conditions_fail_closed() {
     let mut pdf = Pdf::with_version("1.7");
     let pages = pdf.new_object_id();
-    let page = pdf.add_object(dictionary! { "Type" => "Page", "Parent" => pages });
+    let page = pdf.add_object(dictionary! { "Type" => Object::name("Page"), "Parent" => pages });
     let stray = pdf.new_object_id();
     pdf.objects.insert(
         pages,
-        dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        dictionary! { "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1 }
+            .into(),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages });
     pdf.trailer.set("Root", catalog);
     let tree: HashSet<ObjectId> = [pages, page].into();
-    let in_use: HashSet<u32> = pdf.objects.keys().map(|id| id.0).collect();
+    let in_use: HashSet<u32> = pdf.objects.keys().map(|id| id.number).collect();
     let graph = |pdf: &Pdf, keys: Vec<(ObjectId, ObjKey)>| Graph {
         pdf: pdf.clone(),
         keys: keys.into_iter().collect(),
@@ -1181,16 +1143,18 @@ fn the_post_conditions_fail_closed() {
     // A reference to a number the save gave that nothing has; one to a
     // number the primary never used was its own.
     let mut damaged = pdf.clone();
-    (damaged.get_dictionary_mut(page).unwrap()).set("Annots", vec![Object::Reference((0, 0))]);
+    (damaged.get_dictionary_mut(page).unwrap())
+        .set("Annots", vec![Object::from(ObjectId::new(0, 0))]);
     assert!(check(&graph(&damaged, vec![(page, key)]), &[(key, page)].into()).is_ok());
     let mut dangling = pdf.clone();
-    (dangling.get_dictionary_mut(page).unwrap()).set("Annots", vec![Object::Reference((99, 0))]);
+    (dangling.get_dictionary_mut(page).unwrap())
+        .set("Annots", vec![Object::from(ObjectId::new(99, 0))]);
     let e = check(&graph(&dangling, vec![(page, key)]), &[(key, page)].into()).unwrap_err();
     assert!(e.to_string().contains("hasn't got"), "{e}");
     // A page the tree doesn't keep, reached: what nothing reaches was
     // pruned before the checks.
     let mut reaching = pdf.clone();
-    (reaching.objects).insert(stray, dictionary! { "Type" => "Page" }.into());
+    (reaching.objects).insert(stray, dictionary! { "Type" => Object::name("Page") }.into());
     (reaching.get_dictionary_mut(catalog).unwrap()).set("OpenAction", vec![stray.into()]);
     let e = check(&graph(&reaching, Vec::new()), &none).unwrap_err();
     assert!(e.to_string().contains("doesn't keep"), "{e}");
@@ -1198,7 +1162,7 @@ fn the_post_conditions_fail_closed() {
     (reaching.get_dictionary_mut(catalog).unwrap()).set(
         "Names",
         dictionary! { "Templates" => dictionary! {
-            "Names" => vec![Object::string_literal("t"), stray.into()],
+            "Names" => vec![literal("t"), stray.into()],
         } },
     );
     assert!(check(&graph(&reaching, Vec::new()), &none).is_ok());
@@ -1215,7 +1179,7 @@ fn a_copy_brings_no_widget_its_page_doesnt_show() {
     let widget = |f: &mut Form, at: usize| {
         let rect: Vec<Object> = row(at).into_iter().map(Object::from).collect();
         f.pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Widget", "Rect" => rect, "Parent" => field,
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Widget"), "Rect" => rect, "Parent" => field,
         })
     };
     let shown = widget(&mut f, 0);
@@ -1224,7 +1188,7 @@ fn a_copy_brings_no_widget_its_page_doesnt_show() {
     f.pdf.objects.insert(
         field,
         dictionary! {
-            "FT" => "Tx", "T" => Object::string_literal("stray"),
+            "FT" => Object::name("Tx"), "T" => literal("stray"),
             "Kids" => vec![shown.into(), unshown.into()],
         }
         .into(),
@@ -1236,7 +1200,7 @@ fn a_copy_brings_no_widget_its_page_doesnt_show() {
         (pdf.ids())
             .filter(|&id| {
                 (pdf.get_dictionary(id).ok()).is_some_and(|d| {
-                    d.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Widget".as_slice())
+                    d.get(b"Subtype").and_then(Object::as_name) == Some(b"Widget".as_slice())
                 })
             })
             .count()
@@ -1256,7 +1220,7 @@ fn a_copy_brings_no_widget_its_page_doesnt_show() {
 #[test]
 fn copy_on_write_compares_the_primary_s_own_objects_with_their_source() {
     let src = source(&bytes(&file("A", 1, false)), None);
-    let in_use: HashSet<u32> = src.pdf().ids().map(|id| id.0).collect();
+    let in_use: HashSet<u32> = src.pdf().ids().map(|id| id.number).collect();
     let graph = |pdf: Pdf, keys: Vec<(ObjectId, ObjKey)>| Graph {
         pdf,
         keys: keys.into_iter().collect(),
@@ -1269,7 +1233,7 @@ fn copy_on_write_compares_the_primary_s_own_objects_with_their_source() {
     assert!(verify::copied(&graph(loaded.clone(), Vec::new()), &src, &in_use, &none).is_ok());
     let info = (loaded.trailer.get(b"Info").unwrap().as_reference()).unwrap();
     let mut edited = loaded.clone();
-    (edited.get_dictionary_mut(info).unwrap()).set("Title", Object::string_literal("B"));
+    (edited.get_dictionary_mut(info).unwrap()).set("Title", literal("B"));
     let e = verify::copied(&graph(edited.clone(), Vec::new()), &src, &in_use, &none).unwrap_err();
     assert!(e.to_string().contains("other content"), "{e}");
     let said = |id| id == info;
@@ -1349,7 +1313,7 @@ fn an_object_written_in_the_clear_doesnt_read_back() {
     // An object with a string, which encrypting changes: the attachment's
     // file specification.
     let spec = (plain.objects.iter())
-        .find(|(_, o)| o.as_dict().is_ok_and(|d| d.has_type(b"Filespec")))
+        .find(|(_, o)| o.as_dict().is_some_and(|d| d.has_type(b"Filespec")))
         .map(|(&id, _)| id)
         .filter(|&id| in_clear.raw_span_whole(id).is_some())
         .expect("a file specification");

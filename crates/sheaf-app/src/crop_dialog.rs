@@ -663,7 +663,7 @@ mod tests {
     /// the first and a block at (100..250, 500..600) on the second, opened
     /// from `dir` as the app opens them.
     fn blocks(dir: &std::path::Path) -> Document {
-        use lopdf::{Document as Pdf, Object, Stream, dictionary};
+        use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
         let mut pdf = Pdf::with_version("1.7");
         let root = pdf.new_object_id();
         let drawn: [&[u8]; 2] = [
@@ -673,17 +673,19 @@ mod tests {
         let kids: Vec<Object> = (drawn.into_iter())
             .map(|content| {
                 let content = pdf.add_object(Stream::new(dictionary! {}, content.to_vec()));
-                let page =
-                    dictionary! { "Type" => "Page", "Parent" => root, "Contents" => content };
+                let page = dictionary! {
+                    "Type" => Object::name("Page"), "Parent" => root, "Contents" => content,
+                };
                 pdf.add_object(page).into()
             })
             .collect();
         let pages = dictionary! {
-            "Type" => "Pages", "Kids" => kids, "Count" => 2,
+            "Type" => Object::name("Pages"), "Kids" => kids, "Count" => 2,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         };
-        pdf.objects.insert(root, Object::Dictionary(pages));
-        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
+        pdf.objects.insert(root, Object::from(pages));
+        let catalog =
+            pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => root });
         pdf.trailer.set("Root", catalog);
         let path = dir.join("blocks.pdf");
         pdf.save(&path).unwrap();

@@ -25,8 +25,8 @@
 
 use std::collections::HashMap;
 
+use crate::pdf::{Dictionary, Object, Value};
 use im::Vector;
-use lopdf::{Dictionary, Object};
 use sheaf_edit::DestView;
 
 use super::Cx;
@@ -50,9 +50,12 @@ pub(crate) fn outline(cx: &mut Cx) -> Option<Object> {
     }
     let primary = cx.primary;
     let pdf = primary.pdf();
-    let held = (pdf.catalog().ok()).and_then(|c| c.get(b"Outlines").ok());
-    let root_at = held.and_then(|o| o.as_reference().ok());
-    let read = (held.and_then(|o| pdf.dereference(o).ok())).and_then(|(_, o)| o.as_dict().ok());
+    let held = (pdf.catalog().ok()).and_then(|c| c.get(b"Outlines"));
+    let root_at = held.and_then(Object::as_reference);
+    let read = (held.and_then(|o| pdf.dereference(o).ok())).and_then(|(_, o)| match o.value() {
+        Value::Dict(d) => Some(d),
+        _ => None,
+    });
     // What keeps its item's number, before anything refers to it.
     let root_owned = root_at.is_some_and(|at| cx.own(ObjKey::OutlinesRoot, at));
     for (_, id, b) in st.bookmarks_preorder() {
@@ -74,12 +77,12 @@ pub(crate) fn outline(cx: &mut Cx) -> Option<Object> {
     // holds them.
     let saved = cx.saved().and_then(|record| record.roots.outlines.as_ref());
     for (key, value) in saved.or(read).into_iter().flat_map(|d| d.iter()) {
-        if !OUTLINES_OWNED.contains(&key.as_slice()) {
+        if !OUTLINES_OWNED.contains(&key) {
             let value = cx.sym(value, &scope);
-            root.set(key.clone(), value);
+            root.set(key, value);
         }
     }
-    root.set("Type", Object::Name(b"Outlines".to_vec()));
+    root.set("Type", Object::name("Outlines"));
     let place = Place {
         first,
         last,
@@ -99,7 +102,7 @@ pub(crate) fn outline(cx: &mut Cx) -> Option<Object> {
             };
             cx.push_raw(ObjKey::OutlinesRoot, raw);
         }
-        _ => cx.push(ObjKey::OutlinesRoot, Object::Dictionary(root)),
+        _ => cx.push(ObjKey::OutlinesRoot, Object::from(root)),
     }
     Some(cx.placeholder(ObjKey::OutlinesRoot))
 }
@@ -148,15 +151,15 @@ impl Place {
             .filter(|(name, _)| keys.contains(name));
         let links_hold = links.into_iter().all(|(name, key)| {
             let at = key.map(|key| cx.owned_at(key));
-            match (item.get(name).ok(), at) {
+            match (item.get(name).map(Object::value), at) {
                 (None, None) => true,
-                (Some(&Object::Reference(r)), Some(Some(at))) => r == at,
+                (Some(&Value::Ref(r)), Some(Some(at))) => r == at,
                 _ => false,
             }
         });
-        let count = match item.get(b"Count").ok() {
+        let count = match item.get(b"Count").map(Object::value) {
             None => None,
-            Some(&Object::Integer(n)) => Some(n),
+            Some(&Value::Integer(n)) => Some(n),
             Some(_) => return false,
         };
         links_hold && (!keys.contains(&b"Count".as_slice()) || count == self.count)
@@ -204,7 +207,7 @@ impl<'a> Items<'a> {
                 }
                 _ => {
                     place.write(cx, &mut out);
-                    cx.push(keys[i], Object::Dictionary(out));
+                    cx.push(keys[i], Object::from(out));
                 }
             }
         }
@@ -241,7 +244,7 @@ impl<'a> Items<'a> {
             };
             let scope = Scope { src, copy: 0 };
             for (key, value) in item.iter() {
-                let keep = match key.as_slice() {
+                let keep = match key {
                     k if STRUCTURE.contains(&k) => continue,
                     b"Title" => dests.title(item) == *b.title,
                     b"C" => color == b.color,
@@ -252,7 +255,7 @@ impl<'a> Items<'a> {
                 };
                 if keep {
                     let value = cx.sym(value, &scope);
-                    out.set(key.clone(), value);
+                    out.set(key, value);
                 } else {
                     same = false;
                 }
@@ -290,17 +293,22 @@ impl<'a> Items<'a> {
 /// [`DestView`], in PageSpace as the file has it); otherwise the top of
 /// the page.
 fn dest(page: Object, view: Option<&DestView>) -> Vec<Object> {
-    let num = |v: Option<f32>| v.map(Object::from).unwrap_or(Object::Null);
+    let num = |v: Option<f32>| v.map(Object::from).unwrap_or_else(Object::null);
     let mut dest = vec![page];
     match view {
         Some(DestView::Xyz { left, top, zoom }) => {
-            dest.extend(["XYZ".into(), num(*left), num(*top), num(*zoom)]);
+            dest.extend([Object::name("XYZ"), num(*left), num(*top), num(*zoom)]);
         }
         Some(DestView::Other { kind, params }) => {
-            dest.push(Object::Name(kind.as_bytes().to_vec()));
+            dest.push(Object::name(kind.as_str()));
             dest.extend(params.iter().map(|p| num(*p)));
         }
-        None => dest.extend(["XYZ".into(), Object::Null, Object::Null, Object::Null]),
+        None => dest.extend([
+            Object::name("XYZ"),
+            Object::null(),
+            Object::null(),
+            Object::null(),
+        ]),
     }
     dest
 }

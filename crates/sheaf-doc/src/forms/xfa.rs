@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 
-use lopdf::{Dictionary, Object};
+use crate::pdf::{Dictionary, Object, StreamExt, Value};
 use quick_xml::events::{BytesStart, Event};
 
 use crate::attachments::{Objects, resolve};
@@ -104,14 +104,14 @@ fn packets<P: Objects + ?Sized>(
     limits: &FormLimits,
 ) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
     let content = |o: &Object| {
-        let s = resolve(pdf, o)?.as_stream().ok()?;
+        let s = resolve(pdf, o)?.as_stream()?;
         s.decompressed_content_with_limit(limits.xfa).ok()
     };
-    match resolve(pdf, form.get(b"XFA").ok()?)? {
-        Object::Array(items) => {
+    match resolve(pdf, form.get(b"XFA")?)?.value() {
+        Value::Array(items) => {
             let (mut template, mut datasets) = (None, None);
             for pair in items.chunks(2) {
-                match (pair[0].as_str().ok(), pair.get(1)) {
+                match (pair[0].as_bytes(), pair.get(1)) {
                     (Some(b"template"), Some(o)) => template = content(o),
                     (Some(b"datasets"), Some(o)) => datasets = content(o),
                     _ => {}
@@ -119,8 +119,8 @@ fn packets<P: Objects + ?Sized>(
             }
             Some((template?, datasets))
         }
-        o @ Object::Stream(_) => {
-            let all = content(o)?;
+        Value::Stream(s) => {
+            let all = s.decompressed_content_with_limit(limits.xfa).ok()?;
             Some((all.clone(), Some(all)))
         }
         _ => None,

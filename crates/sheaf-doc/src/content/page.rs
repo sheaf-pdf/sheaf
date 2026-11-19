@@ -15,7 +15,7 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-use lopdf::{Dictionary, LazyPdf, Object, ObjectId, Stream};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, Stream, StreamExt, Value};
 
 use super::lex::{self, LexError, ResCx, Tok};
 use crate::source::Limits;
@@ -189,26 +189,26 @@ impl Join {
 pub trait ReadObjects {
     /// Object `id`, its references followed, read once and kept where the
     /// reader keeps what it reads: resources, which pages share.
-    fn object(&self, id: ObjectId) -> lopdf::Result<&Object>;
+    fn object(&self, id: ObjectId) -> crate::pdf::Result<&Object>;
 
     /// Object `id`, its references followed, handed to `read`; a source
     /// reads it without keeping it: a page's streams, each read once to
     /// lex.
-    fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> lopdf::Result<R>;
+    fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> crate::pdf::Result<R>;
 }
 
 impl ReadObjects for LazyPdf {
-    fn object(&self, id: ObjectId) -> lopdf::Result<&Object> {
+    fn object(&self, id: ObjectId) -> crate::pdf::Result<&Object> {
         self.get_object(id)
     }
 
-    fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> lopdf::Result<R> {
+    fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> crate::pdf::Result<R> {
         let mut object = self.object_unkept(id)?;
         let mut chain = 0;
-        while let Object::Reference(next) = *object {
+        while let Some(next) = object.as_reference() {
             chain += 1;
             if chain > Limits::DEFAULT.reader.max_depth {
-                return Err(lopdf::Error::Limit(lopdf::Limit::Depth));
+                return Err(crate::pdf::Error::Limit(crate::pdf::Limit::Depth));
             }
             object = self.object_unkept(next)?;
         }
@@ -216,12 +216,12 @@ impl ReadObjects for LazyPdf {
     }
 }
 
-impl ReadObjects for lopdf::Document {
-    fn object(&self, id: ObjectId) -> lopdf::Result<&Object> {
+impl ReadObjects for crate::pdf::Document {
+    fn object(&self, id: ObjectId) -> crate::pdf::Result<&Object> {
         self.get_object(id)
     }
 
-    fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> lopdf::Result<R> {
+    fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> crate::pdf::Result<R> {
         self.get_object(id).map(read)
     }
 }
@@ -229,15 +229,15 @@ impl ReadObjects for lopdf::Document {
 /// Why a page's content can't be read.
 #[derive(Debug, thiserror::Error)]
 pub enum ContentFault {
-    #[error("stream {} {} R can't be read: {error}", .stream.0, .stream.1)]
+    #[error("stream {} {} R can't be read: {error}", .stream.number, .stream.generation)]
     Stream {
         stream: ObjectId,
-        error: lopdf::Error,
+        error: crate::pdf::Error,
     },
     #[error("its streams decode to more than {0} bytes")]
     TooLarge(usize),
     /// `error`'s offset is into `stream`.
-    #[error("stream {} {} R: {error}", .stream.0, .stream.1)]
+    #[error("stream {} {} R: {error}", .stream.number, .stream.generation)]
     Lex { stream: ObjectId, error: LexError },
 }
 
@@ -272,9 +272,9 @@ impl PageContent {
             let data = stream
                 .decompressed_content_with_limit(left)
                 .map_err(|e| match e {
-                    lopdf::Error::Decompress(lopdf::DecompressError::MemoryLimitExceeded {
-                        ..
-                    }) => ContentFault::TooLarge(cap),
+                    crate::pdf::Error::Limit(crate::pdf::Limit::Decompressed) => {
+                        ContentFault::TooLarge(cap)
+                    }
                     e => ContentFault::Stream {
                         stream: id,
                         error: e,
@@ -290,19 +290,18 @@ impl PageContent {
         };
         for &id in contents {
             let entries = objects
-                .read(id, |object| match object {
-                    Object::Stream(stream) => take(id, stream).map(|()| Vec::new()),
-                    Object::Array(entries) => Ok(entries
-                        .iter()
-                        .filter_map(|e| e.as_reference().ok())
-                        .collect()),
+                .read(id, |object| match object.value() {
+                    Value::Stream(stream) => take(id, stream).map(|()| Vec::new()),
+                    Value::Array(entries) => {
+                        Ok(entries.iter().filter_map(Object::as_reference).collect())
+                    }
                     _ => Ok(Vec::new()),
                 })
                 .or_else(|e| missing(id, e).map(|()| Ok(Vec::new())))??;
             for entry in entries {
                 objects
-                    .read(entry, |object| match object {
-                        Object::Stream(stream) => take(entry, stream),
+                    .read(entry, |object| match object.value() {
+                        Value::Stream(stream) => take(entry, stream),
                         _ => Ok(()),
                     })
                     .or_else(|e| missing(entry, e).map(Ok))??;
@@ -340,7 +339,11 @@ impl PageContent {
     pub fn fault(&self, error: LexError) -> ContentFault {
         let pos = self.concat.pos(error.at);
         ContentFault::Lex {
-            stream: self.ids.get(pos.stream as usize).copied().unwrap_or((0, 0)),
+            stream: self
+                .ids
+                .get(pos.stream as usize)
+                .copied()
+                .unwrap_or(ObjectId::new(0, 0)),
             error: LexError {
                 at: pos.at as usize,
                 ..error
@@ -351,9 +354,9 @@ impl PageContent {
 
 /// A read of `id` that failed: Ok when there's no such object, which
 /// reads as null.
-fn missing(id: ObjectId, e: lopdf::Error) -> Result<(), ContentFault> {
+fn missing(id: ObjectId, e: crate::pdf::Error) -> Result<(), ContentFault> {
     match e {
-        lopdf::Error::MissingXrefEntry | lopdf::Error::ObjectNotFound(_) => Ok(()),
+        crate::pdf::Error::MissingXrefEntry | crate::pdf::Error::ObjectNotFound(_) => Ok(()),
         error => Err(ContentFault::Stream { stream: id, error }),
     }
 }
@@ -362,12 +365,9 @@ fn missing(id: ObjectId, e: lopdf::Error) -> Result<(), ContentFault> {
 /// reference to an array stays that one reference, since telling the two
 /// apart reads the stream it usually is.
 pub fn contents(page: &Dictionary) -> Vec<ObjectId> {
-    match page.get(b"Contents") {
-        Ok(Object::Reference(id)) => vec![*id],
-        Ok(Object::Array(streams)) => streams
-            .iter()
-            .filter_map(|s| s.as_reference().ok())
-            .collect(),
+    match page.get(b"Contents").map(Object::value) {
+        Some(Value::Ref(id)) => vec![*id],
+        Some(Value::Array(streams)) => streams.iter().filter_map(Object::as_reference).collect(),
         _ => Vec::new(),
     }
 }
@@ -378,13 +378,13 @@ impl ResCx {
     pub fn read(objects: &impl ReadObjects, resources: Option<&Object>) -> ResCx {
         let spaces = resources
             .and_then(|r| direct(objects, r))
-            .and_then(|r| r.as_dict().ok())
-            .and_then(|r| direct(objects, r.get(b"ColorSpace").ok()?))
-            .and_then(|s| s.as_dict().ok());
+            .and_then(Object::as_dict)
+            .and_then(|r| direct(objects, r.get(b"ColorSpace")?))
+            .and_then(Object::as_dict);
         ResCx::new(spaces.into_iter().flat_map(|spaces| {
             spaces
                 .iter()
-                .map(|(name, space)| (name.clone(), components(objects, space)))
+                .map(|(name, space)| (name.to_vec(), components(objects, space)))
         }))
     }
 }
@@ -396,24 +396,21 @@ fn components(objects: &impl ReadObjects, space: &Object) -> u32 {
     let Some(space) = direct(space) else {
         return 3;
     };
-    let parts = match space {
-        Object::Name(family) => return lex::family_components(family),
-        Object::Array(parts) => parts,
+    let parts = match space.value() {
+        Value::Name(family) => return lex::family_components(family.as_bytes()),
+        Value::Array(parts) => parts,
         _ => return 3,
     };
-    let family = parts
-        .first()
-        .and_then(direct)
-        .and_then(|f| f.as_name().ok());
+    let family = parts.first().and_then(direct).and_then(Object::as_name);
     let second = || parts.get(1).and_then(direct);
     match family {
         Some(b"ICCBased") => second()
-            .and_then(|s| s.as_stream().ok())
-            .and_then(|s| s.dict.get(b"N").ok()?.as_i64().ok())
+            .and_then(Object::as_stream)
+            .and_then(|s| s.dict.get(b"N")?.as_integer())
             .filter(|n| matches!(n, 1 | 3 | 4))
             .map_or(3, |n| n as u32),
         Some(b"DeviceN") => second()
-            .and_then(|names| names.as_array().ok())
+            .and_then(Object::as_array)
             .map(|names| names.len() as u32)
             .filter(|&n| n > 0)
             .unwrap_or(3),
@@ -424,8 +421,8 @@ fn components(objects: &impl ReadObjects, space: &Object) -> u32 {
 
 /// `object`, or what the reference it is names.
 pub(super) fn direct<'a>(objects: &'a impl ReadObjects, object: &'a Object) -> Option<&'a Object> {
-    match object {
-        Object::Reference(id) => objects.object(*id).ok(),
-        o => Some(o),
+    match object.as_reference() {
+        Some(id) => objects.object(id).ok(),
+        None => Some(object),
     }
 }

@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use lopdf::{Dictionary, Error, LazyPdf, Object, ObjectId};
+use crate::pdf::{Dictionary, Error, LazyPdf, Object, ObjectId, Value};
 
 use super::{OpenError, PageTreeError, PageTreeLimits};
 use crate::geom::{Geom, Rect};
@@ -52,7 +52,7 @@ pub struct PageFacts {
 
 impl PageFacts {
     /// A kid that names no dictionary, which keeps its place in the tree,
-    /// as PDFium's traversal and lopdf's `get_pages` keep it: a Letter
+    /// as PDFium's traversal and `Document::get_pages` keep it: a Letter
     /// page with nothing on it.
     fn stand_in(id: ObjectId) -> PageFacts {
         PageFacts {
@@ -98,8 +98,8 @@ pub(super) fn table(pdf: &LazyPdf, limits: &PageTreeLimits) -> Result<Vec<PageFa
         visits: 0,
     };
     let root = match pdf.catalog()?.get(b"Pages") {
-        Ok(root) => walk.dict_at(root)?,
-        Err(_) => None,
+        Some(root) => walk.dict_at(root)?,
+        None => None,
     };
     let Some((id, root)) = root else {
         return Err(PageTreeError::NoPages.into());
@@ -171,9 +171,9 @@ impl<'a> Walk<'a> {
                 continue;
             };
             frame.next += 1;
-            // A dictionary written in place has no object number: lopdf's
-            // get_pages skips it too.
-            let Ok(id) = kid.as_reference() else {
+            // A dictionary written in place has no object number:
+            // `Document::get_pages` skips it too.
+            let Some(id) = kid.as_reference() else {
                 continue;
             };
             // A page listed again: the facts it was read with, shared.
@@ -211,26 +211,26 @@ impl<'a> Walk<'a> {
 
     fn page(&mut self, id: ObjectId, dict: &'a Dictionary) -> Result<(), OpenError> {
         let up = match dict.get(b"Parent").and_then(Object::as_reference) {
-            Ok(parent) => self.inherited(parent)?,
-            Err(_) => None,
+            Some(parent) => self.inherited(parent)?,
+            None => None,
         };
         let up = up.as_deref();
         let media = self.found(dict, b"MediaBox")?.or(up.and_then(|u| u.media));
         let crop = self.found(dict, b"CropBox")?.or(up.and_then(|u| u.crop));
         let rotate = self.found(dict, b"Rotate")?.or(up.and_then(|u| u.rotate));
         let resources = match self.found(dict, b"Resources")? {
-            Some(_) => dict.get(b"Resources").ok().cloned().map(Arc::new),
+            Some(_) => dict.get(b"Resources").cloned().map(Arc::new),
             None => up.and_then(|u| u.resources.clone()),
         };
-        let degrees = match rotate {
-            Some(Object::Integer(i)) => *i,
-            Some(Object::Real(r)) => *r as i64,
+        let degrees = match rotate.map(Object::value) {
+            Some(Value::Integer(i)) => *i,
+            Some(Value::Real(r)) => *r as i64,
             _ => 0,
         };
         let page_box = |key: &[u8]| self.rect(self.found(dict, key)?);
-        let user_unit = match self.found(dict, b"UserUnit")? {
-            Some(&Object::Integer(i)) if i > 0 => i as f32,
-            Some(&Object::Real(r)) if r > 0.0 => r as f32,
+        let user_unit = match self.found(dict, b"UserUnit")?.map(Object::value) {
+            Some(&Value::Integer(i)) if i > 0 => i as f32,
+            Some(&Value::Real(r)) if r > 0.0 => r as f32,
             _ => 1.0,
         };
         let geom = Geom {
@@ -249,7 +249,7 @@ impl<'a> Walk<'a> {
             geom,
             contents: contents.into(),
             annots,
-            struct_parents: dict.get(b"StructParents").and_then(Object::as_i64).ok(),
+            struct_parents: dict.get(b"StructParents").and_then(Object::as_integer),
             repeat: 0,
         };
         self.push(page)
@@ -271,9 +271,9 @@ impl<'a> Walk<'a> {
     /// How many pages PDFium counts by the root's `/Count`, as its
     /// `CountPages` reads it: None when it counts the tree instead.
     fn counted(&self, root: &'a Dictionary) -> Result<Option<usize>, OpenError> {
-        let count = match self.found(root, b"Count")? {
-            Some(&Object::Integer(i)) => i,
-            Some(&Object::Real(r)) => r as i64,
+        let count = match self.found(root, b"Count")?.map(Object::value) {
+            Some(&Value::Integer(i)) => i,
+            Some(&Value::Real(r)) => r as i64,
             _ => 0,
         };
         Ok((1..PDFIUM_PAGE_MAX)
@@ -284,13 +284,13 @@ impl<'a> Walk<'a> {
     /// A page's `/Annots` entries: an array that pages name by reference
     /// is read once, and shared.
     fn annots(&mut self, dict: &'a Dictionary) -> Result<Arc<[Object]>, OpenError> {
-        let shared = dict.get(b"Annots").and_then(Object::as_reference).ok();
+        let shared = dict.get(b"Annots").and_then(Object::as_reference);
         if let Some(annots) = shared.and_then(|id| self.arrays.get(&id)) {
             return Ok(annots.clone());
         }
-        let annots: Arc<[Object]> = match self.found(dict, b"Annots")? {
-            Some(Object::Array(annots)) => annots.as_slice().into(),
-            _ => Arc::from([]),
+        let annots: Arc<[Object]> = match self.found(dict, b"Annots")?.and_then(Object::as_array) {
+            Some(annots) => annots.into(),
+            None => Arc::from([]),
         };
         if let Some(id) = shared {
             self.arrays.insert(id, annots.clone());
@@ -321,7 +321,7 @@ impl<'a> Walk<'a> {
                 break;
             };
             chain.push((node, dict));
-            at = dict.get(b"Parent").and_then(Object::as_reference).ok();
+            at = dict.get(b"Parent").and_then(Object::as_reference);
         }
         for (node, dict) in chain.into_iter().rev() {
             let up = above.as_deref();
@@ -330,7 +330,7 @@ impl<'a> Walk<'a> {
                 return Err(PageTreeError::TooDeep.into());
             }
             let resources = match self.found(dict, b"Resources")? {
-                Some(_) => dict.get(b"Resources").ok().cloned().map(Arc::new),
+                Some(_) => dict.get(b"Resources").cloned().map(Arc::new),
                 None => up.and_then(|u| u.resources.clone()),
             };
             let node_inherits = Rc::new(Inherited {
@@ -352,18 +352,18 @@ impl<'a> Walk<'a> {
 
     /// A node's kids: none when its `/Kids` isn't an array.
     fn kids(&self, node: &'a Dictionary) -> Result<&'a [Object], OpenError> {
-        Ok(match self.found(node, b"Kids")? {
-            Some(Object::Array(kids)) => kids,
-            _ => &[],
-        })
+        Ok(self
+            .found(node, b"Kids")?
+            .and_then(Object::as_array)
+            .unwrap_or(&[]))
     }
 
     /// The value of `key` in `dict`, references followed: None when it's
     /// missing or names no object, as PDFium takes it.
     fn found(&self, dict: &'a Dictionary, key: &[u8]) -> Result<Option<&'a Object>, OpenError> {
         match dict.get(key) {
-            Ok(value) => self.resolve(value),
-            Err(_) => Ok(None),
+            Some(value) => self.resolve(value),
+            None => Ok(None),
         }
     }
 
@@ -378,7 +378,7 @@ impl<'a> Walk<'a> {
 
     /// The dictionary a reference names, with its id.
     fn dict_at(&self, entry: &'a Object) -> Result<Option<(ObjectId, &'a Dictionary)>, OpenError> {
-        let Ok(id) = entry.as_reference() else {
+        let Some(id) = entry.as_reference() else {
             return Ok(None);
         };
         Ok(self.dict(id)?.map(|dict| (id, dict)))
@@ -388,9 +388,7 @@ impl<'a> Walk<'a> {
     fn dict(&self, id: ObjectId) -> Result<Option<&'a Dictionary>, OpenError> {
         let pdf = self.pdf;
         match pdf.get(id) {
-            Ok(Object::Dictionary(dict)) => Ok(Some(dict)),
-            Ok(Object::Stream(stream)) => Ok(Some(&stream.dict)),
-            Ok(_) => Ok(None),
+            Ok(obj) => Ok(obj.as_dict()),
             Err(e) if fatal(&e) => Err(e.into()),
             Err(_) => Ok(None),
         }
@@ -398,17 +396,17 @@ impl<'a> Walk<'a> {
 
     /// A box: four numbers, normalized. None for anything else.
     fn rect(&self, value: Option<&'a Object>) -> Result<Option<Rect>, OpenError> {
-        let Some(Object::Array(numbers)) = value else {
+        let Some(numbers) = value.and_then(Object::as_array) else {
             return Ok(None);
         };
-        let [a, b, c, d] = numbers.as_slice() else {
+        let [a, b, c, d] = numbers else {
             return Ok(None);
         };
         let mut corners = [0.0; 4];
         for (n, value) in corners.iter_mut().zip([a, b, c, d]) {
-            *n = match self.resolve(value)? {
-                Some(Object::Integer(i)) => *i as f32,
-                Some(Object::Real(r)) => *r as f32,
+            *n = match self.resolve(value)?.map(Object::value) {
+                Some(Value::Integer(i)) => *i as f32,
+                Some(Value::Real(r)) => *r as f32,
                 _ => 0.0,
             };
         }

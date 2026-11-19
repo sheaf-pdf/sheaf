@@ -8,8 +8,10 @@
 //! of it left. Opened again, the block is the file's, kept in its slot,
 //! and a second flatten adds another after it.
 
+use crate::pdf::{
+    Dictionary, Document as Pdf, Object, ObjectId, Stream, Value, dictionary, literal,
+};
 use in_progress::NoProgress;
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_edit::{FlattenSet, Rotation};
 
 use super::How;
@@ -54,16 +56,16 @@ fn annotated(tagged: bool) -> (Vec<u8>, Held) {
     let page = f.pages[0];
     let form = |f: &mut Form, ops: &str| {
         let dict = dictionary! {
-            "Type" => "XObject", "Subtype" => "Form",
+            "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"),
             "BBox" => vec![0.into(), 0.into(), 50.into(), 25.into()],
         };
         f.pdf.add_object(Stream::new(dict, ops.as_bytes().to_vec()))
     };
     let annot = |f: &mut Form, name: &str, flags: i64, x: i64, ap: Dictionary| {
         let id = f.pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Square", "P" => page,
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Square"), "P" => page,
             "Rect" => vec![x.into(), 400.into(), (x + 100).into(), 450.into()],
-            "NM" => Object::string_literal(name), "F" => flags, "AP" => ap,
+            "NM" => literal(name), "F" => flags, "AP" => ap,
         });
         let mut annots = f.annots(0);
         annots.push(id);
@@ -85,9 +87,9 @@ fn annotated(tagged: bool) -> (Vec<u8>, Held) {
     f.dict(stated)
         .set("Rect", vec![72.into(), 300.into(), 172.into(), 350.into()]);
     let link = f.pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Link", "F" => 4,
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"), "F" => 4,
         "Rect" => vec![72.into(), 200.into(), 172.into(), 220.into()],
-        "Dest" => vec![f.pages[1].into(), "Fit".into()],
+        "Dest" => vec![f.pages[1].into(), Object::name("Fit")],
     });
     let mut annots = f.annots(0);
     annots.push(link);
@@ -189,11 +191,9 @@ fn base(p: &Placement) -> Option<ObjectId> {
 fn appearance(pdf: &Pdf, id: ObjectId, state: Option<&[u8]>) -> ObjectId {
     let ap = pdf.get_dictionary(id).unwrap().get(b"AP").unwrap();
     let n = ap.as_dict().unwrap().get(b"N").unwrap();
-    match (n, state) {
-        (Object::Reference(r), None) => *r,
-        (Object::Dictionary(states), Some(state)) => {
-            states.get(state).unwrap().as_reference().unwrap()
-        }
+    match (n.value(), state) {
+        (Value::Ref(r), None) => *r,
+        (Value::Dict(states), Some(state)) => states.get(state).unwrap().as_reference().unwrap(),
         (n, _) => panic!("{n:?}"),
     }
 }
@@ -331,19 +331,27 @@ fn a_comment_with_states_draws_the_one_pdfium_shows() {
         (&["Red", "Off"], dictionary! {}, Some("Off")),
         (
             &["Red", "Green"],
-            dictionary! { "V" => "Green" },
+            dictionary! { "V" => Object::name("Green") },
             Some("Green"),
         ),
         (
             &["Red", "Green"],
-            dictionary! { "Parent" => dictionary! { "V" => "Green" } },
+            dictionary! { "Parent" => dictionary! { "V" => Object::name("Green") } },
             Some("Green"),
         ),
-        (&["Red", "Off"], dictionary! { "V" => "Blue" }, Some("Off")),
-        (&["Red", "Off"], dictionary! { "AS" => "Blue" }, None),
+        (
+            &["Red", "Off"],
+            dictionary! { "V" => Object::name("Blue") },
+            Some("Off"),
+        ),
+        (
+            &["Red", "Off"],
+            dictionary! { "AS" => Object::name("Blue") },
+            None,
+        ),
         (
             &["Red", "Green"],
-            dictionary! { "AS" => Object::string_literal("Green") },
+            dictionary! { "AS" => literal("Green") },
             Some("Green"),
         ),
     ];
@@ -352,7 +360,7 @@ fn a_comment_with_states_draws_the_one_pdfium_shows() {
         let mut ap = Dictionary::new();
         for (n, state) in states.iter().enumerate() {
             let dict = dictionary! {
-                "Type" => "XObject", "Subtype" => "Form",
+                "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"),
                 "BBox" => vec![0.into(), 0.into(), 50.into(), 25.into()],
             };
             let ops = format!("{n} 0 0 rg 0 0 50 25 re f");
@@ -364,13 +372,13 @@ fn a_comment_with_states_draws_the_one_pdfium_shows() {
         }
         let y = 700 - 60 * i as i64;
         let mut dict = dictionary! {
-            "Type" => "Annot", "Subtype" => "Square", "P" => page, "F" => 4,
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Square"), "P" => page, "F" => 4,
             "Rect" => vec![72.into(), y.into(), 172.into(), (y + 50).into()],
-            "NM" => Object::string_literal(format!("square{i}")),
+            "NM" => literal(format!("square{i}")),
             "AP" => dictionary! { "N" => ap },
         };
         for (k, v) in extra.iter() {
-            dict.set(k.clone(), v.clone());
+            dict.set(k, v.clone());
         }
         let id = f.pdf.add_object(dict);
         let mut annots = f.annots(0);
@@ -442,11 +450,11 @@ fn placements_in(st: &crate::DocState, page: PageId) -> usize {
 /// The block stream `id` of `pdf` is a flattened layer's, by its id.
 fn flat_block(pdf: &Pdf, id: ObjectId) -> Option<BlockId> {
     let (dict, _) = stream(pdf, id);
-    let marker = dict.get(b"SHEF_Block").ok()?.as_dict().ok()?;
-    if marker.get(b"K").and_then(Object::as_name).ok()? != b"Flat" {
+    let marker = dict.get(b"SHEF_Block")?.as_dict()?;
+    if marker.get(b"K").and_then(Object::as_name)? != b"Flat" {
         return None;
     }
-    BlockId::parse(marker.get(b"B").ok()?.as_str().ok()?)
+    BlockId::parse(marker.get(b"B")?.as_bytes()?)
 }
 
 /// What each of page `page`'s streams of `pdf` is: `Isolate`, `Flat`, or
@@ -463,11 +471,7 @@ fn kinds(pdf: &Pdf, page: ObjectId) -> Vec<&'static str> {
 
 /// The XObject page `page` of `pdf` names `name`.
 fn xobject(pdf: &Pdf, page: ObjectId, name: &[u8]) -> ObjectId {
-    let (res, ids) = pdf.get_page_resources(page).unwrap();
-    let res = match res {
-        Some(d) => d.clone(),
-        None => pdf.get_dictionary(ids[0]).unwrap().clone(),
-    };
+    let res = pdf.resources_of_page(page).unwrap();
     let xo = pdf.dereference(res.get(b"XObject").unwrap()).unwrap().1;
     xo.as_dict()
         .unwrap()
@@ -548,7 +552,7 @@ fn drawn_after(how: How) {
             .get_page_annotations(page)
             .unwrap_or_default()
             .into_iter())
-        .map(|d| d.get(b"NM").ok().map(|n| n.as_str().unwrap().to_vec()))
+        .map(|d| d.get(b"NM").map(|n| n.as_bytes().unwrap().to_vec()))
         .collect::<Vec<_>>();
         let left: Vec<Option<Vec<u8>>> =
             vec![Some(b"hidden".to_vec()), Some(b"unviewed".to_vec()), None];
@@ -564,8 +568,11 @@ fn drawn_after(how: How) {
         // object reference: those of the annotations gone went with them.
         if tagged {
             let elements = (out.objects.values())
-                .filter_map(|o| o.as_dict().ok())
-                .filter(|d| d.get(b"S").and_then(Object::as_name).ok() == Some(b"Form"))
+                .filter_map(|o| match o.value() {
+                    Value::Dict(d) => Some(d),
+                    _ => None,
+                })
+                .filter(|d| d.get(b"S").and_then(Object::as_name) == Some(b"Form"))
                 .count();
             assert_eq!(
                 elements, 3,
@@ -664,7 +671,7 @@ fn a_page_that_cant_be_read_isnt_flattened() {
     let content = pdf.get_dictionary(page).unwrap().get(b"Contents").unwrap();
     let content = content.as_reference().unwrap();
     let bad = Stream::new(Dictionary::new(), b"0 0 9 9 re f EMC".to_vec());
-    pdf.objects.insert(content, Object::Stream(bad));
+    pdf.objects.insert(content, Object::from(bad));
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
     let (_, mut doc) = opened(&dir, "a.pdf", &bytes);
