@@ -61,14 +61,19 @@ pub enum Body<'a> {
     /// The object as its source holds it, `n g obj` to `endobj`: copied as
     /// it is, at the number it gives (raw passthrough, §11.6).
     Raw(&'a [u8]),
+    /// An unchanged object-stream member's decoded bytes (M18 slice 9):
+    /// copied as they are into its new container when packed, or written
+    /// from its object value if unpacked.
+    Member(&'a [u8], Cow<'a, Object>, ObjKey),
     /// An object, which is the key: written, and encrypted when the file
     /// is, on its own, its IVs keyed by the key, or, when the layout packs
     /// it, with its object stream.
     Object(Cow<'a, Object>, ObjKey),
 }
 
-/// An object [`write_bodies`] packs: its id, what it is, and itself.
-pub(super) type Member<'a> = (ObjectId, ObjKey, Cow<'a, Object>);
+/// An object [`write_bodies`] packs: its id, what it is, itself, and its
+/// decoded bytes when copied from a source container.
+pub(super) type Member<'a> = (ObjectId, ObjKey, Cow<'a, Object>, Option<&'a [u8]>);
 
 /// How [`write_bodies`] writes what isn't one of its objects.
 pub struct Layout<'a> {
@@ -170,8 +175,15 @@ fn file<'a>(
                 out.push(b'\n');
                 pos
             }
+            Body::Member(raw, obj, key) if pack.is_some() && objstm::packable(id, &obj) => {
+                members.push((id, key, obj, Some(raw)));
+                continue;
+            }
+            Body::Member(_, obj, key) => {
+                super::indirect_as(&mut out, id, &key, &obj, layout.crypt)?
+            }
             Body::Object(obj, key) if pack.is_some() && objstm::packable(id, &obj) => {
-                members.push((id, key, obj));
+                members.push((id, key, obj, None));
                 continue;
             }
             Body::Object(obj, key) => super::indirect_as(&mut out, id, &key, &obj, layout.crypt)?,
@@ -367,7 +379,7 @@ fn numbers(
 fn plain(
     out: &mut Vec<u8>,
     section: &mut Section,
-    (id, key, obj): &Member<'_>,
+    (id, key, obj, _): &Member<'_>,
     crypt: Option<&Crypt>,
 ) -> Result<()> {
     let pos = super::indirect_as(out, *id, key, obj, crypt)?;
@@ -423,9 +435,15 @@ pub(super) fn containers(
 /// when its data wouldn't [`fit`](objstm::fits).
 fn container(n: u32, members: &[&Member<'_>], crypt: Option<&Crypt>) -> Result<Option<Object>> {
     let mut written = Vec::with_capacity(members.len());
-    for (id, _, obj) in members.iter().copied() {
-        let mut bytes = Vec::new();
-        object::write(&mut bytes, obj).map_err(|e| e.within(*id))?;
+    for (id, _, obj, raw) in members.iter().copied() {
+        let bytes = match raw {
+            Some(raw) => raw.to_vec(),
+            None => {
+                let mut bytes = Vec::new();
+                object::write(&mut bytes, obj).map_err(|e| e.within(*id))?;
+                bytes
+            }
+        };
         written.push((id.0, bytes));
     }
     let Some(stream) = objstm::container(&written) else {

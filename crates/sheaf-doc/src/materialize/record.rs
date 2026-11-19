@@ -374,14 +374,21 @@ impl ObjMap {
     }
 }
 
-/// A set of object numbers, a bit each.
+/// A set of object numbers: a bit each below [`crate::serialize::NUMBERS`],
+/// and a sparse set at or past it so sparse high numbers cost words only
+/// for what's there.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BitSet {
     words: Vec<u64>,
+    high: BTreeSet<u32>,
 }
 
 impl BitSet {
     pub fn insert(&mut self, n: u32) {
+        if n >= crate::serialize::NUMBERS {
+            self.high.insert(n);
+            return;
+        }
         let (word, bit) = (n as usize / 64, n % 64);
         if word >= self.words.len() {
             self.words.resize(word + 1, 0);
@@ -390,31 +397,44 @@ impl BitSet {
     }
 
     pub fn contains(&self, n: u32) -> bool {
+        if n >= crate::serialize::NUMBERS {
+            return self.high.contains(&n);
+        }
         let (word, bit) = (n as usize / 64, n % 64);
         self.words.get(word).is_some_and(|w| w & (1 << bit) != 0)
     }
 
     pub fn len(&self) -> usize {
-        self.words.iter().map(|w| w.count_ones() as usize).sum()
+        self.words
+            .iter()
+            .map(|w| w.count_ones() as usize)
+            .sum::<usize>()
+            + self.high.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.words.iter().all(|&w| w == 0)
+        self.high.is_empty() && self.words.iter().all(|&w| w == 0)
     }
 
     /// The largest number, when there's one.
     pub fn last(&self) -> Option<u32> {
+        if let Some(&n) = self.high.last() {
+            return Some(n);
+        }
         let (i, w) = self.words.iter().enumerate().rfind(|(_, w)| **w != 0)?;
         Some(i as u32 * 64 + 63 - w.leading_zeros())
     }
 
     /// The numbers, in order.
     pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
-        (0u32..).zip(&self.words).flat_map(|(i, &w)| {
-            (0..64)
-                .filter(move |b| w & (1 << b) != 0)
-                .map(move |b| i * 64 + b)
-        })
+        (0u32..)
+            .zip(&self.words)
+            .flat_map(|(i, &w)| {
+                (0..64)
+                    .filter(move |b| w & (1 << b) != 0)
+                    .map(move |b| i * 64 + b)
+            })
+            .chain(self.high.iter().copied())
     }
 }
 

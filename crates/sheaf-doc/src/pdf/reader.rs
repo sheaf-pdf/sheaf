@@ -2,7 +2,7 @@
 //! objects to `lopdf`'s model at the door until slice 11 moves sheaf onto
 //! `pdf_objects`' types directly.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
@@ -76,6 +76,15 @@ pub struct XrefFacts {
     pub hybrid: bool,
     pub linearized: bool,
     pub sections: usize,
+}
+
+/// First-parse verbatim copy candidates from [`LazyPdf::to_document_and_raw`]:
+/// outer-file byte spans (`Origin::File`) and decoded object-stream member
+/// slices (`Origin::Stream`).
+#[derive(Debug, Default)]
+pub struct RawCopies {
+    pub spans: HashMap<ObjectId, Range<usize>>,
+    pub members: HashMap<ObjectId, Vec<u8>>,
 }
 
 type Kept = std::result::Result<Arc<Object>, KeptError>;
@@ -210,13 +219,6 @@ impl LazyPdf {
             .ok()
             .and_then(|s| u32::try_from(s).ok())
             .unwrap_or(0);
-        if size > limits.max_objects {
-            return Err(Error::Limit(Limit::Objects));
-        }
-        let max_id = reading.ids().last().map_or(0, |id| id.number);
-        if max_id >= limits.max_objects {
-            return Err(Error::Limit(Limit::Objects));
-        }
 
         let facts = XrefFacts {
             kind,
@@ -390,6 +392,12 @@ impl LazyPdf {
     /// through `pdf_structure::Reading::to_document`, matching what `LazyPdf`
     /// reads (`Encrypt` stripped as Rewrite expects).
     pub fn to_document(&self) -> Result<Document> {
+        self.to_document_and_raw(false).map(|(doc, _)| doc)
+    }
+
+    /// [`LazyPdf::to_document`], plus first-parse verbatim spans and decoded
+    /// object-stream member bytes when `want_raw` is `true` (M18 slice 9).
+    pub fn to_document_and_raw(&self, want_raw: bool) -> Result<(Document, RawCopies)> {
         let pdoc = self.reading.to_document().map_err(|e| match e {
             pdf_structure::Error::Io(io) => Error::IO(io),
             other => Error::Syntax(other.to_string()),
@@ -401,11 +409,13 @@ impl LazyPdf {
             trailer.remove(b"Encrypt");
         }
         out.trailer = trailer;
+        let mut raw = RawCopies::default();
         for (oid, obj) in pdoc.objects() {
             let id = (oid.number, oid.generation);
             if Some(id) == encrypt_id {
                 continue;
             }
+            let mut decrypt_fallback = false;
             let converted = match obj.value() {
                 Value::Stream(s) => {
                     let data = match (&s.data, self.reading.encryption()) {
@@ -424,14 +434,16 @@ impl LazyPdf {
                             })) => plain,
                             // Stream stored in the clear in an encrypted file
                             // (e.g. 0169467's XMP): keep raw bytes so Rewrite
-                            // re-encrypts them cleanly.
+                            // re-encrypts them cleanly, never copying raw.
                             Err(pdf_structure::Error::Decrypt(_)) => match s.data.at() {
-                                Some(span) => self
-                                    .reading
-                                    .source()
-                                    .read_at(span.range())
-                                    .map_err(Error::IO)?
-                                    .into_owned(),
+                                Some(span) => {
+                                    decrypt_fallback = true;
+                                    self.reading
+                                        .source()
+                                        .read_at(span.range())
+                                        .map_err(Error::IO)?
+                                        .into_owned()
+                                }
                                 None => continue,
                             },
                             Err(_) => continue,
@@ -448,16 +460,33 @@ impl LazyPdf {
                 }
                 _ => convert_value(obj),
             };
+            if want_raw
+                && !decrypt_fallback
+                && let Some(rec) = pdoc.record(oid)
+            {
+                if let Some(span) = whole_span(rec) {
+                    raw.spans.insert(id, span);
+                } else if id.1 == 0
+                    && let Origin::Stream { stream, .. } = rec.origin
+                {
+                    let stm_oid = PdfId::new(stream, 0);
+                    if !pdoc.in_the_clear(stm_oid)
+                        && let Some(held) = pdoc.held(stm_oid)
+                        && let Some(slice) = rec.at.stream_slice_in(stm_oid, held)
+                    {
+                        raw.members.insert(id, slice.to_vec());
+                    }
+                }
+            }
             out.max_id = out.max_id.max(id.0);
             out.objects.insert(id, converted);
         }
-        Ok(out)
+        Ok((out, raw))
     }
 
     /// Decoded bytes of an object-stream member `(container_id, bytes)`
     /// when `id` was read from an object stream (`Origin::Stream`).
-    #[allow(dead_code)]
-    pub(crate) fn member_bytes(&self, id: ObjectId) -> Option<(u32, Vec<u8>)> {
+    pub fn member_bytes(&self, id: ObjectId) -> Option<(u32, Vec<u8>)> {
         let oid = PdfId::from(id);
         let rec = match self.reading.record(oid) {
             Some(rec) => rec.clone(),
@@ -707,23 +736,16 @@ fn check_xref_dict_caps(
     total_rows: &mut usize,
     max_entries: usize,
 ) -> Result<()> {
-    if let Some(size) = dict.get(b"Size").and_then(PdfObj::as_integer)
-        && u32::try_from(size).map_or(true, |s| s > limits.max_objects)
-    {
-        return Err(Error::Limit(Limit::Objects));
-    }
     match dict.get(b"Index").map(PdfObj::value) {
         Some(Value::Array(arr)) => {
             for pair in arr.as_chunks::<2>().0 {
-                let Some(start) = pair[0].as_integer().and_then(|n| u32::try_from(n).ok()) else {
+                let Some(start) = pair[0].as_integer().and_then(|n| u64::try_from(n).ok()) else {
                     break;
                 };
                 let Some(count) = pair[1].as_integer().and_then(|n| u32::try_from(n).ok()) else {
                     break;
                 };
-                if start
-                    .checked_add(count)
-                    .is_none_or(|end| end > limits.max_objects)
+                if count > limits.max_objects || start + u64::from(count) > u64::from(u32::MAX) + 1
                 {
                     return Err(Error::Limit(Limit::Objects));
                 }
@@ -731,12 +753,14 @@ fn check_xref_dict_caps(
             }
         }
         _ => {
-            if let Some(size) = dict
-                .get(b"Size")
-                .and_then(PdfObj::as_integer)
-                .and_then(|n| usize::try_from(n).ok())
-            {
-                *total_rows = total_rows.saturating_add(size);
+            if let Some(size) = dict.get(b"Size").and_then(PdfObj::as_integer) {
+                let Ok(count) = u32::try_from(size) else {
+                    return Err(Error::Limit(Limit::Objects));
+                };
+                if count > limits.max_objects {
+                    return Err(Error::Limit(Limit::Objects));
+                }
+                *total_rows = total_rows.saturating_add(count as usize);
             }
         }
     }

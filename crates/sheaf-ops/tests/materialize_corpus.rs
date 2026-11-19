@@ -180,6 +180,11 @@ fn identity(entry: &Entry, corpus: &Corpus) -> Option<Identity> {
                 out.failed
                     .push(format!("{} {} was left alone and written anew", id.0, id.1));
             }
+        } else if let (Some((_, a)), Some((_, b))) =
+            (before.member_bytes(id), after.member_bytes(id))
+            && a == b
+        {
+            out.raw += 1;
         }
     }
     Some(out)
@@ -205,12 +210,14 @@ fn identity(entry: &Entry, corpus: &Corpus) -> Option<Identity> {
 /// has no `/Root` under `pdf-structure` (closing F29), incremental `type
 /// 0` free entries (0150632, 3170869, …) drop freed objects lopdf kept,
 /// and 2,121 streams with multi-EOL whitespace before `endstream` copy
-/// verbatim.
+/// verbatim. M18 slice 9 moved `raw` to 2,246,369 (99.1% of surviving
+/// primary objects): unchanged object-stream members copy into new
+/// containers as their decoded bytes without re-serialization.
 const IDENTITY: Baseline = Baseline {
     manifest: 4392,
     files: 4388,
     survived: 2_267_675,
-    raw: 921_586,
+    raw: 2_246_369,
     changed: 431,
 };
 

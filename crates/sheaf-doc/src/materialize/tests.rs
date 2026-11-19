@@ -625,10 +625,10 @@ fn a_second_save_keeps_the_first_save_s_numbers() {
 /// The highest number a PDF may use, past which [`far`]'s objects are.
 const LAST: u32 = crate::serialize::NUMBERS - 1;
 
-/// A one-page file whose object stream (object 4, which its table lists)
-/// holds two objects the table doesn't place, numbered 4,294,967,290 and
-/// 4,294,967,291: the lazy reader never reads them, the eager load takes
-/// them. The catalog names the first (`/Far`, "FARONE"), the page's font
+/// A one-page file whose sparse cross-reference stream places two members
+/// of object stream 4 at numbers 4,294,967,290 and 4,294,967,291 (9 entries
+/// in all, well below the entry cap, at numbers past what a full write may
+/// use). The catalog names the first (`/Far`, "FARONE"), the page's font
 /// the second (`/Far`, "FARTWO") and 4,294,967,000, which nothing is
 /// (`/Gone`).
 fn far() -> Vec<u8> {
@@ -673,14 +673,28 @@ fn far() -> Vec<u8> {
         .into(),
     ];
     let mut out = b"%PDF-1.7\n".to_vec();
-    let mut table = "xref\n0 7\n0000000000 65535 f \n".to_string();
+    let mut rows = vec![0, 0, 0, 0, 0, 0xff, 0xff];
     for (num, obj) in (1..).zip(&objects) {
         let pos = crate::serialize::object::indirect(&mut out, (num, 0), obj).unwrap();
-        table.push_str(&format!("{pos:010} 00000 n \n"));
+        rows.push(1);
+        rows.extend_from_slice(&(pos as u32).to_be_bytes());
+        rows.extend_from_slice(&[0, 0]);
+    }
+    for idx in 0..2u16 {
+        rows.push(2);
+        rows.extend_from_slice(&4u32.to_be_bytes());
+        rows.extend_from_slice(&idx.to_be_bytes());
     }
     let start = out.len();
-    out.extend_from_slice(table.as_bytes());
-    out.extend_from_slice(b"trailer\n<< /Size 7 /Root 1 0 R >>\n");
+    let xref = dictionary! {
+        "Type" => "XRef",
+        "Size" => i64::from(u32::MAX - 3),
+        "W" => vec![1.into(), 4.into(), 2.into()],
+        "Index" => vec![0.into(), 7.into(), i64::from(u32::MAX - 5).into(), 2.into()],
+        "Root" => (1, 0),
+    };
+    let xref_stream = Object::Stream(Stream::new(xref, rows));
+    crate::serialize::object::indirect(&mut out, (7, 0), &xref_stream).unwrap();
     out.extend_from_slice(format!("startxref\n{start}\n%%EOF\n").as_bytes());
     out
 }
@@ -695,16 +709,16 @@ fn far_of(pdf: &LazyPdf, id: ObjectId) -> (ObjectId, Vec<u8>) {
     (at, said.as_str().unwrap().to_vec())
 }
 
-/// Objects a base holds at numbers past what a PDF may use, which an
-/// object stream its table doesn't place can, are given new numbers past
-/// the primary's, so the file stays small and reads back, with a note;
-/// what names them follows them there, a reference to such a number that
-/// nothing is becomes null, and a second save keeps their numbers.
+/// Objects a base holds at numbers past what a PDF may use, placed sparsely
+/// by its cross-reference stream, are given new numbers past the primary's,
+/// so the file stays small and reads back, with a note; what names them
+/// follows them there, a reference to such a number that nothing is becomes
+/// null, and a second save keeps their numbers.
 #[test]
 fn objects_numbered_past_the_last_number_are_given_new_ones() {
     let base = far();
     let mut d = open(&base, None);
-    assert!(lazy(&base, None).ids().all(|id| id.0 < 7));
+    assert_eq!(lazy(&base, None).ids().filter(|id| id.0 > LAST).count(), 2);
     let first = save(&mut d);
     assert!(first.bytes.len() < 4096, "{} bytes", first.bytes.len());
     assert!(first.notes.iter().any(|n| n.0.contains("new numbers")));
@@ -1559,4 +1573,34 @@ fn the_fast_paths_write_what_the_built_path_would() {
             span(&was, &before, (id, 0))
         );
     }
+}
+
+#[test]
+fn first_parse_spans_equal_raw_span_whole_and_members_copy_verbatim() {
+    let mut form = crate::forms::fixture::every_kind();
+    let mut packed = Vec::new();
+    form.pdf.save_modern(&mut packed).unwrap();
+    let pdf = lazy(&packed, None);
+    let (_, raw) = pdf.to_document_and_raw(true).unwrap();
+    for id in pdf.ids() {
+        assert_eq!(
+            raw.spans.get(&id).cloned(),
+            pdf.raw_span_whole(id),
+            "{id:?}"
+        );
+    }
+    assert!(!raw.members.is_empty());
+    let doc = open(&packed, None);
+    let out = rewrite(&doc, Profile::default());
+    let after = lazy(&out.bytes, None);
+    let mut copied_members = 0;
+    for (id, member) in &raw.members {
+        if !out.record.map.keys.values().any(|k| k == id)
+            && let Some((_, written_member)) = after.member_bytes(*id)
+        {
+            assert_eq!(&written_member, member, "{id:?}");
+            copied_members += 1;
+        }
+    }
+    assert!(copied_members > 0);
 }

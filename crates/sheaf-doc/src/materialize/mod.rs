@@ -111,9 +111,8 @@ pub mod verify;
 pub(crate) mod watermark_tests;
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::pdf::{ByteSource as _, Object, ObjectId, Stream, XrefKind};
 use anyhow::{Context as _, Result};
@@ -288,10 +287,7 @@ fn rewrite(
     };
     let stable = target.profile.numbering == Numbering::Stable;
     let raw = stable && src.base_sound() && same_crypt(crypt.as_ref(), src.crypt());
-    // Where the primary's objects are in its bytes, found while the graph
-    // is built and pruned, for those written as they were.
-    let spans = raw.then(|| Spans::find(src));
-    let loaded = graph::eager(src)?;
+    let (loaded, mut raw_copies) = graph::eager_with_raw(src, raw)?;
     let in_use: HashSet<u32> = src.pdf().ids().map(|id| id.0).collect();
     let numbers = number::stable(&e, &input.target, src, &loaded, &in_use, prev)?;
     let owned = std::mem::take(&mut e.owned);
@@ -368,20 +364,27 @@ fn rewrite(
         start: numbers.start(),
     };
     verify::graph(&graph, &checked, &owned, &tree, stable, encrypt)?;
-    let mut spans = spans.map(Spans::join).unwrap_or_default();
     // What the emitter or `keep_only` changed, what `release_written`
     // let go of, or what names a moved object, is written anew.
     let changed = |id: ObjectId| {
         kept.modified.contains(&id) || released.contains(&id) || graph.followed.contains(&id)
     };
-    spans.retain(|&id, _| {
+    let keep_raw = |id: ObjectId| {
         graph.pdf.objects.contains_key(&id)
             && !graph.keys.contains_key(&id)
             && !graph.deferred.contains_key(&id)
             && !changed(id)
-    });
+    };
+    raw_copies.spans.retain(|&id, _| keep_raw(id));
+    raw_copies
+        .members
+        .retain(|&id, _| keep_raw(id) && pack && objstm::packable(id, &graph.pdf.objects[&id]));
     if stable {
-        let changed = |id| changed(id) || spans.contains_key(&id);
+        let changed = |id| {
+            changed(id)
+                || raw_copies.spans.contains_key(&id)
+                || raw_copies.members.contains_key(&id)
+        };
         verify::copied(&graph, src, &in_use, &changed)?;
     }
     match target.profile.private {
@@ -419,8 +422,11 @@ fn rewrite(
             let made = Object::Stream(Stream::new(dict, data));
             return Ok((id, Body::Object(Cow::Owned(made), key)));
         }
-        if let Some(span) = spans.get(&id) {
+        if let Some(span) = raw_copies.spans.get(&id) {
             return Ok((id, Body::Raw(&bytes[span.clone()])));
+        }
+        if let Some(member) = raw_copies.members.get(&id) {
+            return Ok((id, Body::Member(member.as_slice(), Cow::Borrowed(obj), key)));
         }
         Ok((id, Body::Object(Cow::Borrowed(obj), key)))
     });
@@ -526,76 +532,6 @@ fn written_tree(pdf: &crate::pdf::Document) -> TreeShape {
         node.from = None;
     }
     tree
-}
-
-/// Where an object is in its source's bytes.
-type Span = std::ops::Range<usize>;
-
-/// The search for where the primary's objects are in its bytes
-/// ([`raw_spans`]), on a thread of its own while the graph is built: told
-/// to stop and waited for when it's dropped unjoined, so a save that
-/// stops first (cancelled, or failing) leaves nothing reading the file.
-struct Spans {
-    stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<HashMap<ObjectId, Span>>>,
-}
-
-impl Spans {
-    fn find(src: &crate::store::Src) -> Spans {
-        let stop = Arc::new(AtomicBool::new(false));
-        let (src, halt) = (src.clone(), stop.clone());
-        let thread = std::thread::spawn(move || {
-            let ids: Vec<ObjectId> = src.pdf().ids().collect();
-            raw_spans(&src, &ids, &halt)
-        });
-        Spans {
-            stop,
-            thread: Some(thread),
-        }
-    }
-
-    fn join(mut self) -> HashMap<ObjectId, Span> {
-        let thread = self.thread.take().expect("joined once");
-        thread.join().expect("finding spans doesn't panic")
-    }
-}
-
-impl Drop for Spans {
-    fn drop(&mut self) {
-        if let Some(thread) = self.thread.take() {
-            self.stop.store(true, Ordering::Relaxed);
-            let _ = thread.join();
-        }
-    }
-}
-
-/// Where each of `ids`, objects of `src`, is in its bytes, those a write
-/// may copy as they are ([`Source::raw_span_whole`]): found on a thread
-/// per core (8 at most), each a parse of its object, until `stop`.
-///
-/// [`Source::raw_span_whole`]: crate::source::Source::raw_span_whole
-fn raw_spans(
-    src: &crate::source::Source,
-    ids: &[ObjectId],
-    stop: &AtomicBool,
-) -> HashMap<ObjectId, Span> {
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
-    let chunk = ids.len().div_ceil(threads).max(1024);
-    std::thread::scope(|s| {
-        let found: Vec<_> = (ids.chunks(chunk))
-            .map(|ids| {
-                s.spawn(move || {
-                    (ids.iter())
-                        .take_while(|_| !stop.load(Ordering::Relaxed))
-                        .filter_map(|&id| Some((id, src.raw_span_whole(id)?)))
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect();
-        (found.into_iter())
-            .flat_map(|f| f.join().expect("finding spans doesn't panic"))
-            .collect()
-    })
 }
 
 /// Whether a file encrypted with `a` is encrypted as one with `b` is,

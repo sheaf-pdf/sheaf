@@ -95,7 +95,12 @@ pub fn stable(
         copy: 0,
     };
     let keys: BTreeSet<ObjKey> = (e.objects.iter().map(|(key, _)| *key))
-        .chain(e.syms.keys().iter().copied())
+        .chain(e.syms.keys().iter().copied().filter(|k| match *k {
+            ObjKey::Base { blob, obj, copy: 0 } if blob == identity && obj.0 >= NUMBERS => {
+                loaded.objects.contains_key(&obj)
+            }
+            _ => true,
+        }))
         .chain(beyond(loaded).map(base))
         .collect();
     let own = |key: &ObjKey| match *key {

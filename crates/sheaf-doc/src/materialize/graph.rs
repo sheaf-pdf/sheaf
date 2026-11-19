@@ -29,6 +29,12 @@ pub fn eager(src: &Source) -> Result<Pdf> {
     Ok(src.pdf().to_document()?)
 }
 
+/// [`eager`], plus first-parse verbatim copy candidates when `want_raw` is
+/// `true` (M18 slice 9).
+pub fn eager_with_raw(src: &Source, want_raw: bool) -> Result<(Pdf, crate::pdf::RawCopies)> {
+    Ok(src.pdf().to_document_and_raw(want_raw)?)
+}
+
 /// A Rewrite's objects: the primary's, the emitted ones over them.
 pub struct Graph {
     pub pdf: Pdf,

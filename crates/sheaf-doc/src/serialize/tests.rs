@@ -1607,7 +1607,7 @@ fn containers_build_alike_on_one_thread_and_on_eight() {
         .map(|n| {
             let text = Object::string_literal(format!("object {n}"));
             let obj = Object::Dictionary(dictionary! { "N" => n, "Text" => text });
-            ((n, 0), key_of((n, 0)), Cow::Owned(obj))
+            ((n, 0), key_of((n, 0)), Cow::Owned(obj), None)
         })
         .collect();
     let groups: Vec<(u32, Vec<&Member>)> = (5000..)

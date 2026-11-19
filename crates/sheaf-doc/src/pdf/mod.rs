@@ -10,7 +10,7 @@ pub use lopdf::{
     SaveOptions, Stream, StringFormat, content, decode_text_string, encryption, xref,
 };
 pub use pdf_structure::{ByteSource, FileBytes};
-pub use reader::{LazyPdf, ReadLimits, XrefFacts, XrefKind};
+pub use reader::{LazyPdf, RawCopies, ReadLimits, XrefFacts, XrefKind};
 
 #[doc(hidden)]
 #[macro_export]
