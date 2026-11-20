@@ -218,34 +218,141 @@ fn a_font_is_read_through_a_source_that_keeps_none_of_its_streams() {
     assert!(matches!(too_large, Err(crate::pdf::fonts::Error::TooLarge)));
 }
 
-/// pdf-fonts' limits are its defaults with content's as sheaf sets them.
+/// pdf-fonts' limits are its defaults with content's as sheaf sets them,
+/// and a `/UseCMap` chain's cap is content's depth, as it was when sheaf
+/// read the chain itself.
 #[test]
 fn a_font_s_limits_are_the_family_s_with_sheaf_s_content_caps() {
     let mut lim = Limits::DEFAULT;
+    assert_eq!(lim.fonts().cmaps, lim.content.depth);
     lim.content.depth = 7;
     lim.content.operands = 11;
     let fonts = lim.fonts();
     assert_eq!(fonts.content, lim.content.family());
     assert_eq!(fonts.content.depth, 7);
+    assert_eq!(fonts.cmaps, 7);
     let family = crate::pdf::fonts::Limits::DEFAULT;
     assert_eq!(
-        (
-            fonts.cmaps,
-            fonts.type1_work,
-            fonts.font_fuel,
-            fonts.glyph_fuel
-        ),
-        (
-            family.cmaps,
-            family.type1_work,
-            family.font_fuel,
-            family.glyph_fuel
-        )
+        (fonts.type1_work, fonts.font_fuel, fonts.glyph_fuel),
+        (family.type1_work, family.font_fuel, family.glyph_fuel)
     );
     assert_eq!(
         (fonts.composite_glyphs, fonts.composite_depth),
         (family.composite_glyphs, family.composite_depth)
     );
+}
+
+/// A CMap's `/UseCMap` chain is read as far as content's depth and no
+/// further, whatever a caller sets it to: a chain within it is read
+/// whole, and one CMap more leaves the font's codes guessed, as sheaf's
+/// own reader left them.
+#[test]
+fn a_cmap_chain_is_cut_at_content_s_depth() {
+    let mut lim = Limits::DEFAULT;
+    lim.content.depth = 3;
+    let depth = lim.content.depth;
+    let guessed = |chain: usize| {
+        let mut doc = Document::new();
+        // Those it uses take nothing, so what's guessed is only the cut.
+        let mut cmap = doc.add_object(Stream::new(dictionary! {}, Vec::new()));
+        for _ in 2..chain {
+            cmap = doc.add_object(Stream::new(dictionary! { "UseCMap" => cmap }, Vec::new()));
+        }
+        let cmap = doc.add_object(Stream::new(
+            dictionary! { "UseCMap" => cmap },
+            b"1 begincidrange <00> <FF> 0 endcidrange".to_vec(),
+        ));
+        let descendant = doc.add_object(dictionary! {
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("CIDFontType2"),
+            "BaseFont" => Object::name("Chained"),
+        });
+        let font = dictionary! {
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type0"),
+            "BaseFont" => Object::name("Chained"),
+            "Encoding" => cmap,
+            "DescendantFonts" => vec![Object::from(descendant)],
+        };
+        let limits = lim.fonts();
+        let font = Font::read(Objects(&doc), &font, &limits, &mut (1 << 20), &mut ()).unwrap();
+        font.approx().codes
+    };
+    assert!(!guessed(depth), "a chain of {depth} CMaps is read whole");
+    assert!(guessed(depth + 1), "a chain past {depth} CMaps is cut");
+}
+
+/// A stream whose data doesn't read (here an encrypted one whose last
+/// block doesn't decrypt) is lent as a stream and decodes as damaged,
+/// the same before anything asked for its data as after
+/// [`LazyPdf::get`] kept the failure: what a font makes of such a stream
+/// doesn't turn on what touched the object first.
+#[test]
+fn a_stream_whose_data_doesn_t_read_is_lent_the_same_kept_or_not() {
+    use crate::pdf::test_crypt::{CipherKind, TestEncryption};
+
+    let mut doc = Document::new();
+    let pages = doc.add_object(dictionary! {
+        "Type" => Object::name("Pages"),
+        "Kids" => Vec::<Object>::new(),
+        "Count" => 0i64,
+    });
+    let catalog = doc.add_object(dictionary! {
+        "Type" => Object::name("Catalog"),
+        "Pages" => pages,
+    });
+    doc.trailer.set("Root", catalog);
+    let stream = doc.add_object(Stream::new(
+        dictionary! { "Marker" => 7i64 },
+        PROGRAM.to_vec(),
+    ));
+    doc.encrypt(&TestEncryption::new(CipherKind::Aes128, "", "owner"))
+        .unwrap();
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).unwrap();
+
+    // The stream's last byte in the file, which its padding is read from.
+    let find = |from: usize, what: &[u8]| {
+        from + (bytes[from..].windows(what.len()))
+            .position(|w| w == what)
+            .expect("in the file")
+    };
+    let object = find(0, format!("\n{} 0 obj", stream.number).as_bytes());
+    let end = find(object, b"endstream");
+    let last = (object..end)
+        .rev()
+        .find(|&at| !bytes[at].is_ascii_whitespace())
+        .unwrap();
+    let open = |bytes: Vec<u8>| {
+        LazyPdf::open(Arc::<[u8]>::from(bytes), Some(""), &Limits::DEFAULT.reader).unwrap()
+    };
+    // A last byte under which the stream doesn't decrypt.
+    let broken = (1..=255u8)
+        .map(|flip| {
+            let mut bytes = bytes.clone();
+            bytes[last] ^= flip;
+            bytes
+        })
+        .find(|bytes| open(bytes.clone()).get(stream).is_err())
+        .expect("no last byte fails the stream's padding");
+
+    let lent = |pdf: &LazyPdf| {
+        let objects = Objects(pdf);
+        (
+            objects.resolve(stream).and_then(marker),
+            (objects.decoded(stream, 1 << 20))
+                .map(|data| data.len())
+                .map_err(|e| e.why),
+        )
+    };
+    let fresh = open(broken.clone());
+    assert_eq!(lent(&fresh), (Some(7), Err(Why::Damaged)));
+    assert!(!fresh.is_kept(stream));
+
+    let kept = open(broken);
+    assert!(kept.get(stream).is_err());
+    assert!(kept.is_kept(stream), "the failure is kept");
+    assert_eq!(lent(&kept), (Some(7), Err(Why::Damaged)));
 }
 
 /// A page interpreted from a source keeps none of its fonts' streams:

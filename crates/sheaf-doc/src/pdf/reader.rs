@@ -357,8 +357,9 @@ impl LazyPdf {
     /// nothing of it is kept, so asking for a stream's dictionary doesn't
     /// hold its bytes for the life of the reader as [`LazyPdf::get`]
     /// does. Its `/Length` is then the file's (a kept stream's is its
-    /// data's), and its data is read by [`LazyPdf::object_unkept`].
-    /// Anything else is read and kept as `get` keeps it.
+    /// data's), and its data is read by [`LazyPdf::object_unkept`]. A
+    /// stream whose data doesn't read is lent the same way, kept as that
+    /// error or not. Anything else is read and kept as `get` keeps it.
     pub fn peek(&self, id: ObjectId) -> Option<&Object> {
         let mut object = self.peek_one(id)?;
         let mut chain = 0;
@@ -372,10 +373,13 @@ impl LazyPdf {
         Some(object)
     }
 
-    /// [`LazyPdf::peek`], no reference followed.
+    /// [`LazyPdf::peek`], no reference followed. A stream kept as the
+    /// error its data gave ([`LazyPdf::get`] keeps one) is lent as one
+    /// not kept yet is, by its dictionary: what a stream is lent as
+    /// doesn't turn on whether something asked for its data first.
     fn peek_one(&self, id: ObjectId) -> Option<&Object> {
-        if let Some(kept) = self.slot(id)?.get() {
-            return kept.as_ref().ok().map(|object| &**object);
+        if let Some(Ok(kept)) = self.slot(id)?.get() {
+            return Some(&**kept);
         }
         match self.reading.get(id) {
             Ok(object) if object.as_stream().is_some() => Some(object),
