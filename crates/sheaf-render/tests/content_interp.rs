@@ -584,11 +584,9 @@ fn a_long_tj_is_laid_out_as_pdfium_lays_it_out() {
 #[test]
 #[ignore = "PDFium's own faces: cargo test -p sheaf-render --test content_interp -- --ignored --exact standard_14_widths_are_pdfium_s_faces_but_where_guessed"]
 fn standard_14_widths_are_pdfium_s_faces_but_where_guessed() {
-    let afms = Path::new(env!("CARGO_MANIFEST_DIR")).join("../sheaf-doc/assets/afm");
     let (mut checked, mut guessed, mut wrong) = (0, 0, Vec::new());
     for std14 in Std14::ALL {
-        let afm = std::fs::read_to_string(afms.join(format!("{}.afm", std14.name())));
-        let afm = afm.expect("its AFM");
+        let afm = std14.afm_text();
         let names: Vec<&str> = (afm.lines().filter(|l| l.starts_with("C ")))
             .filter_map(|l| l.split(';').find_map(|f| f.trim().strip_prefix("N ")))
             .map(str::trim)

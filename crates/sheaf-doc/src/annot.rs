@@ -44,7 +44,7 @@ use unicode_normalization::UnicodeNormalization;
 use crate::attachments::{Objects, resolve};
 use crate::content::sink::Sink;
 use crate::content::{
-    Blend, Color, ContentWriter, DrawText, FillRule, Font, GState, LineCap, LineJoin, Paint,
+    Blend, Color, ContentWriter, DrawFont, DrawText, FillRule, GState, LineCap, LineJoin, Paint,
     Reserved, ResourceNeeds, Std14, place_form,
 };
 use crate::geom::{Affine, Geom, Rect};

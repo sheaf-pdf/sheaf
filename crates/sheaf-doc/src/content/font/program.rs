@@ -47,7 +47,8 @@ use skrifa::raw::{FileRef, FontRead, FontRef, ReadError, TableProvider};
 
 use super::encoding::{Encoding, name_code_point};
 use super::foreign::{charged, is_stream};
-use super::{Std14, TooLarge, type1};
+use super::std14::Std14;
+use super::{TooLarge, type1};
 use crate::content::page::{ReadObjects, direct};
 use crate::geom::Rect;
 

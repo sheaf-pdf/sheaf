@@ -11,6 +11,7 @@ use crate::pdf::{
 
 use super::encoding::Encoding;
 use super::*;
+use crate::content::{ResBody, ResId};
 use crate::serialize::built::ResObjects;
 use crate::source::Limits;
 
@@ -45,22 +46,39 @@ fn cp1252(code: u8) -> Option<char> {
     }
 }
 
-/// Every code a font's encoding maps advances by its glyph's width in
-/// Adobe's AFM, and every glyph it names is in the AFM.
+/// The encoding sheaf writes a standard 14 font in.
+fn written_in(font: Std14) -> Encoding {
+    match font {
+        Std14::Symbol => Encoding::Symbol,
+        Std14::ZapfDingbats => Encoding::ZapfDingbats,
+        _ => Encoding::WinAnsi,
+    }
+}
+
+/// Every code a font's encoding maps names a glyph of Adobe's AFM, and
+/// the character it's written for advances by that glyph's width.
 #[test]
 fn widths_equal_the_afm() {
-    for font in Std14::ALL {
+    for (font, read) in Std14::ALL.into_iter().zip(std14::Std14::ALL) {
         let (widths, codes) = afm(font.afm_text());
+        let encoding = written_in(font);
         let mut mapped = 0;
+        let mut written = 0;
         for code in 0..=255u8 {
-            let advance = font.advance(&[code], 1000.0);
-            let Some(glyph) = font.encoding().glyph(code) else {
-                assert_eq!(advance, 0.0, "{font:?} {code:#x}");
+            let Some(glyph) = encoding.glyph(code) else {
                 continue;
             };
             let width = widths.get(glyph).copied();
-            assert_eq!(Some(advance), width, "{font:?} {code:#x} {glyph}");
+            assert!(width.is_some(), "{font:?} {code:#x} {glyph}");
             mapped += 1;
+            // The code's character, where it has one and it's written as
+            // this code (the lower one, where two draw it).
+            let text = encoding.text(code).unwrap_or_default();
+            if font.encode(&text) == (vec![code], Unencoded(0)) {
+                let advance = font.width(&text, 1000.0);
+                assert_eq!(Some(advance), width, "{font:?} {code:#x} {glyph}");
+                written += 1;
+            }
         }
         let expected = match font {
             // Printable ASCII, 27 of 0x80–0x9F, and 0xA0–0xFF.
@@ -68,7 +86,8 @@ fn widths_equal_the_afm() {
             _ => 95 + 27 + 96,
         };
         assert_eq!(mapped, expected, "{font:?}");
-        assert_eq!(font.afm().len(), widths.len(), "{font:?}");
+        assert!(written + 8 >= mapped, "{font:?}: {written} of {mapped}");
+        assert_eq!(read.afm().len(), widths.len(), "{font:?}");
     }
     let width = |font: Std14, s: &str| font.width(s, 1000.0);
     assert_eq!(width(Std14::Helvetica, "A"), 667.0);
@@ -101,7 +120,7 @@ fn win_ansi_is_cp1252_both_ways() {
         let Some(c) = c else { continue };
         for font in Std14::ALL
             .into_iter()
-            .filter(|f| f.encoding() == Encoding::WinAnsi)
+            .filter(|&f| written_in(f) == Encoding::WinAnsi)
         {
             let encoded = font.encode(&c.to_string());
             match drawn {
@@ -179,20 +198,15 @@ fn wrap_breaks_at_spaces_and_inside_long_words() {
 
 #[test]
 fn glyphless_encodes_utf16_at_half_an_em() {
-    // By the trait it has been drawn in and by the one it will be.
-    for encode in [<Glyphless as Font>::encode, <Glyphless as DrawFont>::encode] {
-        let (codes, none) = encode(&Glyphless, "Hé𝄞");
-        assert_eq!(codes, [0x00, 0x48, 0x00, 0xe9, 0xd8, 0x34, 0xdd, 0x1e]);
-        assert_eq!(none, Unencoded(0));
-        assert_eq!(Glyphless.advance(&codes, 10.0), 20.0);
-        // Decomposed text stays as it was recognized.
-        assert_eq!(encode(&Glyphless, "e\u{301}").0, [0, 0x65, 0x03, 0x01]);
-    }
-    assert!(Font::covers(&Glyphless, '中'));
-    assert!(DrawFont::covers(&Glyphless, '中'));
-    assert_eq!(DrawFont::width(&Glyphless, "Hé𝄞", 10.0), 20.0);
-    // Any font goes where a `dyn Font` does.
-    let fonts: [&dyn Font; 2] = [&Std14::Courier, &Glyphless];
+    let (codes, none) = Glyphless.encode("Hé𝄞");
+    assert_eq!(codes, [0x00, 0x48, 0x00, 0xe9, 0xd8, 0x34, 0xdd, 0x1e]);
+    assert_eq!(none, Unencoded(0));
+    assert_eq!(Glyphless.width("Hé𝄞", 10.0), 20.0);
+    // Decomposed text stays as it was recognized.
+    assert_eq!(Glyphless.encode("e\u{301}").0, [0, 0x65, 0x03, 0x01]);
+    assert!(Glyphless.covers('中'));
+    // Any font goes where a `dyn DrawFont` does.
+    let fonts: [&dyn DrawFont; 2] = [&Std14::Courier, &Glyphless];
     assert_eq!(fonts.map(|f| f.width("ab", 10.0)), [12.0, 10.0]);
 }
 
@@ -200,8 +214,12 @@ fn glyphless_encodes_utf16_at_half_an_em() {
 /// into a document with numbers of its own.
 #[test]
 fn fonts_as_resources() {
-    let helvetica = Std14::Helvetica.resource();
-    let [obj] = &helvetica.objects[..] else {
+    let helvetica = Std14::Helvetica.res();
+    let objects = |res: &Res| match res.body() {
+        ResBody::Objects(objects) => objects.clone(),
+        other => panic!("{other:?}"),
+    };
+    let [obj] = &objects(&helvetica)[..] else {
         panic!("one dictionary")
     };
     let Value::Dict(dict) = obj.value() else {
@@ -216,22 +234,22 @@ fn fonts_as_resources() {
             "Encoding" => Object::name("WinAnsiEncoding"),
         }
     );
-    let symbol = Std14::Symbol.resource();
-    assert!(!symbol.objects[0].as_dict().unwrap().has(b"Encoding"));
+    let symbol = objects(&Std14::Symbol.res());
+    assert!(!symbol[0].as_dict().unwrap().has(b"Encoding"));
     // Named by what they are.
-    assert_eq!(helvetica.id, Std14::Helvetica.resource().id);
-    let ids: std::collections::HashSet<_> = Std14::ALL.map(|f| f.resource().id).into();
+    assert_eq!(helvetica.id(), Std14::Helvetica.res().id());
+    let ids: std::collections::HashSet<_> = Std14::ALL.map(|f| f.res().id()).into();
     assert_eq!(ids.len(), 14);
     let mut reordered = Dictionary::new();
     for (key, value) in dict.iter().rev() {
         reordered.set(key, value.clone());
     }
-    assert_eq!(ResId::of(&[reordered.into()]), helvetica.id);
-    assert_ne!(Glyphless.resource().id, helvetica.id);
+    assert_eq!(ResId::of(&[reordered.into()]), helvetica.id());
+    assert_ne!(Glyphless.res().id(), helvetica.id());
 
     let mut pdf = Pdf::with_version("1.7");
     pdf.add_object(dictionary! {});
-    let font = ResObjects::default().object(&mut pdf, &Glyphless.resource().into());
+    let font = ResObjects::default().object(&mut pdf, &Glyphless.res());
     assert_eq!(pdf.objects.len(), 7);
     let type0 = pdf.get_dictionary(font).unwrap();
     let cid = type0.get(b"DescendantFonts").unwrap().as_array().unwrap()[0]
@@ -363,7 +381,7 @@ fn standard_14_without_widths() {
     // Those StandardEncoding names no glyph for, or one PDFium's face is
     // another width of, and only those.
     let guessed = |c: u32| match Encoding::Standard.glyph(c as u8) {
-        Some(name) => Std14::Helvetica.drawn_otherwise(name),
+        Some(name) => std14::Std14::Helvetica.drawn_otherwise(name),
         None => true,
     };
     assert!((0..256).all(|c| helvetica.width_guessed(c) == guessed(c)));
@@ -415,7 +433,7 @@ fn standard_14_without_widths() {
     assert_eq!(given.width(0x80), 600.0);
     assert!((0..256).all(|c| !given.width_guessed(c)));
     assert!(!given.width_guessed_in(b"\x80\x01"));
-    assert!(Std14::Courier.glyph_width("A") == Some(600.0));
+    assert!(std14::Std14::Courier.glyph_width("A") == Some(600.0));
     let courier = foreign(&pdf, type1("Courier"));
     assert!((0..=255).all(|c| courier.width(c) == 600.0));
     let mut symbol = type1("Symbol");
@@ -438,6 +456,8 @@ fn standard_14_without_widths() {
 /// `Ascender` or `Descender`, reach their box's top and bottom.
 #[test]
 fn standard_14_heights_and_boxes_are_the_afm_s() {
+    // The reader's own, until it reads through the PDF layer's.
+    use std14::Std14;
     for font in Std14::ALL {
         let metrics = font.metrics();
         let bbox = metrics.bbox.unwrap();
@@ -466,6 +486,7 @@ fn standard_14_heights_and_boxes_are_the_afm_s() {
 /// case, after a subset's tag.
 #[test]
 fn standard_14_by_pdfium_s_names() {
+    use std14::Std14;
     let named = |n: &str| Std14::named(n.as_bytes());
     assert_eq!(named("Helvetica"), Some(Std14::Helvetica));
     assert_eq!(named("Arial,Bold"), Some(Std14::HelveticaBold));
@@ -1634,13 +1655,13 @@ fn text_is_written_in_its_font() {
     want.extend(format!("/{} 12 Tf\n", name(helvetica)).bytes());
     assert_eq!(bytes, want, "{}", String::from_utf8_lossy(&bytes));
     assert_eq!(helvetica.kind, ResKind::Font);
-    assert_eq!(helvetica.res, Std14::Helvetica.resource().into());
+    assert_eq!(helvetica.res, Std14::Helvetica.res());
     assert_eq!(
         helvetica.res.body(),
-        &ResBody::Objects(Std14::Helvetica.resource().objects)
+        &ResBody::Objects(Arc::new([Std14::Helvetica.dict().into()]))
     );
     assert_eq!(glyphless.kind, ResKind::Font);
-    assert_eq!(glyphless.res, Glyphless.resource().into());
+    assert_eq!(glyphless.res, Glyphless.res());
 }
 
 /// What [`every_character_encodes_as_it_always_has`] holds a font to:
@@ -1693,30 +1714,23 @@ const DRAWN: [u128; 15] = [
 /// nothing in Symbol or ZapfDingbats, and little of what a font has.
 #[test]
 fn every_character_encodes_as_it_always_has() {
-    use crate::pdf::fonts::Std14 as Family;
     let digests = (0..15).map(|i| {
-        let old: &dyn Font = match Std14::ALL.get(i) {
+        let font: &dyn DrawFont = match Std14::ALL.get(i) {
             Some(font) => font,
             None => &Glyphless,
         };
-        let new: &dyn DrawFont = match Family::ALL.get(i) {
-            Some(font) => font,
-            None => &Glyphless,
-        };
-        [
-            drawn_digest(|c| old.covers(c), |s| old.encode(s), |s, z| old.width(s, z)),
-            drawn_digest(|c| new.covers(c), |s| new.encode(s), |s, z| new.width(s, z)),
-        ]
+        drawn_digest(
+            |c| font.covers(c),
+            |s| font.encode(s),
+            |s, z| font.width(s, z),
+        )
     });
     // Every font is said before any fails, each as it is now.
     let mut moved = Vec::new();
-    for (i, [old, new]) in digests.enumerate() {
-        let name = Family::ALL.get(i).map_or("Glyphless", |font| font.name());
-        if old != DRAWN[i] {
-            moved.push(format!("{name}, as sheaf's own font draws: {old:#034x}"));
-        }
-        if new != DRAWN[i] {
-            moved.push(format!("{name}: {new:#034x}"));
+    for (i, drawn) in digests.enumerate() {
+        let name = Std14::ALL.get(i).map_or("Glyphless", |font| font.name());
+        if drawn != DRAWN[i] {
+            moved.push(format!("{name}: {drawn:#034x}"));
         }
     }
     assert!(moved.is_empty(), "drawn otherwise:\n{}", moved.join("\n"));

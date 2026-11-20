@@ -29,10 +29,11 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use crate::pdf::{Dictionary, Object, ObjectId, StreamExt, Value, dictionary};
 
+use super::FontMetrics;
 use super::encoding::{Encoding, glyph_text};
 use super::predefined::{self, Collection, Split};
 use super::program::{self, CidGlyphs, EncodingObject, Face, FontProgram, Simple};
-use super::{FontMetrics, Std14};
+use super::std14::Std14;
 use crate::content::lex::{self, LexError, ResCx, Tok};
 use crate::content::page::{ReadObjects, direct};
 use crate::geom::{Affine, Rect};

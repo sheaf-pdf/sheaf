@@ -23,10 +23,10 @@
 //!   sheaf's own blocks.
 //! - [`text_bag`]: the words it draws, as [`interp`] reads it, decoded
 //!   through its fonts.
-//! - [`Font`]: what sheaf draws text in, [`Std14`] and [`Glyphless`], and
-//!   [`FontRes`], a font as a page resource named by its [`ResId`];
-//!   [`Foreign`], a font a file draws in, as read, and [`Fonts`], a
-//!   source's.
+//! - [`DrawFont`]: what sheaf draws text in, the PDF layer's [`Std14`]
+//!   and sheaf's [`Glyphless`], each a page resource ([`Res`]) named by
+//!   its [`ResId`]; [`Foreign`], a font a file draws in, as read, and
+//!   [`Fonts`], a source's.
 //! - [`interp`]: what it draws, an operator at a time, in the graphics
 //!   and text state it's drawn in: each glyph and where it is, each
 //!   path, image and shading, the clip and the marked content each is
@@ -37,7 +37,7 @@
 //! - [`ContentWriter`]: content written, its resources ([`Res`]) named at
 //!   the end ([`Reserved`], [`ResourceNeeds`]): pdf-content-streams', as
 //!   are the types its calls take. Text goes in through [`DrawText`], in a
-//!   [`Font`], and a form by [`place_form`], in sheaf's geometry.
+//!   [`DrawFont`], and a form by [`place_form`], in sheaf's geometry.
 //! - [`sink`]: where content's resources are written: the emitter, or a
 //!   PDF built in memory ([`serialize::built`](crate::serialize::built)).
 
@@ -76,8 +76,8 @@ pub use blocks::{
     PaginationKind, SheafBlock, SheafBlockRef, isolates,
 };
 pub use font::{
-    Descendant, DrawFont, DrawText, Font, FontApprox, FontId, FontKind, FontMetrics, FontProgram,
-    FontRes, FontScope, Fonts, Foreign, Glyphless, Std14, TooLarge, Unencoded, VerticalMetrics,
+    Descendant, DrawFont, DrawText, FontApprox, FontId, FontKind, FontMetrics, FontProgram,
+    FontScope, Fonts, Foreign, Glyphless, Std14, TooLarge, Unencoded, VerticalMetrics, std14_of,
     wrap_with,
 };
 pub use lex::{LexError, LexErrorKind, ResCx, Tok, lex, name, object};

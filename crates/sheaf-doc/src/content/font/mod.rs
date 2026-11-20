@@ -2,16 +2,16 @@
 //! they advance, and the font's resource for a page; and the fonts files
 //! draw in, as read.
 //!
-//! - [`Std14`]: the standard 14, with Adobe's widths, boxes and exact
-//!   encoders.
-//! - [`Glyphless`]: OCR's invisible text.
+//! - [`DrawFont`]: a font sheaf draws in, the PDF layer's [`Std14`] (the
+//!   standard 14, with Adobe's widths and boxes) and sheaf's own
+//!   [`Glyphless`], OCR's invisible text; [`DrawText`] writes text in one.
 //! - [`Foreign`]: a file's font, its codes, widths and heights as PDFium
 //!   reads them; [`Fonts`], a source's, each read once.
 //!
 //! Text a font can't encode draws `?` and is counted ([`Unencoded`]), so
 //! the writer can say so once; the text itself (`/Contents`, a recipe) is
-//! kept exactly. M10 slice 7's fallback font ends that, behind the same
-//! trait.
+//! kept exactly. M10 slice 7's fallback font ends that, behind
+//! [`DrawFont`].
 
 mod afm;
 mod draw;
@@ -27,11 +27,11 @@ mod std14;
 mod tests;
 mod type1;
 
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
+use sheaf_edit::FontChoice;
 use unicode_normalization::UnicodeNormalization;
 
-use crate::pdf::Object;
 use crate::pdf::fonts::LayoutFont;
 
 pub use draw::DrawText;
@@ -40,9 +40,10 @@ pub use foreign::{
 };
 pub use glyphless::Glyphless;
 pub use program::FontProgram;
-pub use std14::Std14;
 
-use super::{Res, ResBody, ResId};
+pub use crate::pdf::fonts::Std14;
+
+use super::Res;
 use crate::geom::Rect;
 
 /// How far a font's glyphs reach above and below the baseline, and the
@@ -62,7 +63,11 @@ pub struct FontMetrics {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Unencoded(pub usize);
 
-/// A font sheaf draws text in.
+/// A font sheaf draws text in, by the PDF layer's own fonts: what
+/// [`LayoutFont`] gives of one (a character's codes, how far it
+/// advances), the font as a page resource, and sheaf's rules for text
+/// over them, written here once: a font says what it is ([`DrawFont::res`],
+/// [`DrawFont::composed`]) and takes the rest as given.
 ///
 /// Any font sheaf embeds is GID-preserving: a subset keeps each glyph's
 /// number from the whole font (CID = GID, `/CIDToGIDMap /Identity`), so
@@ -70,41 +75,6 @@ pub struct Unencoded(pub usize);
 /// and re-subsetting never changes them. [`Glyphless`], embedded whole,
 /// is the one exception: its CIDs are the text's UTF-16, all drawing its
 /// one glyph.
-pub trait Font: Send + Sync {
-    /// `s` as this font's codes. A character it can't encode is drawn as
-    /// `?`, or left out by a font without one (ZapfDingbats), and counted.
-    fn encode(&self, s: &str) -> (Vec<u8>, Unencoded);
-
-    /// How far codes `b` advance at `size`, in text space: the sum of
-    /// their widths, without character or word spacing.
-    fn advance(&self, b: &[u8], size: f32) -> f32;
-
-    /// How far `s` advances at `size`, drawn as [`Font::encode`] draws it.
-    fn width(&self, s: &str, size: f32) -> f32 {
-        self.advance(&self.encode(s).0, size)
-    }
-
-    /// `s` in lines no wider than `width` at `size`, as [`wrap_with`]
-    /// breaks them.
-    fn wrap(&self, s: &str, size: f32, width: f32) -> Vec<String> {
-        wrap_with(s, width, |t| self.width(t, size))
-    }
-
-    /// Whether it encodes `c`.
-    fn covers(&self, c: char) -> bool;
-
-    /// The font as a page resource.
-    fn resource(&self) -> FontRes;
-}
-
-/// A font sheaf draws text in, by the PDF layer's own fonts: what
-/// [`LayoutFont`] gives of one (a character's codes, how far it
-/// advances), the font as a page resource, and sheaf's rules for text
-/// over them, written here once: a font says what it is ([`DrawFont::res`],
-/// [`DrawFont::composed`]) and takes the rest as given.
-///
-/// Any font sheaf embeds is GID-preserving, as [`Font`] says;
-/// [`Glyphless`] is the one exception.
 pub trait DrawFont: LayoutFont + Send + Sync {
     /// The font as a page resource: its dictionary and the objects it
     /// reaches, named by a digest of all of them, so a save writes one
@@ -175,7 +145,7 @@ pub trait DrawFont: LayoutFont + Send + Sync {
 
 /// A standard 14 font: text composed, in WinAnsiEncoding for the twelve
 /// Latin ones and their own for Symbol and ZapfDingbats.
-impl DrawFont for crate::pdf::fonts::Std14 {
+impl DrawFont for Std14 {
     /// Its dictionary, made once.
     fn res(&self) -> Res {
         static RESOURCES: [OnceLock<Res>; 14] = [const { OnceLock::new() }; 14];
@@ -185,6 +155,24 @@ impl DrawFont for crate::pdf::fonts::Std14 {
                     .expect("a font's objects are one at least, their streams in memory")
             })
             .clone()
+    }
+}
+
+/// The face an op chose, which is one of the twelve.
+pub fn std14_of(choice: FontChoice) -> Std14 {
+    match choice {
+        FontChoice::Helvetica => Std14::Helvetica,
+        FontChoice::HelveticaBold => Std14::HelveticaBold,
+        FontChoice::HelveticaOblique => Std14::HelveticaOblique,
+        FontChoice::HelveticaBoldOblique => Std14::HelveticaBoldOblique,
+        FontChoice::TimesRoman => Std14::TimesRoman,
+        FontChoice::TimesBold => Std14::TimesBold,
+        FontChoice::TimesItalic => Std14::TimesItalic,
+        FontChoice::TimesBoldItalic => Std14::TimesBoldItalic,
+        FontChoice::Courier => Std14::Courier,
+        FontChoice::CourierBold => Std14::CourierBold,
+        FontChoice::CourierOblique => Std14::CourierOblique,
+        FontChoice::CourierBoldOblique => Std14::CourierBoldOblique,
     }
 }
 
@@ -221,28 +209,4 @@ pub fn wrap_with(s: &str, width: f32, measure: impl Fn(&str) -> f32) -> Vec<Stri
         out.push(line);
     }
     out
-}
-
-/// A font as a page resource ([`Font::resource`]): its dictionary and the
-/// objects it reaches, named by a digest of all of them, so a save writes
-/// one font once however many pages draw in it. It's a [`Res`](super::Res)
-/// like any other.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FontRes {
-    pub id: ResId,
-    /// The font dictionary first, then the objects it reaches (descendant
-    /// font, descriptor, program, maps), streams decoded. A reference
-    /// `(i, 0)` among them is to `objects[i]`.
-    pub objects: Arc<[Object]>,
-}
-
-impl From<FontRes> for Res {
-    /// Named by the id the font gave it. A font's objects are its
-    /// dictionary at least, built in memory with their streams' data, so
-    /// they're never what a resource refuses: none, or a stream whose
-    /// data is somewhere a reader left it.
-    fn from(font: FontRes) -> Res {
-        Res::named(font.id, ResBody::Objects(font.objects))
-            .expect("a font's objects are one at least, their streams in memory")
-    }
 }

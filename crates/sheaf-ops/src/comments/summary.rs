@@ -17,7 +17,7 @@ use anyhow::{Result, bail};
 use in_progress::NoProgress;
 use sheaf_doc::Box2;
 use sheaf_doc::content::{
-    Color, ContentWriter, DrawText, Font, Paint, Res, Reserved, Std14, place_form, wrap_with,
+    Color, ContentWriter, DrawFont, DrawText, Paint, Res, Reserved, Std14, place_form, wrap_with,
 };
 use sheaf_doc::export::ExportFrom;
 use sheaf_doc::geom::Rect;

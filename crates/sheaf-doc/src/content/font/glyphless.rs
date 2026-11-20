@@ -9,8 +9,8 @@ use std::sync::{Arc, OnceLock};
 
 use crate::pdf::{Object, ObjectId, Stream, dictionary, literal};
 
-use super::{DrawFont, Font, FontRes, Unencoded};
-use crate::content::{Res, ResId};
+use super::DrawFont;
+use crate::content::Res;
 use crate::pdf::fonts::{FontMetrics, GlyphBox, LayoutFont};
 
 /// Tesseract's glyphless font.
@@ -85,92 +85,61 @@ impl DrawFont for Glyphless {
         s.encode_utf16().count() as f32 * 500.0 * size / 1000.0
     }
 
-    /// The same six objects as [`Font::resource`]'s.
+    /// The Type0 font, its CIDFontType2, descriptor and program, the
+    /// CIDToGIDMap that sends every CID to glyph 1, and the ToUnicode
+    /// CMap, made once.
     fn res(&self) -> Res {
         static RES: OnceLock<Res> = OnceLock::new();
         RES.get_or_init(|| {
-            Res::of(Font::resource(self).objects)
-                .expect("a font's objects are one at least, their streams in memory")
+            // Every CID maps to glyph 1, the font's one (empty) glyph.
+            let map = [0u8, 1].repeat(65536);
+            let objects: Arc<[Object]> = Arc::new([
+                dictionary! {
+                    "Type" => Object::name("Font"),
+                    "Subtype" => Object::name("Type0"),
+                    "BaseFont" => Object::name("GlyphLessFont"),
+                    "Encoding" => Object::name("Identity-H"),
+                    "DescendantFonts" => vec![Object::from(ObjectId::new(1, 0))],
+                    "ToUnicode" => Object::from(ObjectId::new(5, 0)),
+                }
+                .into(),
+                dictionary! {
+                    "Type" => Object::name("Font"),
+                    "Subtype" => Object::name("CIDFontType2"),
+                    "BaseFont" => Object::name("GlyphLessFont"),
+                    "CIDSystemInfo" => dictionary! {
+                        "Registry" => literal("Adobe"),
+                        "Ordering" => literal("Identity"),
+                        "Supplement" => 0i64,
+                    },
+                    "FontDescriptor" => Object::from(ObjectId::new(2, 0)),
+                    "DW" => 500i64,
+                    "CIDToGIDMap" => Object::from(ObjectId::new(4, 0)),
+                }
+                .into(),
+                dictionary! {
+                    "Type" => Object::name("FontDescriptor"),
+                    "FontName" => Object::name("GlyphLessFont"),
+                    "Flags" => 5i64, // FixedPitch + Symbolic
+                    "FontBBox" => vec![0.into(), 0.into(), 500.into(), 1000.into()],
+                    "Ascent" => 1000i64,
+                    "Descent" => -1i64,
+                    "CapHeight" => 1000i64,
+                    "ItalicAngle" => 0i64,
+                    "StemV" => 80i64,
+                    "FontFile2" => Object::from(ObjectId::new(3, 0)),
+                }
+                .into(),
+                Stream::new(
+                    dictionary! { "Length1" => Glyphless::PROGRAM.len() as i64 },
+                    Glyphless::PROGRAM.to_vec(),
+                )
+                .into(),
+                Stream::new(dictionary! {}, map).into(),
+                Stream::new(dictionary! {}, TO_UNICODE.as_bytes().to_vec()).into(),
+            ]);
+            Res::of(objects).expect("a font's objects are one at least, their streams in memory")
         })
         .clone()
-    }
-}
-
-impl Font for Glyphless {
-    /// UTF-16 code units, each a two-byte CID, as written: nothing is
-    /// unencoded.
-    fn encode(&self, s: &str) -> (Vec<u8>, Unencoded) {
-        let codes = s.encode_utf16().flat_map(u16::to_be_bytes).collect();
-        (codes, Unencoded::default())
-    }
-
-    fn advance(&self, b: &[u8], size: f32) -> f32 {
-        (b.len() / 2) as f32 * 500.0 * size / 1000.0
-    }
-
-    fn covers(&self, _: char) -> bool {
-        true
-    }
-
-    /// The Type0 font, its CIDFontType2, descriptor and program, the
-    /// CIDToGIDMap that sends every CID to glyph 1, and the ToUnicode
-    /// CMap.
-    fn resource(&self) -> FontRes {
-        static RESOURCE: OnceLock<FontRes> = OnceLock::new();
-        RESOURCE
-            .get_or_init(|| {
-                // Every CID maps to glyph 1, the font's one (empty) glyph.
-                let map = [0u8, 1].repeat(65536);
-                let objects: Arc<[Object]> = Arc::new([
-                    dictionary! {
-                        "Type" => Object::name("Font"),
-                        "Subtype" => Object::name("Type0"),
-                        "BaseFont" => Object::name("GlyphLessFont"),
-                        "Encoding" => Object::name("Identity-H"),
-                        "DescendantFonts" => vec![Object::from(ObjectId::new(1, 0))],
-                        "ToUnicode" => Object::from(ObjectId::new(5, 0)),
-                    }
-                    .into(),
-                    dictionary! {
-                        "Type" => Object::name("Font"),
-                        "Subtype" => Object::name("CIDFontType2"),
-                        "BaseFont" => Object::name("GlyphLessFont"),
-                        "CIDSystemInfo" => dictionary! {
-                            "Registry" => literal("Adobe"),
-                            "Ordering" => literal("Identity"),
-                            "Supplement" => 0i64,
-                        },
-                        "FontDescriptor" => Object::from(ObjectId::new(2, 0)),
-                        "DW" => 500i64,
-                        "CIDToGIDMap" => Object::from(ObjectId::new(4, 0)),
-                    }
-                    .into(),
-                    dictionary! {
-                        "Type" => Object::name("FontDescriptor"),
-                        "FontName" => Object::name("GlyphLessFont"),
-                        "Flags" => 5i64, // FixedPitch + Symbolic
-                        "FontBBox" => vec![0.into(), 0.into(), 500.into(), 1000.into()],
-                        "Ascent" => 1000i64,
-                        "Descent" => -1i64,
-                        "CapHeight" => 1000i64,
-                        "ItalicAngle" => 0i64,
-                        "StemV" => 80i64,
-                        "FontFile2" => Object::from(ObjectId::new(3, 0)),
-                    }
-                    .into(),
-                    Stream::new(
-                        dictionary! { "Length1" => Glyphless::PROGRAM.len() as i64 },
-                        Glyphless::PROGRAM.to_vec(),
-                    )
-                    .into(),
-                    Stream::new(dictionary! {}, map).into(),
-                    Stream::new(dictionary! {}, TO_UNICODE.as_bytes().to_vec()).into(),
-                ]);
-                FontRes {
-                    id: ResId::of(&objects),
-                    objects,
-                }
-            })
-            .clone()
     }
 }

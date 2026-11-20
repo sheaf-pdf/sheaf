@@ -440,7 +440,7 @@ fn a_header_goes_out_in_win_ansi_with_a_named_list() {
         [ResKind::Properties, ResKind::Font, ResKind::Properties]
     );
     let font = &drawn.res.0[1];
-    assert_eq!(font.res, Std14::TimesRoman.resource().into());
+    assert_eq!(font.res, Std14::TimesRoman.res());
     for (need, kind) in [(&drawn.res.0[0], "Header"), (&drawn.res.0[2], "Footer")] {
         let want = dictionary! {
             "Type" => Object::name("Pagination"),

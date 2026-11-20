@@ -4,17 +4,10 @@
 //! every width and box is Adobe's, from the font's AFM. A file's font
 //! names one by any of the names PDFium takes for it ([`Std14::named`]).
 
-use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
-use crate::pdf::{Object, dictionary};
-use sheaf_edit::FontChoice;
-use unicode_normalization::UnicodeNormalization;
-
+use super::FontMetrics;
 use super::afm::Afm;
-use super::encoding::{Encoding, glyph_text};
-use super::{Font, FontMetrics, FontRes, Unencoded};
-use crate::content::ResId;
 use crate::geom::Rect;
 
 /// A standard 14 font.
@@ -37,6 +30,7 @@ pub enum Std14 {
 }
 
 impl Std14 {
+    #[cfg(test)]
     pub const ALL: [Std14; 14] = [
         Std14::Courier,
         Std14::CourierBold,
@@ -143,15 +137,6 @@ impl Std14 {
         (latin && ADDED.contains(&name)) || own.contains(&name)
     }
 
-    /// The encoding sheaf writes it in.
-    pub(crate) fn encoding(self) -> Encoding {
-        match self {
-            Std14::Symbol => Encoding::Symbol,
-            Std14::ZapfDingbats => Encoding::ZapfDingbats,
-            _ => Encoding::WinAnsi,
-        }
-    }
-
     /// Its AFM, as Adobe wrote it but for the kerning.
     pub(crate) fn afm_text(self) -> &'static str {
         match self {
@@ -180,12 +165,6 @@ impl Std14 {
     pub(super) fn afm(self) -> &'static Afm {
         static AFMS: [OnceLock<Afm>; 14] = [const { OnceLock::new() }; 14];
         AFMS[self as usize].get_or_init(|| Afm::parse(self.afm_text()))
-    }
-
-    /// Its codes in [`Std14::encoding`], read once.
-    fn face(self) -> &'static Face {
-        static FACES: [OnceLock<Face>; 14] = [const { OnceLock::new() }; 14];
-        FACES[self as usize].get_or_init(|| Face::new(self))
     }
 }
 
@@ -376,131 +355,3 @@ pub(super) const NAMES: [(&str, Std14); 89] = [
     ("TimesNewRomanPSMT,Italic", Std14::TimesItalic),
     ("ZapfDingbats", Std14::ZapfDingbats),
 ];
-
-/// A font's encoding, both ways, with each code's advance.
-struct Face {
-    /// Per 1000 em; 0 where the encoding has no glyph.
-    widths: [u16; 256],
-    /// The code each character it draws has.
-    codes: HashMap<char, u8>,
-    /// What it draws for a character it hasn't: `?` where it has one.
-    unknown: Option<u8>,
-}
-
-impl Face {
-    fn new(font: Std14) -> Face {
-        let encoding = font.encoding();
-        let afm = font.afm();
-        let mut face = Face {
-            widths: [0; 256],
-            codes: HashMap::new(),
-            unknown: None,
-        };
-        // From the top, so where two codes draw one character the lower
-        // one stays.
-        for code in (0..=255u8).rev() {
-            let Some(glyph) = encoding.glyph(code) else {
-                continue;
-            };
-            let Some(width) = afm.width(glyph) else {
-                continue;
-            };
-            face.widths[code as usize] = width;
-            // The AGL reads three of Symbol's Greek letters as the math
-            // signs (∆ U+2206, Ω U+2126, µ U+00B5); the letters, its
-            // `…greek` names, are written with them too.
-            let greek = (encoding == Encoding::Symbol)
-                .then(|| glyph_text(&format!("{glyph}greek"), false))
-                .flatten()
-                .filter(|t| t.chars().all(char::is_alphabetic));
-            for text in [encoding.text(code), greek].into_iter().flatten() {
-                let mut chars = text.nfc();
-                if let (Some(c), None) = (chars.next(), chars.next()) {
-                    face.codes.insert(c, code);
-                }
-            }
-        }
-        face.unknown = face.codes.get(&'?').copied();
-        face
-    }
-}
-
-/// The face an op chose, which is one of the twelve.
-impl From<FontChoice> for Std14 {
-    fn from(choice: FontChoice) -> Std14 {
-        match choice {
-            FontChoice::Helvetica => Std14::Helvetica,
-            FontChoice::HelveticaBold => Std14::HelveticaBold,
-            FontChoice::HelveticaOblique => Std14::HelveticaOblique,
-            FontChoice::HelveticaBoldOblique => Std14::HelveticaBoldOblique,
-            FontChoice::TimesRoman => Std14::TimesRoman,
-            FontChoice::TimesBold => Std14::TimesBold,
-            FontChoice::TimesItalic => Std14::TimesItalic,
-            FontChoice::TimesBoldItalic => Std14::TimesBoldItalic,
-            FontChoice::Courier => Std14::Courier,
-            FontChoice::CourierBold => Std14::CourierBold,
-            FontChoice::CourierOblique => Std14::CourierOblique,
-            FontChoice::CourierBoldOblique => Std14::CourierBoldOblique,
-        }
-    }
-}
-
-impl Font for Std14 {
-    /// Composed first (NFC), so a decomposed "é" is WinAnsi's 0xE9. Where
-    /// the encoding has a character twice, the lower code is written.
-    fn encode(&self, s: &str) -> (Vec<u8>, Unencoded) {
-        let face = self.face();
-        let mut unencoded = Unencoded::default();
-        let mut out = Vec::with_capacity(s.len());
-        for c in s.nfc() {
-            match face.codes.get(&c) {
-                Some(&code) => out.push(code),
-                None => {
-                    unencoded.0 += 1;
-                    out.extend(face.unknown);
-                }
-            }
-        }
-        (out, unencoded)
-    }
-
-    fn advance(&self, b: &[u8], size: f32) -> f32 {
-        let widths = &self.face().widths;
-        b.iter()
-            .map(|&c| f32::from(widths[c as usize]))
-            .sum::<f32>()
-            * size
-            / 1000.0
-    }
-
-    /// As [`Font::encode`] would: `c` composed.
-    fn covers(&self, c: char) -> bool {
-        let mut composed = std::iter::once(c).nfc();
-        match (composed.next(), composed.next()) {
-            (Some(c), None) => self.face().codes.contains_key(&c),
-            _ => false,
-        }
-    }
-
-    /// Its dictionary, made once.
-    fn resource(&self) -> FontRes {
-        static RESOURCES: [OnceLock<FontRes>; 14] = [const { OnceLock::new() }; 14];
-        RESOURCES[*self as usize]
-            .get_or_init(|| {
-                let mut dict = dictionary! {
-                    "Type" => Object::name("Font"),
-                    "Subtype" => Object::name("Type1"),
-                    "BaseFont" => Object::name(self.name()),
-                };
-                if self.encoding() == Encoding::WinAnsi {
-                    dict.set("Encoding", Object::name("WinAnsiEncoding"));
-                }
-                let objects: Arc<[Object]> = Arc::new([dict.into()]);
-                FontRes {
-                    id: ResId::of(&objects),
-                    objects,
-                }
-            })
-            .clone()
-    }
-}

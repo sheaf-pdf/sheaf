@@ -13,7 +13,7 @@ use sheaf_edit::OcrWord;
 
 use super::TextLayer;
 use crate::annot::Box2;
-use crate::content::{Font, Glyphless};
+use crate::content::{DrawFont, Glyphless};
 use crate::geom::Geom;
 use crate::serialize::built::ResObjects;
 
@@ -110,7 +110,7 @@ fn block_resources(pdf: &mut Pdf) -> Dictionary {
 
 /// The glyphless font's objects, made in `pdf`: its Type0's number.
 fn glyphless(pdf: &mut Pdf) -> ObjectId {
-    ResObjects::default().object(pdf, &Glyphless.resource().into())
+    ResObjects::default().object(pdf, &Glyphless.res())
 }
 
 /// Helvetica, made in `pdf`.
