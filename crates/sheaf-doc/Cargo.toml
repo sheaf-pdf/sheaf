@@ -64,7 +64,7 @@ md-5 = "0.11"
 # attributes to the digest it holds (B5); in the tree already, imageproc's.
 num-bigint = { version = "0.4", default-features = false }
 # Text in a mark's staleness digest is NFC, whatever another tool wrote
-# (M10.5 §3.6).
+# (M10.5 §3.6), and text is composed before a standard 14 font encodes it.
 unicode-normalization = "0.1"
 # What a change means for saving and signatures, as sets (M10.5 §7.1).
 bitflags.workspace = true

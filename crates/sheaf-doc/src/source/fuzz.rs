@@ -1262,8 +1262,8 @@ mod tests {
     }
 
     /// [`font_part_fixtures`] with programs that once stopped the fuzzer:
-    /// a Type 1 program whose integers run past what sheaf hands
-    /// read-fonts, and an SFNT whose `loca` record is past its end.
+    /// a Type 1 program with a long run of integers in its clear text,
+    /// and an SFNT whose `loca` record is past its end.
     fn hostile_program_fixtures() -> Vec<Vec<u8>> {
         let programs = [
             crate::content::fixture::type1_integers_program(300),

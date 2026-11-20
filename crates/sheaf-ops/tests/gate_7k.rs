@@ -334,7 +334,8 @@ const INTERP: &str = "SHEAF_GATE_INTERP";
 /// included, or on the scanned, whose source holds 474 MB of bytes, what
 /// interpreting adds to it. Set from the median of five processes'
 /// medians on a quiet machine (2026-10-24, after the wrap-up's speed
-/// step, hayro-cmap and skrifa): 1,018 ms and 31.2 MB on the synthetic,
+/// step, hayro-cmap and skrifa, which are pdf-fonts' from M18 slice 22,
+/// where fonts are read): 1,018 ms and 31.2 MB on the synthetic,
 /// 1,072 ms and 89.3 MB on the heavy (its 70 embedded TrueType programs
 /// read each run, each glyph's box united with its outline's), 71.5 ms and
 /// 0.52 MB added on the scanned. Times and peaks have about 1.6 times

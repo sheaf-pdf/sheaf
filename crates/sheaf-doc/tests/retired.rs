@@ -1166,6 +1166,9 @@ const RETIRED_M18: &[(&str, u8)] = &[
     // encodings and metrics went with them.
     ("content::font::Foreign", 22),
     ("content::font::TooLarge", 22),
+    // A program for a test of the reader's own, which pdf-fonts holds
+    // now with a fixture of its own.
+    ("content::fixture::composite_bomb_program", 22),
 ];
 
 /// The ledgers, with the words a hit names its slice by.

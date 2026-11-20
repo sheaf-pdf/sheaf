@@ -1,5 +1,7 @@
 glyphlist.txt is the Adobe Glyph List and zapfdingbats.txt the ITC Zapf
-Dingbats Glyph List (https://github.com/adobe-type-tools/agl-aglfn), unchanged.
+Dingbats Glyph List (https://github.com/adobe-type-tools/agl-aglfn), unchanged,
+in the pdf-fonts crate sheaf is built with (its assets;
+https://github.com/sheaf-pdf/pdf-lint).
 sheaf maps glyph names to Unicode with them: the text a font's /Differences
 or a symbol font's built-in encoding draws. They are distributed under the
 BSD 3-Clause license, reproduced below.
