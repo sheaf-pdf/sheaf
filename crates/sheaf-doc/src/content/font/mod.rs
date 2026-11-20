@@ -22,6 +22,8 @@ mod glyphless;
 mod parity_tests;
 mod predefined;
 mod program;
+#[cfg(test)]
+mod side_by_side;
 mod std14;
 #[cfg(test)]
 mod tests;

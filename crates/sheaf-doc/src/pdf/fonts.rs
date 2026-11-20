@@ -12,5 +12,7 @@
 //! [`Resolve`]: super::Resolve
 //! [`Streams`]: super::Streams
 
-pub use pdf_fonts::{Error, Font, FontMetrics, GlyphBox, Limits, Std14};
+pub use pdf_fonts::{
+    Descendant, Error, Font, FontKind, FontMetrics, FontProgram, Fonts, GlyphBox, Limits, Std14,
+};
 pub use pdf_gfx::LayoutFont;

@@ -279,6 +279,7 @@ fn fonts_as_resources() {
 
 /// `font` read over `pdf`'s objects, within a page's budget.
 fn foreign(pdf: &Pdf, font: Dictionary) -> Foreign {
+    super::side_by_side::compared(pdf, &font);
     let mut budget = Limits::DEFAULT.content.decompressed;
     Foreign::read(pdf, &font, &Limits::DEFAULT, &mut budget).expect("within the budget")
 }

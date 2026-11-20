@@ -471,7 +471,7 @@ const DUMP_ONLY: &str = "SHEAF_GLYPH_DUMP_ONLY";
 /// (`bench/pool-sample.txt`), every scan, and the conformance suites'
 /// files that claim PDF/UA. The files sheaf-render's interpreter tiers
 /// read.
-fn dump_picks(corpus: &Corpus) -> BTreeMap<String, &'static str> {
+pub(super) fn dump_picks(corpus: &Corpus) -> BTreeMap<String, &'static str> {
     let list = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/pool-sample.txt");
     let pool = std::fs::read_to_string(list).expect("bench/pool-sample.txt");
     let pool = pool.lines().map(str::trim).filter(|l| !l.is_empty());
