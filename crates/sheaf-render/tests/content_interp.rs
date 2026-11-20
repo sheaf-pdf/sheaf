@@ -598,7 +598,7 @@ fn standard_14_widths_are_pdfium_s_faces_but_where_guessed() {
                 .into_iter()
                 .chain(chunk.iter().map(|&n| Object::name(n)))
                 .collect();
-            let font = dictionary! {
+            let dict = dictionary! {
                 "Type" => Object::name("Font"),
                 "Subtype" => Object::name("Type1"),
                 "BaseFont" => Object::name(std14.name()),
@@ -606,8 +606,8 @@ fn standard_14_widths_are_pdfium_s_faces_but_where_guessed() {
             };
             let none = sheaf_doc::pdf::Document::new();
             let limits = Limits::DEFAULT.fonts();
-            let foreign =
-                Font::read(Objects(&none), &font, &limits, &mut 0, &mut ()).expect("no stream");
+            let font =
+                Font::read(Objects(&none), &dict, &limits, &mut 0, &mut ()).expect("no stream");
             // Lines far enough apart that PDFium takes no `A` for one of
             // the line's before it (`CPDF_TextPage::ProcessTextObjectItems`).
             let y = |code: u32| (20 * (code - 127)) as f32;
@@ -618,7 +618,7 @@ fn standard_14_widths_are_pdfium_s_faces_but_where_guessed() {
                 )
             };
             let content: String = (128..128 + chunk.len() as u32).map(line).collect();
-            let chars = chars(&one_page(dictionary! { "F" => font }, content));
+            let chars = chars(&one_page(dictionary! { "F" => dict }, content));
             for (code, name) in (128u32..).zip(chunk) {
                 let xs = (chars.iter())
                     .filter(|c| (c.origin.1 - y(code)).abs() < EPSILON)
@@ -626,17 +626,17 @@ fn standard_14_widths_are_pdfium_s_faces_but_where_guessed() {
                 let (first, last) = xs.fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), x| {
                     (lo.min(x), hi.max(x))
                 });
-                let theirs = (last - first) * 100.0 - foreign.width(0x41);
-                if foreign.width_guessed(code) {
+                let theirs = (last - first) * 100.0 - font.width(0x41);
+                if font.width_guessed(code) {
                     guessed += 1;
                     continue;
                 }
                 checked += 1;
-                if !theirs.is_finite() || (theirs - foreign.width(code)).abs() > 0.01 {
+                if !theirs.is_finite() || (theirs - font.width(code)).abs() > 0.01 {
                     wrong.push(format!(
                         "{} {name}: {}, PDFium's {theirs}",
                         std14.name(),
-                        foreign.width(code)
+                        font.width(code)
                     ));
                 }
             }
