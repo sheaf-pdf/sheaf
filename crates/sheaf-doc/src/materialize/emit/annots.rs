@@ -830,9 +830,9 @@ impl Cx<'_> {
                     .map(|(bbox, matrix)| (id, bbox, matrix))
                     .ok_or_else(|| anyhow::anyhow!("a form with no box"))
             }
-            FormRef::Blob(page) => blob_form(page.blob(), 0).map(|(objects, bbox, matrix)| {
-                let id = self.resource_of(objects);
-                (Object::from(id), bbox, matrix)
+            FormRef::Blob(page) => blob_form(page.blob(), 0).and_then(|(objects, bbox, matrix)| {
+                let id = self.resource_of(objects)?;
+                Ok((Object::from(id), bbox, matrix))
             }),
             FormRef::Pinned(ap) => Ok(self.pinned(ap)),
         };
@@ -914,7 +914,12 @@ impl Cx<'_> {
             },
             file.bytes().to_vec(),
         );
-        let made = self.resource_of(vec![Object::from(stream)]);
+        let made = self
+            .resource_of(vec![Object::from(stream)])
+            .inspect_err(|e| {
+                log::warn!("attachment {name} ({stem}) is written without its file: {e:#}");
+            })
+            .ok()?;
         self.files.insert(file.id(), made);
         Some(made)
     }
@@ -943,9 +948,13 @@ impl Cx<'_> {
 
     /// `objects`, a resource's (the resource first; a reference `(i, 0)`
     /// among them to the `i`th), written once a file: its placeholder.
-    fn resource_of(&mut self, objects: Vec<Object>) -> ObjectId {
+    /// Refused where they aren't a resource's: none, or a stream whose
+    /// data isn't in memory, which nothing made here holds.
+    fn resource_of(&mut self, objects: Vec<Object>) -> anyhow::Result<ObjectId> {
         use crate::content::sink::Sink as _;
-        self.resource(&Res::of(objects))
+        let res = Res::of(objects);
+        debug_assert!(res.is_ok(), "objects made here are a resource: {res:?}");
+        Ok(self.resource(&res?))
     }
 
     /// The annotation whose object `obj` of `src` is, as `copy` of it,

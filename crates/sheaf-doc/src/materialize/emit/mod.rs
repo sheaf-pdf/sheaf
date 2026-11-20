@@ -817,13 +817,22 @@ impl Sink for Cx<'_> {
     }
 
     fn resource(&mut self, res: &Res) -> ObjectId {
-        let objects = match &res.body {
+        let id = res.id();
+        let key = |i: usize| match i {
+            0 => ObjKey::Res(id),
+            i => ObjKey::ResPart(id, i as u32),
+        };
+        let objects = match res.body() {
             ResBody::Written(id) => return *id,
             ResBody::Objects(objects) => objects.clone(),
-        };
-        let key = |i: usize| match i {
-            0 => ObjKey::Res(res.id),
-            i => ObjKey::ResPart(res.id, i as u32),
+            // A kind of resource made after this was written: its name
+            // binds nothing, written once, and the save goes on.
+            body => {
+                return self.push_once(key(0), |_| {
+                    log::warn!("a resource of an unknown kind is written as null: {body:?}");
+                    Object::null()
+                });
+            }
         };
         for (i, obj) in objects.iter().enumerate().skip(1) {
             self.push_once(key(i), |cx| part(cx, obj, &key));

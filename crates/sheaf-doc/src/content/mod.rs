@@ -50,7 +50,6 @@ mod names;
 mod page;
 #[cfg(test)]
 mod parity_tests;
-mod res;
 pub mod sink;
 mod splice;
 #[cfg(test)]
@@ -64,6 +63,7 @@ mod writer_tests;
 #[cfg(test)]
 mod written_golden;
 
+pub use crate::pdf::content::{Res, ResBody, ResId, ResKind};
 pub use balance::{Balance, balance};
 pub use blocks::{
     BlockAt, BlockId, ContentError, DrawnForms, GenId, Marker, PagOrigin, PageBlocks, Pagination,
@@ -75,9 +75,8 @@ pub use font::{
 };
 pub use lex::{LexError, LexErrorKind, ResCx, Tok, lex, name, object};
 pub use marked::{Marked, PropertiesDict, Props, marked};
-pub use names::{Kept, NameSet, ResKind, kept, names_used};
+pub use names::{Kept, NameSet, kept, names_used};
 pub use page::{Concat, ContentFault, PageContent, Pos, ReadObjects, SpanAcross, contents};
-pub use res::{Res, ResBody, ResId};
 pub use splice::{Rewrite, SpliceError, Spliced, splice, splice_each, without_keys};
 pub use text_bag::{TextBag, text_bag};
 pub use writer::{

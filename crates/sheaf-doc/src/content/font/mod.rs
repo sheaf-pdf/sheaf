@@ -35,7 +35,7 @@ pub use glyphless::Glyphless;
 pub use program::FontProgram;
 pub use std14::Std14;
 
-use super::ResId;
+use super::{Res, ResBody, ResId};
 use crate::geom::Rect;
 
 /// How far a font's glyphs reach above and below the baseline, and the
@@ -136,4 +136,15 @@ pub struct FontRes {
     /// font, descriptor, program, maps), streams decoded. A reference
     /// `(i, 0)` among them is to `objects[i]`.
     pub objects: Arc<[Object]>,
+}
+
+impl From<FontRes> for Res {
+    /// Named by the id the font gave it. A font's objects are its
+    /// dictionary at least, built in memory with their streams' data, so
+    /// they're never what a resource refuses: none, or a stream whose
+    /// data is somewhere a reader left it.
+    fn from(font: FontRes) -> Res {
+        Res::named(font.id, ResBody::Objects(font.objects))
+            .expect("a font's objects are one at least, their streams in memory")
+    }
 }

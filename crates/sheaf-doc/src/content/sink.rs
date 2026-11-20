@@ -13,10 +13,9 @@
 
 use crate::pdf::{Dictionary, Object, ObjectId, Value};
 
-use super::names::ResKind;
 use super::page::ReadObjects;
-use super::res::Res;
 use super::writer::{Reserved, ResourceNeeds};
+use super::{Res, ResKind};
 
 /// What content's resources are read through and written to.
 pub trait Sink {

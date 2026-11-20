@@ -127,7 +127,7 @@ pub fn layout_digest(g: &Generator, ctx: &PageCtx, art: Option<&Art>) -> u128 {
 fn digest(out: &ContentWriter) -> u128 {
     let (mut bytes, needs) = out.named(&Reserved::default());
     for need in &needs.0 {
-        bytes.extend(need.res.id.0.to_be_bytes());
+        bytes.extend(need.res.id().0.to_be_bytes());
     }
     sheaf_util::checksum(&bytes)
 }
@@ -323,10 +323,11 @@ fn watermark<R>(
 /// page's frame, read from its XObject's dictionary. None when that isn't
 /// one.
 pub(crate) fn placed_art(placed: &Placed, image: bool, body: ResBody) -> Option<Art> {
-    let res = Res {
-        id: placed.res,
-        body,
-    };
+    let res = Res::named(placed.res, body);
+    debug_assert!(res.is_ok(), "a placed image or page is a resource: {res:?}");
+    let res = res
+        .inspect_err(|e| log::warn!("a watermark is drawn without its image or page: {e}"))
+        .ok()?;
     let pdf = placed.at.src.pdf();
     if !image {
         let (bbox, matrix) = crate::stamp_lib::form_frame(pdf, placed.at.id)?;

@@ -1,9 +1,9 @@
 //! sheaf's content writer and pdf-content-streams', driven by the same
 //! calls (M18 slice 19): the same content bytes, and the same resources
 //! under the same names, so the writer can be swapped for the family's
-//! with every byte sheaf writes held. Also the two digests a resource is
-//! named by, over the resources sheaf makes, and the names a resources
-//! dictionary already binds, read both ways.
+//! with every byte sheaf writes held. Also the names a resources
+//! dictionary already binds, read both ways. Resources are the family's
+//! for both ([`Res`], named by its digest), sheaf's own being gone.
 //!
 //! Where the two part, a fixed case shows the difference exactly: a whole
 //! number of 32 bits or more ([`a_whole_number_past_32_bits_keeps_its_point`]),
@@ -22,14 +22,13 @@ use crate::annot::{Box2, Pt};
 use crate::geom::{Affine, Rect};
 use crate::pdf::content as fam;
 use crate::pdf::{
-    Dictionary, Document as Pdf, Object, ObjectId, Str, Stream, StringFormat, Value, dictionary,
-    resolve_fn,
+    Dictionary, Document as Pdf, Object, ObjectId, Stream, Value, dictionary, resolve_fn,
 };
 
 use super::sink::{Sink, reserved_shallow};
 use super::{
     Blend, Color, ContentWriter, FillRule, Font, GState, Glyphless, LineCap, LineJoin, Paint, Res,
-    ResBody, ResId, ResKind, Reserved, ResourceNeeds, Std14, TextMode, Unencoded,
+    ResBody, ResKind, Reserved, ResourceNeeds, Std14, TextMode, Unencoded,
 };
 
 // ---- The calls, and each writer driven by them ----
@@ -76,7 +75,7 @@ impl Drawn {
     fn old(&self) -> Res {
         match self {
             Drawn::Written(id) => Res::written(*id),
-            Drawn::Objects(objects) => Res::of(objects.clone()),
+            Drawn::Objects(objects) => Res::of(objects.clone()).expect("held in memory"),
         }
     }
 
@@ -393,11 +392,12 @@ type Named = (Vec<u8>, Vec<NeedOf>);
 fn old_needs(needs: &ResourceNeeds) -> Vec<NeedOf> {
     (needs.0.iter())
         .map(|n| {
-            let body = match &n.res.body {
+            let body = match n.res.body() {
                 ResBody::Objects(objects) => Body::Objects(objects.to_vec()),
                 ResBody::Written(id) => Body::Written(*id),
+                other => panic!("a body of a kind this doesn't know: {other:?}"),
             };
-            (n.kind.key(), n.name.clone(), n.res.id.0, body)
+            (n.kind.key(), n.name.clone(), n.res.id().0, body)
         })
         .collect()
 }
@@ -1166,19 +1166,7 @@ fn a_resource_drawn_in_two_categories_is_a_need_in_each() {
     );
 }
 
-// ---- The digest a resource is named by ----
-
-/// `objects`' digest by sheaf's and by the family's: the same, and the
-/// same through each one's `Res`.
-#[track_caller]
-fn same_id(objects: &[Object]) -> u128 {
-    let ours = ResId::of(objects).0;
-    assert_eq!(ours, fam::ResId::of(objects).0, "{objects:?}");
-    assert_eq!(Res::of(objects.to_vec()).id.0, ours);
-    let theirs = fam::Res::of(objects.to_vec()).expect("held in memory");
-    assert_eq!(theirs.id().0, ours);
-    ours
-}
+// ---- Resources to draw with ----
 
 fn image(pixels: Pixels) -> Object {
     let page = PageImage {
@@ -1189,218 +1177,6 @@ fn image(pixels: Pixels) -> Object {
         pixels,
     };
     crate::images::image_stream(&page).unwrap().into()
-}
-
-/// A form as sheaf holds one to draw: the form first, then what it
-/// reaches, a reference `(i, 0)` to the `i`th.
-fn form_objects() -> Vec<Object> {
-    let form = Stream::new(
-        dictionary! {
-            "Type" => Object::name("XObject"),
-            "Subtype" => Object::name("Form"),
-            "FormType" => 1,
-            "BBox" => vec![0.into(), 0.into(), 612.into(), Object::from(791.5f32)],
-            "Matrix" => vec![1.into(), 0.into(), 0.into(), 1.into(), 0.into(), 0.into()],
-            "Resources" => dictionary! {
-                "Font" => dictionary! { "F1" => ObjectId::new(1, 0) },
-                "ExtGState" => dictionary! {
-                    "G0" => dictionary! { "ca" => 0.5, "SMask" => Object::name("None") },
-                },
-                "XObject" => dictionary! { "Im0" => ObjectId::new(3, 0) },
-                "ProcSet" => vec![Object::name("PDF"), Object::name("Text")],
-            },
-            "Group" => dictionary! { "S" => Object::name("Transparency"), "K" => true },
-        },
-        b"q\nBT\n/F1 12 Tf\n(Hi) Tj\nET\n/Im0 Do\nQ\n".to_vec(),
-    );
-    let font = dictionary! {
-        "Type" => Object::name("Font"),
-        "Subtype" => Object::name("TrueType"),
-        "BaseFont" => Object::name("ABCDEF+Some#Font"),
-        "FirstChar" => 32,
-        "Widths" => vec![Object::from(250), Object::from(333.5f32), Object::null()],
-        "FontDescriptor" => ObjectId::new(2, 0),
-    };
-    let descriptor = dictionary! {
-        "Type" => Object::name("FontDescriptor"),
-        "FontName" => Object::name("ABCDEF+Some#Font"),
-        "Flags" => 32,
-        "ItalicAngle" => -12.5f32,
-        "CharSet" => crate::pdf::literal(b"/a/b".to_vec()),
-        "Panose" => Object::new(Value::String(
-            Str::bytes(vec![0u8, 1, 2, 255]),
-            Some(StringFormat::Hex),
-        )),
-        "FontFile2" => ObjectId::new(4, 0),
-    };
-    let program = Stream::new(dictionary! { "Length1" => 5 }, vec![0, 1, 0, 0, 0]);
-    vec![
-        form.into(),
-        font.into(),
-        descriptor.into(),
-        image(Pixels::Gray(vec![0, 85, 170, 255])),
-        program.into(),
-    ]
-}
-
-/// Every resource sheaf makes is the same id by the family's digest:
-/// each standard font and Glyphless, ExtGStates, a property list, an
-/// image stream of each kind, a form's objects, an object written.
-#[test]
-fn resources_sheaf_makes_digest_the_same() {
-    let mut ids = BTreeSet::new();
-    for face in (0..14).map(Face::Std).chain([Face::Glyphless]) {
-        let res = face.font().resource();
-        assert_eq!(same_id(&res.objects), res.id.0, "{face:?}");
-        assert_eq!(face.family().id().0, res.id.0);
-        assert_eq!(Res::from(res.clone()).id.0, res.id.0);
-        ids.insert(res.id.0);
-    }
-    assert_eq!(ids.len(), 15, "each font its own");
-    assert_eq!(GLYPHLESS.resource().objects.len(), 6);
-
-    // ExtGStates, as each writer makes them, and by the other's digest.
-    let alphas = [None, Some(0.0), Some(0.3), Some(0.5), Some(1.0), Some(2.0)];
-    for fill_alpha in alphas {
-        for stroke_alpha in alphas {
-            for blend in [None, Some(Blend::Normal), Some(Blend::Multiply)] {
-                let state = GState {
-                    fill_alpha,
-                    stroke_alpha,
-                    blend,
-                };
-                let named = same(&[Call::GState(state)]);
-                let (_, _, id, Body::Objects(objects)) = &named.1[0] else {
-                    panic!("{named:?}")
-                };
-                assert_eq!(same_id(objects), *id);
-            }
-        }
-    }
-    for blend in BLENDS {
-        let named = same(&[Call::GState(GState {
-            blend: Some(blend),
-            ..GState::default()
-        })]);
-        let (_, _, id, Body::Objects(objects)) = &named.1[0] else {
-            panic!("{named:?}")
-        };
-        assert_eq!(same_id(objects), *id);
-    }
-
-    // Property lists: pagination's, and one of sheaf's own with a string
-    // and a list inside.
-    for subtype in ["Header", "Footer", "Watermark", "Background"] {
-        let dict = list(subtype);
-        let id = same_id(&[dict.clone().into()]);
-        assert_eq!(Res::dict(dict.clone()).id.0, id);
-        assert_eq!(fam::Res::dict(dict).unwrap().id().0, id);
-    }
-    let own = dictionary! {
-        "Type" => Object::name("Pagination"),
-        "Subtype" => Object::name("Header"),
-        "SHEF_Gen" => crate::pdf::literal(b"0123456789abcdef".to_vec()),
-        "SHEF_Block" => dictionary! { "L" => 3, "R" => 1.5f32, "K" => Object::name("Flat") },
-        "MCID" => 0,
-        "Empty" => Dictionary::new(),
-        "None" => Object::null(),
-        "Hex" => Object::new(Value::String(Str::bytes(vec![0xfe, 0xff, 0, 65]), Some(StringFormat::Hex))),
-    };
-    same_id(&[own.into()]);
-
-    // An image stream of each kind sheaf writes.
-    let mut images = BTreeSet::new();
-    for pixels in [
-        Pixels::Rgb((0..12).collect()),
-        Pixels::Gray(vec![0, 85, 170, 255]),
-        Pixels::Jpeg {
-            bytes: b"\xff\xd8\xff\xe0not a picture\xff\xd9".to_vec(),
-            components: 3,
-        },
-        Pixels::Jpeg {
-            bytes: b"\xff\xd8\xff\xe0not a picture\xff\xd9".to_vec(),
-            components: 1,
-        },
-        Pixels::G4(vec![0x26, 0xa0, 0x00, 0x10, 0x01]),
-    ] {
-        images.insert(same_id(&[image(pixels)]));
-    }
-    assert_eq!(images.len(), 5);
-
-    // A form's objects, and each alone.
-    let form = form_objects();
-    same_id(&form);
-    for object in &form {
-        same_id(std::slice::from_ref(object));
-    }
-
-    // One written already is named by its number.
-    for id in [
-        ObjectId::new(1, 0),
-        ObjectId::new(7, 0),
-        ObjectId::new(u32::MAX, 65535),
-    ] {
-        assert_eq!(Res::written(id).id.0, fam::Res::written(id).id().0);
-        assert_eq!(Res::written(id).id.0, same_id(&[Object::from(id)]));
-    }
-}
-
-/// Any object: every kind of value, strings literal and hex, reals of
-/// every kind, dictionaries, arrays and streams with their data in
-/// memory, nested.
-fn an_object() -> impl Strategy<Value = Object> {
-    let real = prop_oneof![
-        proptest::num::f64::ANY,
-        prop::sample::select(vec![f64::NAN, f64::INFINITY, 0.0, -0.0, 0.1, 0.5]),
-    ];
-    let format = prop::sample::select(vec![
-        None,
-        Some(StringFormat::Literal),
-        Some(StringFormat::Hex),
-    ]);
-    let leaf = prop_oneof![
-        Just(Object::null()),
-        any::<bool>().prop_map(Object::from),
-        any::<i64>().prop_map(Object::from),
-        real.prop_map(Object::from),
-        proptest::num::f32::ANY.prop_map(Object::from),
-        bytes(0..10).prop_map(Object::name),
-        (bytes(0..24), format)
-            .prop_map(|(b, format)| Object::new(Value::String(Str::bytes(b), format))),
-        (any::<u32>(), any::<u16>()).prop_map(|(n, g)| Object::from(ObjectId::new(n, g))),
-    ];
-    leaf.prop_recursive(4, 40, 5, |inner| {
-        let dict = prop::collection::vec((bytes(0..6), inner.clone()), 0..5)
-            .prop_map(|entries| {
-                let mut dict = Dictionary::new();
-                for (key, value) in entries {
-                    dict.set(key, value);
-                }
-                dict
-            })
-            .boxed();
-        prop_oneof![
-            prop::collection::vec(inner, 0..5).prop_map(Object::from),
-            dict.clone().prop_map(Object::from),
-            (dict, bytes(0..48)).prop_map(|(dict, data)| Object::from(Stream::new(dict, data))),
-        ]
-    })
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(2048))]
-
-    /// Any objects whose streams hold their data in memory digest the
-    /// same by sheaf's and by the family's, and the family takes them.
-    #[test]
-    fn any_objects_digest_the_same(objects in prop::collection::vec(an_object(), 1..4)) {
-        let ours = ResId::of(&objects).0;
-        prop_assert_eq!(ours, fam::ResId::of(&objects).0);
-        prop_assert_eq!(Res::of(objects.clone()).id.0, ours);
-        let theirs = fam::Res::of(objects.clone());
-        prop_assert!(theirs.is_ok(), "{:?}", theirs);
-        prop_assert_eq!(theirs.unwrap().id().0, ours);
-    }
 }
 
 // ---- The names a resources dictionary already binds ----

@@ -25,12 +25,18 @@ pub struct ResObjects {
 
 impl ResObjects {
     pub fn object(&mut self, pdf: &mut Pdf, res: &Res) -> ObjectId {
-        match &res.body {
+        match res.body() {
             ResBody::Written(id) => *id,
             ResBody::Objects(objects) => *self
                 .written
-                .entry(res.id)
+                .entry(res.id())
                 .or_insert_with(|| add(pdf, objects)),
+            // A kind of resource made after this was written: its name
+            // binds nothing, written once.
+            body => *self.written.entry(res.id()).or_insert_with(|| {
+                log::warn!("a resource of an unknown kind is written as null: {body:?}");
+                pdf.add_object(Object::null())
+            }),
         }
     }
 
@@ -96,17 +102,15 @@ impl StampForm {
     pub fn written(id: ObjectId, bbox: Rect, matrix: Affine) -> StampForm {
         StampForm {
             id,
-            res: Res::written(id).id,
+            res: Res::written(id).id(),
             bbox,
             matrix,
         }
     }
 
     pub fn resource(&self) -> Res {
-        Res {
-            id: self.res,
-            body: ResBody::Written(self.id),
-        }
+        Res::named(self.res, ResBody::Written(self.id))
+            .expect("an object already written is a resource, whatever it holds")
     }
 }
 

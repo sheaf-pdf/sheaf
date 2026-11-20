@@ -15,9 +15,8 @@ use std::io::Write;
 use crate::pdf::{Dictionary, Object, Value};
 
 use super::font::{Font, Unencoded};
-use super::names::ResKind;
 use super::page::{ReadObjects, direct};
-use super::res::{Res, ResId};
+use super::{Res, ResId, ResKind};
 use crate::annot::{Box2, Pt};
 use crate::geom::{Affine, Rect};
 use crate::serialize::object;
@@ -104,7 +103,7 @@ impl GState {
         if let Some(b) = self.blend {
             dict.set("BM", Object::name(b.name()));
         }
-        Res::dict(dict)
+        Res::dict(dict).expect("an ExtGState of numbers and a name holds no stream")
     }
 }
 
@@ -265,7 +264,7 @@ impl Reserved {
         let resources = resources
             .and_then(|r| direct(objects, r))
             .and_then(Object::as_dict);
-        for kind in ResKind::ALL {
+        for &kind in ResKind::ALL {
             let Some(category) = resources
                 .and_then(|r| direct(objects, r.get(kind.key())?))
                 .and_then(Object::as_dict)
@@ -275,7 +274,7 @@ impl Reserved {
             for (name, bound) in category.iter() {
                 let mut ids = Vec::new();
                 if let Some(id) = bound.as_reference() {
-                    ids.push(Res::written(id).id);
+                    ids.push(Res::written(id).id());
                 }
                 if let Some(resolved) = direct(objects, bound).filter(|o| !reaches(o)) {
                     ids.push(ResId::of(std::slice::from_ref(resolved)));
@@ -294,8 +293,8 @@ impl Reserved {
                 .names
                 .entry((need.kind, need.name.clone()))
                 .or_default();
-            if !ids.contains(&need.res.id) {
-                ids.push(need.res.id);
+            if !ids.contains(&need.res.id()) {
+                ids.push(need.res.id());
             }
         }
     }
@@ -566,7 +565,10 @@ impl<'f> ContentWriter<'f> {
     pub fn begin_marked(&mut self, tag: &str, props: Dictionary) {
         object::name(&mut self.out, tag.as_bytes());
         self.out.push(b' ');
-        self.name(ResKind::Properties, Res::dict(props));
+        // Refused only for a stream held out of memory: a list is built
+        // here, of names, numbers and strings.
+        let list = Res::dict(props).expect("a property list holds no stream out of memory");
+        self.name(ResKind::Properties, list);
         self.out.extend_from_slice(b" BDC\n");
     }
 
@@ -607,7 +609,7 @@ impl<'f> ContentWriter<'f> {
             .iter()
             .map(|(kind, res)| {
                 let (kind, res) = (*kind, res.clone());
-                let name = fresh(kind, res.id, reserved, &taken);
+                let name = fresh(kind, res.id(), reserved, &taken);
                 taken.insert((kind, name.clone()));
                 Need { kind, name, res }
             })
@@ -635,7 +637,7 @@ impl<'f> ContentWriter<'f> {
 
     /// `/` and the place `res`'s name goes, once it has one.
     fn name(&mut self, kind: ResKind, res: Res) {
-        let need = match self.needs.iter().position(|(_, r)| r.id == res.id) {
+        let need = match self.needs.iter().position(|(_, r)| r.id() == res.id()) {
             Some(i) => i,
             None => {
                 self.needs.push((kind, res));

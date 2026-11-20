@@ -2,7 +2,8 @@
 //! out, with the slice that took it out ([`RETIRED`]), and every name a
 //! later milestone's slice, or an item's between milestones, took out, in
 //! a table of its own ([`RETIRED_M5`], [`RETIRED_M11`],
-//! [`RETIRED_OBJECT_STREAMS`], [`RETIRED_PDF_LINT`]). Nothing under
+//! [`RETIRED_OBJECT_STREAMS`], [`RETIRED_PDF_LINT`], [`RETIRED_M18`]).
+//! Nothing under
 //! `crates/` may define one again or refer to it. Each slice adds its rows
 //! in the commit that deletes the names.
 //!
@@ -1092,6 +1093,22 @@ const RETIRED_PDF_LINT: &[(&str, u8)] = &[
     ("arlington::Hold::written", 1),
 ];
 
+/// Every name M18 retired, with the slice that retired it. Only what
+/// sheaf defined: the crate family's types are used again under the same
+/// names, through `content`.
+const RETIRED_M18: &[(&str, u8)] = &[
+    // Resources by what they are are pdf-content-streams' (`Res`, made by
+    // its constructors and read by `id()` and `body()`; `ResBody`;
+    // `ResId`), re-exported by `content`: sheaf has no module of its own
+    // for them, nor a digest of its own.
+    ("content::res::Res", 19),
+    ("content::res::ResBody", 19),
+    ("content::res::ResId", 19),
+    // A resource category is the family's too, which `NameSet` and the
+    // sinks are keyed by.
+    ("content::names::ResKind", 19),
+];
+
 /// The ledgers, with the words a hit names its slice by.
 const LEDGERS: &[(&[(&str, u8)], &str)] = &[
     (RETIRED, "slice"),
@@ -1099,11 +1116,18 @@ const LEDGERS: &[(&[(&str, u8)], &str)] = &[
     (RETIRED_M11, "M11 slice"),
     (RETIRED_OBJECT_STREAMS, "object streams slice"),
     (RETIRED_PDF_LINT, "pdf-lint slice"),
+    (RETIRED_M18, "M18 slice"),
 ];
 
 /// Last segments only a path matches: names the new design uses again
 /// (§17), and words common enough to name other things.
 const QUALIFIED_ONLY: &[&str] = &[
+    // pdf-content-streams' resources and categories, which `content`
+    // re-exports: not the ones sheaf defined (M18 slice 19).
+    "Res",
+    "ResBody",
+    "ResId",
+    "ResKind",
     // A print, export or render request's job, and the app's file-writing
     // job: not the version's.
     "job",

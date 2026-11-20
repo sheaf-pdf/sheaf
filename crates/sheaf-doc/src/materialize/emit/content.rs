@@ -970,15 +970,17 @@ fn binding(cx: &mut Cx, resources: &Dictionary, kind: ResKind, name: &[u8]) -> O
 /// object it's written as, or one whose content is `res`'s one object.
 fn alike(cx: &Cx, bound: &Object, res: &Res) -> bool {
     let Some(r) = bound.as_reference() else {
-        return ResId::of(std::slice::from_ref(bound)) == res.id;
+        return ResId::of(std::slice::from_ref(bound)) == res.id();
     };
-    match &res.body {
+    match res.body() {
         ResBody::Written(written) => *written == r,
         ResBody::Objects(objects) => {
             objects.len() == 1
                 && (cx.read(r))
-                    .is_some_and(|(o, ..)| ResId::of(std::slice::from_ref(&*o)) == res.id)
+                    .is_some_and(|(o, ..)| ResId::of(std::slice::from_ref(&*o)) == res.id())
         }
+        // A kind of resource this doesn't know is like nothing bound.
+        _ => false,
     }
 }
 
@@ -1164,7 +1166,7 @@ fn page_res(
     };
     if !cx.page_res.contains_key(&key) {
         let mut resources = sink::resources(cx, page);
-        for kind in ResKind::ALL {
+        for &kind in ResKind::ALL {
             let lists = strip.lists && kind == ResKind::Properties;
             let mut names = dropped.of(kind).peekable();
             if names.peek().is_none() && !lists {
@@ -1269,7 +1271,7 @@ fn added(needs: &ResourceNeeds, strip: &ResStrip) -> u64 {
         bytes.push(0);
         bytes.extend(&need.name);
         bytes.push(0);
-        bytes.extend(need.res.id.0.to_be_bytes());
+        bytes.extend(need.res.id().0.to_be_bytes());
     }
     if !strip.is_empty() {
         bytes.push(1);
@@ -1402,10 +1404,8 @@ fn flattened(
             continue;
         };
         // Named by which form it is, whichever number it's written at.
-        let form = Res {
-            id: ResId(p.form.digest()),
-            body: ResBody::Written(at),
-        };
+        let form = Res::named(ResId(p.form.digest()), ResBody::Written(at))
+            .expect("an object already written is a resource, whatever it holds");
         let artifact = p.tag == PlaceTag::Artifact;
         if artifact {
             w.begin_tagged("Artifact");
@@ -1466,10 +1466,15 @@ fn art(cx: &mut Cx, content: &WatermarkContent) -> Option<Art> {
             ..
         } => made(cx, (pdf.id(), Some(*index)), || {
             super::annots::blob_form(pdf.blob(), *index)
-                .map(|(objects, bbox, matrix)| Art::Form {
-                    res: Res::of(objects),
-                    bbox,
-                    matrix,
+                .and_then(|(objects, bbox, matrix)| {
+                    // A page made a form holds its streams in memory.
+                    let res = Res::of(objects);
+                    debug_assert!(res.is_ok(), "a page made a form is a resource: {res:?}");
+                    Ok(Art::Form {
+                        res: res?,
+                        bbox,
+                        matrix,
+                    })
                 })
                 .inspect_err(|e| log::warn!("a watermark is drawn without its page: {e:#}"))
                 .ok()
@@ -1497,8 +1502,8 @@ fn art(cx: &mut Cx, content: &WatermarkContent) -> Option<Art> {
 /// which draws nothing and isn't found again.
 pub(crate) fn drawn_as(cx: &mut Cx, content: &WatermarkContent) -> (ResId, u8) {
     match art(cx, content) {
-        Some(Art::Image { res, turns, .. }) => (res.id, turns),
-        Some(Art::Form { res, .. }) => (res.id, 0),
+        Some(Art::Image { res, turns, .. }) => (res.id(), turns),
+        Some(Art::Form { res, .. }) => (res.id(), 0),
         None => (ResId(0), 0),
     }
 }
@@ -1571,8 +1576,11 @@ fn image_of(bytes: &[u8]) -> anyhow::Result<Art> {
         .next())
     .ok_or_else(|| anyhow::anyhow!("the file holds no image"))?;
     let stream = crate::images::image_stream(&image)?;
+    // An image stream made here holds its data in memory.
+    let res = Res::of([Object::from(stream)]);
+    debug_assert!(res.is_ok(), "an image made here is a resource: {res:?}");
     Ok(Art::Image {
-        res: Res::of([Object::from(stream)]),
+        res: res?,
         width: image.width,
         height: image.height,
         turns: (image.rotate % 4) as u8,

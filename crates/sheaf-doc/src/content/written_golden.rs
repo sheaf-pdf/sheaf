@@ -91,7 +91,7 @@ fn needs_of(needs: &ResourceNeeds) -> Vec<String> {
                 "{}/{}/{}",
                 text(n.kind.key()),
                 text(&n.name),
-                hex(n.res.id.0)
+                hex(n.res.id().0)
             )
         })
         .collect()
@@ -166,7 +166,7 @@ impl Sink for Asked {
     }
 
     fn resource(&mut self, res: &Res) -> ObjectId {
-        self.0.push(res.id.0);
+        self.0.push(res.id().0);
         ObjectId::new(self.0.len() as u32, 0)
     }
 
@@ -598,7 +598,7 @@ fn generators(cases: &mut Cases) {
         Private::Strip,
     );
     // Its names bound to something else already: each counted up.
-    let other = Res::dict(dictionary! { "Type" => Object::name("Other") });
+    let other = Res::dict(dictionary! { "Type" => Object::name("Other") }).unwrap();
     let mut taken = Reserved::default();
     taken.take(&ResourceNeeds(
         (needs.0.iter())
@@ -658,7 +658,7 @@ fn generators(cases: &mut Cases) {
         },
         vec![0x40, 0xc0],
     );
-    let res = Res::of([Object::from(pixels)]);
+    let res = Res::of([Object::from(pixels)]).unwrap();
     for turns in 0..4 {
         let art = Art::Image {
             res: res.clone(),

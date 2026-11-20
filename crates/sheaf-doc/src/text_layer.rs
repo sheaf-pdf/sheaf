@@ -325,7 +325,7 @@ mod tests {
         assert!(c.ends_with("ET\nQ\nEMC\n"), "{c}");
         assert_eq!(list.kind, ResKind::Properties);
         let said = dictionary! { "SHEF_OcrBlock" => literal("b2a") };
-        assert_eq!(list.res, Res::dict(said));
+        assert_eq!(list.res, Res::dict(said).unwrap());
         assert!(c.contains(&format!("/{} 10 Tf\n", name(font))), "{c}");
         assert!(font.name.starts_with(b"Sh"));
         assert_eq!(font.res, Glyphless.resource().into());
@@ -377,7 +377,7 @@ mod tests {
         reserved.take(&ResourceNeeds(
             (needs.0.iter())
                 .map(|n| Need {
-                    res: Res::dict(dictionary! { "Other" => 1 }),
+                    res: Res::dict(dictionary! { "Other" => 1 }).unwrap(),
                     ..n.clone()
                 })
                 .collect(),

@@ -201,9 +201,10 @@ fn a_block_is_a_pagination_artifact_in_its_own_state() {
 
 /// The object a resource is.
 fn object(need: &Need) -> &Object {
-    match &need.res.body {
+    match need.res.body() {
         ResBody::Objects(objects) => &objects[0],
         ResBody::Written(_) => panic!("a resource made here"),
+        body => panic!("a resource of a kind not known here: {body:?}"),
     }
 }
 
@@ -228,7 +229,7 @@ fn the_layout_digest_covers_what_is_drawn_never_names() {
     let other = ResourceNeeds(vec![Need {
         kind: ResKind::Font,
         name: font.name.clone(),
-        res: Res::dict(dictionary! { "Other" => 1 }),
+        res: Res::dict(dictionary! { "Other" => 1 }).unwrap(),
     }]);
     taken.take(&other);
     let clear = layout(&over(1, &wm), &ctx_of(&geom), None, &taken, Private::Keep);
@@ -305,7 +306,7 @@ fn an_image_keeps_its_proportions_and_its_turn() {
         Private::Keep,
     );
     assert!(none.ops.is_empty() && none.res.0.is_empty());
-    let res = Res::dict(dictionary! { "Subtype" => Object::name("Image") });
+    let res = Res::dict(dictionary! { "Subtype" => Object::name("Image") }).unwrap();
     for (turns, across, up) in [(0, 40.0, 20.0), (1, 20.0, 40.0)] {
         let art = Art::Image {
             res: res.clone(),

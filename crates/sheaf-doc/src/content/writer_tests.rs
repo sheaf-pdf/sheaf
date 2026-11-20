@@ -178,7 +178,7 @@ fn marked_content_names_its_list() {
     );
     assert_eq!(
         (props.kind, &props.res),
-        (ResKind::Properties, &Res::dict(list("Header")))
+        (ResKind::Properties, &Res::dict(list("Header")).unwrap())
     );
     assert_eq!(
         gs.res,
@@ -188,6 +188,7 @@ fn marked_content_names_its_list() {
             "CA" => 1.0,
             "BM" => Object::name("Multiply"),
         })
+        .unwrap()
     );
     assert!(!text.contains("<<"));
 }
@@ -285,7 +286,7 @@ fn needs_are_one_a_resource_in_first_use_order() {
     w.draw(Res::written(ObjectId::new(7, 0)));
     w.draw(Res::written(ObjectId::new(8, 0)));
     let (text, needs) = written(w);
-    let kinds: Vec<_> = needs.0.iter().map(|n| (n.kind, &n.res.body)).collect();
+    let kinds: Vec<_> = needs.0.iter().map(|n| (n.kind, n.res.body())).collect();
     let font = |f: Std14| ResBody::Objects(f.resource().objects);
     assert_eq!(
         kinds,
@@ -451,7 +452,7 @@ fn needs_are_written_once_and_bound() {
             .any(|w| w == b"<0000> <FFFF> <0000>\n")
     );
     // A stream once a save.
-    let q = || Res::of([Stream::new(dictionary! {}, b"q\n".to_vec()).into()]);
+    let q = || Res::of([Stream::new(dictionary! {}, b"q\n".to_vec()).into()]).unwrap();
     let q = (res.object(&mut pdf, &q()), res.object(&mut pdf, &q()));
     assert_eq!(q.0, q.1);
     let q = q.0;
