@@ -1084,6 +1084,10 @@ impl ReadObjects for Unreadable<'_> {
     fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> crate::pdf::Result<R> {
         self.object(id).map(read)
     }
+
+    fn peek(&self, id: ObjectId) -> Option<&Object> {
+        self.object(id).ok()
+    }
 }
 
 /// A form that can't be read stops what draws it, but not where XObjects

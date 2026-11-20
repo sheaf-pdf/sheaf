@@ -179,13 +179,18 @@ fn wrap_breaks_at_spaces_and_inside_long_words() {
 
 #[test]
 fn glyphless_encodes_utf16_at_half_an_em() {
-    let (codes, none) = Glyphless.encode("Hé𝄞");
-    assert_eq!(codes, [0x00, 0x48, 0x00, 0xe9, 0xd8, 0x34, 0xdd, 0x1e]);
-    assert_eq!(none, Unencoded(0));
-    assert_eq!(Glyphless.advance(&codes, 10.0), 20.0);
-    assert!(Glyphless.covers('中'));
-    // Decomposed text stays as it was recognized.
-    assert_eq!(Glyphless.encode("e\u{301}").0, [0, 0x65, 0x03, 0x01]);
+    // By the trait it has been drawn in and by the one it will be.
+    for encode in [<Glyphless as Font>::encode, <Glyphless as DrawFont>::encode] {
+        let (codes, none) = encode(&Glyphless, "Hé𝄞");
+        assert_eq!(codes, [0x00, 0x48, 0x00, 0xe9, 0xd8, 0x34, 0xdd, 0x1e]);
+        assert_eq!(none, Unencoded(0));
+        assert_eq!(Glyphless.advance(&codes, 10.0), 20.0);
+        // Decomposed text stays as it was recognized.
+        assert_eq!(encode(&Glyphless, "e\u{301}").0, [0, 0x65, 0x03, 0x01]);
+    }
+    assert!(Font::covers(&Glyphless, '中'));
+    assert!(DrawFont::covers(&Glyphless, '中'));
+    assert_eq!(DrawFont::width(&Glyphless, "Hé𝄞", 10.0), 20.0);
     // Any font goes where a `dyn Font` does.
     let fonts: [&dyn Font; 2] = [&Std14::Courier, &Glyphless];
     assert_eq!(fonts.map(|f| f.width("ab", 10.0)), [12.0, 10.0]);
@@ -1636,4 +1641,83 @@ fn text_is_written_in_its_font() {
     );
     assert_eq!(glyphless.kind, ResKind::Font);
     assert_eq!(glyphless.res, Glyphless.resource().into());
+}
+
+/// What [`every_character_encodes_as_it_always_has`] holds a font to:
+/// the xxh3-128, over every character in order, of whether it's covered,
+/// its codes, how many characters weren't encoded and the bits of its
+/// width at a size of 1000.
+fn drawn_digest(
+    covers: impl Fn(char) -> bool,
+    encode: impl Fn(&str) -> (Vec<u8>, Unencoded),
+    width: impl Fn(&str, f32) -> f32,
+) -> u128 {
+    let mut digest = sheaf_util::Checksum::new();
+    let mut buf = [0u8; 4];
+    for c in '\0'..=char::MAX {
+        let s = &*c.encode_utf8(&mut buf);
+        let (codes, unencoded) = encode(s);
+        digest.write(&[u8::from(covers(c)), codes.len() as u8]);
+        digest.write(&codes);
+        digest.write(&(unencoded.0 as u32).to_le_bytes());
+        digest.write(&width(s, 1000.0).to_bits().to_le_bytes());
+    }
+    digest.finish()
+}
+
+/// Each standard 14 font's digest, in [`Std14::ALL`]'s order, and
+/// Glyphless's: computed from the fonts sheaf drew in before it drew in
+/// the PDF layer's (M18 slice 22), and constants since. A digest that
+/// moves is a byte some mark, header, stamp or text layer is written
+/// with that moved, or a width a line was broken or placed by.
+const DRAWN: [u128; 15] = [
+    0xd4aed3fc76f711b95bfc874d1e8fd29b, // Courier
+    0xd4aed3fc76f711b95bfc874d1e8fd29b, // Courier-Bold
+    0xd4aed3fc76f711b95bfc874d1e8fd29b, // Courier-Oblique
+    0xd4aed3fc76f711b95bfc874d1e8fd29b, // Courier-BoldOblique
+    0xadc31ca352224f2bb11fee3e8feac903, // Helvetica
+    0xe124332fa457838cc59362e61ec7483a, // Helvetica-Bold
+    0xadc31ca352224f2bb11fee3e8feac903, // Helvetica-Oblique
+    0xe124332fa457838cc59362e61ec7483a, // Helvetica-BoldOblique
+    0x50abd98349831cce31061e543291f2de, // Times-Roman
+    0x65e96874b8297d5e69088cd8471134f4, // Times-Bold
+    0xdb0f491ad92642e6311ac032ee834d9c, // Times-Italic
+    0x3fcdca091b9621c3e0b57009846a744a, // Times-BoldItalic
+    0xd60b6896ae4494e13cda342ddaf70667, // Symbol
+    0xbcccbb42c27bd834d2b199efb1d83b7f, // ZapfDingbats
+    0xd35d404c39425fa1eb37a225ec49c33d, // Glyphless
+];
+
+/// Every font sheaf draws in covers, encodes and measures every character
+/// there is as it always has: the goldens of what sheaf writes draw
+/// nothing in Symbol or ZapfDingbats, and little of what a font has.
+#[test]
+fn every_character_encodes_as_it_always_has() {
+    use crate::pdf::fonts::Std14 as Family;
+    let digests = (0..15).map(|i| {
+        let old: &dyn Font = match Std14::ALL.get(i) {
+            Some(font) => font,
+            None => &Glyphless,
+        };
+        let new: &dyn DrawFont = match Family::ALL.get(i) {
+            Some(font) => font,
+            None => &Glyphless,
+        };
+        [
+            drawn_digest(|c| old.covers(c), |s| old.encode(s), |s, z| old.width(s, z)),
+            drawn_digest(|c| new.covers(c), |s| new.encode(s), |s, z| new.width(s, z)),
+        ]
+    });
+    // Every font is said before any fails, each as it is now.
+    let mut moved = Vec::new();
+    for (i, [old, new]) in digests.enumerate() {
+        let name = Family::ALL.get(i).map_or("Glyphless", |font| font.name());
+        if old != DRAWN[i] {
+            moved.push(format!("{name}, as sheaf's own font draws: {old:#034x}"));
+        }
+        if new != DRAWN[i] {
+            moved.push(format!("{name}: {new:#034x}"));
+        }
+    }
+    assert!(moved.is_empty(), "drawn otherwise:\n{}", moved.join("\n"));
 }

@@ -18,6 +18,8 @@ mod draw;
 mod encoding;
 mod foreign;
 mod glyphless;
+#[cfg(test)]
+mod parity_tests;
 mod predefined;
 mod program;
 mod std14;
@@ -25,9 +27,12 @@ mod std14;
 mod tests;
 mod type1;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+use unicode_normalization::UnicodeNormalization;
 
 use crate::pdf::Object;
+use crate::pdf::fonts::LayoutFont;
 
 pub use draw::DrawText;
 pub use foreign::{
@@ -90,6 +95,97 @@ pub trait Font: Send + Sync {
 
     /// The font as a page resource.
     fn resource(&self) -> FontRes;
+}
+
+/// A font sheaf draws text in, by the PDF layer's own fonts: what
+/// [`LayoutFont`] gives of one (a character's codes, how far it
+/// advances), the font as a page resource, and sheaf's rules for text
+/// over them, written here once: a font says what it is ([`DrawFont::res`],
+/// [`DrawFont::composed`]) and takes the rest as given.
+///
+/// Any font sheaf embeds is GID-preserving, as [`Font`] says;
+/// [`Glyphless`] is the one exception.
+pub trait DrawFont: LayoutFont + Send + Sync {
+    /// The font as a page resource: its dictionary and the objects it
+    /// reaches, named by a digest of all of them, so a save writes one
+    /// font once however many pages draw in it.
+    fn res(&self) -> Res;
+
+    /// Whether text is composed (NFC) before it's encoded, so a
+    /// decomposed "é" is the one character a font has. Not in a font
+    /// whose codes are the text as written ([`Glyphless`]).
+    fn composed(&self) -> bool {
+        true
+    }
+
+    /// `s` as this font's codes. A character it can't encode is drawn as
+    /// `?`, or left out by a font without one (ZapfDingbats), and counted.
+    fn encode(&self, s: &str) -> (Vec<u8>, Unencoded) {
+        let mut out = Vec::with_capacity(s.len());
+        let mut unencoded = Unencoded::default();
+        let mut put = |c: char| {
+            if !self.encode_char(c, &mut out) {
+                unencoded.0 += 1;
+                self.encode_char('?', &mut out);
+            }
+        };
+        match self.composed() {
+            true => s.nfc().for_each(&mut put),
+            false => s.chars().for_each(&mut put),
+        }
+        (out, unencoded)
+    }
+
+    /// How far `s` advances at `size`, in text space, drawn as
+    /// [`DrawFont::encode`] draws it: the sum of its codes' widths,
+    /// without character or word spacing.
+    fn width(&self, s: &str, size: f32) -> f32 {
+        // What's drawn for a character the font hasn't: `?`, or nothing.
+        let unknown = self.char_advance('?');
+        let advance = |c: char| self.char_advance(c).or(unknown);
+        // Summed in glyph units and scaled once, so a line's width has
+        // the bits it always had.
+        let units: f32 = match self.composed() {
+            true => s.nfc().filter_map(advance).sum(),
+            false => s.chars().filter_map(advance).sum(),
+        };
+        units * size / 1000.0
+    }
+
+    /// Whether it encodes `c`, as [`DrawFont::encode`] would: `c`
+    /// composed, where the font composes text.
+    fn covers(&self, c: char) -> bool {
+        let mut codes = Vec::new();
+        if !self.composed() {
+            return self.encode_char(c, &mut codes);
+        }
+        let mut composed = std::iter::once(c).nfc();
+        match (composed.next(), composed.next()) {
+            (Some(c), None) => self.encode_char(c, &mut codes),
+            _ => false,
+        }
+    }
+
+    /// `s` in lines no wider than `width` at `size`, as [`wrap_with`]
+    /// breaks them.
+    fn wrap(&self, s: &str, size: f32, width: f32) -> Vec<String> {
+        wrap_with(s, width, |t| self.width(t, size))
+    }
+}
+
+/// A standard 14 font: text composed, in WinAnsiEncoding for the twelve
+/// Latin ones and their own for Symbol and ZapfDingbats.
+impl DrawFont for crate::pdf::fonts::Std14 {
+    /// Its dictionary, made once.
+    fn res(&self) -> Res {
+        static RESOURCES: [OnceLock<Res>; 14] = [const { OnceLock::new() }; 14];
+        RESOURCES[*self as usize]
+            .get_or_init(|| {
+                Res::dict(self.dict())
+                    .expect("a font's objects are one at least, their streams in memory")
+            })
+            .clone()
+    }
 }
 
 /// `s` in lines no wider than `width` by `measure`, which says how wide a

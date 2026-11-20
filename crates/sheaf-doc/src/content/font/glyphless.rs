@@ -9,8 +9,9 @@ use std::sync::{Arc, OnceLock};
 
 use crate::pdf::{Object, ObjectId, Stream, dictionary, literal};
 
-use super::{Font, FontRes, Unencoded};
-use crate::content::ResId;
+use super::{DrawFont, Font, FontRes, Unencoded};
+use crate::content::{Res, ResId};
+use crate::pdf::fonts::{FontMetrics, GlyphBox, LayoutFont};
 
 /// Tesseract's glyphless font.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -45,6 +46,55 @@ CMapName currentdict /CMap defineresource pop
 end
 end
 ";
+
+/// Half an em for each UTF-16 code unit of a character, which is one CID
+/// each: nothing is refused.
+impl LayoutFont for Glyphless {
+    /// Its descriptor's: `/Ascent`, `/Descent` and `/FontBBox`.
+    fn font_metrics(&self) -> FontMetrics {
+        FontMetrics::new(1000.0, -1.0, Some(GlyphBox::new(0.0, 0.0, 500.0, 1000.0)))
+    }
+
+    fn char_advance(&self, ch: char) -> Option<f32> {
+        Some(500.0 * ch.len_utf16() as f32)
+    }
+
+    fn encode_char(&self, ch: char, out: &mut Vec<u8>) -> bool {
+        let mut units = [0u16; 2];
+        out.extend(
+            ch.encode_utf16(&mut units)
+                .iter()
+                .flat_map(|u| u.to_be_bytes()),
+        );
+        true
+    }
+}
+
+impl DrawFont for Glyphless {
+    /// As written: its CIDs are the text's UTF-16, and a word is fitted
+    /// to its box by how many it has.
+    fn composed(&self) -> bool {
+        false
+    }
+
+    /// Half an em a CID, by their count, as it has always been reckoned:
+    /// the same as the sum of each character's advance, without its
+    /// rounding in a text of tens of thousands of characters, and nothing
+    /// for no text.
+    fn width(&self, s: &str, size: f32) -> f32 {
+        s.encode_utf16().count() as f32 * 500.0 * size / 1000.0
+    }
+
+    /// The same six objects as [`Font::resource`]'s.
+    fn res(&self) -> Res {
+        static RES: OnceLock<Res> = OnceLock::new();
+        RES.get_or_init(|| {
+            Res::of(Font::resource(self).objects)
+                .expect("a font's objects are one at least, their streams in memory")
+        })
+        .clone()
+    }
+}
 
 impl Font for Glyphless {
     /// UTF-16 code units, each a two-byte CID, as written: nothing is

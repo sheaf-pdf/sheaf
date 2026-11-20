@@ -76,12 +76,15 @@ pub use blocks::{
     PaginationKind, SheafBlock, SheafBlockRef, isolates,
 };
 pub use font::{
-    Descendant, DrawText, Font, FontApprox, FontId, FontKind, FontMetrics, FontProgram, FontRes,
-    FontScope, Fonts, Foreign, Glyphless, Std14, TooLarge, Unencoded, VerticalMetrics, wrap_with,
+    Descendant, DrawFont, DrawText, Font, FontApprox, FontId, FontKind, FontMetrics, FontProgram,
+    FontRes, FontScope, Fonts, Foreign, Glyphless, Std14, TooLarge, Unencoded, VerticalMetrics,
+    wrap_with,
 };
 pub use lex::{LexError, LexErrorKind, ResCx, Tok, lex, name, object};
 pub use marked::{Marked, PropertiesDict, Props, marked};
 pub use names::{Kept, NameSet, kept, names_used};
-pub use page::{Concat, ContentFault, PageContent, Pos, ReadObjects, SpanAcross, contents};
+pub use page::{
+    Concat, ContentFault, Objects, PageContent, Pos, ReadObjects, SpanAcross, contents,
+};
 pub use place::place_form;
 pub use text_bag::{TextBag, text_bag};

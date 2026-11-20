@@ -230,7 +230,7 @@ boundaries:
     bad=$(cargo tree -p sheaf-edit -e normal --prefix none | awk '{print $1}' | sort -u \
       | grep -E '^sheaf-' | grep -vx 'sheaf-edit' || true)
     [ -z "$bad" ] || { echo "sheaf-edit depends on: $bad"; exit 1; }
-    for pkg in pdf-objects pdf-filters pdf-crypt pdf-structure pdf-content-streams; do
+    for pkg in pdf-objects pdf-filters pdf-crypt pdf-structure pdf-content-streams pdf-fonts pdf-gfx; do
       bad=$(cargo tree --workspace -e all -i "$pkg" --prefix depth 2>/dev/null | awk '/^1sheaf-/ {print $1}' | sed 's/^1//' | sort -u \
         | grep -vx 'sheaf-doc' || true)
       [ -z "$bad" ] || { echo "crates outside sheaf-doc depend on $pkg directly: $bad"; exit 1; }

@@ -285,7 +285,7 @@ const ADDED: [&str; 86] = [
 /// The names PDFium reads as the standard 14 fonts: the 14 and the
 /// alternates it takes for them, from `cfx_standardfont.cpp`'s
 /// `kAltFontNames` (PDFium 8fdce8e1).
-const NAMES: [(&str, Std14); 89] = [
+pub(super) const NAMES: [(&str, Std14); 89] = [
     ("Arial", Std14::Helvetica),
     ("Arial,Bold", Std14::HelveticaBold),
     ("Arial,BoldItalic", Std14::HelveticaBoldOblique),
