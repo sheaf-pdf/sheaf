@@ -14,9 +14,14 @@
 //!
 //! [`ContentLimits::decompressed`]: crate::source::ContentLimits
 
+use std::borrow::Cow;
+
 use crate::pdf::content::Join;
 pub use crate::pdf::content::{Concat, Pos, SpanAcross};
-use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, Stream, StreamExt, Value};
+use crate::pdf::{
+    Dictionary, LazyPdf, Object, ObjectId, Resolve, Stream, StreamExt, Streams, Unreadable, Value,
+    Why,
+};
 
 use super::lex::{self, LexError, ResCx};
 use crate::source::Limits;
@@ -32,6 +37,61 @@ pub trait ReadObjects {
     /// reads it without keeping it: a page's streams, each read once to
     /// lex.
     fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> crate::pdf::Result<R>;
+
+    /// Object `id`, its references followed as [`object`] follows them,
+    /// borrowed; None where it can't be read. A source lends a stream's
+    /// dictionary without reading or keeping its data, which [`read`]
+    /// gives: what a font's objects are found by ([`Objects`]), so a
+    /// font's program and CMaps aren't held once the font is read.
+    ///
+    /// [`object`]: ReadObjects::object
+    /// [`read`]: ReadObjects::read
+    fn peek(&self, id: ObjectId) -> Option<&Object>;
+}
+
+/// A source's or a document's objects as the PDF layer's crates read
+/// them: [`Resolve`] by [`ReadObjects::peek`], so a reference to a
+/// reference is followed as sheaf follows it everywhere, and [`Streams`]
+/// by [`ReadObjects::read`] and sheaf's own decoding, a stream read once
+/// and not kept. What pdf-fonts reads a font from, and what interprets a
+/// page with it takes the same.
+#[derive(Debug)]
+pub struct Objects<'a, R: ?Sized>(pub &'a R);
+
+impl<R: ?Sized> Clone for Objects<'_, R> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<R: ?Sized> Copy for Objects<'_, R> {}
+
+impl<'a, R: ReadObjects + ?Sized> Resolve<'a> for Objects<'a, R> {
+    fn resolve(&self, id: ObjectId) -> Option<&'a Object> {
+        self.0.peek(id)
+    }
+}
+
+impl<R: ReadObjects + ?Sized> Streams for Objects<'_, R> {
+    /// Stream `id` decoded, as sheaf decodes every stream. Past `limit`
+    /// it's [`Why::Limit`]; anything else that gives no data (no such
+    /// object, not a stream, a filter that fails, a source that doesn't
+    /// read) is [`Why::Damaged`], which a font reads as none.
+    fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
+        let read = self.0.read(id, |object| {
+            let stream = object.as_stream()?;
+            Some(stream.decompressed_content_with_limit(limit))
+        });
+        match read {
+            Ok(Some(Ok(data))) => Ok(Cow::Owned(data)),
+            Ok(Some(Err(crate::pdf::Error::Limit(crate::pdf::Limit::Decompressed)))) => {
+                Err(Unreadable::new(id, Why::Limit, "decodes past the limit"))
+            }
+            Ok(Some(Err(error))) => Err(Unreadable::new(id, Why::Damaged, error.to_string())),
+            Ok(None) => Err(Unreadable::new(id, Why::Damaged, "not a stream")),
+            Err(error) => Err(Unreadable::new(id, Why::Damaged, error.to_string())),
+        }
+    }
 }
 
 impl ReadObjects for LazyPdf {
@@ -51,6 +111,10 @@ impl ReadObjects for LazyPdf {
         }
         Ok(read(&object))
     }
+
+    fn peek(&self, id: ObjectId) -> Option<&Object> {
+        LazyPdf::peek(self, id)
+    }
 }
 
 impl ReadObjects for crate::pdf::Document {
@@ -60,6 +124,10 @@ impl ReadObjects for crate::pdf::Document {
 
     fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> crate::pdf::Result<R> {
         self.get_object(id).map(read)
+    }
+
+    fn peek(&self, id: ObjectId) -> Option<&Object> {
+        self.get_object(id).ok()
     }
 }
 
@@ -261,3 +329,6 @@ pub(super) fn direct<'a>(objects: &'a impl ReadObjects, object: &'a Object) -> O
         None => Some(object),
     }
 }
+
+#[cfg(test)]
+mod tests;

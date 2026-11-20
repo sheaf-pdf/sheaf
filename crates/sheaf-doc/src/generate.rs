@@ -42,8 +42,8 @@ use sheaf_edit::{FontChoice, GridPos, HeaderFooterSpec, Z};
 
 use crate::annot::{Box2, Pt};
 use crate::content::{
-    Color, ContentWriter, DrawText, Font, GState, PaginationKind, Res, ResBody, ResId, Reserved,
-    ResourceNeeds, Std14, place_form,
+    Color, ContentWriter, DrawFont, DrawText, GState, PaginationKind, Res, ResBody, ResId,
+    Reserved, ResourceNeeds, Std14, place_form, std14_of,
 };
 use crate::geom::{Affine, Geom, Rect};
 use crate::materialize::Private;
@@ -172,7 +172,7 @@ fn header_footer<R>(
     ctx: &PageCtx,
     done: impl FnOnce(&ContentWriter) -> R,
 ) -> Option<R> {
-    let face = Std14::from(hf.font);
+    let face = std14_of(hf.font);
     let lines = header::layout(hf, &g.frozen, ctx, &face);
     if lines.is_empty() {
         return None;
@@ -231,7 +231,7 @@ fn watermark<R>(
             },
             _,
         ) => {
-            let face = Std14::from(*font);
+            let face = std14_of(*font);
             let width = face.width(text, *size);
             let text = Draws::Text {
                 face,

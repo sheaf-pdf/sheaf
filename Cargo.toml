@@ -92,7 +92,9 @@ in-progress = "0.1"
 # sheaf-pdf/instance-handoff. Pinned exactly, as its README asks: until
 # 0.1.0 a later alpha may change the API and what two builds share.
 instance-handoff = "=0.1.0-alpha.2"
-# The PDF family, from sheaf-pdf/pdf-lint main (M18): MIT OR Apache-2.0.
+# The PDF family, from sheaf-pdf/pdf-lint main (M18): MIT OR Apache-2.0,
+# and pdf-fonts `(MIT OR Apache-2.0) AND FTL`, for what its program
+# reading takes from FreeType (packaging/licenses/LICENSE-freetype).
 # pdf-lint itself (Apache-2.0) runs as a standalone CLI oracle in tests,
 # never linked as a library.
 pdf-objects = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main" }
@@ -100,6 +102,10 @@ pdf-filters = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", 
 pdf-crypt = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main" }
 pdf-structure = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", features = ["zlib-rs"] }
 pdf-content-streams = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main" }
+# Without their defaults: pdf-fonts reads programs and Adobe's predefined
+# CMaps and embeds nothing; of pdf-gfx only what lays text out in a font.
+pdf-fonts = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", default-features = false, features = ["programs", "predefined-cmaps"] }
+pdf-gfx = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", default-features = false, features = ["text-layout"] }
 
 # Zed's workspace patches for crates GPUI uses, mirrored from the
 # [patch.crates-io] of Zed's Cargo.toml at the snapshot's rev.

@@ -1,5 +1,6 @@
-sheaf reads the font programs PDFs embed as PDFium's FreeType reads them
-(crates/sheaf-doc/src/content/font/program.rs): its cmap format 2 and 4
+sheaf reads the font programs PDFs embed as PDFium's FreeType reads them,
+through the pdf-fonts crate (its src/program.rs, licensed (MIT OR Apache-2.0)
+AND FTL; https://github.com/sheaf-pdf/pdf-lint): its cmap format 2 and 4
 readers, its glyph-name-to-Unicode charmap and its CFF encodings follow
 FreeType's routines (tt_cmap2_*, tt_cmap4_*, ps_unicodes_*,
 cff_encoding_load, https://gitlab.freedesktop.org/freetype/freetype), and

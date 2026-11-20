@@ -128,6 +128,19 @@ impl ContentLimits {
 }
 
 impl Limits {
+    /// These caps as pdf-fonts takes them: its defaults, with content's
+    /// as [`ContentLimits::family`] gives them, which a font's CMaps and
+    /// a Type 3 font's glyphs are read under, and with the CMaps one
+    /// `/UseCMap` chain may run to as content's `depth`, the cap sheaf
+    /// has always cut that chain by. Every font read through pdf-fonts
+    /// takes its limits from here.
+    pub fn fonts(&self) -> crate::pdf::fonts::Limits {
+        let mut limits = crate::pdf::fonts::Limits::DEFAULT;
+        limits.content = self.content.family();
+        limits.cmaps = self.content.depth;
+        limits
+    }
+
     pub const DEFAULT: Limits = Limits {
         reader: crate::pdf::ReadLimits::DEFAULT,
         page_tree: PageTreeLimits {

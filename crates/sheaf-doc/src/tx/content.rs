@@ -11,8 +11,8 @@ use sheaf_edit::{GridPos, HeaderFooterSpec, Z};
 
 use super::{EditError, Lower, Notice, OthersFound};
 use crate::content::{
-    self, BlockAt, ContentError, Font, GenId, PagOrigin, PageContent, Pagination, PaginationKind,
-    PropertiesDict, ResCx, SheafBlock, SpanAcross, Std14,
+    self, BlockAt, ContentError, DrawFont, GenId, PagOrigin, PageContent, Pagination,
+    PaginationKind, PropertiesDict, ResCx, SheafBlock, SpanAcross, std14_of,
 };
 use crate::generate::{self, header};
 use crate::model::{
@@ -186,7 +186,7 @@ pub(crate) fn set_watermark(
         Some(pages) => Scope::Pages(pages.clone()),
     };
     if let WatermarkContent::Text { text, font, .. } = content
-        && Std14::from(*font).encode(text).1.0 > 0
+        && std14_of(*font).encode(text).1.0 > 0
     {
         lw.notices.push(Notice::Unencodable);
     }
@@ -542,7 +542,7 @@ pub(crate) fn set_header_footer(
         frozen: Frozen { date, file, bates },
         replaces: header::kinds(),
     };
-    let face = Std14::from(spec.font);
+    let face = std14_of(spec.font);
     if header::unencodable(spec, &g.frozen, &face) || label_unencodable(&lw.rec, &g) {
         lw.notices.push(Notice::Unencodable);
     }
@@ -559,7 +559,7 @@ pub(crate) fn label_unencodable(st: &DocState, g: &Generator) -> bool {
     let Some(spec) = g.spec.header_footer() else {
         return false;
     };
-    let face = Std14::from(spec.font);
+    let face = std14_of(spec.font);
     let mut prefixes = st.labels().into_iter().flat_map(|l| l.iter());
     if !prefixes.any(|l| header::label_unencodable(spec, &l.prefix, &face)) {
         return false;

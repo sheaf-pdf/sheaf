@@ -351,6 +351,49 @@ impl LazyPdf {
         Ok(Arc::new(loaded))
     }
 
+    /// Object `id`, its references followed, borrowed; None where it
+    /// isn't there or doesn't read. A stream that isn't kept yet is lent
+    /// as the file has it, its dictionary alone: its data isn't read and
+    /// nothing of it is kept, so asking for a stream's dictionary doesn't
+    /// hold its bytes for the life of the reader as [`LazyPdf::get`]
+    /// does. Its `/Length` is then the file's (a kept stream's is its
+    /// data's), and its data is read by [`LazyPdf::object_unkept`]. A
+    /// stream whose data doesn't read is lent the same way, kept as that
+    /// error or not. Anything else is read and kept as `get` keeps it.
+    pub fn peek(&self, id: ObjectId) -> Option<&Object> {
+        let mut object = self.peek_one(id)?;
+        let mut chain = 0;
+        while let Some(next) = object.as_reference() {
+            chain += 1;
+            if chain > self.limits.max_depth {
+                return None;
+            }
+            object = self.peek_one(next)?;
+        }
+        Some(object)
+    }
+
+    /// [`LazyPdf::peek`], no reference followed. A stream kept as the
+    /// error its data gave ([`LazyPdf::get`] keeps one) is lent as one
+    /// not kept yet is, by its dictionary: what a stream is lent as
+    /// doesn't turn on whether something asked for its data first.
+    fn peek_one(&self, id: ObjectId) -> Option<&Object> {
+        if let Some(Ok(kept)) = self.slot(id)?.get() {
+            return Some(&**kept);
+        }
+        match self.reading.get(id) {
+            Ok(object) if object.as_stream().is_some() => Some(object),
+            _ => self.get(id).ok(),
+        }
+    }
+
+    /// Whether object `id` is kept: read by [`LazyPdf::get`], a stream
+    /// with its data.
+    #[cfg(test)]
+    pub(crate) fn is_kept(&self, id: ObjectId) -> bool {
+        self.slot(id).is_some_and(|slot| slot.get().is_some())
+    }
+
     pub fn get_object(&self, id: ObjectId) -> Result<&Object> {
         self.dereference(self.get(id)?).map(|(_, obj)| obj)
     }

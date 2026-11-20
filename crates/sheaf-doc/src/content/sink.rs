@@ -109,7 +109,7 @@ pub fn reserved_shallow(sink: &mut dyn Sink, resources: Option<&Object>) -> Rese
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::content::{ContentWriter, DrawText, Font, Glyphless};
+    use crate::content::{ContentWriter, DrawFont, DrawText, Glyphless};
     use crate::pdf::{Document as Pdf, Stream, StreamExt, dictionary};
     use crate::serialize::built::ResObjects;
 
@@ -160,7 +160,7 @@ mod tests {
             );
         }
         // Glyphless is its six objects, its program compressed.
-        let font = res.object(&mut pdf, &Glyphless.resource().into());
+        let font = res.object(&mut pdf, &Glyphless.res());
         let type0 = pdf.get_dictionary(font).unwrap();
         let to_unicode = type0.get(b"ToUnicode").unwrap().as_reference().unwrap();
         let cmap = pdf.get_object(to_unicode).unwrap().as_stream().unwrap();

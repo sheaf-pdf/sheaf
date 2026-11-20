@@ -783,6 +783,13 @@ impl ReadObjects for Joined<'_> {
             None => ReadObjects::read(self.old, id, read),
         }
     }
+
+    fn peek(&self, id: ObjectId) -> Option<&Object> {
+        match self.section.get(&id) {
+            Some((_, obj)) => Some(obj),
+            None => ReadObjects::peek(self.old, id),
+        }
+    }
 }
 
 /// What annotation `rec` says, as words: a sheaf mark's contents, author

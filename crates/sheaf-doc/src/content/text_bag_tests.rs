@@ -180,10 +180,14 @@ fn codes_no_font_reads_are_their_bytes_hash() {
         "Subtype" => Object::name("Type1"),
         "BaseFont" => Object::name("Times-Roman"),
     });
+    // Its codes are glyphs by names that say no text.
+    let unnamed = (0..256).map(|code| Object::name(format!("glyph{code}")));
+    let differences: Vec<Object> = std::iter::once(Object::from(0)).chain(unnamed).collect();
     let symbolic = pdf.add_object(dictionary! {
         "Type" => Object::name("Font"),
         "Subtype" => Object::name("TrueType"),
         "BaseFont" => Object::name("ABCDEF+Wingdings"),
+        "Encoding" => dictionary! { "Differences" => differences },
     });
     let composite = pdf.add_object(dictionary! {
         "Type" => Object::name("Font"),

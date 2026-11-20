@@ -23,7 +23,7 @@ use crate::pdf::{
 use image::{Rgb, RgbImage};
 
 use super::interp::Encoded;
-use super::{Foreign, Glyphless, PageContent, contents};
+use super::{Font, Glyphless, Objects, PageContent, contents};
 use crate::source::Limits;
 
 /// A one-page PDF.
@@ -221,7 +221,14 @@ pub fn standard_14(subtype: &str, name: &str) -> Dictionary {
         "BaseFont" => Object::name(name),
         "Encoding" => Object::name("WinAnsiEncoding"),
     };
-    let read = Foreign::read(&Pdf::new(), &font, &Limits::DEFAULT, &mut 0);
+    let none = Pdf::new();
+    let read = Font::read(
+        Objects(&none),
+        &font,
+        &Limits::DEFAULT.fonts(),
+        &mut 0,
+        &mut (),
+    );
     let afm = read.expect("a font by name alone has no stream to decompress");
     let widths = (32..=255).map(|code| Object::from(afm.width(code) as i64));
     font.set("FirstChar", 32);
@@ -837,66 +844,6 @@ pub fn heavy_cff_program(levels: i32) -> Vec<u8> {
     cff(&[vec![14], vec![14], a], &[1, 34], &subrs)
 }
 
-/// A TrueType program whose glyph 0 is a composite of glyph 1 fifty
-/// times, glyph 1 of glyph 2 fifty times, and so on to glyph 6, a
-/// triangle: 50⁶ glyphs drawn for one.
-pub fn composite_bomb_program() -> Vec<u8> {
-    let component = |glyph: i16| be(&[0x0023, glyph, 0, 0]);
-    let mut glyphs: Vec<Vec<u8>> = (1..7)
-        .map(|next| {
-            let mut glyph = be(&[-1, 0, 0, 600, 750]);
-            for _ in 0..49 {
-                glyph.extend(component(next));
-            }
-            // The last component, without MORE_COMPONENTS.
-            glyph.extend(be(&[0x0003, next, 0, 0]));
-            glyph
-        })
-        .collect();
-    glyphs.push(simple_glyph(&[
-        (0, 0, true),
-        (300, 750, true),
-        (600, 0, true),
-    ]));
-    let mut glyf = Vec::new();
-    let mut loca = Vec::new();
-    for glyph in &glyphs {
-        loca.extend((glyf.len() as u32).to_be_bytes());
-        glyf.extend(glyph);
-        glyf.resize(glyf.len().next_multiple_of(4), 0);
-    }
-    loca.extend((glyf.len() as u32).to_be_bytes());
-    let head = [
-        &0x0001_0000u32.to_be_bytes()[..],
-        &0x0001_0000u32.to_be_bytes(),
-        &0u32.to_be_bytes(),
-        &0x5F0F_3CF5u32.to_be_bytes(),
-        &be(&[0, 1000]),
-        &[0; 16],
-        &be(&[0, 0, 600, 750, 0, 8, 2, 1, 0]),
-    ]
-    .concat();
-    let hhea = [
-        &0x0001_0000u32.to_be_bytes()[..],
-        &be(&[800, -200, 0, 600, 0, 0, 600, 1, 0, 0, 0, 0, 0, 0, 0, 7]),
-    ]
-    .concat();
-    let maxp = [
-        &0x0001_0000u32.to_be_bytes()[..],
-        &be(&[7, 3, 1, 3, 1, 2, 0, 0, 0, 0, 0, 0, 50, 7]),
-    ]
-    .concat();
-    let hmtx = be(&[600, 0].repeat(7));
-    sfnt(&mut [
-        (*b"glyf", glyf),
-        (*b"head", head),
-        (*b"hhea", hhea),
-        (*b"hmtx", hmtx),
-        (*b"loca", loca),
-        (*b"maxp", maxp),
-    ])
-}
-
 /// A charstring's numbers, encoded as Type 1 and Type 2 charstrings share:
 /// a byte, or two, for -1131 to 1131.
 fn cs(values: &[i32]) -> Vec<u8> {
@@ -1053,7 +1000,7 @@ pub fn type1_program() -> Vec<u8> {
 }
 
 /// [`type1_program`] with `n` integers in a row in its clear text, which
-/// read-fonts reads ahead of one by one.
+/// a reader of Type 1 programs reads ahead of one by one.
 pub fn type1_integers_program(n: usize) -> Vec<u8> {
     let program = type1_program();
     let at = program.windows(4).position(|w| w == b"/Pai").unwrap();

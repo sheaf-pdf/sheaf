@@ -195,7 +195,7 @@ mod tests {
     use sheaf_edit::Rotation;
 
     use super::*;
-    use crate::content::{Font, Need, Res, ResKind};
+    use crate::content::{DrawFont, Need, Res, ResKind};
     use crate::geom::Rect;
     use crate::serialize::built::ResObjects;
 
@@ -333,7 +333,7 @@ mod tests {
         assert_eq!(list.res, Res::dict(said).unwrap());
         assert!(c.contains(&format!("/{} 10 Tf\n", name(font))), "{c}");
         assert!(font.name.starts_with(b"Sh"));
-        assert_eq!(font.res, Glyphless.resource().into());
+        assert_eq!(font.res, Glyphless.res());
         // 5 code units, size 10, width 40 → 200*40/(10*5) = 160.
         assert!(
             c.contains("1 0 0 1 72 682 Tm\n160 Tz\n<00480065006C006C006F> Tj\n"),

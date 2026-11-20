@@ -129,7 +129,7 @@ jobs:
         # M18 slices 1 and 13: only sheaf-doc reaches pdf-*, lopdf is gone, and
         # insecure-test-writer never enters normal (shipped) dependencies.
         run: |
-          for pkg in pdf-objects pdf-filters pdf-crypt pdf-structure pdf-content-streams; do
+          for pkg in pdf-objects pdf-filters pdf-crypt pdf-structure pdf-content-streams pdf-fonts pdf-gfx; do
             bad=$(cargo tree --workspace -e all -i "$pkg" --prefix depth 2>/dev/null | awk '/^1sheaf-/ {print $1}' | sed 's/^1//' | sort -u \
               | grep -vx 'sheaf-doc' || true)
             if [ -n "$bad" ]; then echo "crates outside sheaf-doc depend on $pkg directly: $bad"; exit 1; fi

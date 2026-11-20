@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use sheaf_edit::{BatesSpec, HeaderFooterSpec};
 
-use crate::content::{Font, PaginationKind, Std14};
+use crate::content::{DrawFont, PaginationKind, Std14};
 use crate::geom::Geom;
 use crate::model::{CtxNeeds, Frozen, PageCtx, PageId};
 

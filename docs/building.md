@@ -29,6 +29,9 @@ lists them):
   sheaf-app.
 - `just premerge` runs every ignored corpus tier, before a PR merges.
 - `just gates` runs the 7k gates, waiting for a quiet machine first.
+- `just glyph-dump <file>` writes what every corpus page shows (its
+  glyphs and its text, a line a page): run before and after a change to
+  what reads fonts or interprets a page, and `diff` the two files.
 
 Tests run under a memory cap where Linux has a user systemd
 (`scripts/test-capped.sh`; `SHEAF_UNCAPPED=1` turns it off).

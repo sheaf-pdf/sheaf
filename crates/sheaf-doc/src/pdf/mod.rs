@@ -1,10 +1,14 @@
 //! The single door to the PDF layer (M18 slices 1 and 8–13): every module in
 //! `sheaf-doc` and every other crate in the workspace reaches the PDF
-//! object, structure, filter and encryption types through here.
+//! object, structure, filter and encryption types through here
+//! (`pdf-objects`, `pdf-structure`, `pdf-filters`, `pdf-crypt`), and
+//! content's (`content`: `pdf-content-streams`, M18 slice 19) and fonts'
+//! (`fonts`: `pdf-fonts` and `pdf-gfx`, M18 slice 22).
 
 pub mod content;
 mod document;
 mod error;
+pub mod fonts;
 mod reader;
 mod stream;
 #[cfg(any(test, feature = "fixtures"))]
@@ -18,7 +22,7 @@ pub use pdf_crypt::Ivs;
 pub use pdf_crypt::{Changes, KeyCheck, Method, Password, Permissions, Printing, Protection};
 pub use pdf_objects::{
     Data, Dict as Dictionary, Entry as DictEntry, Form as StringFormat, Name, Object, ObjectId,
-    Resolve, SmallBytes, Span, Str, Stream, Value, resolve_fn,
+    Resolve, SmallBytes, Span, Str, Stream, Streams, Unreadable, Value, Why, resolve_fn,
 };
 pub use pdf_structure::{ByteSource, FileBytes};
 pub use reader::{LazyPdf, RawCopies, ReadLimits, XrefFacts, XrefKind};

@@ -759,8 +759,10 @@ lint ledger) keeps them out of everything but tests.
   (`/ExtGState` with opacity and blend mode), line styles, paths and
   their painting and clipping, text as the codes a font encoded, with
   that font's resource, and images. It keeps no font: sheaf draws text
-  through `DrawText` (`set_font`, `show_text`), which gives it a `Font`'s
-  resource and the codes that font encodes a string as, and places a
+  through `DrawText` (`set_font`, `show_text`), which gives it a
+  `DrawFont`'s resource and the codes that font encodes a string as (one
+  value gives both, so a call can't take them from two fonts; that the
+  font shown in is the one set is the caller's to keep), and places a
   form with `content::place_form`, which maps a form's `/Matrix`·`/BBox`
   onto a box.
   Numbers have at most four decimals, never an exponent or `-0`; strings
@@ -780,19 +782,35 @@ lint ledger) keeps them out of everything but tests.
   slice 20, `content::to_lopdf` before) writes them into a PDF sheaf
   builds in memory (exchange's comments, the comment summary's sheets, a
   tape's picture), one object a resource a document.
-- **Fonts** (`content::Font`: `encode`, `advance`, `wrap`, `covers`,
-  `resource`). `Std14` is the 14 standard fonts with Adobe's Core 14 AFM
-  widths, glyph boxes and heights (`crates/sheaf-doc/assets/afm`, with
-  Adobe's notice) and exact encoders: WinAnsi as cp1252, and Symbol's
-  and ZapfDingbats' own, glyph names read by the Adobe Glyph List; text
-  is composed (NFC) first. `Std14::named` reads a file's `/BaseFont` as
-  PDFium does: the 14's names, and the alternates PDFium takes for them
-  (`Arial,Bold`, `TimesNewRomanPSMT`).
-  `Glyphless` is the OCR layer's: Tesseract's glyphless font, each UTF-16
-  code unit a CID, read back through its ToUnicode, so it draws any
-  text. A font sheaf embeds keeps its glyph ids (CID = GID); Glyphless,
-  whose one glyph serves every CID, is the exception, and the rule is
-  for M10 slice 7's Noto subsets. These replace four encoders and three
+- **Fonts drawn in** (`content::DrawFont`: `encode`, `width`, `wrap`,
+  `covers`, `res`). `DrawFont` is sheaf's rules for text over the PDF
+  layer's `LayoutFont` (pdf-gfx's: a font's metrics, a character's
+  advance and its codes): a character a font has no code for is written
+  as `?` where the font has one and counted (`Unencoded`), text is
+  composed (NFC) first where the font says so (`composed`), widths are
+  summed in glyph units and scaled once, and lines break as
+  `wrap_with` breaks them; a font gives only its resource, a `Res`.
+  `Std14` is pdf-fonts' (from M18 slice 22; sheaf's own copy of it, its
+  AFMs and its glyph lists went then): the 14 standard fonts with
+  Adobe's Core 14 AFM widths, glyph boxes and heights and exact
+  encoders: WinAnsi as cp1252, and Symbol's and ZapfDingbats' own, glyph
+  names read by the Adobe Glyph List; in Symbol the Greek letters Δ, Ω
+  and μ and the composed angle brackets are written as the signs the
+  encoding has. `Std14::named` reads a file's `/BaseFont` as PDFium
+  does: the 14's names, and the alternates PDFium takes for them
+  (`Arial,Bold`, `TimesNewRomanPSMT`). `std14_of` gives a `FontChoice`'s.
+  What every character encodes as, and how wide, in each of the 14 and
+  in Glyphless is held by a digest a font
+  (`every_character_encodes_as_it_always_has`), taken from sheaf's own
+  fonts before they went.
+  `Glyphless` is the OCR layer's, and sheaf's own (pdf-fonts embeds
+  subsets of real programs, and has no glyphless font): Tesseract's
+  glyphless font, each UTF-16 code unit a CID as the text is written
+  (never composed: a word is scaled by its count of units), read back
+  through its ToUnicode, so it draws any text. A font sheaf embeds keeps
+  its glyph ids (CID = GID); Glyphless, whose one glyph serves every
+  CID, is the exception, and the rule is for M10 slice 7's Noto subsets
+  (pdf-fonts' `embed`). These replace four encoders and three
   width tables (the header and footer's, the marks', the watermark's
   UTF-8 written as WinAnsi, and the summary's); marks, tapes, the header
   and footer, the watermark's text, OCR layers and the comment summary
@@ -946,9 +964,19 @@ never lopdf's `Content`.
   form's resources lack is looked up in the page's (`FindResourceHolder`);
   and a form starts in PDFium's `AddForm` state, `Tz`, `TL`, `Ts` and
   the text matrix reset.
-- **Fonts give glyph boxes.** `Foreign::read` reads a file's font as
+- **Fonts give glyph boxes.** A file's font is pdf-fonts' `Font`
+  (`content::Font`, from M18 slice 22; sheaf's own reader, `Foreign`,
+  went then, and pdf-fonts began as a copy of it). It reads a source
+  through `content::Objects`, any `ReadObjects` as the PDF layer's
+  `Resolve` and `Streams`: `peek` lends an object, its references
+  followed, a stream's dictionary without its data read or kept, and a
+  stream is decoded by sheaf's own decoding within the limit, never
+  kept, so a font's program, CMaps and CharProcs don't stay in a lazy
+  reader's slots; the limits are `Limits::fonts`. The interpreter of
+  slice 23 takes the same provider and the same `Fonts`. `Font::read`
+  reads a file's font as
   PDFium does, failing only past the budget it decompresses within
-  (`TooLarge`): its kind (Type1, MMType1, TrueType, Type3, or Type0 over
+  (`FontError::TooLarge`): its kind (Type1, MMType1, TrueType, Type3, or Type0 over
   CIDFontType0 or 2); its codes (`codes`, split as PDFium's
   `CPDF_CMap::GetNextChar` splits them: by an embedded CMap's codespace,
   a byte each by one range but two where it's of two bytes, by more each
@@ -956,36 +984,45 @@ never lopdf's `Content`.
   and -V by name; the other predefined CMaps (PDF 32000-1 Table 118's,
   and Adobe's UCS2 maps) from hayro-cmap's bundle of Adobe's, each parsed
   once, split as PDFium's table of them says (`kPredefinedCMaps`, since
-  hayro-cmap keeps their codespaces to itself); a code of two bytes cut
+  hayro-cmap keeps their codespaces to itself), a code one has no
+  mapping for CID 0, and an `/Encoding` name that's no CMap two bytes a
+  code, each its CID; a code of two bytes cut
   off at a string's end padded with a 0; a `/UseCMap` chain followed
   through streams, a predefined base read for the codes it maps none of,
-  guessed where it can't be read whole) and CIDs; its widths (`/Widths` from
+  guessed where it can't be read whole, at most `Limits.cmaps` of them)
+  and CIDs; its widths (`/Widths` from
   `/FirstChar`, `/MissingWidth`, CID `/W`, `/DW`, `/W2` and `/DW2`, kept
   as the ranges they're given in, the first for a CID winning, so no
   array expands past its own length; cut to whole numbers as PDFium cuts
   them); its heights and `/FontBBox` (`metrics`); a Type3 font's
   `/FontMatrix` and each CharProc's `d1` box (`glyph_box`), rounded as
   PDFium rounds them; and each code's text (`code_text`: its
-  `/ToUnicode`'s, else its encoding's; in a Type0 font without a
+  `/ToUnicode`'s, else its encoding's, WinAnsiEncoding's six empty slots
+  the bullet as PDFium reads them, and a simple font that names no
+  encoding, or differences alone, by its program's own encoding or
+  character map, or without one by its name's; a code its program gives
+  no text has none; a Type0 font's code its `/ToUnicode` leaves out has
+  its CID's; in a Type0 font without a
   `/ToUnicode` as PDFium's `GetUnicodeFromCharCode` reads it, a UCS2 or
   UTF16 map's code its own text, another predefined map's CID, or
   Identity's where `/CIDSystemInfo` orders GB1, CNS1, Japan1 or Korea1,
   through Adobe-<collection>-UCS2). Its embedded program (`/FontFile`,
   `/FontFile2` or `/FontFile3`: TrueType, bare CFF, OpenType over CFF,
   Type 1) is read through skrifa and read-fonts as PDFium's FreeType
-  reads it (`Foreign::program`, `FontProgram::{None, Read, Malformed}`),
+  reads it (`Font::program`, `FontProgram::{None, Read, Malformed,
+  Capped}`),
   each code mapped to its glyph PDFium's way, for each glyph's outline
   box (`CPDF_Font::GetCharBBox`) and the heights a descriptor lacks
   (`CheckFontMetrics`); programs are untrusted, so a TrueType glyph's
   composites are counted first (glyphs and points), charstrings run
   within fuel, each glyph its share of its font's, a Type 1 program is
-  scanned ahead of read-fonts (its nesting, its integers in a row and
-  its work bounded) and read once, and one that can't be read is
-  `Malformed`, its boxes and heights guessed as without one; what
+  read once by skrifa's Type 1 reader within its work
+  (`Limits.type1_work`; one past it is `Capped`), and one that can't be
+  read is `Malformed`, its boxes and heights guessed as without one; what
   drawing costs (charstring evaluated, glyph data read) is charged to
   the page's budget, a simple font's as it's read, a CIDFont's glyph
   the first time an interpretation shows it, whichever page drew it
-  (`Foreign::charge_outlines`). The
+  (`Font::charge_outlines`). The
   standard 14 have Adobe's AFM widths, glyph boxes and
   heights, and the names PDFium takes for them (`Std14::named`); a glyph
   PDFium's own faces draw that Adobe's metrics lack, or draw at another
@@ -1012,7 +1049,7 @@ never lopdf's `Content`.
   aren't embedded, a malformed or tricky one, a code whose glyph sheaf
   can't say, a Type3 glyph with no box). Simple fonts whose codes are
   bytes are laid out by a fast path that makes the same sums in the same
-  order (`Foreign::byte_widths`). `Fonts` keeps a source's fonts by
+  order (`Font::byte_widths`). `Fonts` keeps a source's fonts by
   object, each read once (`Fonts::get`), and `FontScope` one
   interpretation's picks by owner and name, a `FontId` each, so a `q`
   copies no reference count; `Fonts::for_text` reads no program, for
@@ -1103,14 +1140,14 @@ never lopdf's `Content`.
   `SHEAF_INTERP_ONLY` narrows them) read every form, the pool sample,
   every scan and conformance's 540 files that claim PDF/UA
   (`Corpus::conformance`), 54,009 pages: every page interpreted within
-  the caps, with no panic, failure or box not finite (10 s); 117,492,213
+  the caps, with no panic, failure or box not finite (10 s); 117,492,223
   glyphs matched to PDFium's characters, none past a thousandth of a
   point: at the origin, and equal to the loose box on every side where
-  the outline is known and nothing guessed (90,677,142), else within it
-  and equal where the outline lies within; 3,637 with codes or widths
+  the outline is known and nothing guessed (90,676,967), else within it
+  and equal where the outline lies within; 3,534 with codes or widths
   guessed counted; one file's 38 glyphs, whose corrupt program PDFium
   can't load and sheaf reads, allowed by count; and the glyphs and
-  characters it can't say why it matched none for (73,296 and 279) held
+  characters it can't say why it matched none for (70,633 and 231) held
   to each file's count in a checked-in list
   (`content_interp_unexplained.tsv`), so text the interpreter misses
   fails (4 minutes); and every page written again rendering as before,
@@ -4608,7 +4645,7 @@ its page tokens count the pages written.
 
 - **Blocks.** Each slot that isn't blank is its own `/Artifact /Sh… BDC
   q BT … ET Q EMC`, its list `<< /Type /Pagination /Subtype /Header (or
-  /Footer) /SHEF_Gen (g…) >>`, set in `Std14::from(spec.font)` from the
+  /Footer) /SHEF_Gen (g…) >>`, set in `std14_of(spec.font)` from the
   page's shown frame, so it's upright at every turn and on the page's
   crop. A page with nothing to draw gets an empty block, so its scope
   reads back. The block's `/SHEF_Block` says `/N (n)`, decimal, when the

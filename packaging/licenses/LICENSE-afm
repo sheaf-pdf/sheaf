@@ -1,9 +1,11 @@
 afm/*.afm are Adobe's Core 14 font metrics (Core14_AFMs, as Apache PDFBox
 redistributes them with Adobe's notice: pdfbox/src/main/resources/org/apache/
-pdfbox/resources/afm, https://github.com/apache/pdfbox). sheaf reads their
-glyph widths and built-in encodings to lay out text in the standard 14 fonts.
-Each file is modified, and says so in a Comment on its second line: its
-kerning data and the blank lines between its lines are removed.
+pdfbox/resources/afm, https://github.com/apache/pdfbox), in the pdf-fonts
+crate sheaf is built with (its assets/afm; https://github.com/sheaf-pdf/pdf-lint).
+sheaf reads their glyph widths and built-in encodings through it to lay out
+text in the standard 14 fonts. Each file is modified, and says so in Comment
+lines at its top: its kerning data and the blank lines between its lines are
+removed.
 
 Adobe's notice, from the set's MustRead.html, follows unmodified.
 

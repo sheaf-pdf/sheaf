@@ -29,6 +29,11 @@ pdf-structure.workspace = true
 # spliced (M18 slice 19). Its default features only: `image-ends` would
 # find an inline image's end by decoding, which sheaf's lexer doesn't.
 pdf-content-streams.workspace = true
+# The fonts files draw in, as read, and the standard 14 (M18 slice 22);
+# of pdf-gfx, the trait a font text is laid out in gives its codes and
+# widths by.
+pdf-fonts.workspace = true
+pdf-gfx.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 log.workspace = true
@@ -59,25 +64,13 @@ md-5 = "0.11"
 # attributes to the digest it holds (B5); in the tree already, imageproc's.
 num-bigint = { version = "0.4", default-features = false }
 # Text in a mark's staleness digest is NFC, whatever another tool wrote
-# (M10.5 §3.6).
+# (M10.5 §3.6), and text is composed before a standard 14 font encodes it.
 unicode-normalization = "0.1"
 # What a change means for saving and signatures, as sets (M10.5 §7.1).
 bitflags.workspace = true
 # The date and time a mark's identity tokens are filled in with, as the
 # user's settings write them (M10.5 §6.8).
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-# The predefined CMaps a Type0 font's /Encoding names (ISO 32000-1 Table
-# 118, and Adobe-*-UCS2 for a CID's text), bundled: each code's CID, and
-# its text where the font has no /ToUnicode (M11 slice 3). Only its own
-# bundle is parsed, never a file's bytes. Adobe's CMap data is under
-# BSD-3, its notice in packaging/licenses (LICENSE-cmap-resources); the
-# bundle is brotli, so the full brotli crate comes with it (LICENSE-brotli).
-hayro-cmap = "0.1"
-# The font programs files embed (TrueType, CFF and Type 1), read for each
-# glyph's outline box and a font's heights as PDFium's FreeType reads them
-# (M11 slice 3); read-fonts comes with it, as skrifa::raw. 0.44 is the
-# version the Linux app's GPUI already builds, so the two share one.
-skrifa = { version = "0.44", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 # Every op as Op JSON, which seeds the fuzzing of transactions.

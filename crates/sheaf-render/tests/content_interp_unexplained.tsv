@@ -14,13 +14,11 @@ conformance/safedocs/0009399.pdf	11	0
 conformance/safedocs/0009469.pdf	22	0
 conformance/safedocs/0009988.pdf	16	0
 conformance/safedocs/0161162.pdf	2	0
-conformance/verapdf/PDF_UA-1/7.21 Fonts/7.21.3 Composite fonts/7.21.3.3 CMaps/7.21.3.3-t01-fail-a.pdf	5	5
 conformance/verapdf/PDF_UA-1/7.7 Mathematical expressions/7.7-t01-fail-a.pdf	0	6
 conformance/verapdf/PDF_UA-1/7.7 Mathematical expressions/7.7-t01-fail-b.pdf	0	6
 conformance/verapdf/PDF_UA-1/7.7 Mathematical expressions/7.7-t01-pass-a.pdf	0	6
 conformance/verapdf/PDF_UA-1/7.7 Mathematical expressions/7.7-t01-pass-b.pdf	0	6
 conformance/verapdf/PDF_UA-1/7.7 Mathematical expressions/7.7-t01-pass-c.pdf	0	6
-conformance/verapdf/PDF_UA-2/8.4 Text representation for content/8.4.5 Fonts/8.4.5.4 CMaps/8.4.5.4-t01-fail-a.pdf	5	5
 forms/ny-tax/it201_2025_fill_in.pdf	2	0
 forms/safedocs/0002886.pdf	6	0
 forms/safedocs/0003246.pdf	1	0
@@ -73,10 +71,9 @@ forms/safedocs/0094223.pdf	2	2
 forms/safedocs/0095966.pdf	1	0
 forms/safedocs/0096346.pdf	4	0
 forms/safedocs/0097204.pdf	1	0
-forms/safedocs/0098234.pdf	6	0
 forms/safedocs/0098749.pdf	4	0
 forms/safedocs/0100636.pdf	27	0
-forms/safedocs/0110856.pdf	27	0
+forms/safedocs/0110856.pdf	20	0
 forms/safedocs/0110952.pdf	2	0
 forms/safedocs/0110973.pdf	3	0
 forms/safedocs/0112664.pdf	19	0
@@ -113,7 +110,6 @@ forms/safedocs/0291684.pdf	1	0
 forms/safedocs/0296110.pdf	10	0
 forms/safedocs/0328496.pdf	362	0
 forms/safedocs/0356360.pdf	7	7
-forms/safedocs/0392041.pdf	0	24
 forms/safedocs/0402991.pdf	60	0
 forms/safedocs/0440854.pdf	9	0
 forms/safedocs/0477226.pdf	2	0
@@ -125,27 +121,22 @@ forms/safedocs/0588528.pdf	26	2
 forms/safedocs/0595581.pdf	0	22
 forms/safedocs/0600033.pdf	3	0
 forms/safedocs/0614186.pdf	6	0
-forms/safedocs/0626002.pdf	0	6
 forms/safedocs/0651841.pdf	61	0
 forms/safedocs/0674521.pdf	0	56
 forms/safedocs/0725543.pdf	10	12
 forms/safedocs/0760674.pdf	0	8
-forms/safedocs/0773301.pdf	33	0
 forms/safedocs/0790306.pdf	0	25
 forms/safedocs/0824122.pdf	4	0
 forms/safedocs/0838592.pdf	3	0
 forms/safedocs/0845477.pdf	117	0
 forms/safedocs/0853606.pdf	1	0
 forms/safedocs/0861734.pdf	26	0
-forms/safedocs/0899113.pdf	0	8
 forms/safedocs/1024832.pdf	2	0
-forms/safedocs/1098070.pdf	2	0
 forms/safedocs/1104756.pdf	44	0
 forms/safedocs/1122811.pdf	2	0
 forms/safedocs/1196202.pdf	1	0
 forms/safedocs/1204971.pdf	56	0
-forms/safedocs/1213146.pdf	1	0
-forms/safedocs/1263925.pdf	2985	0
+forms/safedocs/1263925.pdf	384	0
 forms/safedocs/1269149.pdf	22	0
 forms/safedocs/1331385.pdf	1	0
 forms/safedocs/1333976.pdf	1	0
@@ -154,7 +145,6 @@ forms/safedocs/1368570.pdf	128	0
 forms/safedocs/1421035.pdf	7	0
 forms/safedocs/1443331.pdf	7	0
 forms/safedocs/1455083.pdf	20	0
-forms/safedocs/1465063.pdf	1	0
 forms/safedocs/1525528.pdf	2	0
 forms/safedocs/1530261.pdf	110	0
 forms/safedocs/1636539.pdf	114	0
@@ -177,7 +167,6 @@ forms/safedocs/4031267.pdf	16	0
 forms/safedocs/4250253.pdf	1	0
 forms/safedocs/4396908.pdf	1	0
 forms/uscourts/form_b122a-2.pdf	10	0
-forms/va/VBA-21-526EZ-ARE.pdf	2	0
 pool/safedocs/0157/0157217.pdf	5	0
 pool/safedocs/0157/0157604.pdf	4	0
 pool/safedocs/0422/0422088.pdf	1	0
