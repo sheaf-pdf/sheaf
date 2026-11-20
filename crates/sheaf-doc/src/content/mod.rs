@@ -7,7 +7,8 @@
 //!   bytes as written, an inline image one token found by PDFium's rules.
 //! - [`page`]: a page's `/Contents` as one, the concatenation PDFium lexes,
 //!   read within [`ContentLimits`](crate::source::ContentLimits), and
-//!   places in it mapped back to a stream.
+//!   places in it mapped back to a stream ([`Concat`], [`Pos`] and
+//!   [`SpanAcross`], which are pdf-content-streams').
 //! - [`marked`], [`balance`] and [`names_used`]: its marked ranges, its
 //!   `q`/`Q` balance and the resource names it uses; [`kept`], the last
 //!   two of what's left once ranges are taken out.
