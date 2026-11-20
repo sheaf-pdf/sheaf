@@ -870,3 +870,69 @@ fn a_watermark_taken_off_isn_t_kept_by_a_field_s_stray_kid() {
     let now = crate::forms::check(&out, None).unwrap();
     assert_eq!(now.added_since(&was), []);
 }
+
+/// A background a saved file holds, moved, and a watermark of the same
+/// image file set over it, both drawn anew on one page: one image in the
+/// file, under one name the page's resources bind once, though the first
+/// is drawn as the file's own object and the second as one made from the
+/// image file. Both ways.
+fn one_image_twice(how: How) {
+    let dir = scratch();
+    let (path, mut doc) = opened(&dir, "a.pdf", &text_file(1));
+    let (_png, spec) = image_watermark(&doc, &png());
+    let set = fx::set_watermark(spec.clone(), Z::Under, None);
+    doc.commit_ops(vec![set], "background").unwrap();
+    save_rewritten(&mut doc, &path).unwrap();
+    let mut doc = crate::open::file(&path, None).unwrap().doc;
+    let held = doc.state().watermark(Z::Under).unwrap();
+    let held = &held.spec.watermark().unwrap().content;
+    assert!(
+        matches!(
+            held,
+            crate::model::WatermarkContent::Image {
+                image: crate::model::ImageRef::Placed(_),
+                ..
+            }
+        ),
+        "{held:?}"
+    );
+    let moved = WatermarkSpec {
+        content: WatermarkContent::Image {
+            image: None,
+            scale: 0.25,
+            opacity: 0.5,
+        },
+        position: GridPos::TopLeft,
+    };
+    let (_png, over) = image_watermark(&doc, &png());
+    let ops = vec![
+        fx::set_watermark(moved, Z::Under, None),
+        fx::set_watermark(over, Z::Over, None),
+    ];
+    doc.commit_ops(ops, "the same image, twice").unwrap();
+    let bytes = how.write(&doc);
+    let pdf = Pdf::load_mem(&bytes).unwrap();
+    let image = |o: &Object| {
+        (o.as_stream())
+            .is_some_and(|s| s.dict.get(b"Subtype").and_then(Object::as_name) == Some(b"Image"))
+    };
+    let images = pdf.objects.values().filter(|o| image(o)).count();
+    assert_eq!(images, 1, "{how:?}");
+    let page = pages(&pdf)[0];
+    let (_, res) = resources(&pdf, page);
+    let xobjects = pdf.dereference(res.get(b"XObject").unwrap()).unwrap().1;
+    let names: Vec<_> = (xobjects.as_dict().unwrap().iter())
+        .map(|(name, _)| String::from_utf8_lossy(name).into_owned())
+        .collect();
+    assert_eq!(names.len(), 1, "{how:?}: {names:?}");
+    let draws = format!("/{} Do\n", names[0]);
+    let drawn: Vec<_> = (contents(&pdf, page).into_iter())
+        .filter(|&id| String::from_utf8_lossy(&stream(&pdf, id).1).contains(&draws))
+        .collect();
+    assert_eq!(drawn.len(), 2, "{how:?}: both blocks draw {draws:?}");
+}
+
+crate::both_ways!(
+    an_image_the_file_holds_drawn_anew_beside_itself_is_one_image,
+    an_image_the_file_holds_drawn_anew_beside_itself_is_one_image_appended: one_image_twice
+);

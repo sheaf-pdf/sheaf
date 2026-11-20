@@ -1048,6 +1048,7 @@ fn drawn(
     needs: &mut ResourceNeeds,
 ) -> Object {
     let art = g.spec.watermark().and_then(|wm| art(cx, &wm.content));
+    let art = art.map(|art| as_the_page_draws(art, needs));
     let drawn = generate::layout(g, ctx, art.as_ref(), reserved, cx.private);
     let recipe = generate::recipe_digest(g, id);
     // What a view or a save asks of the page next ([`header_digest`]): a
@@ -1082,6 +1083,21 @@ fn drawn(
         },
     );
     block
+}
+
+/// `art` drawn as the resource `needs`, what the page's new content
+/// draws with so far, already has of its digest, where it has one: the
+/// file's own image or page ([`ResBody::Written`]) and the same one made
+/// from its blob are two resources to the writer, which tells resources
+/// apart by what they hold, and one to a page, which draws it under one
+/// name and holds it once. The first drawn is the one kept.
+fn as_the_page_draws(mut art: Art, needs: &ResourceNeeds) -> Art {
+    let (Art::Image { res, .. } | Art::Form { res, .. }) = &mut art;
+    let drawn = (needs.0.iter()).find(|n| n.kind == ResKind::XObject && n.res.id() == res.id());
+    if let Some(drawn) = drawn {
+        *res = drawn.res.clone();
+    }
+    art
 }
 
 /// `res` added to `needs`, each but a name it has already.
