@@ -459,6 +459,7 @@ fn corpus_content_lexes_splices_and_classifies() {
 }
 
 /// Where [`glyphs_and_text_dump`] writes: a path. Unset, it reads nothing.
+/// `just glyph-dump <file>` sets it.
 const DUMP: &str = "SHEAF_GLYPH_DUMP";
 
 /// A corpus path (`forms/irs/f1040.pdf`) whose records
