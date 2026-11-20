@@ -125,7 +125,7 @@ use crate::content::sink::{self, Sink as _};
 use crate::content::{
     self, Balance, BlockAt, BlockId, Concat, ContentWriter, GenId, Marker, NameSet, PagOrigin,
     PageBlocks, PageContent, Pagination, PaginationKind, Pos, Props, Res, ResBody, ResCx, ResId,
-    ResKind, Reserved, ResourceNeeds, SheafBlock, SpanAcross,
+    ResKind, Reserved, ResourceNeeds, Rewrite, SheafBlock, SpanAcross, SpliceError, Spliced,
 };
 use crate::generate::{self, Art};
 use crate::geom::Geom;
@@ -762,7 +762,10 @@ fn rebuilt(
             Err(_) => stayed += 1,
         }
     }
-    let spliced = content::splice_each(concat, &res, lim, &groups);
+    // The splice reads with pdf-content-streams' limits.
+    let cs = &lim.content.family();
+    let each = content::splice_each(concat, res.family(), cs, &groups);
+    let spliced = taken_or_none(each, groups.len());
     let refused = |taken: &[bool]| taken.iter().filter(|t| !**t).count();
     let text_stayed = refused(&spliced.taken[..texts_cut]);
     stayed += refused(&spliced.taken[texts_cut..]);
@@ -817,12 +820,13 @@ fn rebuilt(
         {
             continue;
         }
-        match content::without_keys(concat, &res, lim, span, &private::LIST_KEYS) {
+        match content::without_keys(concat, res.family(), cs, span, &private::LIST_KEYS) {
             Ok(rewrite) => rewrites.extend(rewrite),
             Err(_) => lists += 1,
         }
     }
-    let spliced = spliced.streams(concat, &rewrites);
+    let (spliced, unwritten) = streams_made(&spliced, concat, &res, cs, &rewrites);
+    lists += unwritten;
     // Each stream as written: a copy where it changed, or where its
     // dictionary loses what sheaf marked it with, else the file's.
     let unmarked = strips(PrivateSel::Streams);
@@ -922,6 +926,44 @@ fn rebuilt(
     })
 }
 
+/// What a splice takes out of a page's content, `each` what
+/// [`content::splice_each`] gave for `groups` groups: nothing, every group
+/// refused, where it can't read the content or check it within its caps,
+/// so each stays and is counted.
+fn taken_or_none(each: Result<Spliced, SpliceError>, groups: usize) -> Spliced {
+    each.unwrap_or_else(|e| {
+        log::warn!("nothing is taken out of a page's content: {e}");
+        let mut none = Spliced::default();
+        none.taken = vec![false; groups];
+        none
+    })
+}
+
+/// `concat`'s streams with what `spliced` takes out and `rewrites` made,
+/// None when no stream changes, and how many of the lists stay as they
+/// were: all of them where what they give together with what's taken out
+/// reads otherwise than the content did, and what's taken out is then
+/// made alone, as it was checked.
+fn streams_made<'a>(
+    spliced: &Spliced,
+    concat: &'a Concat,
+    res: &ResCx,
+    cs: &crate::pdf::content::Limits,
+    rewrites: &[Rewrite],
+) -> (Option<Vec<Cow<'a, [u8]>>>, usize) {
+    match spliced.streams(concat, res.family(), cs, rewrites) {
+        Ok(streams) => (streams, 0),
+        Err(e) => {
+            log::warn!("a page's lists keep sheaf's private data: {e}");
+            // Without lists it's refused only another content's ranges.
+            let alone = spliced.streams(concat, res.family(), cs, &[]);
+            let alone =
+                alone.inspect_err(|e| log::warn!("nothing is taken out of a page's content: {e}"));
+            (alone.ok().flatten(), rewrites.len())
+        }
+    }
+}
+
 /// The marked ranges of a page's `blocks` that `filters` take sheaf's
 /// private data out of the lists of ([`Filter::StripPrivate`]), each once.
 fn marked_ranges(filters: &[Filter], blocks: Option<&PageBlocks>) -> Vec<SpanAcross> {
@@ -970,15 +1012,17 @@ fn binding(cx: &mut Cx, resources: &Dictionary, kind: ResKind, name: &[u8]) -> O
 /// object it's written as, or one whose content is `res`'s one object.
 fn alike(cx: &Cx, bound: &Object, res: &Res) -> bool {
     let Some(r) = bound.as_reference() else {
-        return ResId::of(std::slice::from_ref(bound)) == res.id;
+        return ResId::of(std::slice::from_ref(bound)) == res.id();
     };
-    match &res.body {
+    match res.body() {
         ResBody::Written(written) => *written == r,
         ResBody::Objects(objects) => {
             objects.len() == 1
                 && (cx.read(r))
-                    .is_some_and(|(o, ..)| ResId::of(std::slice::from_ref(&*o)) == res.id)
+                    .is_some_and(|(o, ..)| ResId::of(std::slice::from_ref(&*o)) == res.id())
         }
+        // A kind of resource this doesn't know is like nothing bound.
+        _ => false,
     }
 }
 
@@ -1004,6 +1048,7 @@ fn drawn(
     needs: &mut ResourceNeeds,
 ) -> Object {
     let art = g.spec.watermark().and_then(|wm| art(cx, &wm.content));
+    let art = art.map(|art| as_the_page_draws(art, needs));
     let drawn = generate::layout(g, ctx, art.as_ref(), reserved, cx.private);
     let recipe = generate::recipe_digest(g, id);
     // What a view or a save asks of the page next ([`header_digest`]): a
@@ -1038,6 +1083,21 @@ fn drawn(
         },
     );
     block
+}
+
+/// `art` drawn as the resource `needs`, what the page's new content
+/// draws with so far, already has of its digest, where it has one: the
+/// file's own image or page ([`ResBody::Written`]) and the same one made
+/// from its blob are two resources to the writer, which tells resources
+/// apart by what they hold, and one to a page, which draws it under one
+/// name and holds it once. The first drawn is the one kept.
+fn as_the_page_draws(mut art: Art, needs: &ResourceNeeds) -> Art {
+    let (Art::Image { res, .. } | Art::Form { res, .. }) = &mut art;
+    let drawn = (needs.0.iter()).find(|n| n.kind == ResKind::XObject && n.res.id() == res.id());
+    if let Some(drawn) = drawn {
+        *res = drawn.res.clone();
+    }
+    art
 }
 
 /// `res` added to `needs`, each but a name it has already.
@@ -1164,7 +1224,7 @@ fn page_res(
     };
     if !cx.page_res.contains_key(&key) {
         let mut resources = sink::resources(cx, page);
-        for kind in ResKind::ALL {
+        for &kind in ResKind::ALL {
             let lists = strip.lists && kind == ResKind::Properties;
             let mut names = dropped.of(kind).peekable();
             if names.peek().is_none() && !lists {
@@ -1269,7 +1329,7 @@ fn added(needs: &ResourceNeeds, strip: &ResStrip) -> u64 {
         bytes.push(0);
         bytes.extend(&need.name);
         bytes.push(0);
-        bytes.extend(need.res.id.0.to_be_bytes());
+        bytes.extend(need.res.id().0.to_be_bytes());
     }
     if !strip.is_empty() {
         bytes.push(1);
@@ -1402,16 +1462,14 @@ fn flattened(
             continue;
         };
         // Named by which form it is, whichever number it's written at.
-        let form = Res {
-            id: ResId(p.form.digest()),
-            body: ResBody::Written(at),
-        };
+        let form = Res::named(ResId(p.form.digest()), ResBody::Written(at))
+            .expect("an object already written is a resource, whatever it holds");
         let artifact = p.tag == PlaceTag::Artifact;
         if artifact {
             w.begin_tagged("Artifact");
         }
         w.save();
-        w.transform(p.matrix);
+        w.transform(p.matrix.array());
         w.draw(form);
         w.restore();
         if artifact {
@@ -1466,10 +1524,15 @@ fn art(cx: &mut Cx, content: &WatermarkContent) -> Option<Art> {
             ..
         } => made(cx, (pdf.id(), Some(*index)), || {
             super::annots::blob_form(pdf.blob(), *index)
-                .map(|(objects, bbox, matrix)| Art::Form {
-                    res: Res::of(objects),
-                    bbox,
-                    matrix,
+                .and_then(|(objects, bbox, matrix)| {
+                    // A page made a form holds its streams in memory.
+                    let res = Res::of(objects);
+                    debug_assert!(res.is_ok(), "a page made a form is a resource: {res:?}");
+                    Ok(Art::Form {
+                        res: res?,
+                        bbox,
+                        matrix,
+                    })
                 })
                 .inspect_err(|e| log::warn!("a watermark is drawn without its page: {e:#}"))
                 .ok()
@@ -1497,8 +1560,8 @@ fn art(cx: &mut Cx, content: &WatermarkContent) -> Option<Art> {
 /// which draws nothing and isn't found again.
 pub(crate) fn drawn_as(cx: &mut Cx, content: &WatermarkContent) -> (ResId, u8) {
     match art(cx, content) {
-        Some(Art::Image { res, turns, .. }) => (res.id, turns),
-        Some(Art::Form { res, .. }) => (res.id, 0),
+        Some(Art::Image { res, turns, .. }) => (res.id(), turns),
+        Some(Art::Form { res, .. }) => (res.id(), 0),
         None => (ResId(0), 0),
     }
 }
@@ -1571,8 +1634,11 @@ fn image_of(bytes: &[u8]) -> anyhow::Result<Art> {
         .next())
     .ok_or_else(|| anyhow::anyhow!("the file holds no image"))?;
     let stream = crate::images::image_stream(&image)?;
+    // An image stream made here holds its data in memory.
+    let res = Res::of([Object::from(stream)]);
+    debug_assert!(res.is_ok(), "an image made here is a resource: {res:?}");
     Ok(Art::Image {
-        res: Res::of([Object::from(stream)]),
+        res: res?,
         width: image.width,
         height: image.height,
         turns: (image.rotate % 4) as u8,
@@ -1593,4 +1659,96 @@ fn placed_form(cx: &mut Cx, at: &ObjRef) -> Object {
         copy: 0,
     };
     cx.sym(&Object::from(at.id), &scope)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::private::LIST_KEYS;
+    use crate::source::Limits;
+
+    /// The span of `part` in `s`, one stream.
+    fn span_of(s: &[u8], part: &[u8]) -> SpanAcross {
+        let at = s.windows(part.len()).position(|w| w == part).unwrap() as u32;
+        let pos = |at| Pos { stream: 0, at };
+        SpanAcross {
+            start: pos(at),
+            end: pos(at + part.len() as u32),
+        }
+    }
+
+    /// Content the splice can't read has nothing taken out of it: each
+    /// group is refused, so counted as staying, and no stream changes.
+    #[test]
+    fn content_a_splice_cant_read_keeps_every_range() {
+        let s: &[u8] = b"/A BMC EMC /B BMC EMC (no end";
+        let c = Concat::new(&[s]);
+        let (res, cs) = (ResCx::none(), Limits::DEFAULT.content.family());
+        let groups = [
+            vec![span_of(s, b"/A BMC EMC")],
+            vec![span_of(s, b"/B BMC EMC")],
+        ];
+        let each = content::splice_each(&c, res.family(), &cs, &groups);
+        assert!(matches!(each, Err(SpliceError::Read(_))), "{each:?}");
+        let spliced = taken_or_none(each, groups.len());
+        assert_eq!(spliced.taken, [false, false]);
+        assert!(!spliced.takes(&c, groups[0][0]));
+        assert_eq!(streams_made(&spliced, &c, &res, &cs, &[]), (None, 0));
+        // One it reads is as it gave it.
+        let s: &[u8] = b"/A BMC EMC 0 g";
+        let c = Concat::new(&[s]);
+        let groups = [vec![span_of(s, b"/A BMC EMC")]];
+        let each = content::splice_each(&c, res.family(), &cs, &groups);
+        let spliced = taken_or_none(each, groups.len());
+        assert_eq!(spliced.taken, [true]);
+        let (streams, unwritten) = streams_made(&spliced, &c, &res, &cs, &[]);
+        assert_eq!((&*streams.unwrap()[0], unwritten), (&b" 0 g"[..], 0));
+    }
+
+    /// Lists that lose sheaf's private data are made with what's taken
+    /// out. Where the content would then read otherwise (here an ASCII85
+    /// image whose data two lists' strings and comments would end, and an
+    /// ASCIIHex image a comment taken out and a list's `>>` would), the
+    /// lists stay as they were, counted, and what's taken out still goes.
+    #[test]
+    fn lists_that_cant_be_written_again_together_stay() {
+        let (res, cs) = (ResCx::none(), Limits::DEFAULT.content.family());
+        let list = |c: &Concat, range: SpanAcross| {
+            let rewrite = content::without_keys(c, res.family(), &cs, range, &LIST_KEYS);
+            rewrite.unwrap().unwrap()
+        };
+        let nothing = Spliced::default();
+        let s: &[u8] = b"BI /W 1 /H 1 /CS /G /BPC 8 /F /A85 ID 9jqo^ EI \
+            /A <</SHEF_Gen (~%)>> BDC EMC /C <</SHEF_Gen (~%)>> BDC EMC 0 0 9 9 re f ~> EI";
+        let c = Concat::new(&[s]);
+        let a = list(&c, span_of(s, b"/A <</SHEF_Gen (~%)>> BDC EMC"));
+        let b = list(&c, span_of(s, b"/C <</SHEF_Gen (~%)>> BDC EMC"));
+        // Each alone is made.
+        let (alone, unwritten) = streams_made(&nothing, &c, &res, &cs, std::slice::from_ref(&a));
+        assert_eq!(unwritten, 0);
+        assert_eq!(
+            &*alone.unwrap()[0],
+            &b"BI /W 1 /H 1 /CS /G /BPC 8 /F /A85 ID 9jqo^ EI \
+            /A <<>> BDC EMC /C <</SHEF_Gen (~%)>> BDC EMC 0 0 9 9 re f ~> EI"[..]
+        );
+        // Both together would run the image on: neither is, no stream changes.
+        assert_eq!(streams_made(&nothing, &c, &res, &cs, &[a, b]), (None, 2));
+
+        let s: &[u8] = b"BI /W 1 /H 1 /CS /G /BPC 8 /F /AHx ID 41 EI q % > (\n Q \
+            /A <</SHEF_Gen (>%) /B 1>> BDC EMC 0 0 9 9 re f EI";
+        let c = Concat::new(&[s]);
+        let cut = span_of(s, b"q % > (\n Q");
+        let each = content::splice_each(&c, res.family(), &cs, &[vec![cut]]);
+        let spliced = taken_or_none(each, 1);
+        assert_eq!(spliced.taken, [true]);
+        let rewrite = list(&c, span_of(s, b"/A <</SHEF_Gen (>%) /B 1>> BDC EMC"));
+        // With the comment taken out the list stays, and the comment goes.
+        let (streams, unwritten) = streams_made(&spliced, &c, &res, &cs, &[rewrite]);
+        assert_eq!(unwritten, 1);
+        assert_eq!(
+            &*streams.unwrap()[0],
+            &b"BI /W 1 /H 1 /CS /G /BPC 8 /F /AHx ID 41 EI  \
+            /A <</SHEF_Gen (>%) /B 1>> BDC EMC 0 0 9 9 re f EI"[..]
+        );
+    }
 }

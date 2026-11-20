@@ -8,44 +8,8 @@ use std::collections::BTreeSet;
 use super::balance::Balance;
 use super::lex::{self, LexError, ResCx, Tok};
 use super::page::{Concat, SpanAcross};
+use crate::pdf::content::ResKind;
 use crate::source::Limits;
-
-/// A resource category: a key of `/Resources`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ResKind {
-    ColorSpace,
-    ExtGState,
-    Font,
-    Pattern,
-    Properties,
-    Shading,
-    XObject,
-}
-
-impl ResKind {
-    pub const ALL: [ResKind; 7] = [
-        ResKind::ColorSpace,
-        ResKind::ExtGState,
-        ResKind::Font,
-        ResKind::Pattern,
-        ResKind::Properties,
-        ResKind::Shading,
-        ResKind::XObject,
-    ];
-
-    /// Its key in `/Resources`.
-    pub fn key(self) -> &'static [u8] {
-        match self {
-            ResKind::ColorSpace => b"ColorSpace",
-            ResKind::ExtGState => b"ExtGState",
-            ResKind::Font => b"Font",
-            ResKind::Pattern => b"Pattern",
-            ResKind::Properties => b"Properties",
-            ResKind::Shading => b"Shading",
-            ResKind::XObject => b"XObject",
-        }
-    }
-}
 
 /// Resource names, each in its category, decoded.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -15,14 +15,16 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 use in_progress::NoProgress;
-use sheaf_doc::content::{Color, ContentWriter, Font, Paint, Res, Reserved, Std14, wrap_with};
+use sheaf_doc::Box2;
+use sheaf_doc::content::{
+    Color, ContentWriter, DrawText, Font, Paint, Res, Reserved, Std14, place_form, wrap_with,
+};
 use sheaf_doc::export::ExportFrom;
 use sheaf_doc::geom::Rect;
 use sheaf_doc::materialize::AskAnswers;
 use sheaf_doc::serialize::built::Built;
 use sheaf_doc::stamp_lib::PageForm;
 use sheaf_doc::store::{BlobKind, MemoryKind, Store};
-use sheaf_doc::{Box2, Pt};
 use sheaf_edit::{BlobSel, Bring, Op, PageSize, PageSource};
 
 use crate::session::{Decided, SaveTo, Session};
@@ -341,7 +343,7 @@ impl Picture {
             w: pw,
             h: ph,
         };
-        sheet.place_form(Res::written(id), bbox, matrix, shown);
+        place_form(sheet, Res::written(id), bbox, matrix, shown);
         sheet.stroke_rect(left, top - ph, pw, ph, RULE, 0.75);
         // Each number at its comment's top-left as the page shows.
         const R: f32 = 7.0;
@@ -455,14 +457,14 @@ trait Draw {
     fn disc(&mut self, cx: f32, cy: f32, r: f32, color: [f32; 3]);
 }
 
-impl Draw for ContentWriter<'static> {
+impl Draw for ContentWriter {
     fn label(&mut self, x: f32, y: f32, size: f32, bold: bool, color: [f32; 3], s: &str) {
         self.begin_text();
         self.fill_color(Color::Rgb(color));
         self.text_move(x, y);
         for (font, run) in runs(s, bold) {
-            self.font(font, size);
-            self.text(&run);
+            self.set_font(font, size);
+            self.show_text(font, &run);
         }
         self.end_text();
     }
@@ -495,13 +497,12 @@ impl Draw for ContentWriter<'static> {
     /// Four Béziers.
     fn disc(&mut self, cx: f32, cy: f32, r: f32, color: [f32; 3]) {
         let k = r * 0.5523;
-        let at = |x: f32, y: f32| Pt { x, y };
         self.fill_color(Color::Rgb(color));
         self.move_to(cx + r, cy);
-        self.curve_to(at(cx + r, cy + k), at(cx + k, cy + r), at(cx, cy + r));
-        self.curve_to(at(cx - k, cy + r), at(cx - r, cy + k), at(cx - r, cy));
-        self.curve_to(at(cx - r, cy - k), at(cx - k, cy - r), at(cx, cy - r));
-        self.curve_to(at(cx + k, cy - r), at(cx + r, cy - k), at(cx + r, cy));
+        self.curve_to(cx + r, cy + k, cx + k, cy + r, cx, cy + r);
+        self.curve_to(cx - k, cy + r, cx - r, cy + k, cx - r, cy);
+        self.curve_to(cx - r, cy - k, cx - k, cy - r, cx, cy - r);
+        self.curve_to(cx + k, cy - r, cx + r, cy - k, cx + r, cy);
         self.paint(Paint::Fill);
     }
 }
@@ -511,7 +512,7 @@ struct Writer {
     built: Built,
     size: PageSize,
     margin: f32,
-    sheets: Vec<ContentWriter<'static>>,
+    sheets: Vec<ContentWriter>,
 }
 
 impl Writer {
@@ -544,7 +545,7 @@ impl Writer {
         self.sheets.push(ContentWriter::new());
     }
 
-    fn sheet(&mut self) -> &mut ContentWriter<'static> {
+    fn sheet(&mut self) -> &mut ContentWriter {
         if self.sheets.is_empty() {
             self.new_sheet();
         }
@@ -684,3 +685,7 @@ mod tests {
         assert_eq!(fit("short", 60.0, 8.0), "short");
     }
 }
+
+#[cfg(test)]
+#[path = "summary_golden.rs"]
+mod golden;

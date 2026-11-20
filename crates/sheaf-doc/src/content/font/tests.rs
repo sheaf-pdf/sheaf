@@ -1595,3 +1595,45 @@ fn a_program_is_charged_to_the_budget() {
         Some(TooLarge)
     );
 }
+
+/// Text drawn in a font through the writer ([`DrawText`]): the font is
+/// named as its resource, the string written as that font's codes,
+/// literal and escaped, or in hex where a code is a control (Glyphless's
+/// two-byte codes), and a character a font can't encode is a `?`,
+/// counted. Text names the font it's in at each call, so two fonts can
+/// take turns under one `Tf` each.
+#[test]
+fn text_is_written_in_its_font() {
+    use crate::content::{ContentWriter, DrawText, ResKind, Reserved};
+
+    let mut w = ContentWriter::new();
+    w.set_font(&Std14::Helvetica, 9.0);
+    assert_eq!(w.show_text(&Std14::Helvetica, "(a\\b) é"), Unencoded(0));
+    assert_eq!(w.show_text(&Std14::Helvetica, "中文"), Unencoded(2));
+    w.save();
+    w.set_font(&Glyphless, 10.0);
+    assert_eq!(w.show_text(&Glyphless, "Hi"), Unencoded(0));
+    w.restore();
+    w.show_text(&Std14::Helvetica, "é");
+    // A font set again is the one need, under the one name.
+    w.set_font(&Std14::Helvetica, 12.0);
+    let (bytes, needs) = w.finish(&Reserved::default());
+    let [helvetica, glyphless] = &needs.0[..] else {
+        panic!("{needs:?}")
+    };
+    let name = |need: &crate::content::Need| String::from_utf8_lossy(&need.name).into_owned();
+    let mut want = format!("/{} 9 Tf\n", name(helvetica)).into_bytes();
+    want.extend_from_slice(b"(\\(a\\\\b\\) \xe9) Tj\n(??) Tj\nq\n");
+    want.extend(format!("/{} 10 Tf\n", name(glyphless)).bytes());
+    want.extend_from_slice(b"<00480069> Tj\nQ\n(\xe9) Tj\n");
+    want.extend(format!("/{} 12 Tf\n", name(helvetica)).bytes());
+    assert_eq!(bytes, want, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(helvetica.kind, ResKind::Font);
+    assert_eq!(helvetica.res, Std14::Helvetica.resource().into());
+    assert_eq!(
+        helvetica.res.body(),
+        &ResBody::Objects(Std14::Helvetica.resource().objects)
+    );
+    assert_eq!(glyphless.kind, ResKind::Font);
+    assert_eq!(glyphless.res, Glyphless.resource().into());
+}

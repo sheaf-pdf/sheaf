@@ -1,7 +1,7 @@
 //! A page's `q`/`Q` balance (§3.4): what content assembly isolates it
 //! with, counted from the tokens, with no "unknown".
 
-use super::lex::{LexError, ResCx, Tok};
+use super::lex::{LexError, ResCx, Tok, lex};
 use super::page::Concat;
 use crate::source::Limits;
 
@@ -31,7 +31,7 @@ impl Balance {
 /// How `content`'s `q`s and `Q`s balance, lexed with `res`.
 pub fn balance(content: &Concat, res: &ResCx, lim: &Limits) -> Result<Balance, LexError> {
     let mut balance = Balance::default();
-    for token in content.lex(res, lim) {
+    for token in lex(content.bytes(), res, lim) {
         if let (_, Tok::Op(op)) = token? {
             balance.take(op);
         }

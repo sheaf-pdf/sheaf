@@ -92,6 +92,12 @@ impl Affine {
         f: 0.0,
     };
 
+    /// Its six numbers in PDF's order, `a b c d e f`, as `cm` and `Tm`
+    /// take them.
+    pub fn array(self) -> [f32; 6] {
+        [self.a, self.b, self.c, self.d, self.e, self.f]
+    }
+
     /// PageSpace into the frame, y down, that reads upright when the page
     /// is turned `r`, with no translation: [`Geom::to_view`]'s linear part
     /// for a page rotated `r`.

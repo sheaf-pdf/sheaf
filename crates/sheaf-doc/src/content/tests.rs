@@ -459,7 +459,6 @@ fn streams_lex_as_one() {
     // The space between is the end of the stream before it.
     assert_eq!(c.pos(24), Pos { stream: 0, at: 24 });
     assert_eq!(c.pos(36), Pos { stream: 2, at: 5 });
-    assert_eq!(c.lex(&ResCx::none(), &Limits::DEFAULT).count(), lexed.len());
     // One stream is lexed where it is.
     let one = Concat::new(&[first]);
     assert!(std::ptr::eq(one.bytes(), first));
@@ -602,6 +601,41 @@ fn streams_past_the_cap_are_a_fault() {
     }
 }
 
+/// What pdf-content-streams is given is what sheaf reads with: the same
+/// color spaces, and its defaults under sheaf's caps.
+#[test]
+fn the_familys_resources_and_limits_are_sheafs() {
+    use crate::pdf::content as family;
+    let spaces = [(b"CS0".to_vec(), 3), (b"Sp#1".to_vec(), 1)];
+    assert_eq!(
+        ResCx::new(spaces.clone()).family(),
+        &family::ResCx::new(spaces)
+    );
+    assert_eq!(ResCx::none().family(), &family::ResCx::none());
+    // One name given twice counts as its last, in both.
+    let twice = [(b"N".to_vec(), 3), (b"N".to_vec(), 4)];
+    assert_eq!(
+        ResCx::new(twice.clone()).family(),
+        &family::ResCx::new(twice)
+    );
+
+    // The defaults are the same caps already.
+    assert_eq!(Limits::DEFAULT.content.family(), family::Limits::DEFAULT);
+    let content = ContentLimits {
+        decompressed: 3002,
+        operands: 7,
+        depth: 5,
+        inline_image: 11,
+        ..Limits::DEFAULT.content
+    };
+    let mut want = family::Limits::DEFAULT;
+    want.content = 3002;
+    want.operands = 7;
+    want.depth = 5;
+    want.inline_image = 11;
+    assert_eq!(content.family(), want);
+}
+
 #[test]
 fn a_lex_error_names_its_stream() {
     let (pdf, page) = page_with(|pdf| {
@@ -610,9 +644,7 @@ fn a_lex_error_names_its_stream() {
         vec![first.into(), second.into()].into()
     });
     let content = read(&pdf, &page_dict(&pdf, page)).unwrap();
-    let e = content
-        .concat()
-        .lex(&ResCx::none(), &Limits::DEFAULT)
+    let e = lex(content.concat().bytes(), &ResCx::none(), &Limits::DEFAULT)
         .find_map(Result::err)
         .unwrap();
     assert_eq!(e.at, 6);

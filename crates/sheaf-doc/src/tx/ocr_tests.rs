@@ -184,6 +184,42 @@ fn a_page_whose_content_can_t_be_cut_fails_the_op() {
     assert_eq!(filters(&d, p0), []);
 }
 
+/// A merged block that shows text before text the page shows outside any
+/// text object (`Tj` with no `BT`) fails Set and Clear: that text is
+/// drawn from where the last text object left off, the block's, so the
+/// block taken out would move it. With that text in a text object of its
+/// own, the block goes.
+#[test]
+fn a_block_before_text_outside_a_text_object_fails_the_op() {
+    let block: &[u8] = b"/ShOCR << /SHEF_OcrBlock (b2a) >> BDC BT (words) Tj ET EMC";
+    let bare = [block, b" (after) Tj"].concat();
+    let inside = [block, b" BT (after) Tj ET"].concat();
+    let mut d = open(saved::pages_drawing(&[&bare, &inside]), "pages.pdf");
+    let [p0, p1] = [0, 1].map(|i| d.page(i).unwrap());
+    let (at, st, n) = (d.current_version(), d.state().clone(), d.version_count());
+    let cases = [
+        (fx::ocr([(p0, layer("a"))]), "set-ocr-text"),
+        (vec![fx::clear_ocr(&[p0])], "clear-ocr-text"),
+    ];
+    for (ops, name) in cases {
+        let e = commit(&mut d, Actor::User, ops).unwrap_err();
+        let EditError::Content { op, page, why } = &e else {
+            panic!("{e}");
+        };
+        assert_eq!((*op, *page), (name, 0), "{e}");
+        assert_eq!(
+            why,
+            "page 1's content can't be changed without changing what else it draws; \
+             nothing was changed"
+        );
+        assert_eq!((d.current_version(), d.version_count()), (at, n));
+        assert_eq!(d.state(), &st);
+    }
+    commit(&mut d, Actor::User, vec![fx::clear_ocr(&[p1])]).unwrap();
+    let marked = Filter::DropMarked(MarkedSel::SheafOcr);
+    assert_eq!(filters(&d, p1), [marked]);
+}
+
 /// A layer's block id is drawn in [1, 2^53) when it's made, kept by a
 /// layer that replaces it unsaved, and by undo and redo; a duplicate's
 /// layer is the page's; and a transaction lowered again draws the id it

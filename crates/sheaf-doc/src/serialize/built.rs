@@ -14,7 +14,9 @@ use crate::content::{Need, Res, ResBody, ResId, ResKind, Reserved, ResourceNeeds
 use crate::geom::{Affine, Rect};
 use crate::materialize::copy::copy_object;
 use crate::model::{FormRef, Mark};
-use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StreamExt, dictionary};
+use crate::pdf::{
+    Dictionary, Document as Pdf, Object, ObjectId, Stream, StreamExt, dictionary, resolve_fn,
+};
 use crate::source::Limits;
 use crate::store::{BlobId, BlobRef};
 
@@ -25,12 +27,18 @@ pub struct ResObjects {
 
 impl ResObjects {
     pub fn object(&mut self, pdf: &mut Pdf, res: &Res) -> ObjectId {
-        match &res.body {
+        match res.body() {
             ResBody::Written(id) => *id,
             ResBody::Objects(objects) => *self
                 .written
-                .entry(res.id)
+                .entry(res.id())
                 .or_insert_with(|| add(pdf, objects)),
+            // A kind of resource made after this was written: its name
+            // binds nothing, written once.
+            body => *self.written.entry(res.id()).or_insert_with(|| {
+                log::warn!("a resource of an unknown kind is written as null: {body:?}");
+                pdf.add_object(Object::null())
+            }),
         }
     }
 
@@ -75,7 +83,8 @@ impl Sink for Graph<'_> {
     }
 
     fn reserved(&mut self, resources: Option<&Object>) -> Reserved {
-        Reserved::read(self.pdf, resources)
+        let objects = resolve_fn(|id| self.pdf.objects.get(&id));
+        Reserved::read(objects, resources, &crate::content::sink::naming_limits())
     }
 }
 
@@ -96,17 +105,15 @@ impl StampForm {
     pub fn written(id: ObjectId, bbox: Rect, matrix: Affine) -> StampForm {
         StampForm {
             id,
-            res: Res::written(id).id,
+            res: Res::written(id).id(),
             bbox,
             matrix,
         }
     }
 
     pub fn resource(&self) -> Res {
-        Res {
-            id: self.res,
-            body: ResBody::Written(self.id),
-        }
+        Res::named(self.res, ResBody::Written(self.id))
+            .expect("an object already written is a resource, whatever it holds")
     }
 }
 
@@ -349,7 +356,7 @@ impl Built {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::content::{ContentWriter, Std14};
+    use crate::content::{ContentWriter, DrawText, Std14};
 
     #[test]
     fn built_pages_share_their_fonts_and_read_back() {
@@ -358,9 +365,9 @@ mod tests {
             for line in ["one", "two"] {
                 let mut w = ContentWriter::new();
                 w.begin_text();
-                w.font(&Std14::Helvetica, 12.0);
+                w.set_font(&Std14::Helvetica, 12.0);
                 w.text_move(72.0, 700.0);
-                w.text(line);
+                w.show_text(&Std14::Helvetica, line);
                 w.end_text();
                 let (content, needs) = w.finish(&Reserved::default());
                 built.page(Rect::new(0.0, 0.0, 612.0, 792.0), content, &needs);

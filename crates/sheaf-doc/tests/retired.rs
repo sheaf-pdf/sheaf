@@ -2,7 +2,8 @@
 //! out, with the slice that took it out ([`RETIRED`]), and every name a
 //! later milestone's slice, or an item's between milestones, took out, in
 //! a table of its own ([`RETIRED_M5`], [`RETIRED_M11`],
-//! [`RETIRED_OBJECT_STREAMS`], [`RETIRED_PDF_LINT`]). Nothing under
+//! [`RETIRED_OBJECT_STREAMS`], [`RETIRED_PDF_LINT`], [`RETIRED_M18`]).
+//! Nothing under
 //! `crates/` may define one again or refer to it. Each slice adds its rows
 //! in the commit that deletes the names.
 //!
@@ -1092,6 +1093,63 @@ const RETIRED_PDF_LINT: &[(&str, u8)] = &[
     ("arlington::Hold::written", 1),
 ];
 
+/// Every name M18 retired, with the slice that retired it. Only what
+/// sheaf defined: the crate family's types are used again under the same
+/// names, through `content`.
+const RETIRED_M18: &[(&str, u8)] = &[
+    // Resources by what they are are pdf-content-streams' (`Res`, made by
+    // its constructors and read by `id()` and `body()`; `ResBody`;
+    // `ResId`), re-exported by `content`: sheaf has no module of its own
+    // for them, nor a digest of its own.
+    ("content::res::Res", 19),
+    ("content::res::ResBody", 19),
+    ("content::res::ResId", 19),
+    // A resource category is the family's too, which `NameSet` and the
+    // sinks are keyed by.
+    ("content::names::ResKind", 19),
+    // The content writer and what its calls take are the family's too,
+    // re-exported by `content`: sheaf has no writer of its own.
+    ("content::writer::ContentWriter", 19),
+    ("content::writer::Color", 19),
+    ("content::writer::Blend", 19),
+    ("content::writer::GState", 19),
+    ("content::writer::LineCap", 19),
+    ("content::writer::LineJoin", 19),
+    ("content::writer::Paint", 19),
+    ("content::writer::FillRule", 19),
+    ("content::writer::TextMode", 19),
+    ("content::writer::Need", 19),
+    ("content::writer::ResourceNeeds", 19),
+    ("content::writer::Reserved", 19),
+    ("content::writer::write_string", 19),
+    // The writer keeps no font: text is drawn through `DrawText`
+    // (`set_font`, `show_text`), which names the font at each call, and a
+    // form is placed by the function `content::place_form`.
+    ("content::writer::ContentWriter::text", 19),
+    ("content::writer::ContentWriter::place_form", 19),
+    // `Reserved::read` takes a resolver; one of nothing is a
+    // `resolve_fn`.
+    ("content::sink::Unread", 19),
+    // A page's streams as one and the places in them are the family's
+    // (`content::Concat`, `Pos`, `SpanAcross`), joined by its `Join`.
+    // Its `Concat` reads by its own tokens: sheaf's lexer is called on
+    // the bytes, `lex(concat.bytes(), ..)`.
+    ("content::page::Concat::lex", 19),
+    ("content::page::Join", 19),
+    // The splice is the family's (`content::splice`, `splice_each`,
+    // `Spliced`, `Rewrite`, `SpliceError`, `without_keys`), called with
+    // `ResCx::family` and `ContentLimits::family`. Content it can't read
+    // is `SpliceError::Read`, with the family's error.
+    ("content::splice::splice", 19),
+    ("content::splice::splice_each", 19),
+    ("content::splice::Spliced", 19),
+    ("content::splice::Rewrite", 19),
+    ("content::splice::SpliceError", 19),
+    ("content::splice::SpliceError::Lex", 19),
+    ("content::splice::without_keys", 19),
+    ("content::lex::without_entries", 19),
+];
+
 /// The ledgers, with the words a hit names its slice by.
 const LEDGERS: &[(&[(&str, u8)], &str)] = &[
     (RETIRED, "slice"),
@@ -1099,11 +1157,55 @@ const LEDGERS: &[(&[(&str, u8)], &str)] = &[
     (RETIRED_M11, "M11 slice"),
     (RETIRED_OBJECT_STREAMS, "object streams slice"),
     (RETIRED_PDF_LINT, "pdf-lint slice"),
+    (RETIRED_M18, "M18 slice"),
 ];
 
 /// Last segments only a path matches: names the new design uses again
 /// (§17), and words common enough to name other things.
 const QUALIFIED_ONLY: &[&str] = &[
+    // pdf-content-streams' resources and categories, which `content`
+    // re-exports: not the ones sheaf defined (M18 slice 19).
+    "Res",
+    "ResBody",
+    "ResId",
+    "ResKind",
+    // Its writer and what the writer's calls take, re-exported the same
+    // way; and `content::place_form`, a function now, not the writer's
+    // method (M18 slice 19). (`text` is below.)
+    "ContentWriter",
+    "Color",
+    "Blend",
+    "GState",
+    "LineCap",
+    "LineJoin",
+    "Paint",
+    "FillRule",
+    "TextMode",
+    "Need",
+    "ResourceNeeds",
+    "Reserved",
+    "write_string",
+    "place_form",
+    // sheaf's lexer, the function `content::lex`, which reads a page's
+    // joined bytes: not the method sheaf's `Concat` had. And the
+    // family's `Join`, and the app's mode that joins a running sheaf: not
+    // the join `content::page` had (M18 slice 19).
+    "lex",
+    "Join",
+    // pdf-content-streams' splice, which `content` re-exports: not the
+    // one sheaf had; and the interpreter's errors and the page order's
+    // `tx::splice`, not sheaf's `SpliceError::Lex` (M18 slice 19).
+    "splice",
+    "splice_each",
+    "Spliced",
+    "Rewrite",
+    "SpliceError",
+    "without_keys",
+    "Lex",
+    // What a private-data scan said of content it couldn't read
+    // (`Said::Unread`), and pdf-structure's error: not the sink's objects
+    // that read nothing.
+    "Unread",
     // A print, export or render request's job, and the app's file-writing
     // job: not the version's.
     "job",
