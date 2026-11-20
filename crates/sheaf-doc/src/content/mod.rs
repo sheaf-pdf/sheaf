@@ -59,6 +59,8 @@ mod text_bag_tests;
 mod writer;
 #[cfg(test)]
 mod writer_tests;
+#[cfg(test)]
+mod written_golden;
 
 pub use balance::{Balance, balance};
 pub use blocks::{

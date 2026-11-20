@@ -7,6 +7,9 @@ use pdf_objects::Object;
 
 use super::{Error, Result};
 
+#[cfg(test)]
+pub(crate) mod read_back;
+
 /// A single PDF content-stream operator and its operands in stream order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Operation {

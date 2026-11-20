@@ -684,3 +684,7 @@ mod tests {
         assert_eq!(fit("short", 60.0, 8.0), "short");
     }
 }
+
+#[cfg(test)]
+#[path = "summary_golden.rs"]
+mod golden;
