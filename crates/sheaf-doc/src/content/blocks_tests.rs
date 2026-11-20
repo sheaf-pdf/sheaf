@@ -180,7 +180,7 @@ fn an_artifacts_cuts_keep_the_q_it_opens_with() {
 /// A list loses the keys sheaf marks it with ([`private::LIST_KEYS`])
 /// and keeps every other byte as it was written: comments, spacing, line
 /// ends, a key written with an escape, and a dictionary inside it, whose
-/// own keys are its own.
+/// own keys are its own. A key ends at a 0x80 or 0xFF byte.
 ///
 /// [`private::LIST_KEYS`]: crate::private::LIST_KEYS
 #[test]
@@ -209,6 +209,22 @@ fn a_list_loses_sheafs_private_keys() {
         &b"q /Artifact << /Type /Pagination % its kind\n  /Subtype /Watermark \
             /Inner <</SHEF_Gen 1>> % a note\n\n>> BDC Q EMC"[..]
     );
+    // A 0x80 or 0xFF byte ends a name, as PDFium reads it, so a key of
+    // sheaf's written right before one is sheaf's and goes; its value is
+    // what comes after the byte.
+    for byte in [0x80, 0xFF] {
+        let s = [
+            &b"/Artifact <</SHEF_Gen"[..],
+            &[byte],
+            b"(g1) /Type /Pagination>> BDC EMC",
+        ];
+        let s = s.concat();
+        assert_eq!(
+            made(&s, &s),
+            b"/Artifact << /Type /Pagination>> BDC EMC",
+            "{byte:#x}"
+        );
+    }
 }
 
 #[test]

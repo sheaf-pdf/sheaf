@@ -792,6 +792,19 @@ const MIXED_LEFT: &[u8] = b"q 1 0 0 rg 0 0 10 10 re f Q\n\n\
     /Artifact <</Type /Pagination /Subtype /Watermark /SHEF_Gen (g2)>> BDC BT (wm) Tj ET EMC\n\
     0 0 1 rg";
 
+/// [`MIXED`] with its last three texts shown outside any text object
+/// (`Tj` with no `BT`), which PDFium draws from where the last text object
+/// left off.
+const MIXED_BARE: &[u8] = b"q 1 0 0 rg 0 0 10 10 re f Q\n\
+    /Artifact <</Type /Pagination /Subtype /Header /SHEF_Gen (g1)>> BDC \
+    q BT /F1 9 Tf (Head) Tj ET Q EMC\n\
+    /Artifact <</Type /Layout>> BDC 0 0 m 9 9 l S EMC\n\
+    /Artifact <</Type /Pagination /Subtype /Footer /SHEF_Gen (g1)>> BDC \
+    /Span <</ActualText (x)>> BDC (nested) Tj EMC EMC\n\
+    /Artifact <</Type /Pagination /Subtype /Header>> BDC (author) Tj EMC\n\
+    /Artifact <</Type /Pagination /Subtype /Watermark /SHEF_Gen (g2)>> BDC (wm) Tj EMC\n\
+    0 0 1 rg";
+
 /// A header another file's generator drew, merged into the page's stream.
 const MERGED_HEAD: &[u8] = b"/Artifact <</Type /Pagination /Subtype /Header /SHEF_Gen (g1)>> BDC \
     q BT /F1 9 Tf (Head) Tj ET Q EMC";
@@ -883,6 +896,58 @@ fn a_removal_takes_out_what_it_takes_and_nothing_else() {
         assert_eq!(now[2], across[2], "{how:?}: as it was");
     }
 }
+
+/// Text shown outside any text object is drawn from where the last text
+/// object left off, so a header or footer that shows text before it can't
+/// be taken out without moving it: another file's header and footer on
+/// such a page ([`MIXED_BARE`]) stay, counted as left in place, and the
+/// page is written as it was; with every text in a text object of its own
+/// ([`MIXED`]) the same two go. Both ways.
+fn bare_text(how: How) {
+    let dir = scratch();
+    let file = acrobat_file(&[&[MIXED_BARE], &[MIXED]]);
+    let (_, mut doc) = opened(&dir, "a.pdf", &file);
+    let all = all(&doc);
+    let found = OthersFound {
+        other_files: 2,
+        authored_left: 2,
+        refused: 2,
+        ..OthersFound::default()
+    };
+    assert_eq!(headers_on(&doc, &all, false), found, "{how:?}");
+    let c = (doc.commit_ops(vec![fx::remove_header(&all)], "remove")).unwrap();
+    assert_eq!(
+        c.lines[0].text,
+        "Remove the header and footer from pages 1, 2 (2 from other files; 2 the author's \
+         left in place; 2 left in place, as taking them out would change the page)",
+        "{how:?}"
+    );
+    let pdf = Pdf::load_mem(&how.write(&doc)).unwrap();
+    let [bare, mixed] = pages(&pdf)[..] else {
+        panic!("two pages")
+    };
+    let content = |page| {
+        let [one] = contents(&pdf, page)[..] else {
+            panic!("one stream")
+        };
+        String::from_utf8_lossy(&stream(&pdf, one).1).into_owned()
+    };
+    assert_eq!(
+        content(bare),
+        String::from_utf8_lossy(MIXED_BARE),
+        "{how:?}"
+    );
+    assert_eq!(
+        content(mixed),
+        String::from_utf8_lossy(MIXED_LEFT),
+        "{how:?}"
+    );
+}
+
+crate::both_ways!(
+    a_header_before_text_outside_a_text_object_stays,
+    a_header_before_text_outside_a_text_object_stays_appended: bare_text
+);
 
 /// A page brought in from a file sheaf saved with a header draws that
 /// header, which no generator of the document's backs; RemoveHeaderFooter
