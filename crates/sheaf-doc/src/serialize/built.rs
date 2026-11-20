@@ -84,7 +84,7 @@ impl Sink for Graph<'_> {
 
     fn reserved(&mut self, resources: Option<&Object>) -> Reserved {
         let objects = resolve_fn(|id| self.pdf.objects.get(&id));
-        Reserved::read(objects, resources, &crate::pdf::content::Limits::DEFAULT)
+        Reserved::read(objects, resources, &crate::content::sink::naming_limits())
     }
 }
 

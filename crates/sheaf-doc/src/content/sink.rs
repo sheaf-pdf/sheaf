@@ -13,6 +13,7 @@
 
 use crate::pdf::content::Limits;
 use crate::pdf::{Dictionary, Object, ObjectId, Value, resolve_fn};
+use crate::source;
 
 use super::{Res, ResKind, Reserved, ResourceNeeds};
 
@@ -74,6 +75,17 @@ pub fn bind(sink: &mut dyn Sink, needs: &ResourceNeeds, resources: &mut Dictiona
     }
 }
 
+/// The caps a resources dictionary's names are read under
+/// ([`Reserved::read`]): sheaf's defaults, as pdf-content-streams takes
+/// them ([`ContentLimits::family`]). A sink reads for a file being
+/// written, of pages of any source, so it has no one document's limits;
+/// the read follows references a few in a row and no further.
+///
+/// [`ContentLimits::family`]: source::ContentLimits::family
+pub fn naming_limits() -> Limits {
+    source::Limits::DEFAULT.content.family()
+}
+
 /// The names `resources` binds as far as `sink` reads them: the
 /// dictionary and its categories followed, each name's binding as
 /// written. What a binding that's a reference names isn't read, so a name
@@ -91,7 +103,7 @@ pub fn reserved_shallow(sink: &mut dyn Sink, resources: Option<&Object>) -> Rese
         }
     }
     let nothing = resolve_fn(|_: ObjectId| None::<&Object>);
-    Reserved::read(nothing, Some(&Object::from(dict)), &Limits::DEFAULT)
+    Reserved::read(nothing, Some(&Object::from(dict)), &naming_limits())
 }
 
 #[cfg(test)]

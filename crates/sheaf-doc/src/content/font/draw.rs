@@ -17,6 +17,8 @@ pub trait DrawText {
     /// `Tj`: `s` as `font`'s codes, and the characters it couldn't
     /// encode, drawn as `?`. `font` is the one [`set_font`] set: the
     /// writer keeps none, so text names the font it's encoded in.
+    /// Nothing checks that it is, nor which font a `Q` brings back: the
+    /// caller pairs them.
     ///
     /// [`set_font`]: DrawText::set_font
     fn show_text(&mut self, font: &dyn Font, s: &str) -> Unencoded;

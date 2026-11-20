@@ -112,7 +112,11 @@ pub struct ContentLimits {
 impl ContentLimits {
     /// These caps as pdf-content-streams takes them: its defaults, with
     /// `operands`, `depth` and `inline_image` as here, and its cap on a
-    /// page's joined streams as `decompressed`.
+    /// page's joined streams as `decompressed`. Every call into
+    /// pdf-content-streams that takes limits takes them from here: a
+    /// splice and a page's join from the document's, and the names a
+    /// resources dictionary binds from sheaf's defaults
+    /// ([`naming_limits`](crate::content::sink::naming_limits)).
     pub fn family(&self) -> crate::pdf::content::Limits {
         let mut limits = crate::pdf::content::Limits::DEFAULT;
         limits.operands = self.operands;

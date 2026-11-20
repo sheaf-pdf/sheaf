@@ -20,9 +20,8 @@ use super::{Error, Result};
 
 pub use pdf_content_streams::{
     Blend, Color, Concat, ContentWriter, FillRule, GState, Join, Limits, LineCap, LineJoin, Need,
-    Paint, Pos, Res, ResBody, ResCx, ResError, ResId, ResKind, Reserved, ResourceNeeds, Rewrite,
-    SpanAcross, SpliceError, Spliced, TextMode, object, splice, splice_each, tokens, without_keys,
-    write_string,
+    Paint, Pos, Res, ResBody, ResCx, ResId, ResKind, Reserved, ResourceNeeds, Rewrite, SpanAcross,
+    SpliceError, Spliced, TextMode, object, splice, splice_each, tokens, without_keys,
 };
 
 #[cfg(test)]

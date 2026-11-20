@@ -68,7 +68,7 @@ mod written_golden;
 pub use crate::pdf::content::{
     Blend, Color, ContentWriter, FillRule, GState, LineCap, LineJoin, Need, Paint, Res, ResBody,
     ResId, ResKind, Reserved, ResourceNeeds, Rewrite, SpliceError, Spliced, TextMode, splice,
-    splice_each, without_keys, write_string,
+    splice_each, without_keys,
 };
 pub use balance::{Balance, balance};
 pub use blocks::{

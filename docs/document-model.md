@@ -685,12 +685,15 @@ lint ledger) keeps them out of everything but tests.
   or make a lone `BI` an image, is refused. Anything else is refused:
   removing a running head drawn in the middle of a text object can't
   shift the body text, and a color an artifact sets can't leak onto what
-  follows. Content that can't be read, that holds an inline image sized
-  by a color space counted past a cap, or whose checks would read more
-  than `Limits::splice_reads` is an error of the call, not a refusal of
+  follows. Content that can't be read, or whose checks would read more
+  than `Limits::splice_reads`, is an error of the call, not a refusal of
   one range: `splice_each` and `Spliced::streams` return it, and the
   emitter then takes nothing out, each range counted as staying
-  (`taken_or_none`). `without_keys` writes a marked range's property
+  (`taken_or_none`). (The splice has a third such error, for an inline
+  image sized by a color space whose components it counted past a cap;
+  sheaf gives it the counts its own lexer reads with, `ResCx::family`,
+  which are never capped, so that one doesn't come until the family's
+  tokens replace the lexer.) `without_keys` writes a marked range's property
   list again without some keys, read from the content's start and read
   again once written; lists that read otherwise made together with what's
   taken out are refused together, and the emitter then leaves them as

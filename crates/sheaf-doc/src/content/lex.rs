@@ -72,7 +72,13 @@ pub enum LexErrorKind {
 pub struct ResCx {
     spaces: HashMap<Vec<u8>, u32>,
     /// The same names and counts as pdf-content-streams reads content
-    /// with.
+    /// with: sheaf's counts ([`family_components`]), not the ones it
+    /// would count itself from the resources, so that its splice sizes an
+    /// unfiltered inline image as this lexer does, which found the ranges
+    /// it's given. The two count some spaces otherwise (a `/Pattern`
+    /// space over a base is 1 here), and counts given this way are never
+    /// capped, so its splice never refuses content for a capped count.
+    /// Its own counting takes over when its tokens replace this lexer.
     family: crate::pdf::content::ResCx,
 }
 
