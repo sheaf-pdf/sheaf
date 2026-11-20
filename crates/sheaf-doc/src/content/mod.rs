@@ -48,6 +48,8 @@ mod lex;
 mod marked;
 mod names;
 mod page;
+#[cfg(test)]
+mod parity_tests;
 mod res;
 pub mod sink;
 mod splice;

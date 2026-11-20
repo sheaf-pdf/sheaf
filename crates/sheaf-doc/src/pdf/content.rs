@@ -1,11 +1,21 @@
-//! Minimal content-stream operation builder for test fixtures and examples,
-//! plus test-only `Content::decode` backed by `pdf-content-streams` (M18
-//! slices 11 and 13). Production content-stream lexing, splicing, and writing
-//! live in `crate::content`.
+//! Content through `pdf-content-streams` (M18 slices 11, 13 and 19): the
+//! types content is written with ([`ContentWriter`], and what its calls
+//! take), the resources it draws with by what they are ([`Res`], named
+//! when the content is finished against the names a resources dictionary
+//! already binds, [`Reserved`]), and the limits its reading is held to.
+//! `crate::content` is where sheaf writes, lexes and splices content.
+//!
+//! Also a minimal content-stream operation builder for test fixtures and
+//! examples ([`Content`]), with a test-only `Content::decode`.
 
 use pdf_objects::Object;
 
 use super::{Error, Result};
+
+pub use pdf_content_streams::{
+    Blend, Color, ContentWriter, FillRule, GState, Limits, LineCap, LineJoin, Need, Paint, Res,
+    ResBody, ResError, ResId, ResKind, Reserved, ResourceNeeds, TextMode, write_string,
+};
 
 #[cfg(test)]
 pub(crate) mod read_back;
@@ -55,7 +65,7 @@ impl Content {
     /// oracle for `content::corpus`, `forms::check`, and `file::tests`).
     #[cfg(test)]
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        let limits = pdf_content_streams::Limits::DEFAULT;
+        let limits = Limits::DEFAULT;
         let res = pdf_content_streams::ResCx::none();
         let mut operations = Vec::new();
         for item in pdf_content_streams::operations(bytes, &res, &limits) {

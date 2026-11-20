@@ -25,6 +25,10 @@ pdf-objects.workspace = true
 pdf-filters.workspace = true
 pdf-crypt.workspace = true
 pdf-structure.workspace = true
+# Content written, its resources named by what they are, and content
+# spliced (M18 slice 19). Its default features only: `image-ends` would
+# find an inline image's end by decoding, which sheaf's lexer doesn't.
+pdf-content-streams.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 log.workspace = true
@@ -88,4 +92,3 @@ syn = { version = "2", features = ["full", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 pdf-crypt = { workspace = true, features = ["insecure-test-writer"] }
 pdf-structure = { workspace = true, features = ["insecure-test-writer"] }
-pdf-content-streams.workspace = true
