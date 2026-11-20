@@ -49,6 +49,7 @@ use crate::serialize::built::{Built, StampForm};
 use crate::source::Limits;
 use crate::text_layer::{self, TextLayer};
 use crate::tx::fixture as fx;
+use crate::tx::{Actor, CommitOpts};
 
 const GOLDEN: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -1116,6 +1117,10 @@ const BODY: [&[u8]; 3] = [
     b"BT /F1 24 Tf 72 72 Td (page 2) Tj ET",
 ];
 
+/// The day the golden was written, as a header set that day keeps it
+/// (`<<date>>`, in the default format).
+const GOLDEN_DAY: &str = "11/19/2026";
+
 /// A file of three pages edited by ops: marks on the first (a square, a
 /// text box and a highlight), a header and footer with Bates numbers and
 /// a watermark on every page, recognized text on the second (whose own
@@ -1174,7 +1179,17 @@ fn edited() -> Vec<Case> {
         fx::set_watermark(fx::watermark("DRAFT"), Z::Over, None),
         fx::set_header(header, None),
     ];
-    doc.commit_ops(generators, "generators")
+    // A header keeps the day it was set, which its recipe's digest holds
+    // and its block's marker says: set on the day the golden was written,
+    // whatever today is.
+    let Ok(mut cx) = Arc::try_unwrap(doc.lower_cx(Actor::User)) else {
+        unreachable!("a context just made is held once");
+    };
+    cx.host.date = GOLDEN_DAY.into();
+    let mut tx = Document::tx_at(&doc.snapshot(), Arc::new(cx));
+    tx.apply_batch(generators, &in_progress::NoProgress)
+        .expect("generators");
+    doc.commit(tx, CommitOpts::labelled("generators"))
         .expect("generators");
     let layer = Arc::new(text_layer::fixture::layer());
     doc.commit_ops(fx::ocr([(all[1], layer)]), "ocr")
