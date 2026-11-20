@@ -113,7 +113,7 @@ impl ContentLimits {
     /// These caps as pdf-content-streams takes them: its defaults, with
     /// `operands`, `depth` and `inline_image` as here, and its cap on a
     /// page's joined streams as `decompressed`.
-    pub(crate) fn family(&self) -> crate::pdf::content::Limits {
+    pub fn family(&self) -> crate::pdf::content::Limits {
         let mut limits = crate::pdf::content::Limits::DEFAULT;
         limits.operands = self.operands;
         limits.depth = self.depth;

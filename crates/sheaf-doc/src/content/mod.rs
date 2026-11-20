@@ -11,9 +11,13 @@
 //! - [`marked`], [`balance`] and [`names_used`]: its marked ranges, its
 //!   `q`/`Q` balance and the resource names it uses; [`kept`], the last
 //!   two of what's left once ranges are taken out.
-//! - [`splice`]: its streams with ranges taken out, byte for byte, when
-//!   that's safe, and refused when it isn't; and [`without_keys`], a
-//!   marked range's property list written again without some keys.
+//! - [`splice`] and [`splice_each`]: its streams with ranges taken out,
+//!   byte for byte, when that's safe, and refused when it isn't; and
+//!   [`without_keys`], a marked range's property list written again
+//!   without some keys. They're pdf-content-streams', which has the
+//!   rules, called with [`ResCx::family`] and
+//!   [`ContentLimits::family`](crate::source::ContentLimits::family):
+//!   the ranges are found by sheaf's lexer, and judged by its tokens.
 //! - [`PageBlocks`]: its pagination artifacts and who drew them, and
 //!   sheaf's own blocks.
 //! - [`text_bag`]: the words it draws, as [`interp`] reads it, decoded
@@ -52,7 +56,6 @@ mod names;
 mod page;
 mod place;
 pub mod sink;
-mod splice;
 #[cfg(test)]
 mod tests;
 mod text_bag;
@@ -63,7 +66,8 @@ mod written_golden;
 
 pub use crate::pdf::content::{
     Blend, Color, ContentWriter, FillRule, GState, LineCap, LineJoin, Need, Paint, Res, ResBody,
-    ResId, ResKind, Reserved, ResourceNeeds, TextMode, write_string,
+    ResId, ResKind, Reserved, ResourceNeeds, Rewrite, SpliceError, Spliced, TextMode, splice,
+    splice_each, without_keys, write_string,
 };
 pub use balance::{Balance, balance};
 pub use blocks::{
@@ -79,5 +83,4 @@ pub use marked::{Marked, PropertiesDict, Props, marked};
 pub use names::{Kept, NameSet, kept, names_used};
 pub use page::{Concat, ContentFault, PageContent, Pos, ReadObjects, SpanAcross, contents};
 pub use place::place_form;
-pub use splice::{Rewrite, SpliceError, Spliced, splice, splice_each, without_keys};
 pub use text_bag::{TextBag, text_bag};

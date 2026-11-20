@@ -21,11 +21,6 @@ use crate::forms::corpus::{Corpus, Entry, each_entry};
 use crate::source::Limits;
 use crate::store::{BlobKind, Store};
 
-/// Temporary (M18 slice 19): sheaf's splice and pdf-content-streams'
-/// side by side, until sheaf splices through the family's.
-#[path = "splices_agree.rs"]
-mod agree;
-
 const LIM: &Limits = &Limits::DEFAULT;
 
 /// What one file's content came to.
@@ -191,6 +186,8 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
     let mut forms_seen = HashSet::new();
     let known = DrawnForms::default();
     let fonts = Fonts::for_text();
+    // The splice reads with pdf-content-streams' limits.
+    let cs = &LIM.content.family();
     for (i, page) in src.pages().iter().enumerate() {
         out.pages += 1;
         let at = format!("{} page {}", entry.path, i + 1);
@@ -218,7 +215,7 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
                 stream.decompressed_content().unwrap()
             })
             .collect();
-        match splice(concat, &res, LIM, &[]) {
+        match splice(concat, res.family(), cs, &[]) {
             Ok(streams) => {
                 for (n, (stream, own)) in streams.iter().zip(&own).enumerate() {
                     if **stream != **own || concat.stream(n) != own {
@@ -227,8 +224,7 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
                 }
             }
             Err(e) => {
-                out.unread
-                    .push(format!("{at}: {}", content.fault(lex_error(e))));
+                out.unread.push(format!("{at}: {e}"));
                 continue;
             }
         }
@@ -273,7 +269,7 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
                 continue;
             }
             let one = Concat::new(&[&data]);
-            match splice(&one, &res, LIM, &[]) {
+            match splice(&one, res.family(), cs, &[]) {
                 Ok(streams) if *streams[0] == *data => {}
                 Ok(_) => out.changed.push(at),
                 Err(e) => out.unread.push(format!("{at}: {e}")),
@@ -288,14 +284,14 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
                         out.acrobat_found.insert(p.kind);
                     }
                     let cuts = p.cuts(concat, &res, LIM).unwrap();
-                    let made = splice(concat, &res, LIM, &cuts).is_ok();
+                    let made = splice(concat, res.family(), cs, &cuts).is_ok();
                     *out.splices.entry((p.origin, made)).or_default() += 1;
                     if p.origin == PagOrigin::Acrobat && !made {
                         out.acrobat_refused.push(format!("{at}: {:?}", p.kind));
                     }
                     let range = blocks.marked.iter().find(|m| m.span == p.span);
                     let inline = range.is_some_and(|m| matches!(m.props, Some(Props::Inline(_))));
-                    let made = match without_keys(concat, &res, LIM, p.span, &[b"Type"]) {
+                    let made = match without_keys(concat, res.family(), cs, p.span, &[b"Type"]) {
                         Ok(_) => true,
                         Err(e) => {
                             if inline {
@@ -316,7 +312,7 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
                     let cuts: Vec<SpanAcross> = (blocks.selected(&kinds, &origins))
                         .flat_map(|p| p.cuts(concat, &res, LIM).unwrap())
                         .collect();
-                    if let Err(e) = splice(concat, &res, LIM, &cuts) {
+                    if let Err(e) = splice(concat, res.family(), cs, &cuts) {
                         out.unstrippable.push(format!("{at}, {kinds:?}: {e}"));
                     }
                 }
@@ -328,13 +324,6 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
         }
     }
     out
-}
-
-fn lex_error(e: SpliceError) -> LexError {
-    match e {
-        SpliceError::Lex(e) => e,
-        e => panic!("a splice of nothing: {e}"),
-    }
 }
 
 /// Every page of every form in the corpus, its content and the forms it
@@ -465,12 +454,4 @@ fn corpus_content_lexes_splices_and_classifies() {
         office.1
     );
     assert!(missed.is_empty(), "{missed:#?}");
-}
-
-/// Temporary (M18 slice 19): every splice the corpus asks for, made by
-/// sheaf's splice and by pdf-content-streams', and the two compared; each
-/// disagreement is a row of `target/s19/splice-diff.tsv`.
-#[test]
-fn splices_agree() {
-    agree::run();
 }

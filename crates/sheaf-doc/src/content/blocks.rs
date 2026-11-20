@@ -14,11 +14,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::pdf::{Dictionary, Object, ObjectId, StreamExt, Value};
 
+use super::SpliceError;
 use super::balance::Balance;
 use super::lex::{self, LexError, ResCx, Step, Tok};
 use super::marked::{self, Event, Marked, Nest, PropertiesDict, Props};
 use super::page::{Concat, ContentFault, PageContent, ReadObjects, SpanAcross, direct};
-use super::splice::SpliceError;
 use crate::source::Limits;
 
 /// What a pagination artifact is, by its `/Subtype`.

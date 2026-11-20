@@ -1136,6 +1136,18 @@ const RETIRED_M18: &[(&str, u8)] = &[
     // the bytes, `lex(concat.bytes(), ..)`.
     ("content::page::Concat::lex", 19),
     ("content::page::Join", 19),
+    // The splice is the family's (`content::splice`, `splice_each`,
+    // `Spliced`, `Rewrite`, `SpliceError`, `without_keys`), called with
+    // `ResCx::family` and `ContentLimits::family`. Content it can't read
+    // is `SpliceError::Read`, with the family's error.
+    ("content::splice::splice", 19),
+    ("content::splice::splice_each", 19),
+    ("content::splice::Spliced", 19),
+    ("content::splice::Rewrite", 19),
+    ("content::splice::SpliceError", 19),
+    ("content::splice::SpliceError::Lex", 19),
+    ("content::splice::without_keys", 19),
+    ("content::lex::without_entries", 19),
 ];
 
 /// The ledgers, with the words a hit names its slice by.
@@ -1180,6 +1192,16 @@ const QUALIFIED_ONLY: &[&str] = &[
     // the join `content::page` had (M18 slice 19).
     "lex",
     "Join",
+    // pdf-content-streams' splice, which `content` re-exports: not the
+    // one sheaf had; and the interpreter's errors and the page order's
+    // `tx::splice`, not sheaf's `SpliceError::Lex` (M18 slice 19).
+    "splice",
+    "splice_each",
+    "Spliced",
+    "Rewrite",
+    "SpliceError",
+    "without_keys",
+    "Lex",
     // What a private-data scan said of content it couldn't read
     // (`Said::Unread`), and pdf-structure's error: not the sink's objects
     // that read nothing.

@@ -158,7 +158,7 @@ fn cut_together(src: &Src, index: u32, spans: &[SpanAcross]) -> Result<(), Conte
     let read = |fault| ContentError::Read { page: index, fault };
     let content = PageContent::read(src.pdf(), &facts.contents, lim).map_err(read)?;
     let res = ResCx::read(src.pdf(), facts.resources.as_deref());
-    match content::splice(content.concat(), &res, lim, spans) {
+    match content::splice(content.concat(), res.family(), &lim.content.family(), spans) {
         Ok(_) => Ok(()),
         Err(error) => Err(ContentError::Unsafe { page: index, error }),
     }
@@ -417,7 +417,12 @@ fn cut_alone<T, U>(src: &Src, index: u32, ranges: &[(T, &Pagination, U)]) -> Vec
         .map(|(_, p, _)| p.cuts(concat, &res, lim).ok())
         .collect();
     let groups: Vec<Vec<SpanAcross>> = cuts.iter().flatten().cloned().collect();
-    let mut taken = (content::splice_each(concat, &res, lim, &groups).taken).into_iter();
+    // Content the splice can't read has nothing taken out of it.
+    let Ok(spliced) = content::splice_each(concat, res.family(), &lim.content.family(), &groups)
+    else {
+        return none();
+    };
+    let mut taken = spliced.taken.into_iter();
     cuts.iter()
         .map(|c| c.is_some() && taken.next().unwrap_or(false))
         .collect()

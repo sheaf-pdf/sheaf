@@ -780,16 +780,16 @@ const MIXED: &[u8] = b"q 1 0 0 rg 0 0 10 10 re f Q\n\
     q BT /F1 9 Tf (Head) Tj ET Q EMC\n\
     /Artifact <</Type /Layout>> BDC 0 0 m 9 9 l S EMC\n\
     /Artifact <</Type /Pagination /Subtype /Footer /SHEF_Gen (g1)>> BDC \
-    /Span <</ActualText (x)>> BDC (nested) Tj EMC EMC\n\
-    /Artifact <</Type /Pagination /Subtype /Header>> BDC (author) Tj EMC\n\
-    /Artifact <</Type /Pagination /Subtype /Watermark /SHEF_Gen (g2)>> BDC (wm) Tj EMC\n\
+    /Span <</ActualText (x)>> BDC BT (nested) Tj ET EMC EMC\n\
+    /Artifact <</Type /Pagination /Subtype /Header>> BDC BT (author) Tj ET EMC\n\
+    /Artifact <</Type /Pagination /Subtype /Watermark /SHEF_Gen (g2)>> BDC BT (wm) Tj ET EMC\n\
     0 0 1 rg";
 
 /// What [`MIXED`] is with the header and footer taken out.
 const MIXED_LEFT: &[u8] = b"q 1 0 0 rg 0 0 10 10 re f Q\n\n\
     /Artifact <</Type /Layout>> BDC 0 0 m 9 9 l S EMC\n\n\
-    /Artifact <</Type /Pagination /Subtype /Header>> BDC (author) Tj EMC\n\
-    /Artifact <</Type /Pagination /Subtype /Watermark /SHEF_Gen (g2)>> BDC (wm) Tj EMC\n\
+    /Artifact <</Type /Pagination /Subtype /Header>> BDC BT (author) Tj ET EMC\n\
+    /Artifact <</Type /Pagination /Subtype /Watermark /SHEF_Gen (g2)>> BDC BT (wm) Tj ET EMC\n\
     0 0 1 rg";
 
 /// A header another file's generator drew, merged into the page's stream.

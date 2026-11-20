@@ -95,8 +95,10 @@ fn strip(pdf: &mut Pdf, page: ObjectId) -> bool {
     let groups: Vec<_> = (blocks.selected(&kinds, &origins))
         .map(|p| p.cuts(content.concat(), &res, &lim).unwrap())
         .collect();
-    let spliced = splice_each(content.concat(), &res, &lim, &groups);
-    let Some(streams) = spliced.streams(content.concat(), &[]) else {
+    let cs = lim.content.family();
+    let spliced = splice_each(content.concat(), res.family(), &cs, &groups).unwrap();
+    let streams = spliced.streams(content.concat(), res.family(), &cs, &[]);
+    let Some(streams) = streams.unwrap() else {
         return false;
     };
     let entries: Vec<Object> = (content.ids().iter().zip(streams))

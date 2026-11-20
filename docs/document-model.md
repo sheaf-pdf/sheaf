@@ -654,7 +654,11 @@ lint ledger) keeps them out of everything but tests.
   resource names the content uses (fonts, XObjects, graphics states,
   shadings, color spaces and patterns, named property lists), for slice
   16's pruning.
-- **Splicing is safe or refused.** `splice` takes ranges out of a page's
+- **Splicing is safe or refused.** The splice is pdf-content-streams'
+  (`splice`, `splice_each`, `Spliced`, `without_keys`, re-exported by
+  `content`), called with the same color spaces (`ResCx::family`) and
+  caps (`ContentLimits::family`) sheaf's lexer reads with. `splice` takes
+  ranges out of a page's
   streams and keeps every other byte as it was; a stream nothing is taken
   from is borrowed, and a space goes where what's kept either side of a
   cut (or of cuts that touch) would join two tokens. A range is taken out
@@ -672,10 +676,26 @@ lint ledger) keeps them out of everything but tests.
   range closes, as long as no marked content is kept between them, and
   closes only what it or an earlier range opened. A range must also
   start and end between operators, never inside a token or a comment or
-  between an operator and its operands. Anything else is refused:
+  between an operator and its operands. It shows no text and moves no
+  line outside a text object (PDFium draws such text), moves no line
+  inside a `q`…`Q` of its own, and shows no text while the rendering
+  mode may add it to the clip (`Tr` 4 to 7), but in a text object of its
+  own inside a `q`…`Q` of its own. What's kept is read again and must
+  read as the same tokens: a cut that would move an inline image's end,
+  or make a lone `BI` an image, is refused. Anything else is refused:
   removing a running head drawn in the middle of a text object can't
   shift the body text, and a color an artifact sets can't leak onto what
-  follows. An op reports a refusal as a `ContentError` that names the
+  follows. Content that can't be read, that holds an inline image sized
+  by a color space counted past a cap, or whose checks would read more
+  than `Limits::splice_reads` is an error of the call, not a refusal of
+  one range: `splice_each` and `Spliced::streams` return it, and the
+  emitter then takes nothing out, each range counted as staying
+  (`taken_or_none`). `without_keys` writes a marked range's property
+  list again without some keys, read from the content's start and read
+  again once written; lists that read otherwise made together with what's
+  taken out are refused together, and the emitter then leaves them as
+  they were, counted, and makes what's taken out alone (`streams_made`).
+  An op reports a refusal as a `ContentError` that names the
   page ("page 12's content can't be changed without changing what else
   it draws; nothing was changed"; one that can't be read, "page 12's
   content can't be read; nothing was changed").
@@ -4374,7 +4394,8 @@ What a generator draws on a page replaces what others drew there of its
 (`PagOrigin::REPLACED`), never the author's own, which only Remove with
 `include_authored` takes. The cut is made at emit (`replacing`), only on
 a page whose blocks hold such a range, through `content::splice_each`
-(each range spliced out alone where the whole set can't be) into
+(pdf-content-streams'; each range spliced out alone where the whole set
+can't be, none where the content can't be read) into
 `ObjKey::Filtered` copies, so a stream other pages share stays whole for
 them; Acrobat's leading `Q` stays (`Pagination::cuts`), and another
 file's block of a replaced kind, a stream of its own, is left out whole
@@ -4396,14 +4417,15 @@ replaced Acrobat watermark's text.
 of the ranges selected again without `private::LIST_KEYS` (`/SHEF_Gen`
 and `/SHEF_OcrBlock`, which mark a generator's block or an OCR block
 another tool merged into a stream), keeping what they draw:
-`lex::without_entries` removes the entries and the spaces before them and
-keeps every other byte, and the result must read back (`lex::object`) as
-the list less those keys, or the rewrite is refused (`SpliceError::List`:
-a named list, one across streams, a key that isn't a name or a value
-that isn't an object, a range that doesn't open with `BDC`). Rewrites go
-in the same `Filtered` copies as cuts (`Spliced::streams(content,
-rewrites)`; one inside a taken cut goes with it); a refused one keeps
-what marks it, with a Note. Clean Copy, and print and page images
+pdf-content-streams' `without_keys` removes the entries and the spaces
+before them and keeps every other byte, and the result must read back as
+the list less those keys, and the content with it as it did but for the
+list, or the rewrite is refused (`SpliceError::List`: a named list, one
+across streams, a key that isn't a name or a value that isn't an object,
+a range that doesn't open with `BDC`). Rewrites go in the same `Filtered`
+copies as cuts (`Spliced::streams`; one inside a taken cut goes with
+it); a refused one keeps what marks it, with a Note, as do all of a
+page's where they can't be made together with what's taken out. Clean Copy, and print and page images
 without markup, read each page's blocks and add the filter where such a
 block is merged into a stream (`private_filters`, the
 `RemovePrivateData` transform's); adding it is `CONTENT | REMOVES`
@@ -4854,8 +4876,8 @@ Flattened}`).
   read.").
 - **Taken out.** `rebuilt` acts on the filters: OCR blocks that are
   streams of their own are left out of `/Contents`; merged OCR ranges
-  are cut out of their streams (`splice_each`, a copy of each stream,
-  `ObjKey::Filtered`), and the names only they used are dropped from the
+  are cut out of their streams (pdf-content-streams' `splice_each`, a
+  copy of each stream, `ObjKey::Filtered`), and the names only they used are dropped from the
   page's resources. A cut a splice refuses stays, said in a Note
   ("Recognized text sheaf wrote earlier stays on page 3: taking it out
   would change what else the page draws."). What's left is counted again, so the isolation

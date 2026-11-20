@@ -125,7 +125,7 @@ use crate::content::sink::{self, Sink as _};
 use crate::content::{
     self, Balance, BlockAt, BlockId, Concat, ContentWriter, GenId, Marker, NameSet, PagOrigin,
     PageBlocks, PageContent, Pagination, PaginationKind, Pos, Props, Res, ResBody, ResCx, ResId,
-    ResKind, Reserved, ResourceNeeds, SheafBlock, SpanAcross,
+    ResKind, Reserved, ResourceNeeds, Rewrite, SheafBlock, SpanAcross, SpliceError, Spliced,
 };
 use crate::generate::{self, Art};
 use crate::geom::Geom;
@@ -762,7 +762,10 @@ fn rebuilt(
             Err(_) => stayed += 1,
         }
     }
-    let spliced = content::splice_each(concat, &res, lim, &groups);
+    // The splice reads with pdf-content-streams' limits.
+    let cs = &lim.content.family();
+    let each = content::splice_each(concat, res.family(), cs, &groups);
+    let spliced = taken_or_none(each, groups.len());
     let refused = |taken: &[bool]| taken.iter().filter(|t| !**t).count();
     let text_stayed = refused(&spliced.taken[..texts_cut]);
     stayed += refused(&spliced.taken[texts_cut..]);
@@ -817,12 +820,13 @@ fn rebuilt(
         {
             continue;
         }
-        match content::without_keys(concat, &res, lim, span, &private::LIST_KEYS) {
+        match content::without_keys(concat, res.family(), cs, span, &private::LIST_KEYS) {
             Ok(rewrite) => rewrites.extend(rewrite),
             Err(_) => lists += 1,
         }
     }
-    let spliced = spliced.streams(concat, &rewrites);
+    let (spliced, unwritten) = streams_made(&spliced, concat, &res, cs, &rewrites);
+    lists += unwritten;
     // Each stream as written: a copy where it changed, or where its
     // dictionary loses what sheaf marked it with, else the file's.
     let unmarked = strips(PrivateSel::Streams);
@@ -920,6 +924,44 @@ fn rebuilt(
         text: text_stayed,
         lists,
     })
+}
+
+/// What a splice takes out of a page's content, `each` what
+/// [`content::splice_each`] gave for `groups` groups: nothing, every group
+/// refused, where it can't read the content or check it within its caps,
+/// so each stays and is counted.
+fn taken_or_none(each: Result<Spliced, SpliceError>, groups: usize) -> Spliced {
+    each.unwrap_or_else(|e| {
+        log::warn!("nothing is taken out of a page's content: {e}");
+        let mut none = Spliced::default();
+        none.taken = vec![false; groups];
+        none
+    })
+}
+
+/// `concat`'s streams with what `spliced` takes out and `rewrites` made,
+/// None when no stream changes, and how many of the lists stay as they
+/// were: all of them where what they give together with what's taken out
+/// reads otherwise than the content did, and what's taken out is then
+/// made alone, as it was checked.
+fn streams_made<'a>(
+    spliced: &Spliced,
+    concat: &'a Concat,
+    res: &ResCx,
+    cs: &crate::pdf::content::Limits,
+    rewrites: &[Rewrite],
+) -> (Option<Vec<Cow<'a, [u8]>>>, usize) {
+    match spliced.streams(concat, res.family(), cs, rewrites) {
+        Ok(streams) => (streams, 0),
+        Err(e) => {
+            log::warn!("a page's lists keep sheaf's private data: {e}");
+            // Without lists it's refused only another content's ranges.
+            let alone = spliced.streams(concat, res.family(), cs, &[]);
+            let alone =
+                alone.inspect_err(|e| log::warn!("nothing is taken out of a page's content: {e}"));
+            (alone.ok().flatten(), rewrites.len())
+        }
+    }
 }
 
 /// The marked ranges of a page's `blocks` that `filters` take sheaf's
@@ -1601,4 +1643,96 @@ fn placed_form(cx: &mut Cx, at: &ObjRef) -> Object {
         copy: 0,
     };
     cx.sym(&Object::from(at.id), &scope)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::private::LIST_KEYS;
+    use crate::source::Limits;
+
+    /// The span of `part` in `s`, one stream.
+    fn span_of(s: &[u8], part: &[u8]) -> SpanAcross {
+        let at = s.windows(part.len()).position(|w| w == part).unwrap() as u32;
+        let pos = |at| Pos { stream: 0, at };
+        SpanAcross {
+            start: pos(at),
+            end: pos(at + part.len() as u32),
+        }
+    }
+
+    /// Content the splice can't read has nothing taken out of it: each
+    /// group is refused, so counted as staying, and no stream changes.
+    #[test]
+    fn content_a_splice_cant_read_keeps_every_range() {
+        let s: &[u8] = b"/A BMC EMC /B BMC EMC (no end";
+        let c = Concat::new(&[s]);
+        let (res, cs) = (ResCx::none(), Limits::DEFAULT.content.family());
+        let groups = [
+            vec![span_of(s, b"/A BMC EMC")],
+            vec![span_of(s, b"/B BMC EMC")],
+        ];
+        let each = content::splice_each(&c, res.family(), &cs, &groups);
+        assert!(matches!(each, Err(SpliceError::Read(_))), "{each:?}");
+        let spliced = taken_or_none(each, groups.len());
+        assert_eq!(spliced.taken, [false, false]);
+        assert!(!spliced.takes(&c, groups[0][0]));
+        assert_eq!(streams_made(&spliced, &c, &res, &cs, &[]), (None, 0));
+        // One it reads is as it gave it.
+        let s: &[u8] = b"/A BMC EMC 0 g";
+        let c = Concat::new(&[s]);
+        let groups = [vec![span_of(s, b"/A BMC EMC")]];
+        let each = content::splice_each(&c, res.family(), &cs, &groups);
+        let spliced = taken_or_none(each, groups.len());
+        assert_eq!(spliced.taken, [true]);
+        let (streams, unwritten) = streams_made(&spliced, &c, &res, &cs, &[]);
+        assert_eq!((&*streams.unwrap()[0], unwritten), (&b" 0 g"[..], 0));
+    }
+
+    /// Lists that lose sheaf's private data are made with what's taken
+    /// out. Where the content would then read otherwise (here an ASCII85
+    /// image whose data two lists' strings and comments would end, and an
+    /// ASCIIHex image a comment taken out and a list's `>>` would), the
+    /// lists stay as they were, counted, and what's taken out still goes.
+    #[test]
+    fn lists_that_cant_be_written_again_together_stay() {
+        let (res, cs) = (ResCx::none(), Limits::DEFAULT.content.family());
+        let list = |c: &Concat, range: SpanAcross| {
+            let rewrite = content::without_keys(c, res.family(), &cs, range, &LIST_KEYS);
+            rewrite.unwrap().unwrap()
+        };
+        let nothing = Spliced::default();
+        let s: &[u8] = b"BI /W 1 /H 1 /CS /G /BPC 8 /F /A85 ID 9jqo^ EI \
+            /A <</SHEF_Gen (~%)>> BDC EMC /C <</SHEF_Gen (~%)>> BDC EMC 0 0 9 9 re f ~> EI";
+        let c = Concat::new(&[s]);
+        let a = list(&c, span_of(s, b"/A <</SHEF_Gen (~%)>> BDC EMC"));
+        let b = list(&c, span_of(s, b"/C <</SHEF_Gen (~%)>> BDC EMC"));
+        // Each alone is made.
+        let (alone, unwritten) = streams_made(&nothing, &c, &res, &cs, std::slice::from_ref(&a));
+        assert_eq!(unwritten, 0);
+        assert_eq!(
+            &*alone.unwrap()[0],
+            &b"BI /W 1 /H 1 /CS /G /BPC 8 /F /A85 ID 9jqo^ EI \
+            /A <<>> BDC EMC /C <</SHEF_Gen (~%)>> BDC EMC 0 0 9 9 re f ~> EI"[..]
+        );
+        // Both together would run the image on: neither is, no stream changes.
+        assert_eq!(streams_made(&nothing, &c, &res, &cs, &[a, b]), (None, 2));
+
+        let s: &[u8] = b"BI /W 1 /H 1 /CS /G /BPC 8 /F /AHx ID 41 EI q % > (\n Q \
+            /A <</SHEF_Gen (>%) /B 1>> BDC EMC 0 0 9 9 re f EI";
+        let c = Concat::new(&[s]);
+        let cut = span_of(s, b"q % > (\n Q");
+        let each = content::splice_each(&c, res.family(), &cs, &[vec![cut]]);
+        let spliced = taken_or_none(each, 1);
+        assert_eq!(spliced.taken, [true]);
+        let rewrite = list(&c, span_of(s, b"/A <</SHEF_Gen (>%) /B 1>> BDC EMC"));
+        // With the comment taken out the list stays, and the comment goes.
+        let (streams, unwritten) = streams_made(&spliced, &c, &res, &cs, &[rewrite]);
+        assert_eq!(unwritten, 1);
+        assert_eq!(
+            &*streams.unwrap()[0],
+            &b"BI /W 1 /H 1 /CS /G /BPC 8 /F /AHx ID 41 EI  \
+            /A <</SHEF_Gen (>%) /B 1>> BDC EMC 0 0 9 9 re f EI"[..]
+        );
+    }
 }

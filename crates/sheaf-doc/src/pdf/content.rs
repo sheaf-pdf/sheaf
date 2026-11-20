@@ -6,9 +6,10 @@
 //! joined by [`Join`], with the places in them, [`Pos`] and
 //! [`SpanAcross`]), and what its reading is held to and needs of the
 //! resources ([`Limits`], [`ResCx`]), and its splice ([`splice`],
-//! [`splice_each`], [`without_keys`]), which sheaf's own is set beside
-//! until it splices through it. `crate::content` is where sheaf writes,
-//! lexes and splices content.
+//! [`splice_each`], [`without_keys`]), which sheaf splices through, with
+//! content's tokens and an operand as it reads them ([`tokens`],
+//! [`object`]), as its splice reads content and a list.
+//! `crate::content` re-exports them, and is where sheaf lexes content.
 //!
 //! Also a minimal content-stream operation builder for test fixtures and
 //! examples ([`Content`]), with a test-only `Content::decode`.
@@ -20,7 +21,8 @@ use super::{Error, Result};
 pub use pdf_content_streams::{
     Blend, Color, Concat, ContentWriter, FillRule, GState, Join, Limits, LineCap, LineJoin, Need,
     Paint, Pos, Res, ResBody, ResCx, ResError, ResId, ResKind, Reserved, ResourceNeeds, Rewrite,
-    SpanAcross, SpliceError, Spliced, TextMode, splice, splice_each, without_keys, write_string,
+    SpanAcross, SpliceError, Spliced, TextMode, object, splice, splice_each, tokens, without_keys,
+    write_string,
 };
 
 #[cfg(test)]
