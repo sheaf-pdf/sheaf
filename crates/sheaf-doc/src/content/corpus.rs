@@ -21,6 +21,11 @@ use crate::forms::corpus::{Corpus, Entry, each_entry};
 use crate::source::Limits;
 use crate::store::{BlobKind, Store};
 
+/// Temporary (M18 slice 19): sheaf's splice and pdf-content-streams'
+/// side by side, until sheaf splices through the family's.
+#[path = "splices_agree.rs"]
+mod agree;
+
 const LIM: &Limits = &Limits::DEFAULT;
 
 /// What one file's content came to.
@@ -460,4 +465,12 @@ fn corpus_content_lexes_splices_and_classifies() {
         office.1
     );
     assert!(missed.is_empty(), "{missed:#?}");
+}
+
+/// Temporary (M18 slice 19): every splice the corpus asks for, made by
+/// sheaf's splice and by pdf-content-streams', and the two compared; each
+/// disagreement is a row of `target/s19/splice-diff.tsv`.
+#[test]
+fn splices_agree() {
+    agree::run();
 }
