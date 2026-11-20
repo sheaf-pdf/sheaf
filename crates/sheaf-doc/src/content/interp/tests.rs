@@ -14,7 +14,7 @@ use super::state::number;
 use super::*;
 use crate::annot::Pt;
 use crate::content::fixture::{self, Fixture};
-use crate::content::{FillRule, Foreign, Paint};
+use crate::content::{FillRule, Font, Objects, Paint};
 use crate::geom::{Affine, Rect};
 use crate::source::{ContentLimits, Limits};
 
@@ -764,7 +764,14 @@ fn decompressed_counts_each_font_s_program() {
     for (name, font) in fonts.iter() {
         let font = f.pdf.get_dictionary(font.as_reference().unwrap()).unwrap();
         let mut budget = usize::MAX;
-        let read = Foreign::read(&f.pdf, font, &Limits::DEFAULT, &mut budget).unwrap();
+        let read = Font::read(
+            Objects(&f.pdf),
+            font,
+            &Limits::DEFAULT.fonts(),
+            &mut budget,
+            &mut (),
+        )
+        .unwrap();
         if name == b"PI" {
             let mut first = HashSet::new();
             let shown = b"\0\x01\0\x02\0\x03\0\x04\0\x05";
@@ -2047,7 +2054,7 @@ proptest! {
             "Widths" => widths.iter().map(|&w| w.into()).collect::<Vec<Object>>(),
         };
         let mut budget = 0;
-        let font = Foreign::read(&pdf, &font, &Limits::DEFAULT, &mut budget).unwrap();
+        let font = Font::read(Objects(&pdf), &font, &Limits::DEFAULT.fonts(), &mut budget, &mut ()).unwrap();
         let byte_widths = font.byte_widths().expect("a simple font's codes are bytes");
         prop_assert!((0..256u32).all(|c| byte_widths[c as usize] == font.width(c)));
         let mut state = State::default();

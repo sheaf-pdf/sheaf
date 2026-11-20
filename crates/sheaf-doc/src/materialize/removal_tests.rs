@@ -869,8 +869,12 @@ fn an_unlinked_form_s_text_is_read() {
 #[test]
 fn an_unknown_encoding_counts_as_differing() {
     let dir = scratch();
+    // Its codes are glyphs by names that say no text.
+    let unnamed = (0..256).map(|code| Object::name(format!("glyph{code}")));
+    let differences: Vec<Object> = std::iter::once(Object::from(0)).chain(unnamed).collect();
     let symbolic = dictionary! {
         "Type" => Object::name("Font"), "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("ABCDEF+Wingdings"),
+        "Encoding" => dictionary! { "Differences" => differences },
     };
     let (path, doc, page, _) = form_file(&dir, symbolic.clone(), None, "(secret)");
     let known = [(helvetica(), None, "(secret)")];

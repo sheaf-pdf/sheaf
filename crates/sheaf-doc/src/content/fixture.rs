@@ -23,7 +23,7 @@ use crate::pdf::{
 use image::{Rgb, RgbImage};
 
 use super::interp::Encoded;
-use super::{Foreign, Glyphless, PageContent, contents};
+use super::{Font, Glyphless, Objects, PageContent, contents};
 use crate::source::Limits;
 
 /// A one-page PDF.
@@ -221,7 +221,14 @@ pub fn standard_14(subtype: &str, name: &str) -> Dictionary {
         "BaseFont" => Object::name(name),
         "Encoding" => Object::name("WinAnsiEncoding"),
     };
-    let read = Foreign::read(&Pdf::new(), &font, &Limits::DEFAULT, &mut 0);
+    let none = Pdf::new();
+    let read = Font::read(
+        Objects(&none),
+        &font,
+        &Limits::DEFAULT.fonts(),
+        &mut 0,
+        &mut (),
+    );
     let afm = read.expect("a font by name alone has no stream to decompress");
     let widths = (32..=255).map(|code| Object::from(afm.width(code) as i64));
     font.set("FirstChar", 32);

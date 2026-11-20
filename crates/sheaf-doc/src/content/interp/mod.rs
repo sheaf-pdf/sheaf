@@ -3,7 +3,7 @@
 //! interprets it (`CPDF_StreamContentParser`), so that where it says a
 //! glyph is, PDFium draws it. It reads the toolkit's tokens
 //! ([`lex`](super::lex)) and the fonts files draw in
-//! ([`Foreign`](super::Foreign)), and hands each operator, each string
+//! ([`Font`](super::Font)), and hands each operator, each string
 //! shown and each form drawn to a visitor, as an [`Event`]:
 //!
 //! - every operator, inline images among them, with where it is and its
@@ -84,7 +84,7 @@ pub use xobject::{FormUse, ImageDrawn, ImageOf, Refused, UseId};
 
 use super::lex::{self, LexError, ResCx, Step, Tok};
 use super::page::{Concat, ReadObjects, direct};
-use super::{FontId, FontKind, FontScope, Fonts, Paint, Props, TooLarge};
+use super::{FontError, FontId, FontKind, FontScope, Fonts, Objects, Paint, Props};
 use crate::geom::Rect;
 use crate::source::Limits;
 use op::Op;
@@ -274,7 +274,7 @@ pub struct Summary {
     /// decompresses to ([`FontScope::font`]), and what drawing its
     /// program's glyphs cost: a simple font's as it's read, a CIDFont's
     /// for each glyph shown, once
-    /// ([`Foreign::charge_outlines`](super::Foreign::charge_outlines)).
+    /// ([`Font::charge_outlines`](super::Font::charge_outlines)).
     pub decompressed: usize,
     /// Path segments painted or made the clip.
     pub segments: usize,
@@ -423,7 +423,7 @@ struct Run<'a, R: ReadObjects> {
     /// XObjects read, each once.
     xobjects: HashMap<ObjectId, Rc<Drawn>>,
     /// The CIDFont glyphs whose outlines' drawing is charged
-    /// ([`Foreign::charge_outlines`](super::Foreign::charge_outlines)),
+    /// ([`Font::charge_outlines`](super::Font::charge_outlines)),
     /// each once.
     outlines: HashSet<(FontId, u32)>,
     /// What the forms and fonts may yet decompress to, and drawing the
@@ -683,17 +683,23 @@ impl<'a, R: ReadObjects> Run<'a, R> {
     fn pick(&mut self, frame: &Frame<'_>, state: &mut State, name: &[u8]) -> Result<(), Stop> {
         let objects = self.objects;
         let font = match self.holder(frame, b"Font") {
-            Some((owner, resources)) => self
-                .fonts
-                .font(
-                    objects,
+            Some((owner, resources)) => {
+                let read = self.fonts.font(
+                    Objects(objects),
                     owner,
                     Some(resources),
                     name,
-                    self.lim,
+                    &self.lim.fonts(),
                     &mut self.budget,
-                )
-                .map_err(|_: TooLarge| past(Cap::Decompressed))?,
+                );
+                match read {
+                    Ok(font) => font,
+                    Err(FontError::TooLarge) => return Err(past(Cap::Decompressed)),
+                    // An object that doesn't read is no font by that
+                    // name; sheaf's sources give no other reason.
+                    Err(_) => None,
+                }
+            }
             None => None,
         };
         let text = &mut state.text;
@@ -879,8 +885,9 @@ impl<'a, R: ReadObjects> Run<'a, R> {
             }
             let outlines = &mut self.outlines;
             let first = |glyph| id.is_some_and(|id| outlines.insert((id, glyph)));
+            // A program is in memory by now: nothing but the budget stops it.
             font.charge_outlines(string, first, &mut self.budget)
-                .map_err(|_: TooLarge| past(Cap::Decompressed))?;
+                .map_err(|_: FontError| past(Cap::Decompressed))?;
             let show = TextShow::new(string, &local.state, Some(font), run);
             if !show.bounded(font, glyphs, end) {
                 return Err(not_finite());

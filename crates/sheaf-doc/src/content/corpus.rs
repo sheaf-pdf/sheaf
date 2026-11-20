@@ -471,7 +471,7 @@ const DUMP_ONLY: &str = "SHEAF_GLYPH_DUMP_ONLY";
 /// (`bench/pool-sample.txt`), every scan, and the conformance suites'
 /// files that claim PDF/UA. The files sheaf-render's interpreter tiers
 /// read.
-pub(super) fn dump_picks(corpus: &Corpus) -> BTreeMap<String, &'static str> {
+fn dump_picks(corpus: &Corpus) -> BTreeMap<String, &'static str> {
     let list = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/pool-sample.txt");
     let pool = std::fs::read_to_string(list).expect("bench/pool-sample.txt");
     let pool = pool.lines().map(str::trim).filter(|l| !l.is_empty());
@@ -499,6 +499,9 @@ fn kind_number(kind: FontKind) -> u64 {
         FontKind::Type3 => 3,
         FontKind::Type0(Descendant::CidFontType0) => 4,
         FontKind::Type0(Descendant::CidFontType2) => 5,
+        // A kind the dump has no number for shows as one of its own.
+        FontKind::Type0(_) => 254,
+        _ => 255,
     }
 }
 
@@ -508,6 +511,8 @@ fn program_number(program: FontProgram) -> u64 {
         FontProgram::None => 0,
         FontProgram::Read => 1,
         FontProgram::Malformed => 2,
+        FontProgram::Capped => 3,
+        _ => 255,
     }
 }
 
@@ -672,16 +677,16 @@ fn dump_file(corpus: &Corpus, path: &str, full: bool) -> Vec<String> {
                     return ControlFlow::Continue(());
                 };
                 records.begin("show");
-                let id = show.font.and_then(Foreign::id);
+                let id = show.font.and_then(Font::id);
                 records.maybe("font", id.map(|id| u64::from(id.number)));
                 records.maybe("generation", id.map(|id| u64::from(id.generation)));
                 records.maybe("kind", show.font.map(|f| kind_number(f.kind())));
                 records.maybe("program", show.font.map(|f| program_number(f.program())));
                 records.number("has_font", u64::from(show.font.is_some()));
-                records.approx(show.font.map(Foreign::approx).unwrap_or_default());
+                records.approx(show.font.map(Font::approx).unwrap_or_default());
                 records.number(
                     "vertical",
-                    u64::from(show.font.is_some_and(Foreign::is_vertical)),
+                    u64::from(show.font.is_some_and(Font::is_vertical)),
                 );
                 records.number("stock", u64::from(show.stock));
                 records.bytes("string", Some(show.string));

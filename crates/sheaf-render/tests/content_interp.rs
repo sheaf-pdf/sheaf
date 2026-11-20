@@ -151,7 +151,9 @@ use sheaf_doc::content::fixture::{self, Fixture};
 use sheaf_doc::content::interp::{
     EncodeError, Glyph, InterpError, Kind, Opts, Refused, encode, interpret,
 };
-use sheaf_doc::content::{FontApprox, FontKind, FontProgram, Fonts, Foreign, PageContent, Std14};
+use sheaf_doc::content::{
+    Font, FontApprox, FontKind, FontProgram, Fonts, Objects, PageContent, Std14,
+};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::geom::{Affine, Rect};
 use sheaf_doc::materialize::ObjKey;
@@ -310,7 +312,7 @@ fn near(a: (f32, f32), b: (f32, f32)) -> bool {
 /// held to PDFium's loose box on every side: its outline's box is its
 /// program's, united with its metrics' as PDFium unites them, and nothing
 /// it's placed by is guessed. A Type3 glyph's `d1` box isn't united.
-fn exact(font: &Foreign, approx: FontApprox) -> bool {
+fn exact(font: &Font, approx: FontApprox) -> bool {
     font.kind() != FontKind::Type3 && !approx.any()
 }
 
@@ -573,7 +575,7 @@ fn a_long_tj_is_laid_out_as_pdfium_lays_it_out() {
 
 /// Every glyph of each standard 14 font a file draws without a program or
 /// `/Widths` is as wide as PDFium's own face draws it, where its width
-/// isn't guessed ([`Foreign::width_guessed`]): each named by
+/// isn't guessed ([`Font::width_guessed`]): each named by
 /// `/Differences` in turn, shown between two `A`s, the second where their
 /// widths put it.
 ///
@@ -603,7 +605,9 @@ fn standard_14_widths_are_pdfium_s_faces_but_where_guessed() {
                 "Encoding" => dictionary! { "Differences" => differences },
             };
             let none = sheaf_doc::pdf::Document::new();
-            let foreign = Foreign::read(&none, &font, &Limits::DEFAULT, &mut 0).expect("no stream");
+            let limits = Limits::DEFAULT.fonts();
+            let foreign =
+                Font::read(Objects(&none), &font, &limits, &mut 0, &mut ()).expect("no stream");
             // Lines far enough apart that PDFium takes no `A` for one of
             // the line's before it (`CPDF_TextPage::ProcessTextObjectItems`).
             let y = |code: u32| (20 * (code - 127)) as f32;
@@ -1045,7 +1049,7 @@ fn interpreted(src: &Src) -> Interpreted {
                         // A dictionary font lives as long as its page's
                         // interpretation, so its address is told apart
                         // only within it.
-                        let key = |font: &Foreign| match font.id() {
+                        let key = |font: &Font| match font.id() {
                             Some(id) => (Some(id), 0, 0),
                             None => (None, i, std::ptr::from_ref(font) as usize),
                         };
@@ -1224,7 +1228,7 @@ impl Class {
 
     /// A glyph's class, what's guessed of it `approx`, in `font` and drawn
     /// through `trm`.
-    fn of(approx: FontApprox, font: &Foreign, trm: Affine) -> Class {
+    fn of(approx: FontApprox, font: &Font, trm: Affine) -> Class {
         match font.kind() {
             _ if approx.codes || approx.widths => Class::Approx,
             _ if font.is_vertical() => Class::CidVertical,
@@ -1466,7 +1470,7 @@ struct Showing {
 /// The stream `font`'s program is in, where the font is an object: its
 /// descriptor's, or its descendant's, first of `/FontFile`, `/FontFile2`
 /// and `/FontFile3` that's a reference.
-fn program_of(src: &Src, font: &Foreign) -> Option<ObjectId> {
+fn program_of(src: &Src, font: &Font) -> Option<ObjectId> {
     fn dict<'a>(pdf: &'a sheaf_doc::pdf::LazyPdf, o: &'a Object) -> Option<&'a Dictionary> {
         pdf.dereference(o).ok()?.1.as_dict()
     }
@@ -1482,7 +1486,7 @@ fn program_of(src: &Src, font: &Foreign) -> Option<ObjectId> {
         .find_map(|key| descriptor.get(key)?.as_reference())
 }
 
-fn font_name(src: &Src, font: &Foreign) -> String {
+fn font_name(src: &Src, font: &Font) -> String {
     let named = font.id().and_then(|id| {
         let dict = src.pdf().get_object(id).ok()?.as_dict()?;
         let name = dict.get(b"BaseFont").and_then(Object::as_name)?;
@@ -1497,8 +1501,8 @@ fn font_name(src: &Src, font: &Foreign) -> String {
 
 /// `font`'s name and what's guessed of a glyph of its, `approx`, for a
 /// list: its codes or widths, or only where the glyph is, a width before
-/// it on its line guessed ([`Foreign::width_guessed`]).
-fn font_label(src: &Src, font: &Foreign, approx: FontApprox) -> String {
+/// it on its line guessed ([`Font::width_guessed`]).
+fn font_label(src: &Src, font: &Font, approx: FontApprox) -> String {
     let of_font = font.approx();
     let guessed = match (approx.codes, of_font.widths) {
         (true, true) => "codes and widths",
@@ -1514,7 +1518,7 @@ fn font_label(src: &Src, font: &Foreign, approx: FontApprox) -> String {
 /// PageSpace whatever the text space's scale, from its vertical origin
 /// down by its advance, from the origin `g` has; its quad is that column
 /// through the text space, so the two are one where that isn't scaled.
-fn vertical_cell(font: &Foreign, g: &Glyph<'_>, size: f32) -> Option<Rect> {
+fn vertical_cell(font: &Font, g: &Glyph<'_>, size: f32) -> Option<Rect> {
     let v = font.vertical(g.code)?;
     let left = g.origin.x + (v.vx - 500.0) * size / 1000.0;
     let top = g.origin.y + v.vy * size / 1000.0;

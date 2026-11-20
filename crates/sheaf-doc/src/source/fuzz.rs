@@ -1637,7 +1637,12 @@ mod tests {
             let read = content::Fonts::default();
             let mut budget = Limits::DEFAULT.content.decompressed;
             let tt = read
-                .get(&page.pdf, tt, &Limits::DEFAULT, &mut budget)
+                .get(
+                    content::Objects(&page.pdf),
+                    tt,
+                    &Limits::DEFAULT.fonts(),
+                    &mut budget,
+                )
                 .unwrap()
                 .unwrap();
             assert_eq!(tt.program(), content::FontProgram::Read);

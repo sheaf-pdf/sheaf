@@ -25,7 +25,7 @@
 //!   through its fonts.
 //! - [`DrawFont`]: what sheaf draws text in, the PDF layer's [`Std14`]
 //!   and sheaf's [`Glyphless`], each a page resource ([`Res`]) named by
-//!   its [`ResId`]; [`Foreign`], a font a file draws in, as read, and
+//!   its [`ResId`]; [`Font`], a font a file draws in, as read, and
 //!   [`Fonts`], a source's.
 //! - [`interp`]: what it draws, an operator at a time, in the graphics
 //!   and text state it's drawn in: each glyph and where it is, each
@@ -76,8 +76,8 @@ pub use blocks::{
     PaginationKind, SheafBlock, SheafBlockRef, isolates,
 };
 pub use font::{
-    Descendant, DrawFont, DrawText, FontApprox, FontId, FontKind, FontMetrics, FontProgram,
-    FontScope, Fonts, Foreign, Glyphless, Std14, TooLarge, Unencoded, VerticalMetrics, std14_of,
+    Descendant, DrawFont, DrawText, Font, FontApprox, FontError, FontId, FontKind, FontMetrics,
+    FontProgram, FontScope, Fonts, Glyphless, Std14, Unencoded, VerticalMetrics, std14_of,
     wrap_with,
 };
 pub use lex::{LexError, LexErrorKind, ResCx, Tok, lex, name, object};

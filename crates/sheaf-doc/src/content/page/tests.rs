@@ -247,3 +247,63 @@ fn a_font_s_limits_are_the_family_s_with_sheaf_s_content_caps() {
         (family.composite_glyphs, family.composite_depth)
     );
 }
+
+/// A page interpreted from a source keeps none of its fonts' streams:
+/// each font's program, CMap and map of CIDs is read as the font is,
+/// through [`Objects`], and the source holds no slot for one afterwards,
+/// though every font's program was read and its glyphs laid out.
+#[test]
+fn a_page_interpreted_keeps_no_font_s_stream() {
+    use std::ops::ControlFlow;
+
+    use crate::content::fixture;
+    use crate::content::interp::{Kind, Opts, interpret};
+    use crate::content::{FontProgram, Fonts};
+
+    let mut built = fixture::programs();
+    let page = built.pdf.page_iter().next().expect("one page");
+    let content: Vec<ObjectId> = contents(built.page());
+    // Every stream of the file but the page's content is a font's.
+    let streams: Vec<ObjectId> = (built.pdf.objects.iter())
+        .filter(|(id, object)| object.as_stream().is_some() && !content.contains(id))
+        .map(|(id, _)| *id)
+        .collect();
+    assert_eq!(streams.len(), 3, "a TrueType, a CFF and a Type 1 program");
+
+    let lim = &Limits::DEFAULT;
+    let pdf = LazyPdf::open(Arc::<[u8]>::from(built.bytes()), None, &lim.reader).unwrap();
+    let dict = pdf.get_dictionary(page).expect("the page");
+    let resources = dict.get(b"Resources");
+    let read = PageContent::read(&pdf, &contents(dict), lim).expect("its content");
+
+    let (mut glyphs, mut programs) = (0, 0);
+    let fonts = Fonts::default();
+    let done = interpret(
+        &pdf,
+        read.concat(),
+        resources,
+        lim,
+        &fonts,
+        Opts::default(),
+        |event| {
+            if let Kind::Text(show) = event.kind {
+                glyphs += show.glyphs().count();
+                let read = show.font.map(|font| font.program());
+                programs += usize::from(read == Some(FontProgram::Read));
+            }
+            ControlFlow::Continue(())
+        },
+    );
+    done.expect("the page is interpreted");
+    assert!(glyphs > 20, "{glyphs} glyphs");
+    assert!(
+        programs >= 6,
+        "{programs} strings in a font whose program read"
+    );
+    for id in &streams {
+        assert!(!pdf.is_kept(*id), "{id:?}, a font's stream, was kept");
+    }
+    // One asked for as an object is kept, so the check above can see one.
+    pdf.get(streams[0]).expect("a program");
+    assert!(pdf.is_kept(streams[0]));
+}

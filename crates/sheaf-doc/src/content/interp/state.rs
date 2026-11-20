@@ -69,10 +69,10 @@ pub struct TextState {
     pub pen: Pt,
     /// Whether where the pen is is guessed: a string shown since the line
     /// was set is in a font whose codes or widths are guessed, or shows a
-    /// code whose width is ([`FontApprox`], [`Foreign::width_guessed`]).
+    /// code whose width is ([`FontApprox`], [`Font::width_guessed`]).
     ///
     /// [`FontApprox`]: crate::content::FontApprox
-    /// [`Foreign::width_guessed`]: crate::content::Foreign::width_guessed
+    /// [`Font::width_guessed`]: crate::content::Font::width_guessed
     pub guessed: bool,
 }
 

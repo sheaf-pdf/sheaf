@@ -5,29 +5,18 @@
 //! - [`DrawFont`]: a font sheaf draws in, the PDF layer's [`Std14`] (the
 //!   standard 14, with Adobe's widths and boxes) and sheaf's own
 //!   [`Glyphless`], OCR's invisible text; [`DrawText`] writes text in one.
-//! - [`Foreign`]: a file's font, its codes, widths and heights as PDFium
-//!   reads them; [`Fonts`], a source's, each read once.
+//! - [`Font`]: a file's font, its codes, widths and heights as PDFium
+//!   reads them, by the PDF layer; [`Fonts`], a source's, each read once.
 //!
 //! Text a font can't encode draws `?` and is counted ([`Unencoded`]), so
 //! the writer can say so once; the text itself (`/Contents`, a recipe) is
 //! kept exactly. M10 slice 7's fallback font ends that, behind
 //! [`DrawFont`].
 
-mod afm;
 mod draw;
-mod encoding;
-mod foreign;
 mod glyphless;
 #[cfg(test)]
-mod parity_tests;
-mod predefined;
-mod program;
-#[cfg(test)]
-mod side_by_side;
-mod std14;
-#[cfg(test)]
 mod tests;
-mod type1;
 
 use std::sync::OnceLock;
 
@@ -37,29 +26,14 @@ use unicode_normalization::UnicodeNormalization;
 use crate::pdf::fonts::LayoutFont;
 
 pub use draw::DrawText;
-pub use foreign::{
-    Descendant, FontApprox, FontId, FontKind, FontScope, Fonts, Foreign, TooLarge, VerticalMetrics,
-};
 pub use glyphless::Glyphless;
-pub use program::FontProgram;
 
-pub use crate::pdf::fonts::Std14;
+pub use crate::pdf::fonts::{
+    Descendant, Error as FontError, Font, FontApprox, FontId, FontKind, FontMetrics, FontProgram,
+    FontScope, Fonts, Std14, VerticalMetrics,
+};
 
 use super::Res;
-use crate::geom::Rect;
-
-/// How far a font's glyphs reach above and below the baseline, and the
-/// box all of them fit in, in glyph units: thousandths of text space at a
-/// font size of 1. A Type3 font whose matrix turns glyph space over may
-/// have its ascent below its descent, as PDFium keeps them; a glyph's box
-/// spans the two either way.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct FontMetrics {
-    pub ascent: f32,
-    /// Below the baseline: negative.
-    pub descent: f32,
-    pub bbox: Option<Rect>,
-}
 
 /// Characters a font couldn't encode: each drew `?`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

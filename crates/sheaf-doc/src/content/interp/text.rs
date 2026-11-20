@@ -9,8 +9,9 @@ use std::ops::Range;
 
 use super::state::{State, TextState};
 use crate::annot::Pt;
-use crate::content::{FontApprox, FontKind, Foreign, TextMode};
+use crate::content::{Font, FontApprox, FontKind, TextMode};
 use crate::geom::{Affine, Rect};
+use crate::pdf::fonts::GlyphBox;
 
 /// Four corners in PageSpace, in order around a box: a glyph's
 /// bottom-left, bottom-right, top-right and top-left, as its text space
@@ -57,7 +58,7 @@ pub struct TextShow<'e> {
     /// the name it gave ([`Fonts::stock`](crate::content::Fonts::stock));
     /// None before either, where PDFium draws nothing, and it has no
     /// glyphs.
-    pub font: Option<&'e Foreign>,
+    pub font: Option<&'e Font>,
     /// Whether the font is PDFium's stock Helvetica, the resources having
     /// none by the name `Tf` gave.
     pub stock: bool,
@@ -85,7 +86,7 @@ impl<'e> TextShow<'e> {
     pub(super) fn new(
         string: &'e [u8],
         state: &'e State,
-        font: Option<&'e Foreign>,
+        font: Option<&'e Font>,
         offset: f32,
     ) -> TextShow<'e> {
         let text = &state.text;
@@ -115,8 +116,8 @@ impl<'e> TextShow<'e> {
     /// below [`PLACED`]. A string whose bound is past that is taken for
     /// one that isn't, as content no real page has.
     ///
-    /// [extent]: Foreign::extent
-    pub(super) fn bounded(&self, font: &Foreign, n: usize, end: f32) -> bool {
+    /// [extent]: Font::extent
+    pub(super) fn bounded(&self, font: &Font, n: usize, end: f32) -> bool {
         let text = self.text;
         let size = f64::from(text.size.abs());
         let em = f64::from(font.extent()) * size / 1000.0;
@@ -169,11 +170,10 @@ impl<'e> TextShow<'e> {
             laid(font, text, string, offset).map(move |laid| {
                 let guessed = font.width_guessed(laid.code);
                 let outline = outlined.then(|| font.char_box(laid.code)).flatten();
-                let approx = FontApprox {
-                    widths: of_font.widths || moved || guessed,
-                    boxes: of_font.boxes || (outlined && outline.is_none()),
-                    ..of_font
-                };
+                let outline = outline.map(rect);
+                let mut approx = of_font;
+                approx.widths = of_font.widths || moved || guessed;
+                approx.boxes = of_font.boxes || (outlined && outline.is_none());
                 moved |= guessed;
                 let (origin, cell, pen) = if vertical {
                     let v = font.vertical(laid.code);
@@ -248,9 +248,19 @@ const PLACED: f64 = 3e37;
 /// it out (`kSizeEpsilon`), in text space at the font size.
 const SIZE_EPSILON: f32 = 0.01;
 
+/// A font's box as sheaf's rectangle, side for side.
+fn rect(b: GlyphBox) -> Rect {
+    Rect {
+        x0: b.x0,
+        y0: b.y0,
+        x1: b.x1,
+        y1: b.y1,
+    }
+}
+
 /// The box PDFium gives a glyph's outline, its tight box (`CPDF_TextPage::
 /// ProcessTextObject`), in the text space it's laid out in: `r`, its
-/// font's box for its code in glyph units ([`Foreign::char_box`]), at
+/// font's box for its code in glyph units ([`Font::char_box`]), at
 /// `size`, a thousandth of the font size, from its origin `origin`; a side
 /// shorter than [`SIZE_EPSILON`] taken out, its top to `size` above its
 /// bottom, its right to `width` past its left, its advance at the font
@@ -287,19 +297,19 @@ pub struct Glyph<'e> {
     /// across its width, from the font's descent to its ascent, or in
     /// vertical writing the em-wide column its advance spans; united with
     /// its outline's box where the font's program says it
-    /// ([`Foreign::char_box`]), as PDFium takes that box out where it has
+    /// ([`Font::char_box`]), as PDFium takes that box out where it has
     /// no width or height. United in text space, so in text turned or
     /// skewed its bounds hold PDFium's box, which unites the two boxes'
     /// bounds in PageSpace; and where the font's ascent is its descent,
     /// which PDFium bounds by the outline's box alone, its heights are
     /// guessed ([`FontApprox::heights`]). Where no program says its outline
     /// ([`FontApprox::boxes`]), and in a Type3 font, whose glyphs' `d1`
-    /// boxes ([`Foreign::glyph_box`]) aren't united, it holds what the
+    /// boxes ([`Font::glyph_box`]) aren't united, it holds what the
     /// metrics say, and the outline may reach past it.
     pub quad: Quad,
     /// What of the metrics it's placed by is guessed, so its box may be
-    /// elsewhere: its font's ([`Foreign::approx`]); its width, where the
-    /// font guesses its code's ([`Foreign::width_guessed`]), or one shown
+    /// elsewhere: its font's ([`Font::approx`]); its width, where the
+    /// font guesses its code's ([`Font::width_guessed`]), or one shown
     /// before it on its line, its string's or since the line was set
     /// ([`TextState::guessed`]), which moves it; and its outline, where
     /// the font's program doesn't say its code's.
@@ -309,12 +319,12 @@ pub struct Glyph<'e> {
     /// Where it starts in the text matrix's space: where a string of its
     /// own would start, after a `Td` to here from `BT` in that matrix.
     pub pen: Pt,
-    font: &'e Foreign,
+    font: &'e Font,
     text: &'e TextState,
 }
 
 impl Glyph<'_> {
-    /// The text its code is, where the font says ([`Foreign::code_text`]).
+    /// The text its code is, where the font says ([`Font::code_text`]).
     pub fn text(&self) -> Option<Cow<'_, str>> {
         self.font.code_text(self.code)
     }
@@ -352,7 +362,7 @@ struct Laid {
 
 /// `s`'s codes in `font`, laid out with `text`'s spacing, from `from`.
 fn laid<'a>(
-    font: &'a Foreign,
+    font: &'a Font,
     text: &'a TextState,
     s: &'a [u8],
     from: f32,
@@ -385,7 +395,7 @@ fn laid<'a>(
 
 /// Where showing `s` in `font` from `from` ends ([`laid`]), and how many
 /// glyphs it shows.
-pub(super) fn advance(font: &Foreign, text: &TextState, s: &[u8], from: f32) -> (f32, usize) {
+pub(super) fn advance(font: &Font, text: &TextState, s: &[u8], from: f32) -> (f32, usize) {
     match font.byte_widths() {
         Some(widths) => (bytes_end(widths, text, s, from), s.len()),
         None => laid_end(font, text, s, from),
@@ -394,7 +404,7 @@ pub(super) fn advance(font: &Foreign, text: &TextState, s: &[u8], from: f32) -> 
 
 /// Where [`laid`]'s last code of `s` from `from` ends, `from` where it
 /// has none, and how many codes it lays out.
-pub(super) fn laid_end(font: &Foreign, text: &TextState, s: &[u8], from: f32) -> (f32, usize) {
+pub(super) fn laid_end(font: &Font, text: &TextState, s: &[u8], from: f32) -> (f32, usize) {
     let mut end = from;
     let mut glyphs = 0;
     for laid in laid(font, text, s, from) {

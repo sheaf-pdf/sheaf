@@ -1159,6 +1159,13 @@ const RETIRED_M18: &[(&str, u8)] = &[
     ("content::font::Font::resource", 22),
     ("content::font::Font::advance", 22),
     ("content::font::std14::Std14::encoding", 22),
+    // A font a file draws in is pdf-fonts' `Font`, `content::Font`, read
+    // from a source's objects as `content::Objects` gives them, under
+    // `Limits::fonts()`; what stops one being read is its `Error`,
+    // `content::FontError`. sheaf's own reader, its programs, CMaps,
+    // encodings and metrics went with them.
+    ("content::font::Foreign", 22),
+    ("content::font::TooLarge", 22),
 ];
 
 /// The ledgers, with the words a hit names its slice by.
@@ -1223,6 +1230,11 @@ const QUALIFIED_ONLY: &[&str] = &[
     "resource",
     "advance",
     "encoding",
+    // An annotation that isn't sheaf's (`model::Foreign`), and content or
+    // a form past its cap (`ContentFault::TooLarge`): not the font
+    // reader's (M18 slice 22).
+    "Foreign",
+    "TooLarge",
     // A print, export or render request's job, and the app's file-writing
     // job: not the version's.
     "job",

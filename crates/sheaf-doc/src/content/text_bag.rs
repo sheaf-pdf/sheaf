@@ -1,7 +1,7 @@
 //! Text as words: what content's text-showing operators draw, decoded
 //! through each font's `/ToUnicode` or encoding, or a Type0 font's
 //! predefined CMap's or collection's
-//! ([`Foreign::code_text`](super::Foreign::code_text)), composed (NFC)
+//! ([`Font::code_text`](super::Font::code_text)), composed (NFC)
 //! and counted by word. The same text drawn in two fonts, with different
 //! codes, gives equal bags: what the removal check compares (§11.9). A
 //! string whose codes a font doesn't say the text of is its bytes' hash,
