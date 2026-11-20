@@ -71,6 +71,9 @@ pub enum LexErrorKind {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResCx {
     spaces: HashMap<Vec<u8>, u32>,
+    /// The same names and counts as pdf-content-streams reads content
+    /// with.
+    family: crate::pdf::content::ResCx,
 }
 
 impl ResCx {
@@ -81,9 +84,19 @@ impl ResCx {
 
     /// Color spaces by name, each with its components.
     pub fn new(spaces: impl IntoIterator<Item = (Vec<u8>, u32)>) -> ResCx {
-        ResCx {
-            spaces: spaces.into_iter().collect(),
-        }
+        let spaces: HashMap<Vec<u8>, u32> = spaces.into_iter().collect();
+        let family = crate::pdf::content::ResCx::new(spaces.iter().map(|(n, &c)| (n.clone(), c)));
+        ResCx { spaces, family }
+    }
+
+    /// The same color spaces, as pdf-content-streams reads content with
+    /// them.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the splice reads with it once it is the family's")
+    )]
+    pub(crate) fn family(&self) -> &crate::pdf::content::ResCx {
+        &self.family
     }
 }
 

@@ -227,7 +227,7 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
                 continue;
             }
         }
-        let lexed: Vec<_> = concat.lex(&res, LIM).map(Result::unwrap).collect();
+        let lexed: Vec<_> = lex(concat.bytes(), &res, LIM).map(Result::unwrap).collect();
         let has_image = lexed.iter().any(|(_, t)| matches!(t, Tok::InlineImage(_)));
         let ours = balance(concat, &res, LIM).unwrap();
         if !has_image && let Some(reference) = decoded_balance(concat.bytes()) {

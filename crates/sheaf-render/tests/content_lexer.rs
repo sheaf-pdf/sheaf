@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use pdfium_render::prelude::*;
-use sheaf_doc::content::{PageContent, ResCx, Tok};
+use sheaf_doc::content::{PageContent, ResCx, Tok, lex};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::pdf::{Dictionary, LazyPdf, Object, ObjectId};
 use sheaf_doc::source::{Limits, PageFacts};
@@ -169,7 +169,7 @@ fn lexed(
     // What PDFium's objects depend on of the graphics state, at each `q`
     // level.
     let mut states = vec![State::default()];
-    for token in content.concat().lex(&res, &Limits::DEFAULT) {
+    for token in lex(content.concat().bytes(), &res, &Limits::DEFAULT) {
         let (_, token) = token.map_err(|e| content.fault(e).to_string())?;
         let op = match token {
             Tok::Operand(o) => {

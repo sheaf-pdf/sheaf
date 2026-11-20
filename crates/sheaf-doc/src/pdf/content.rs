@@ -2,8 +2,11 @@
 //! types content is written with ([`ContentWriter`], and what its calls
 //! take), the resources it draws with by what they are ([`Res`], named
 //! when the content is finished against the names a resources dictionary
-//! already binds, [`Reserved`]), and the limits its reading is held to.
-//! `crate::content` is where sheaf writes, lexes and splices content.
+//! already binds, [`Reserved`]), a page's streams as one ([`Concat`],
+//! joined by [`Join`], with the places in them, [`Pos`] and
+//! [`SpanAcross`]), and what its reading is held to and needs of the
+//! resources ([`Limits`], [`ResCx`]). `crate::content` is where sheaf
+//! writes, lexes and splices content.
 //!
 //! Also a minimal content-stream operation builder for test fixtures and
 //! examples ([`Content`]), with a test-only `Content::decode`.
@@ -13,8 +16,9 @@ use pdf_objects::Object;
 use super::{Error, Result};
 
 pub use pdf_content_streams::{
-    Blend, Color, ContentWriter, FillRule, GState, Limits, LineCap, LineJoin, Need, Paint, Res,
-    ResBody, ResError, ResId, ResKind, Reserved, ResourceNeeds, TextMode, write_string,
+    Blend, Color, Concat, ContentWriter, FillRule, GState, Join, Limits, LineCap, LineJoin, Need,
+    Paint, Pos, Res, ResBody, ResCx, ResError, ResId, ResKind, Reserved, ResourceNeeds, SpanAcross,
+    TextMode, write_string,
 };
 
 #[cfg(test)]

@@ -2,7 +2,9 @@
 //! streams. A marked range or a `q` may open in one stream and close in
 //! the next, so a page's streams are lexed as PDFium reads them, joined
 //! with a space between each ([`Concat`]), and what's found is mapped back
-//! to a stream and a place in it ([`Pos`], [`SpanAcross`]).
+//! to a stream and a place in it ([`Pos`], [`SpanAcross`]). Those three
+//! are pdf-content-streams', as is the join a page's streams are read
+//! into.
 //!
 //! [`PageContent`] reads the streams through [`ReadObjects`]: a source,
 //! which reads each without keeping it, or a document in memory (the old
@@ -12,177 +14,12 @@
 //!
 //! [`ContentLimits::decompressed`]: crate::source::ContentLimits
 
-use std::borrow::Cow;
-use std::ops::Range;
-
+use crate::pdf::content::Join;
+pub use crate::pdf::content::{Concat, Pos, SpanAcross};
 use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, Stream, StreamExt, Value};
 
-use super::lex::{self, LexError, ResCx, Tok};
+use super::lex::{self, LexError, ResCx};
 use crate::source::Limits;
-
-/// A place in a page's content: a byte in one of its streams. The end of
-/// a stream is the place after its last byte.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Pos {
-    pub stream: u32,
-    pub at: u32,
-}
-
-/// Part of a page's content, which may start in one stream and end in
-/// another: from `start` up to `end`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SpanAcross {
-    pub start: Pos,
-    pub end: Pos,
-}
-
-impl std::fmt::Display for Pos {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "stream {} byte {}", self.stream, self.at)
-    }
-}
-
-impl std::fmt::Display for SpanAcross {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{} to {}", self.start, self.end)
-    }
-}
-
-/// Streams as one: their bytes joined, a space between each, as PDFium
-/// joins a page's. A token can still run from one into the next, as in
-/// PDFium, when a string or an inline image does. Offsets are into the
-/// joined bytes; streams are at most 4 GiB together, as a page's content
-/// is under its cap.
-#[derive(Debug, Clone)]
-pub struct Concat<'a> {
-    bytes: Cow<'a, [u8]>,
-    /// Where each stream starts.
-    starts: Box<[usize]>,
-}
-
-impl<'a> Concat<'a> {
-    /// `streams` as one; one stream is borrowed as it is.
-    pub fn new(streams: &[&'a [u8]]) -> Concat<'a> {
-        if let [one] = streams {
-            return Concat {
-                bytes: Cow::Borrowed(one),
-                starts: Box::new([0]),
-            };
-        }
-        let mut join = Join::default();
-        for stream in streams {
-            join.push(stream.to_vec());
-        }
-        join.done()
-    }
-
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    /// How many streams there are.
-    pub fn stream_count(&self) -> usize {
-        self.starts.len()
-    }
-
-    /// Stream `i`'s bytes.
-    pub fn stream(&self, i: usize) -> &[u8] {
-        &self.bytes[self.range(i)]
-    }
-
-    /// Where stream `i` is in the joined bytes.
-    pub fn range(&self, i: usize) -> Range<usize> {
-        let end = self
-            .starts
-            .get(i + 1)
-            .map_or(self.bytes.len(), |next| next - 1);
-        self.starts[i]..end
-    }
-
-    /// Where offset `at` is: past a stream's last byte, the space after it
-    /// is that stream's end.
-    pub fn pos(&self, at: usize) -> Pos {
-        let stream = self
-            .starts
-            .partition_point(|&start| start <= at)
-            .saturating_sub(1);
-        let start = self.starts.get(stream).copied().unwrap_or(0);
-        Pos {
-            stream: small(stream),
-            at: small(at - start),
-        }
-    }
-
-    /// Where `pos` is in the joined bytes; None past its stream's end, or
-    /// past the last stream.
-    pub fn offset(&self, pos: Pos) -> Option<usize> {
-        let stream = pos.stream as usize;
-        let range = (stream < self.starts.len()).then(|| self.range(stream))?;
-        let at = range.start + pos.at as usize;
-        (at <= range.end).then_some(at)
-    }
-
-    /// Where `span` is in the joined bytes; None when either end is
-    /// nowhere, or the end is before the start.
-    pub fn offsets(&self, span: SpanAcross) -> Option<Range<usize>> {
-        let (start, end) = (self.offset(span.start)?, self.offset(span.end)?);
-        (start <= end).then_some(start..end)
-    }
-
-    /// Where `range` is.
-    pub fn span(&self, range: Range<usize>) -> SpanAcross {
-        SpanAcross {
-            start: self.pos(range.start),
-            end: self.pos(range.end),
-        }
-    }
-
-    /// The joined bytes' tokens ([`lex::lex`]), at offsets into them.
-    pub fn lex<'s>(
-        &'s self,
-        res: &ResCx,
-        lim: &Limits,
-    ) -> impl Iterator<Item = Result<(Range<usize>, Tok<'s>), LexError>> {
-        lex::lex(&self.bytes, res, lim)
-    }
-}
-
-fn small(n: usize) -> u32 {
-    u32::try_from(n).unwrap_or(u32::MAX)
-}
-
-/// Streams joined as they're read.
-#[derive(Default)]
-struct Join {
-    bytes: Vec<u8>,
-    starts: Vec<usize>,
-}
-
-impl Join {
-    fn push(&mut self, stream: Vec<u8>) {
-        if self.starts.is_empty() {
-            self.starts.push(0);
-            self.bytes = stream;
-        } else {
-            self.bytes.push(b' ');
-            self.starts.push(self.bytes.len());
-            self.bytes.extend_from_slice(&stream);
-        }
-    }
-
-    /// What `len` more bytes would make the joined bytes, a space before
-    /// them.
-    fn with(&self, len: usize) -> usize {
-        self.bytes.len() + usize::from(!self.starts.is_empty()) + len
-    }
-
-    fn done(self) -> Concat<'static> {
-        Concat {
-            bytes: Cow::Owned(self.bytes),
-            starts: self.starts.into(),
-        }
-    }
-}
 
 /// What a page's content is read from: a source, or a document in memory.
 /// The toolkit's own, so it outlives the eager documents.
@@ -266,11 +103,10 @@ impl PageContent {
         let cap = lim.content.decompressed;
         let mut ids = Vec::new();
         let mut dicts = Vec::new();
-        let mut join = Join::default();
+        let mut join = Join::new(&lim.content.family());
         let mut take = |id: ObjectId, stream: &Stream| -> Result<(), ContentFault> {
-            let left = cap.saturating_sub(join.with(0));
             let data = stream
-                .decompressed_content_with_limit(left)
+                .decompressed_content_with_limit(join.room())
                 .map_err(|e| match e {
                     crate::pdf::Error::Limit(crate::pdf::Limit::Decompressed) => {
                         ContentFault::TooLarge(cap)
@@ -280,12 +116,9 @@ impl PageContent {
                         error: e,
                     },
                 })?;
-            if join.with(data.len()) > cap {
-                return Err(ContentFault::TooLarge(cap));
-            }
+            join.push(&data).map_err(|_| ContentFault::TooLarge(cap))?;
             ids.push(id);
             dicts.push(stream.dict.clone());
-            join.push(data);
             Ok(())
         };
         for &id in contents {
@@ -310,7 +143,7 @@ impl PageContent {
         Ok(PageContent {
             ids: ids.into(),
             dicts: dicts.into(),
-            concat: join.done(),
+            concat: join.finish(),
         })
     }
 
@@ -329,9 +162,11 @@ impl PageContent {
         &self.concat
     }
 
-    /// The joined bytes, to draw as they are.
+    /// The joined bytes, to draw as they are: a copy, as
+    /// pdf-content-streams' [`Concat`] lends its bytes and doesn't give
+    /// them up.
     pub fn into_bytes(self) -> Vec<u8> {
-        self.concat.bytes.into_owned()
+        self.concat.bytes().to_vec()
     }
 
     /// The fault `error`, from lexing [`PageContent::concat`], is: in

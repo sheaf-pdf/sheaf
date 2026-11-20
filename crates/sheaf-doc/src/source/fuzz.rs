@@ -113,7 +113,7 @@ pub fn lexer(data: &[u8]) {
     let (first, second) = data.split_at(data.len() / 2);
     let split = Concat::new(&[first, second]);
     for content in [Concat::new(&[data]), split] {
-        for token in content.lex(&res, &Limits::DEFAULT) {
+        for token in content::lex(content.bytes(), &res, &Limits::DEFAULT) {
             let Ok((range, _)) = token else { break };
             let _ = content.span(range);
         }
@@ -616,16 +616,14 @@ fn touching(content: &Concat, spans: &[SpanAcross]) -> Vec<SpanAcross> {
 fn assert_kept(content: &Concat, res: &ResCx, kept: &[Cow<[u8]>], drop: &[SpanAcross]) {
     let lim = &Limits::DEFAULT;
     let drop: Vec<_> = drop.iter().filter_map(|&d| content.offsets(d)).collect();
-    let before: Vec<&[u8]> = content
-        .lex(res, lim)
+    let before: Vec<&[u8]> = content::lex(content.bytes(), res, lim)
         .map(|t| t.expect("a splice lexed it"))
         .filter(|(r, _)| !drop.iter().any(|d| d.start <= r.start && r.end <= d.end))
         .map(|(r, _)| &content.bytes()[r])
         .collect();
     let kept: Vec<&[u8]> = kept.iter().map(|s| &**s).collect();
     let kept = Concat::new(&kept);
-    let after: Vec<&[u8]> = kept
-        .lex(res, lim)
+    let after: Vec<&[u8]> = content::lex(kept.bytes(), res, lim)
         .map(|t| t.expect("what a splice keeps lexes"))
         .map(|(r, _)| &kept.bytes()[r])
         .collect();
@@ -638,7 +636,7 @@ fn assert_kept(content: &Concat, res: &ResCx, kept: &[Cow<[u8]>], drop: &[SpanAc
 fn assert_rewritten(content: &Concat, res: &ResCx, rewritten: &[Cow<[u8]>]) {
     let lim = &Limits::DEFAULT;
     let tokens = |c: &Concat| -> Vec<Vec<u8>> {
-        (c.lex(res, lim))
+        content::lex(c.bytes(), res, lim)
             .map(|t| c.bytes()[t.expect("a list written again lexes").0].to_vec())
             .collect()
     };

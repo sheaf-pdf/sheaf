@@ -1130,6 +1130,12 @@ const RETIRED_M18: &[(&str, u8)] = &[
     // `Reserved::read` takes a resolver; one of nothing is a
     // `resolve_fn`.
     ("content::sink::Unread", 19),
+    // A page's streams as one and the places in them are the family's
+    // (`content::Concat`, `Pos`, `SpanAcross`), joined by its `Join`.
+    // Its `Concat` reads by its own tokens: sheaf's lexer is called on
+    // the bytes, `lex(concat.bytes(), ..)`.
+    ("content::page::Concat::lex", 19),
+    ("content::page::Join", 19),
 ];
 
 /// The ledgers, with the words a hit names its slice by.
@@ -1168,6 +1174,12 @@ const QUALIFIED_ONLY: &[&str] = &[
     "Reserved",
     "write_string",
     "place_form",
+    // sheaf's lexer, the function `content::lex`, which reads a page's
+    // joined bytes: not the method sheaf's `Concat` had. And the
+    // family's `Join`, and the app's mode that joins a running sheaf: not
+    // the join `content::page` had (M18 slice 19).
+    "lex",
+    "Join",
     // What a private-data scan said of content it couldn't read
     // (`Said::Unread`), and pdf-structure's error: not the sink's objects
     // that read nothing.

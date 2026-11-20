@@ -394,7 +394,7 @@ fn check(content: &Concat, res: &ResCx, lim: &Limits, cuts: &[Cut]) -> Result<()
     let mut operand = false;
     let mut operands: [Option<&[u8]>; 2] = [None, None];
     let unsafe_cut = |i: usize| SpliceError::Unsafe(cuts[i].span);
-    let mut tokens = content.lex(res, lim);
+    let mut tokens = lex::lex(content.bytes(), res, lim);
     loop {
         let token = tokens.next().transpose()?;
         let start = token.as_ref().map_or(s.len(), |(r, _)| r.start);
