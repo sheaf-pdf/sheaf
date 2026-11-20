@@ -9,14 +9,17 @@
 //! each list of theirs written in the content can be written again without
 //! a key, as Clean Copy writes sheaf's without what marks it.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::time::Instant;
 
 use crate::pdf::{Object, ObjectId, StreamExt};
 
-use super::interp::{Kind, Opts, interpret};
+use super::interp::{
+    Cap, EncodeError, Encoded, Event, ImageOf, InterpError, Kind, Mark, Opts, Refused, Seg, State,
+    Summary, Unwritable, encode, interpret,
+};
 use super::tests::blank;
 use super::*;
 use crate::forms::corpus::{Corpus, Entry, each_entry};
@@ -788,35 +791,14 @@ fn glyphs_and_text_dump() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let mut picks = dump_picks(&corpus);
-    let mut sets: BTreeMap<&str, usize> = BTreeMap::new();
-    for set in picks.values() {
-        *sets.entry(set).or_default() += 1;
-    }
-    eprintln!("{} files: {sets:?}", picks.len());
-    if let Some(only) = &only {
-        picks.retain(|path, _| path == only);
-        assert_eq!(picks.len(), 1, "{DUMP_ONLY} names no file the dump reads");
-    }
-    let entries: Vec<Entry> = (picks.keys())
-        .map(|path| Entry {
-            path: path.clone(),
-            ..Entry::default()
-        })
-        .collect();
     let started = Instant::now();
     let full = only.is_some();
-    let read = each_entry(&entries, |entry| {
-        let read = || dump_file(&corpus, &entry.path, full);
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)).unwrap_or_else(|panic| {
-            let said = (panic.downcast_ref::<&str>().map(|s| s.to_string()))
-                .or_else(|| panic.downcast_ref::<String>().cloned());
-            let said = said.unwrap_or_else(|| "a panic".into());
-            let said = said.replace(['\n', '\t'], " ");
-            vec![format!("{}\t-\t0\t-\t-\tpanicked: {said}", entry.path)]
-        })
-    });
-    let lines: Vec<String> = read.into_iter().flatten().collect();
+    let lines = each_dumped(
+        &corpus,
+        (only.as_deref(), DUMP_ONLY),
+        |path| dump_file(&corpus, path, full),
+        |path, said| format!("{path}\t-\t0\t-\t-\tpanicked: {said}"),
+    );
     let glyphs: usize = (lines.iter())
         .filter_map(|line| line.split('\t').nth(2)?.parse::<usize>().ok())
         .sum();
@@ -826,8 +808,53 @@ fn glyphs_and_text_dump() {
         lines.len(),
         started.elapsed().as_secs_f64()
     );
+    written(&lines, full, to);
+}
+
+/// The lines of every file the dumps read ([`dump_picks`]), or of the
+/// one `only.0` names (`only.1` the variable that named it), each file
+/// read by `read` on its own, in the order of their paths. A file whose
+/// reading panics is the one line `panicked` makes of its path and what
+/// the panic said.
+fn each_dumped(
+    corpus: &Corpus,
+    only: (Option<&str>, &str),
+    read: impl Fn(&str) -> Vec<String> + Sync,
+    panicked: impl Fn(&str, String) -> String + Sync,
+) -> Vec<String> {
+    let mut picks = dump_picks(corpus);
+    let mut sets: BTreeMap<&str, usize> = BTreeMap::new();
+    for set in picks.values() {
+        *sets.entry(set).or_default() += 1;
+    }
+    eprintln!("{} files: {sets:?}", picks.len());
+    if let (Some(only), var) = only {
+        picks.retain(|path, _| path == only);
+        assert_eq!(picks.len(), 1, "{var} names no file the dump reads");
+    }
+    let entries: Vec<Entry> = (picks.keys())
+        .map(|path| Entry {
+            path: path.clone(),
+            ..Entry::default()
+        })
+        .collect();
+    let read = each_entry(&entries, |entry| {
+        let read = || read(&entry.path);
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)).unwrap_or_else(|panic| {
+            let said = (panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                .or_else(|| panic.downcast_ref::<String>().cloned());
+            let said = said.unwrap_or_else(|| "a panic".into());
+            vec![panicked(&entry.path, said.replace(['\n', '\t'], " "))]
+        })
+    });
+    read.into_iter().flatten().collect()
+}
+
+/// A dump's `lines`, printed to stderr where its records were (`full`),
+/// and written to `to`, where it's set.
+fn written(lines: &[String], full: bool, to: Option<std::ffi::OsString>) {
     if full {
-        for line in &lines {
+        for line in lines {
             eprintln!("{line}");
         }
     }
@@ -836,4 +863,720 @@ fn glyphs_and_text_dump() {
         text.push('\n');
         std::fs::write(&to, text).unwrap_or_else(|e| panic!("{}: {e}", to.display()));
     }
+}
+
+/// Where [`events_dump`] writes: a path. Unset, it reads nothing.
+/// `just events-dump <file>` sets it.
+const EVENTS: &str = "SHEAF_EVENTS_DUMP";
+
+/// A corpus path whose records [`events_dump`] prints in full to stderr,
+/// reading that file alone.
+const EVENTS_ONLY: &str = "SHEAF_EVENTS_DUMP_ONLY";
+
+/// The records of the events dump: each value written goes into the
+/// checksum of every event, and, but in an operator's record and the
+/// leading ([`EventRecords::undrawn`]), into the checksum of what's
+/// drawn, which a page written again must keep, as the `interp` fuzz
+/// target holds it; where the records are printed in full, onto a line
+/// with its name. A show's string and its font, which the glyph dump
+/// has, go into what's drawn alone ([`EventRecords::drawn_only`]).
+struct EventRecords {
+    all: sheaf_util::Checksum,
+    drawn: sheaf_util::Checksum,
+    /// Whether what's being written goes into the checksum of every event
+    /// alone: an operator's record, or the leading.
+    op: bool,
+    full: Option<String>,
+}
+
+impl EventRecords {
+    fn new(full: bool) -> EventRecords {
+        EventRecords {
+            all: sheaf_util::Checksum::new(),
+            drawn: sheaf_util::Checksum::new(),
+            op: false,
+            full: full.then(String::new),
+        }
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.all.write(bytes);
+        if !self.op {
+            self.drawn.write(bytes);
+        }
+    }
+
+    fn name(&mut self, name: &str, v: impl std::fmt::Display) {
+        if let Some(full) = &mut self.full {
+            full.push_str(&format!(" {name}={v}"));
+        }
+    }
+
+    /// A record of kind `what` begins: an operator's where `op`.
+    fn begin(&mut self, what: &str, op: bool) {
+        self.op = op;
+        self.write(what.as_bytes());
+        self.write(&[0]);
+        if let Some(full) = &mut self.full {
+            full.push_str(what);
+        }
+    }
+
+    fn number(&mut self, name: &str, v: u64) {
+        self.write(&v.to_le_bytes());
+        self.name(name, v);
+    }
+
+    /// A number that may not be there.
+    fn maybe(&mut self, name: &str, v: Option<u64>) {
+        self.write(&[u8::from(v.is_some())]);
+        self.write(&v.unwrap_or(0).to_le_bytes());
+        match v {
+            Some(v) => self.name(name, v),
+            None => self.name(name, "-"),
+        }
+    }
+
+    /// An object's id that may not be there.
+    fn id(&mut self, name: &str, id: Option<ObjectId>) {
+        self.write(&[u8::from(id.is_some())]);
+        let (n, g) = id.map_or((0, 0), |id| (id.number, id.generation));
+        self.write(&n.to_le_bytes());
+        self.write(&g.to_le_bytes());
+        if self.full.is_some() {
+            let v = id.map_or("-".into(), |_| format!("{n}.{g}"));
+            self.name(name, v);
+        }
+    }
+
+    /// Numbers by their bits, a 0 of either sign the same.
+    fn reals(&mut self, name: &str, vs: &[f32]) {
+        for v in vs {
+            self.write(&(v + 0.0).to_bits().to_le_bytes());
+        }
+        if self.full.is_some() {
+            let vs: Vec<String> = (vs.iter())
+                .map(|v| format!("{:08x}({v})", (v + 0.0).to_bits()))
+                .collect();
+            self.name(name, vs.join(","));
+        }
+    }
+
+    /// Numbers that may not be there.
+    fn maybe_reals(&mut self, name: &str, vs: Option<&[f32]>) {
+        self.write(&[u8::from(vs.is_some())]);
+        match vs {
+            Some(vs) => self.reals(name, vs),
+            None => self.name(name, "-"),
+        }
+    }
+
+    /// Bytes that may not be there, their length first.
+    fn bytes(&mut self, name: &str, v: Option<&[u8]>) {
+        self.write(&[u8::from(v.is_some())]);
+        let bytes = v.unwrap_or(&[]);
+        self.write(&(bytes.len() as u64).to_le_bytes());
+        self.write(bytes);
+        if self.full.is_some() {
+            self.name(name, v.map_or("-".into(), |v| format!("<{}>", hex(v))));
+        }
+    }
+
+    /// What `write` writes goes into the checksum of every event alone:
+    /// state the page written again needn't keep, nothing it draws
+    /// reading it.
+    fn undrawn(&mut self, write: impl FnOnce(&mut EventRecords)) {
+        let op = std::mem::replace(&mut self.op, true);
+        write(self);
+        self.op = op;
+    }
+
+    /// What goes into the checksum of what's drawn alone: a show's string
+    /// and its font, which the glyph dump has.
+    fn drawn_only(&mut self, string: &[u8], font: Option<ObjectId>) {
+        let (n, g) = font.map_or((0, 0), |id| (id.number, id.generation));
+        for bytes in [&(string.len() as u64).to_le_bytes(), string] {
+            self.drawn.write(bytes);
+        }
+        self.drawn.write(&[u8::from(font.is_some())]);
+        self.drawn.write(&n.to_le_bytes());
+        self.drawn.write(&g.to_le_bytes());
+        if self.full.is_some() {
+            self.name("string", format!("<{}>", hex(string)));
+            self.name("font", font.map_or("-".into(), |_| format!("{n}.{g}")));
+        }
+    }
+
+    /// The record ends.
+    fn end(&mut self) {
+        if let Some(full) = &mut self.full {
+            full.push('\n');
+        }
+    }
+
+    /// The checksums of every record and of what's drawn; the records in
+    /// full go to stderr under `title`.
+    fn finish(self, title: &str) -> (u128, u128) {
+        if let Some(full) = self.full {
+            eprint!("== {title}\n{full}");
+        }
+        (self.all.finish(), self.drawn.finish())
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn affine(m: crate::geom::Affine) -> [f32; 6] {
+    [m.a, m.b, m.c, m.d, m.e, m.f]
+}
+
+fn rect(r: crate::geom::Rect) -> [f32; 4] {
+    [r.x0, r.y0, r.x1, r.y1]
+}
+
+/// The dump's numbers for what the events carry: each numbered by the
+/// dump, never by a type's `Debug`, so the same reading is the same
+/// record whichever interpreter's types hold it.
+fn paint_number(paint: Paint) -> u64 {
+    match paint {
+        Paint::Fill => 0,
+        Paint::FillEvenOdd => 1,
+        Paint::Stroke => 2,
+        Paint::CloseStroke => 3,
+        Paint::FillStroke => 4,
+        Paint::FillStrokeEvenOdd => 5,
+        Paint::CloseFillStroke => 6,
+        Paint::CloseFillStrokeEvenOdd => 7,
+        Paint::None => 8,
+    }
+}
+
+fn rule_number(rule: FillRule) -> u64 {
+    match rule {
+        FillRule::NonZero => 0,
+        FillRule::EvenOdd => 1,
+    }
+}
+
+fn cap_number(cap: LineCap) -> u64 {
+    match cap {
+        LineCap::Butt => 0,
+        LineCap::Round => 1,
+        LineCap::Square => 2,
+    }
+}
+
+fn join_number(join: LineJoin) -> u64 {
+    match join {
+        LineJoin::Miter => 0,
+        LineJoin::Round => 1,
+        LineJoin::Bevel => 2,
+    }
+}
+
+fn mode_number(mode: TextMode) -> u64 {
+    match mode {
+        TextMode::Fill => 0,
+        TextMode::Stroke => 1,
+        TextMode::FillStroke => 2,
+        TextMode::Invisible => 3,
+        TextMode::FillClip => 4,
+        TextMode::StrokeClip => 5,
+        TextMode::FillStrokeClip => 6,
+        TextMode::Clip => 7,
+    }
+}
+
+/// A mark's record: its tag, whether it has a property list and how it's
+/// written, its MCID, `/ActualText` and optional content.
+fn mark_records(r: &mut EventRecords, mark: &Mark) {
+    r.bytes("tag", Some(&mark.tag));
+    let props = match &mark.props {
+        None => 0,
+        Some(Props::Inline(_)) => 1,
+        Some(Props::Named(_, None)) => 2,
+        Some(Props::Named(_, Some(_))) => 3,
+    };
+    r.number("props", props);
+    r.maybe("mcid", mark.mcid.map(u64::from));
+    r.bytes(
+        "actual_text",
+        mark.actual_text.as_deref().map(str::as_bytes),
+    );
+    r.id("oc", mark.oc);
+}
+
+/// The state an event is in, as both interpreters keep it: the CTM, the
+/// line's width, cap, join and miter limit, the clip's bounds, and the
+/// text state: the font's being the stock one, its size, the spacing,
+/// scale, leading, rise and mode, the text matrix, where the line starts
+/// and the pen. All but the leading are what's drawn.
+fn state_records(r: &mut EventRecords, state: &State) {
+    r.reals("ctm", &affine(state.ctm));
+    r.reals("line_width", &[state.line_width]);
+    r.number("cap", cap_number(state.line_cap));
+    r.number("join", join_number(state.line_join));
+    r.reals("miter", &[state.miter_limit]);
+    r.maybe_reals(
+        "clip",
+        state.clip_bounds().map(rect).as_ref().map(|r| &r[..]),
+    );
+    let text = &state.text;
+    r.number("stock", u64::from(text.stock));
+    r.reals("size", &[text.size]);
+    r.reals("spacing", &[text.char_space, text.word_space]);
+    r.reals("scale", &[text.scale]);
+    // `TD` sets the leading, and the encoding writes it, and every
+    // operator that reads the leading, as ones that don't.
+    r.undrawn(|r| r.reals("leading", &[text.leading]));
+    r.reals("rise", &[text.rise]);
+    r.number("mode", mode_number(text.mode));
+    r.reals("matrix", &affine(text.matrix));
+    r.reals("line", &[text.line.x, text.line.y]);
+    r.reals("pen", &[text.pen.x, text.pen.y]);
+}
+
+/// `event`'s record, by fields it names: what it is, the state it's in,
+/// and the marked ranges it's in, innermost first. An operator's is its
+/// name and where it is, from its first operand and itself; a show's its
+/// own fields, its string and glyphs being the glyph dump's.
+fn event_records(r: &mut EventRecords, event: &Event<'_>) {
+    match &event.kind {
+        Kind::Op => {
+            r.begin("op", true);
+            let name: &[u8] = match &event.at.tok {
+                Tok::Op(name) => name,
+                Tok::InlineImage(_) => b"BI",
+                Tok::Operand(_) => b"",
+            };
+            r.bytes("name", Some(name));
+            let range = event.at.range();
+            r.number("from", range.start as u64);
+            r.number("start", event.at.op.start as u64);
+            r.number("end", event.at.op.end as u64);
+        }
+        Kind::Text(show) => {
+            r.begin("text", false);
+            r.reals("size", &[show.size]);
+            r.number("mode", mode_number(show.mode));
+            r.reals("start", &affine(show.start));
+            r.reals("offset", &[show.offset]);
+            r.number("stock", u64::from(show.stock));
+            r.drawn_only(show.string, show.font.and_then(Font::id));
+        }
+        Kind::FormBegin(form) | Kind::FormEnd(form) => {
+            let begins = matches!(event.kind, Kind::FormBegin(_));
+            r.begin(if begins { "form-begin" } else { "form-end" }, false);
+            r.id("form", Some(form.form));
+            r.reals("matrix", &affine(form.matrix));
+            r.maybe_reals("bbox", form.bbox.map(rect).as_ref().map(|r| &r[..]));
+            r.id("oc", form.oc);
+        }
+        Kind::FormRefused { form, why } => {
+            r.begin("form-refused", false);
+            r.id("form", Some(*form));
+            let why = match why {
+                Refused::Cycle => 0,
+                Refused::Depth => 1,
+            };
+            r.number("why", why);
+        }
+        Kind::Path(path) => {
+            r.begin("path", false);
+            r.number("segments", path.segments.len() as u64);
+            for seg in path.segments {
+                match *seg {
+                    Seg::Move(p) => r.reals("m", &[p.x, p.y]),
+                    Seg::Line(p) => r.reals("l", &[p.x, p.y]),
+                    Seg::Curve(a, b, p) => r.reals("c", &[a.x, a.y, b.x, b.y, p.x, p.y]),
+                    Seg::Close => r.number("h", 0),
+                }
+            }
+            r.number("paint", paint_number(path.paint));
+            r.maybe("clip", path.clip.map(rule_number));
+            r.reals("bounds", &rect(path.bounds));
+        }
+        Kind::Image(image) => {
+            r.begin("image", false);
+            let [a, b, c, d] = image.quad.0;
+            r.reals("quad", &[a.x, a.y, b.x, b.y, c.x, c.y, d.x, d.y]);
+            let (inline, xobject) = match image.of {
+                ImageOf::XObject(id) => (false, Some(id)),
+                ImageOf::Inline { .. } => (true, None),
+            };
+            r.number("inline", u64::from(inline));
+            r.id("xobject", xobject);
+            r.number("stencil", u64::from(image.stencil));
+            r.id("smask", image.smask);
+            r.id("mask", image.mask);
+            r.id("oc", image.oc);
+        }
+        Kind::Shading(shading) => {
+            r.begin("shading", false);
+            r.id("shading", shading.shading);
+            r.maybe_reals("bounds", shading.bounds.map(rect).as_ref().map(|r| &r[..]));
+        }
+        Kind::Ignored(id) => {
+            r.begin("ignored", false);
+            r.id("xobject", Some(*id));
+        }
+        Kind::MarkedBegin(mark) | Kind::MarkedEnd(mark) | Kind::MarkedPoint(mark) => {
+            let what = match event.kind {
+                Kind::MarkedBegin(_) => "marked-begin",
+                Kind::MarkedEnd(_) => "marked-end",
+                _ => "marked-point",
+            };
+            r.begin(what, false);
+            mark_records(r, mark);
+        }
+    }
+    state_records(r, event.state);
+    for mark in event.marks.iter() {
+        r.begin("in", r.op);
+        mark_records(r, mark);
+    }
+    r.end();
+}
+
+/// The class of what stopped an interpretation, never its wording, which
+/// changes with the error's type.
+fn interp_class(e: &InterpError) -> String {
+    match e {
+        InterpError::Lex { .. } => "lex".into(),
+        InterpError::XObject { .. } => "xobject".into(),
+        InterpError::Limit(cap) => format!("limit:{}", cap_name(*cap)),
+        InterpError::NotFinite => "not-finite".into(),
+    }
+}
+
+fn cap_name(cap: Cap) -> &'static str {
+    match cap {
+        Cap::Operators => "operators",
+        Cap::Glyphs => "glyphs",
+        Cap::Interpreted => "interpreted",
+        Cap::Segments => "segments",
+        Cap::States => "states",
+        Cap::Marked => "marked",
+        Cap::Decompressed => "decompressed",
+    }
+}
+
+/// The class of why a page wasn't written again: an operator that can't
+/// be, or an interpretation that stopped where the page's didn't.
+fn encode_class(e: &EncodeError) -> String {
+    match e {
+        EncodeError::Unwritable { why, .. } => match why {
+            Unwritable::Line => "unwritable:line".into(),
+            Unwritable::InlineLength => "unwritable:inline-length".into(),
+        },
+        EncodeError::Interp(e) => format!("encode:{}", interp_class(e)),
+    }
+}
+
+/// A summary's fields, in its order, tab-separated.
+fn summary_columns(s: &Summary) -> String {
+    let Summary {
+        operators,
+        glyphs,
+        interpreted,
+        decompressed,
+        segments,
+        uses,
+        refused,
+        deepest_form,
+        deepest_q,
+        deepest_marked,
+        stopped,
+    } = *s;
+    let fields = [
+        operators,
+        glyphs,
+        interpreted,
+        decompressed,
+        segments,
+        uses,
+        refused,
+        deepest_form,
+        deepest_q,
+        deepest_marked,
+        usize::from(stopped),
+    ];
+    fields.map(|n| n.to_string()).join("\t")
+}
+
+/// How many columns a [`Summary`] takes.
+const SUMMARY_COLUMNS: usize = 11;
+
+/// A source's objects with each form a page's content draws written again
+/// in its place, its stream's data what [`encode`] wrote, unfiltered, as
+/// [`Fixture::encoded`](super::fixture::Fixture::encoded) writes them.
+struct Rewritten<'a, O> {
+    old: &'a O,
+    forms: HashMap<ObjectId, Object>,
+}
+
+impl<'a, O: ReadObjects> Rewritten<'a, O> {
+    fn new(old: &'a O, encoded: &Encoded) -> Rewritten<'a, O> {
+        let forms = (encoded.forms.iter())
+            .filter_map(|(id, data)| {
+                let mut form = ReadObjects::read(old, *id, Object::clone).ok()?;
+                form.as_stream_mut()?.set_plain_content(data.clone());
+                Some((*id, form))
+            })
+            .collect();
+        Rewritten { old, forms }
+    }
+}
+
+impl<O: ReadObjects> ReadObjects for Rewritten<'_, O> {
+    fn object(&self, id: ObjectId) -> crate::pdf::Result<&Object> {
+        match self.forms.get(&id) {
+            Some(form) => Ok(form),
+            None => ReadObjects::object(self.old, id),
+        }
+    }
+
+    fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> crate::pdf::Result<R> {
+        match self.forms.get(&id) {
+            Some(form) => Ok(read(form)),
+            None => ReadObjects::read(self.old, id, read),
+        }
+    }
+
+    fn peek(&self, id: ObjectId) -> Option<&Object> {
+        match self.forms.get(&id) {
+            Some(form) => Some(form),
+            None => ReadObjects::peek(self.old, id),
+        }
+    }
+}
+
+/// The events dump's line for a page, or a file, that wasn't interpreted:
+/// `class` says why.
+fn events_none(path: &str, page: &str, class: &str) -> String {
+    let dashes = ["-"; SUMMARY_COLUMNS + 2].join("\t");
+    format!("{path}\t{page}\t{dashes}\t{class}\t-\t-")
+}
+
+/// `content`, drawn with `resources` from `objects`' objects, its forms
+/// drawn and every event wanted, each event's record written to
+/// `records` ([`event_records`]).
+fn recorded<R: ReadObjects>(
+    objects: &R,
+    content: &Concat,
+    resources: Option<&Object>,
+    fonts: &Fonts,
+    records: &mut EventRecords,
+) -> Result<Summary, InterpError> {
+    interpret(
+        objects,
+        content,
+        resources,
+        LIM,
+        fonts,
+        Opts::default(),
+        |event| {
+            event_records(records, &event);
+            ControlFlow::Continue(())
+        },
+    )
+}
+
+/// Whether `encoded`, content of `objects` written again, interpreted
+/// again with each form written again in its place ([`Rewritten`]),
+/// draws what the content did, `drawn` being the checksum of what that
+/// drew ([`EventRecords::finish`]): every event but its operators, to the
+/// bit, as the `interp` fuzz target holds it. Its records in full go to
+/// stderr under `title`.
+fn drawn_again<R: ReadObjects>(
+    objects: &R,
+    encoded: &Encoded,
+    resources: Option<&Object>,
+    fonts: &Fonts,
+    drawn: u128,
+    (title, full): (&str, bool),
+) -> bool {
+    let again = Rewritten::new(objects, encoded);
+    let mut records = EventRecords::new(full);
+    let content = Concat::new(&[&encoded.content]);
+    let read = recorded(&again, &content, resources, fonts, &mut records);
+    let (_, redrawn) = records.finish(title);
+    read.is_ok() && redrawn == drawn
+}
+
+/// The events dump's columns for one page's `content`, drawn with
+/// `resources` from `objects`' objects in `fonts`, after its file and its
+/// number: its interpretation's [`Summary`] field by field, the checksum
+/// of every event ([`event_records`]), the checksum of the page written
+/// again ([`encode`]: its content, then each form's id and bytes), `ok` or
+/// the class of what failed, whether the page written again, interpreted
+/// again, draws what it drew ([`drawn_again`]: `same`, `differs`, or `-`
+/// where it isn't written again), and how many objects that didn't read
+/// the run was told of (`-`: sheaf's interpreter tells of none). Its
+/// records in full go to stderr under `at`, where `full`.
+fn page_events<R: ReadObjects>(
+    objects: &R,
+    content: &Concat,
+    resources: Option<&Object>,
+    fonts: &Fonts,
+    (at, full): (&str, bool),
+) -> String {
+    let mut records = EventRecords::new(full);
+    let read = recorded(objects, content, resources, fonts, &mut records);
+    let (events, drawn) = records.finish(&format!("{at}: events"));
+    let summary = match &read {
+        Ok(summary) => summary_columns(summary),
+        Err(_) => ["-"; SUMMARY_COLUMNS].join("\t"),
+    };
+    let (encoding, why, redrawn) = match read {
+        Err(e) => ("-".to_string(), interp_class(&e), "-"),
+        Ok(_) => match encode(objects, content, resources, LIM, fonts) {
+            Err(e) => ("-".to_string(), encode_class(&e), "-"),
+            Ok(encoded) => {
+                let mut sum = sheaf_util::Checksum::new();
+                sum.write(&(encoded.content.len() as u64).to_le_bytes());
+                sum.write(&encoded.content);
+                for (id, data) in &encoded.forms {
+                    sum.write(&id.number.to_le_bytes());
+                    sum.write(&id.generation.to_le_bytes());
+                    sum.write(&(data.len() as u64).to_le_bytes());
+                    sum.write(data);
+                }
+                let title = format!("{at}: written again");
+                let same = drawn_again(objects, &encoded, resources, fonts, drawn, (&title, full));
+                let same = if same { "same" } else { "differs" };
+                (format!("{:032x}", sum.finish()), "ok".to_string(), same)
+            }
+        },
+    };
+    format!("{summary}\t{events:032x}\t{encoding}\t{why}\t{redrawn}\t-")
+}
+
+/// The events dump's lines for the file at `path` of the corpus, one a
+/// page: the file, the page, and its columns ([`page_events`]), each page
+/// interpreted in fonts whose programs are read ([`Fonts::default`]). A
+/// file that doesn't open is one line, its page `-`.
+fn events_file(corpus: &Corpus, path: &str, full: bool) -> Vec<String> {
+    let Ok(bytes) = std::fs::read(corpus.root.join(path)) else {
+        return vec![events_none(path, "-", "unopened")];
+    };
+    let kind = BlobKind::file(Path::new(path), None);
+    let Ok(src) = Store::new().open(bytes.into(), kind) else {
+        return vec![events_none(path, "-", "unopened")];
+    };
+    let fonts = Fonts::default();
+    let mut lines = Vec::new();
+    for (i, page) in src.pages().iter().enumerate() {
+        let at = format!("{path} page {}", i + 1);
+        let n = (i + 1).to_string();
+        let Ok(content) = PageContent::read(src.pdf(), &page.contents, LIM) else {
+            lines.push(events_none(path, &n, "unread"));
+            continue;
+        };
+        let resources = page.resources.as_deref();
+        let columns = page_events(src.pdf(), content.concat(), resources, &fonts, (&at, full));
+        lines.push(format!("{path}\t{n}\t{columns}"));
+    }
+    lines
+}
+
+/// What every page of the corpus's files does as it's interpreted, to set
+/// beside itself after a change to the interpreter: a line a page
+/// ([`events_file`]), the files in the order of their paths
+/// ([`dump_picks`]: the glyph dump's), written to the path in [`EVENTS`].
+/// Two runs over the same code write the same file. With [`EVENTS_ONLY`]
+/// it reads the one file named, and prints each record in full to
+/// stderr, those of each page written again after its own.
+#[test]
+#[ignore = "a dump of what the corpus's pages do as they're interpreted, written to $SHEAF_EVENTS_DUMP"]
+fn events_dump() {
+    let to = std::env::var_os(EVENTS);
+    let only = std::env::var(EVENTS_ONLY).ok();
+    if to.is_none() && only.is_none() {
+        eprintln!("skipped: neither {EVENTS} nor {EVENTS_ONLY} is set");
+        return;
+    }
+    let Some(corpus) = Corpus::or_skip() else {
+        return;
+    };
+    let started = Instant::now();
+    let full = only.is_some();
+    let lines = each_dumped(
+        &corpus,
+        (only.as_deref(), EVENTS_ONLY),
+        |path| events_file(&corpus, path, full),
+        |path, said| {
+            eprintln!("{path} panicked: {said}");
+            events_none(path, "-", "panicked")
+        },
+    );
+    let column =
+        |line: &String, from_end: usize| line.rsplit('\t').nth(from_end).map(str::to_owned);
+    let count = |from_end: usize, is: &str| {
+        (lines.iter())
+            .filter(|line| column(line, from_end).as_deref() == Some(is))
+            .count()
+    };
+    let not_ok = lines.len() - count(2, "ok");
+    eprintln!(
+        "{} lines, {not_ok} not ok, {} written again and drawn the same, {} drawn otherwise, in {:.0} s",
+        lines.len(),
+        count(1, "same"),
+        count(1, "differs"),
+        started.elapsed().as_secs_f64()
+    );
+    written(&lines, full, to);
+}
+
+/// Every fixture page's events line says it was read, written again and,
+/// written again, drawn the same, and says the same twice; and what's
+/// written again is interpreted again, not taken on trust: an operator
+/// more that draws nothing leaves it drawn the same, a line more drawn in
+/// the content, or in a form written again, draws otherwise.
+#[test]
+fn each_fixture_s_events_are_drawn_the_same_written_again() {
+    let fonts = Fonts::default();
+    for (name, f) in fixture::every() {
+        let content = f.content();
+        let at = (name, false);
+        let line = page_events(&f.pdf, content.concat(), f.resources(), &fonts, at);
+        let last: Vec<&str> = line.rsplit('\t').take(3).collect();
+        assert_eq!(last, ["-", "same", "ok"], "{name}: {line}");
+        let again = page_events(&f.pdf, content.concat(), f.resources(), &fonts, at);
+        assert_eq!(again, line, "{name}");
+    }
+    let drawn_with = |f: &fixture::Fixture, more: &[u8], in_form: bool| {
+        let (content, resources) = (f.content(), f.resources());
+        let mut records = EventRecords::new(false);
+        let read = recorded(&f.pdf, content.concat(), resources, &fonts, &mut records);
+        read.expect("drawn");
+        let (_, drawn) = records.finish("");
+        let mut encoded = encode(&f.pdf, content.concat(), resources, LIM, &fonts);
+        let encoded = encoded.as_mut().expect("written again");
+        match in_form {
+            false => encoded.content.extend_from_slice(more),
+            true => encoded.forms[0].1.extend_from_slice(more),
+        }
+        drawn_again(&f.pdf, encoded, resources, &fonts, drawn, ("", false))
+    };
+    let (operators, forms) = (fixture::operators(), fixture::forms());
+    assert!(drawn_with(&operators, b"", false));
+    assert!(drawn_with(&operators, b"\nq Q", false));
+    assert!(!drawn_with(&operators, b"\n0 0 m 1 1 l S", false));
+    assert!(drawn_with(&forms, b"", true));
+    assert!(!drawn_with(&forms, b"\n0 0 m 1 1 l S", true));
+}
+
+/// The events dump holds numbers by their bits, but for a 0's sign.
+#[test]
+fn the_events_dump_holds_numbers_by_their_bits_but_a_zero_s_sign() {
+    let sum = |v: f32| {
+        let mut records = EventRecords::new(false);
+        records.reals("v", &[v]);
+        records.finish("")
+    };
+    assert_eq!(sum(0.0), sum(-0.0));
+    assert_ne!(sum(1.0), sum(f32::from_bits(1.0_f32.to_bits() + 1)));
 }

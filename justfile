@@ -471,6 +471,27 @@ tier-interp:
 glyph-dump out:
     SHEAF_GLYPH_DUMP="{{ absolute_path(out) }}" scripts/test-capped.sh cargo test -p sheaf-doc --release --lib -- --ignored --nocapture --exact content::corpus::glyphs_and_text_dump
 
+# What every page of the files glyph-dump reads does as it's interpreted,
+# a line a page, written to `out`: its interpretation's summary, field by
+# field; a checksum of every event (each operator, path, image, shading,
+# form, marked range and string shown, by the fields it names, in the
+# state it's in, but a show's string and glyphs, which glyph-dump has);
+# one of the page written again; `ok` or the class of what failed
+# (`lex`, `xobject`, `limit:<cap>`, `not-finite`, `unwritable:<why>`,
+# `encode:` and one of the first four where only writing it again did,
+# `unread` or `unopened` where there was nothing to interpret); whether
+# the page written again, interpreted again, draws the same (`same`,
+# `differs`, or `-` where it isn't written again); and how many objects
+# that didn't read the run was told of (`-` where the interpreter tells
+# of none). It asserts nothing: run it before and after
+# a change to the interpreter, over the same corpus, and `diff` the two
+# files; SHEAF_EVENTS_DUMP_ONLY=<a corpus path> prints that file's
+# records in full. Two runs over the same code write the same file.
+[doc("What every corpus page's interpretation does, a line a page, written to a file: diff two runs across a change to the interpreter")]
+[group('corpus')]
+events-dump out:
+    SHEAF_EVENTS_DUMP="{{ absolute_path(out) }}" scripts/test-capped.sh cargo test -p sheaf-doc --release --lib -- --ignored --nocapture --exact content::corpus::events_dump
+
 # ----- Gates ---------------------------------------------------------------
 
 # Wait until the machine is quiet: the 1-minute load under
