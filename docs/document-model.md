@@ -730,11 +730,16 @@ lint ledger) keeps them out of everything but tests.
   Watermark and Remove Header/Footer take them by origin,
   `include_authored` taking the author's too (Watermarks and backgrounds
   as generators; Headers, footers and Bates as generators).
-- **`ContentWriter`** writes content the same bytes for the same calls,
-  on any thread: `q`/`Q` and `cm`, gray, RGB and CMYK colors, graphics
-  states (`/ExtGState` with opacity and blend mode), line styles, paths
-  and their painting and clipping, text through a `Font`, images, and
-  `place_form`, which maps a form's `/Matrix`·`/BBox` onto a box.
+- **`ContentWriter`** (pdf-content-streams', re-exported by `content`)
+  writes content the same bytes for the same calls, on any thread:
+  `q`/`Q` and `cm`, gray, RGB and CMYK colors, graphics states
+  (`/ExtGState` with opacity and blend mode), line styles, paths and
+  their painting and clipping, text as the codes a font encoded, with
+  that font's resource, and images. It keeps no font: sheaf draws text
+  through `DrawText` (`set_font`, `show_text`), which gives it a `Font`'s
+  resource and the codes that font encodes a string as, and places a
+  form with `content::place_form`, which maps a form's `/Matrix`·`/BBox`
+  onto a box.
   Numbers have at most four decimals, never an exponent or `-0`; strings
   are literal, or hex when a byte is a control code. Marked content names
   its property list in the resources' `/Properties`: lists are never
@@ -1877,8 +1882,8 @@ state against a baseline through the Snapshot's dirty flags and a legacy
 projection of the records, went in slice 9 with the old rewrite path; in
 slice 9 every save was a Rewrite.
 
-What a save draws goes through the content toolkit's `ContentWriter`
-(see Page content): marks' appearances, tapes, the header and footer,
+What a save draws goes through `ContentWriter`, pdf-content-streams'
+writer (see Page content), its text through `DrawText`: marks' appearances, tapes, the header and footer,
 OCR layers and the watermark's text, in the built-in fonts' exact
 encodings, where a character a font can't draw is a `?` in the drawing
 and the text itself is kept. The resources they draw with are named

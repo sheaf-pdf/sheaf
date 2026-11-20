@@ -44,8 +44,8 @@ use unicode_normalization::UnicodeNormalization;
 use crate::attachments::{Objects, resolve};
 use crate::content::sink::Sink;
 use crate::content::{
-    Blend, Color, ContentWriter, FillRule, Font, GState, LineCap, LineJoin, Paint, Reserved,
-    ResourceNeeds, Std14,
+    Blend, Color, ContentWriter, DrawText, FillRule, Font, GState, LineCap, LineJoin, Paint,
+    Reserved, ResourceNeeds, Std14, place_form,
 };
 use crate::geom::{Affine, Geom, Rect};
 use crate::model::{FormRef, PinnedAp};
@@ -912,7 +912,7 @@ fn cloudy_style() -> Dictionary {
 
 /// A mark's cloudy border, laid out upright and drawn in user space
 /// through `up`: a path, not painted.
-fn cloud_path(w: &mut ContentWriter<'_>, kind: &AnnotKind, width: f32, up: &Affine) {
+fn cloud_path(w: &mut ContentWriter, kind: &AnnotKind, width: f32, up: &Affine) {
     let Some(outline) = outline_of(kind) else {
         return;
     };
@@ -924,7 +924,7 @@ fn cloud_path(w: &mut ContentWriter<'_>, kind: &AnnotKind, width: f32, up: &Affi
         if i == 0 {
             w.move_to(a.x, a.y);
         }
-        w.curve_to(c1, c2, b);
+        w.curve_to(c1.x, c1.y, c2.x, c2.y, b.x, b.y);
     }
     w.close();
 }
@@ -1392,7 +1392,7 @@ fn pdf_rect(r: [f32; 4]) -> Object {
 }
 
 /// A path through `points`, not painted.
-fn path(w: &mut ContentWriter<'_>, points: impl IntoIterator<Item = Pt>) {
+fn path(w: &mut ContentWriter, points: impl IntoIterator<Item = Pt>) {
     for (i, p) in points.into_iter().enumerate() {
         if i == 0 {
             w.move_to(p.x, p.y);
@@ -1403,12 +1403,12 @@ fn path(w: &mut ContentWriter<'_>, points: impl IntoIterator<Item = Pt>) {
 }
 
 /// The user-space box `[x0 y0 x1 y1]` as a path, not painted.
-fn box_path(w: &mut ContentWriter<'_>, [x0, y0, x1, y1]: [f32; 4]) {
+fn box_path(w: &mut ContentWriter, [x0, y0, x1, y1]: [f32; 4]) {
     w.rect(x0, y0, x1 - x0, y1 - y0);
 }
 
 /// An ellipse inscribed in the user-space box, as a path, not painted.
-fn ellipse_path(w: &mut ContentWriter<'_>, [x0, y0, x1, y1]: [f32; 4]) {
+fn ellipse_path(w: &mut ContentWriter, [x0, y0, x1, y1]: [f32; 4]) {
     let (cx, cy, rx, ry) = (
         (x0 + x1) / 2.0,
         (y0 + y1) / 2.0,
@@ -1416,28 +1416,11 @@ fn ellipse_path(w: &mut ContentWriter<'_>, [x0, y0, x1, y1]: [f32; 4]) {
         (y1 - y0) / 2.0,
     );
     let k = 0.5523;
-    let at = |x: f32, y: f32| Pt { x, y };
     w.move_to(cx + rx, cy);
-    w.curve_to(
-        at(cx + rx, cy + ry * k),
-        at(cx + rx * k, cy + ry),
-        at(cx, cy + ry),
-    );
-    w.curve_to(
-        at(cx - rx * k, cy + ry),
-        at(cx - rx, cy + ry * k),
-        at(cx - rx, cy),
-    );
-    w.curve_to(
-        at(cx - rx, cy - ry * k),
-        at(cx - rx * k, cy - ry),
-        at(cx, cy - ry),
-    );
-    w.curve_to(
-        at(cx + rx * k, cy - ry),
-        at(cx + rx, cy - ry * k),
-        at(cx + rx, cy),
-    );
+    w.curve_to(cx + rx, cy + ry * k, cx + rx * k, cy + ry, cx, cy + ry);
+    w.curve_to(cx - rx * k, cy + ry, cx - rx, cy + ry * k, cx - rx, cy);
+    w.curve_to(cx - rx, cy - ry * k, cx - rx * k, cy - ry, cx, cy - ry);
+    w.curve_to(cx + rx * k, cy - ry, cx + rx, cy - ry * k, cx + rx, cy);
 }
 
 /// A text string: as is when PDFDocEncoding reads it back so
@@ -1495,7 +1478,7 @@ fn inner_box(outer: [f32; 4], inner: [f32; 4]) -> Object {
 
 /// The stroke a mark's lines are drawn with: its color and width, and
 /// dashes if it has them.
-fn stroke_style(w: &mut ContentWriter<'_>, a: &Annot) {
+fn stroke_style(w: &mut ContentWriter, a: &Annot) {
     w.stroke_color(Color::rgb8(a.color));
     w.line_width(a.stroke);
     if a.dashed {
@@ -1505,7 +1488,7 @@ fn stroke_style(w: &mut ContentWriter<'_>, a: &Annot) {
 
 /// An open arrowhead at `tip`, pointing away from `from` (user space),
 /// solid even on a dashed line.
-fn arrowhead(w: &mut ContentWriter<'_>, from: Pt, tip: Pt, stroke: f32) {
+fn arrowhead(w: &mut ContentWriter, from: Pt, tip: Pt, stroke: f32) {
     let (dx, dy) = (tip.x - from.x, tip.y - from.y);
     let len = (dx * dx + dy * dy).sqrt().max(0.001);
     let (ux, uy) = (dx / len, dy / len);
@@ -1661,7 +1644,7 @@ pub fn tick_glyph(c: char) -> char {
 
 /// `runs` drawn in `color`, each from where the text matrix `at` makes
 /// of its point puts it.
-fn draw_runs(w: &mut ContentWriter<'_>, runs: &[Run], color: Color, at: impl Fn(Pt) -> Affine) {
+fn draw_runs(w: &mut ContentWriter, runs: &[Run], color: Color, at: impl Fn(Pt) -> Affine) {
     if runs.is_empty() {
         return;
     }
@@ -1670,11 +1653,11 @@ fn draw_runs(w: &mut ContentWriter<'_>, runs: &[Run], color: Color, at: impl Fn(
     let mut set = None;
     for run in runs {
         if set != Some((run.font, run.size)) {
-            w.font(run.font, run.size);
+            w.set_font(run.font, run.size);
             set = Some((run.font, run.size));
         }
-        w.text_matrix(at(run.at));
-        w.text(&run.text);
+        w.text_matrix(at(run.at).array());
+        w.show_text(run.font, &run.text);
     }
     w.end_text();
 }
@@ -1757,13 +1740,13 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
         let turned = upright != Affine::IDENTITY;
         if turned {
             w.save();
-            w.transform(upright);
+            w.transform(upright.array());
         }
         let target = Box2 {
             y: -rect.bottom(),
             ..*rect
         };
-        w.place_form(form.resource(), form.bbox, form.matrix, target);
+        place_form(&mut w, form.resource(), form.bbox, form.matrix, target);
         if turned {
             w.restore();
         }
@@ -1774,11 +1757,11 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
     } else {
         Blend::Normal
     };
-    w.gstate(GState {
-        fill_alpha: Some(alpha),
-        stroke_alpha: Some(alpha),
-        blend: Some(blend),
-    });
+    let mut state = GState::default();
+    state.fill_alpha = Some(alpha);
+    state.stroke_alpha = Some(alpha);
+    state.blend = Some(blend);
+    w.gstate(state);
     let mut dict = dictionary! {
         "Type" => Object::name("Annot"),
         "Rect" => pdf_rect(rect),
@@ -2214,7 +2197,7 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
                 match (i, ctrl) {
                     (0, _) => w.move_to(p.x, p.y),
                     (_, None) => w.line_to(p.x, p.y),
-                    (_, Some((c1, c2))) => w.curve_to(c1, c2, p),
+                    (_, Some((c1, c2))) => w.curve_to(c1.x, c1.y, c2.x, c2.y, p.x, p.y),
                 }
             }
             w.close();
@@ -2514,7 +2497,7 @@ fn tape_runs(
 /// the tape's own frame and mapped onto the page through `up`, from
 /// `rect`'s frame, so it reads the right way whichever way it's turned.
 fn tape_content(
-    w: &mut ContentWriter<'_>,
+    w: &mut ContentWriter,
     rect: Box2,
     size: f32,
     look: &crate::tape::TapeLook,
@@ -2529,14 +2512,7 @@ fn tape_content(
     let ex = user(1.0, 0.0);
     let ey = user(0.0, 1.0);
     w.save();
-    w.transform(Affine {
-        a: ex.x - o.x,
-        b: ex.y - o.y,
-        c: ey.x - o.x,
-        d: ey.y - o.y,
-        e: o.x,
-        f: o.y,
-    });
+    w.transform([ex.x - o.x, ex.y - o.y, ey.x - o.x, ey.y - o.y, o.x, o.y]);
     // Paper, a thin grey border, and nothing drawn outside it.
     w.fill_color(Color::rgb8(look.paper));
     w.stroke_color(Color::Gray(0.6));

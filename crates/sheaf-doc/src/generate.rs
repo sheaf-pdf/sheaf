@@ -36,14 +36,14 @@
 
 use std::sync::Arc;
 
-use crate::pdf::{Dictionary, Object, dictionary, literal};
+use crate::pdf::{Object, dictionary, literal};
 use serde::{Deserialize, Serialize};
 use sheaf_edit::{FontChoice, GridPos, HeaderFooterSpec, Z};
 
 use crate::annot::{Box2, Pt};
 use crate::content::{
-    Color, ContentWriter, Font, GState, PaginationKind, Res, ResBody, ResId, Reserved,
-    ResourceNeeds, Std14,
+    Color, ContentWriter, DrawText, Font, GState, PaginationKind, Res, ResBody, ResId, Reserved,
+    ResourceNeeds, Std14, place_form,
 };
 use crate::geom::{Affine, Geom, Rect};
 use crate::materialize::Private;
@@ -148,7 +148,7 @@ fn write<R>(
 
 /// The list a generator's artifact of `kind` is marked with: named in the
 /// page's `/Properties`, it says whose it is, unless `private` strips that.
-fn list(g: &Generator, kind: PaginationKind, private: Private) -> Dictionary {
+fn list(g: &Generator, kind: PaginationKind, private: Private) -> Res {
     let mut list = dictionary! {
         "Type" => Object::name("Pagination"),
         "Subtype" => Object::name(kind.name()),
@@ -156,7 +156,9 @@ fn list(g: &Generator, kind: PaginationKind, private: Private) -> Dictionary {
     if private == Private::Keep {
         list.set("SHEF_Gen", literal(g.id.to_string()));
     }
-    list
+    // Refused only for a stream held out of memory: this list is two
+    // names and a string.
+    Res::dict(list).expect("a property list of names and a string holds no stream")
 }
 
 /// Header and footer `hf`, generator `g`'s, on the page `ctx` says, handed
@@ -195,16 +197,9 @@ fn header_footer<R>(
         out.save();
         out.begin_text();
         out.fill_color(Color::rgb8(hf.color));
-        out.font(&face, line.size);
-        out.text_matrix(Affine {
-            a: ex.x - o.x,
-            b: ex.y - o.y,
-            c: o.x - ey.x,
-            d: o.y - ey.y,
-            e: at.x,
-            f: at.y,
-        });
-        out.text(&line.text);
+        out.set_font(&face, line.size);
+        out.text_matrix([ex.x - o.x, ex.y - o.y, o.x - ey.x, o.y - ey.y, at.x, at.y]);
+        out.show_text(&face, &line.text);
         out.end_text();
         out.restore();
         out.end_marked();
@@ -278,12 +273,11 @@ fn watermark<R>(
     let mut out = ContentWriter::new();
     out.begin_marked("Artifact", list(g, WatermarkGen::kind_at(g.z), private));
     out.save();
-    out.gstate(GState {
-        fill_alpha: Some(opacity),
-        stroke_alpha: Some(opacity),
-        blend: None,
-    });
-    out.transform(frame);
+    let mut state = GState::default();
+    state.fill_alpha = Some(opacity);
+    state.stroke_alpha = Some(opacity);
+    out.gstate(state);
+    out.transform(frame.array());
     match &draws {
         Draws::Text {
             face,
@@ -293,13 +287,13 @@ fn watermark<R>(
         } => {
             out.begin_text();
             out.fill_color(Color::rgb8(*color));
-            out.font(face, *size);
-            out.text(text);
+            out.set_font(face, *size);
+            out.show_text(face, text);
             out.end_text();
         }
         Draws::Image(res, turns) => {
             out.save();
-            out.transform(turned(*turns, w, h));
+            out.transform(turned(*turns, w, h).array());
             out.draw((*res).clone());
             out.restore();
         }
@@ -310,7 +304,7 @@ fn watermark<R>(
                 w,
                 h,
             };
-            out.place_form((*res).clone(), *bbox, *matrix, target);
+            place_form(&mut out, (*res).clone(), *bbox, *matrix, target);
         }
     }
     out.restore();

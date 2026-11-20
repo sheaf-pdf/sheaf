@@ -1107,6 +1107,29 @@ const RETIRED_M18: &[(&str, u8)] = &[
     // A resource category is the family's too, which `NameSet` and the
     // sinks are keyed by.
     ("content::names::ResKind", 19),
+    // The content writer and what its calls take are the family's too,
+    // re-exported by `content`: sheaf has no writer of its own.
+    ("content::writer::ContentWriter", 19),
+    ("content::writer::Color", 19),
+    ("content::writer::Blend", 19),
+    ("content::writer::GState", 19),
+    ("content::writer::LineCap", 19),
+    ("content::writer::LineJoin", 19),
+    ("content::writer::Paint", 19),
+    ("content::writer::FillRule", 19),
+    ("content::writer::TextMode", 19),
+    ("content::writer::Need", 19),
+    ("content::writer::ResourceNeeds", 19),
+    ("content::writer::Reserved", 19),
+    ("content::writer::write_string", 19),
+    // The writer keeps no font: text is drawn through `DrawText`
+    // (`set_font`, `show_text`), which names the font at each call, and a
+    // form is placed by the function `content::place_form`.
+    ("content::writer::ContentWriter::text", 19),
+    ("content::writer::ContentWriter::place_form", 19),
+    // `Reserved::read` takes a resolver; one of nothing is a
+    // `resolve_fn`.
+    ("content::sink::Unread", 19),
 ];
 
 /// The ledgers, with the words a hit names its slice by.
@@ -1128,6 +1151,27 @@ const QUALIFIED_ONLY: &[&str] = &[
     "ResBody",
     "ResId",
     "ResKind",
+    // Its writer and what the writer's calls take, re-exported the same
+    // way; and `content::place_form`, a function now, not the writer's
+    // method (M18 slice 19). (`text` is below.)
+    "ContentWriter",
+    "Color",
+    "Blend",
+    "GState",
+    "LineCap",
+    "LineJoin",
+    "Paint",
+    "FillRule",
+    "TextMode",
+    "Need",
+    "ResourceNeeds",
+    "Reserved",
+    "write_string",
+    "place_form",
+    // What a private-data scan said of content it couldn't read
+    // (`Said::Unread`), and pdf-structure's error: not the sink's objects
+    // that read nothing.
+    "Unread",
     // A print, export or render request's job, and the app's file-writing
     // job: not the version's.
     "job",

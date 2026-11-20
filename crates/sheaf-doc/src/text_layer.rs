@@ -26,7 +26,9 @@ use std::ops::Range;
 use crate::pdf::{dictionary, literal};
 
 use crate::annot::{Box2, Pt};
-use crate::content::{BlockId, ContentWriter, Glyphless, Reserved, ResourceNeeds, TextMode};
+use crate::content::{
+    BlockId, ContentWriter, DrawText, Glyphless, Res, Reserved, ResourceNeeds, TextMode,
+};
 use crate::geom::{Affine, Geom};
 use crate::materialize::Private;
 
@@ -139,6 +141,9 @@ pub(crate) fn block(
     match private {
         Private::Keep => {
             let list = dictionary! { "SHEF_OcrBlock" => literal(id.to_string()) };
+            // Refused only for a stream held out of memory: this list is
+            // one string.
+            let list = Res::dict(list).expect("a property list of a string holds no stream");
             w.begin_marked("ShOCR", list);
         }
         Private::Strip | Private::Scrub => w.begin_tagged("ShOCR"),
@@ -158,7 +163,7 @@ pub(crate) fn block(
             }
             let fs = r.h;
             if last_fs.is_none_or(|f| (fs - f).abs() > 1e-3) {
-                w.font(&Glyphless, fs);
+                w.set_font(&Glyphless, fs);
                 last_fs = Some(fs);
             }
             // The gap to the previous word becomes a real space so viewers
@@ -166,15 +171,15 @@ pub(crate) fn block(
             if let Some(pr) = prev_right {
                 let gap = r.x - pr;
                 if gap > 0.1 {
-                    w.text_matrix(tm(pr, r.bottom()));
+                    w.text_matrix(tm(pr, r.bottom()).array());
                     w.horizontal_scale(200.0 * gap / fs);
-                    w.text(" ");
+                    w.show_text(&Glyphless, " ");
                 }
             }
             // Each CID advances half an em, so scale n half-ems to the box.
-            w.text_matrix(tm(r.x, r.bottom()));
+            w.text_matrix(tm(r.x, r.bottom()).array());
             w.horizontal_scale(200.0 * r.w / (fs * n as f32));
-            w.text(&word.text);
+            w.show_text(&Glyphless, &word.text);
             prev_right = Some(r.right());
         }
     }

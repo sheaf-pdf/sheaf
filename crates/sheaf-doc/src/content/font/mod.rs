@@ -14,6 +14,7 @@
 //! trait.
 
 mod afm;
+mod draw;
 mod encoding;
 mod foreign;
 mod glyphless;
@@ -28,6 +29,7 @@ use std::sync::Arc;
 
 use crate::pdf::Object;
 
+pub use draw::DrawText;
 pub use foreign::{
     Descendant, FontApprox, FontId, FontKind, FontScope, Fonts, Foreign, TooLarge, VerticalMetrics,
 };

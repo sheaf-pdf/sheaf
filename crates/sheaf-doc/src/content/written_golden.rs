@@ -28,8 +28,8 @@ use sheaf_edit::{
 
 use super::sink::Sink;
 use super::{
-    BlockId, Concat, ContentWriter, Fonts, GenId, Glyphless, Need, PaginationKind, Res, Reserved,
-    ResourceNeeds, Std14, fixture, interp,
+    BlockId, Concat, ContentWriter, DrawText, Fonts, GenId, Glyphless, Need, PaginationKind, Res,
+    Reserved, ResourceNeeds, Std14, fixture, interp,
 };
 use crate::annot::{Annot, AnnotId, AnnotKind, Box2};
 use crate::export::Export;
@@ -748,12 +748,12 @@ fn built(cases: &mut Cases) {
     for (n, (line, face)) in lines.into_iter().zip(faces).enumerate() {
         let mut w = ContentWriter::new();
         w.begin_text();
-        w.font(face, 12.0);
+        w.set_font(face, 12.0);
         w.text_move(72.0, 700.0);
-        w.text(line);
+        w.show_text(face, line);
         w.next_line();
-        w.font(&Glyphless, 8.0);
-        w.text(line);
+        w.set_font(&Glyphless, 8.0);
+        w.show_text(&Glyphless, line);
         w.end_text();
         let (content, needs) = w.finish(&Reserved::default());
         cases.written(&format!("built:page{n}"), &content, &needs);

@@ -30,7 +30,9 @@
 //!   and [`fixture`], pages built to test it, for other crates' tests
 //!   too.
 //! - [`ContentWriter`]: content written, its resources ([`Res`]) named at
-//!   the end.
+//!   the end ([`Reserved`], [`ResourceNeeds`]): pdf-content-streams', as
+//!   are the types its calls take. Text goes in through [`DrawText`], in a
+//!   [`Font`], and a form by [`place_form`], in sheaf's geometry.
 //! - [`sink`]: where content's resources are written: the emitter, or a
 //!   PDF built in memory ([`serialize::built`](crate::serialize::built)).
 
@@ -48,8 +50,7 @@ mod lex;
 mod marked;
 mod names;
 mod page;
-#[cfg(test)]
-mod parity_tests;
+mod place;
 pub mod sink;
 mod splice;
 #[cfg(test)]
@@ -57,29 +58,26 @@ mod tests;
 mod text_bag;
 #[cfg(test)]
 mod text_bag_tests;
-mod writer;
-#[cfg(test)]
-mod writer_tests;
 #[cfg(test)]
 mod written_golden;
 
-pub use crate::pdf::content::{Res, ResBody, ResId, ResKind};
+pub use crate::pdf::content::{
+    Blend, Color, ContentWriter, FillRule, GState, LineCap, LineJoin, Need, Paint, Res, ResBody,
+    ResId, ResKind, Reserved, ResourceNeeds, TextMode, write_string,
+};
 pub use balance::{Balance, balance};
 pub use blocks::{
     BlockAt, BlockId, ContentError, DrawnForms, GenId, Marker, PagOrigin, PageBlocks, Pagination,
     PaginationKind, SheafBlock, SheafBlockRef, isolates,
 };
 pub use font::{
-    Descendant, Font, FontApprox, FontId, FontKind, FontMetrics, FontProgram, FontRes, FontScope,
-    Fonts, Foreign, Glyphless, Std14, TooLarge, Unencoded, VerticalMetrics, wrap_with,
+    Descendant, DrawText, Font, FontApprox, FontId, FontKind, FontMetrics, FontProgram, FontRes,
+    FontScope, Fonts, Foreign, Glyphless, Std14, TooLarge, Unencoded, VerticalMetrics, wrap_with,
 };
 pub use lex::{LexError, LexErrorKind, ResCx, Tok, lex, name, object};
 pub use marked::{Marked, PropertiesDict, Props, marked};
 pub use names::{Kept, NameSet, kept, names_used};
 pub use page::{Concat, ContentFault, PageContent, Pos, ReadObjects, SpanAcross, contents};
+pub use place::place_form;
 pub use splice::{Rewrite, SpliceError, Spliced, splice, splice_each, without_keys};
 pub use text_bag::{TextBag, text_bag};
-pub use writer::{
-    Blend, Color, ContentWriter, FillRule, GState, LineCap, LineJoin, Need, Paint, Reserved,
-    ResourceNeeds, TextMode, write_string,
-};

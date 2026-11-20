@@ -1411,7 +1411,7 @@ fn flattened(
             w.begin_tagged("Artifact");
         }
         w.save();
-        w.transform(p.matrix);
+        w.transform(p.matrix.array());
         w.draw(form);
         w.restore();
         if artifact {
