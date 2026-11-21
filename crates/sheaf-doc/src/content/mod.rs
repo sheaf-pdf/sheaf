@@ -9,7 +9,10 @@
 //!   operands ([`Tok`], [`Operation`], [`Operand`]); an operand's [`name`]
 //!   and [`object`]; and what stops them, [`SyntaxError`]. They're
 //!   pdf-content-streams' (M18 slice 17; sheaf's own lexer until then),
-//!   which reads content as PDFium does.
+//!   which reads content as PDFium does. Everything here reads a page by
+//!   them, with the color spaces [`res_cx`] reads: its text bag and its
+//!   interpretation, its blocks, marked ranges, cuts and splices, and the
+//!   names it keeps, so a page is read one way.
 //! - [`page`]: a page's `/Contents` as one, the concatenation PDFium reads,
 //!   read within [`ContentLimits`](crate::source::ContentLimits), and
 //!   places in it mapped back to a stream ([`Concat`], [`Pos`] and

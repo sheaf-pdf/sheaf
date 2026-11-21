@@ -213,10 +213,12 @@ blob, and a source parses the blob in place:
   stream decompressed, 1,024 sections, 8,388,607 objects and twice as
   many cross-reference stream entries, references 64 deep), the page
   tree's (1,024 levels, fewer than 0xFFFFF pages), the form reader's and,
-  from slice 6, the content lexer's (`Limits.content`: 256 MiB of a
-  page's streams decompressed together, 65,536 operands before an
-  operator, arrays, dictionaries and marked content 512 deep, and 64 MiB
-  of an inline image's data).
+  from slice 6, content's (`Limits.content`, which pdf-content-streams
+  reads a page's content under, as `ContentLimits::family` gives them:
+  256 MiB of a page's streams decompressed together, 65,536 operands
+  before an operator, marked content 512 deep, arrays and dictionaries
+  too but never past the 64 levels PDFium reads, and 64 MiB of an inline
+  image's data).
   Breaking one, a `/Kids` cycle, a `/Parent` loop or an object that
   doesn't decrypt is a typed error, never a panic, a hang or memory
   without bound; nothing is repaired. So the app doesn't open such a
@@ -613,95 +615,126 @@ meet. The flatten (until 19) was their last user, the watermark's install
 and read having gone in slice 16, and slice 19's clippy ban (the plan's
 lint ledger) keeps them out of everything but tests.
 
-- **Lexing** (`content::lex`) gives each token with its bytes as
-  written and where they are: an operator, an operand (a number, name,
-  string, array or dictionary, each one token, nested strings, escapes
-  and all), or an inline image, `BI` to `EI`. Comments are skipped, and a
-  stray closing delimiter is an operand of its own, which PDFium skips
-  too. An error (`LexError`: a string, array, dictionary or image that
-  doesn't end, or a cap) says where; lexing stops there, never panics or
-  loops, and is linear in what it reads.
-- **A page's content is one concatenation.** PDFium lexes a page's
+- **Tokens** (`content::tokens`, and `content::operations`, each
+  operator with its operands) are pdf-content-streams' from M18 slice
+  17, which reads content as PDFium's `CPDF_StreamParser` reads it;
+  sheaf's own lexer (`content::lex`, from this slice) went then. Each
+  token has its bytes as written and where they are: an operator, an
+  operand (a number, name, string, array or dictionary, each one token,
+  nested strings, escapes and all), or an inline image, `BI` to `EI`.
+  0x80 and 0xFF are white-space, as in PDFium. An array or a dictionary
+  ends where PDFium's `ReadNextObject` ends it: an array inside an array
+  opens none, and a dictionary ends at a key that's no name or a value
+  that's no object, what's after it read on as content. Comments are
+  skipped, and a stray closing delimiter is an operand of its own, which
+  PDFium skips too. An error (`SyntaxError`: a string, array, dictionary
+  or image that doesn't end, arrays and dictionaries nested past the 64
+  levels PDFium reads, or a cap) says where; reading stops there, never
+  panics or loops. **One page is read one way:** its text bag, its
+  interpretation, its blocks, marked ranges, cuts and splices, the names
+  its resources keep and the private names' walk all read these tokens,
+  with the color spaces `content::res_cx` reads from the page's
+  resources (a `ResCx`, counted as PDFium counts them).
+- **A page's content is one concatenation.** PDFium reads a page's
   `/Contents` streams joined with a space between each, so a string or a
   marked range may open in one stream and close in the next.
-  `PageContent::read` decodes them within `Limits.content` (see the
-  Core idea) into one buffer (`Concat`), and maps any place in it back
-  to a stream and an offset (`Pos`, `SpanAcross`). A missing entry reads
-  as nothing, as PDFium draws nothing for it; a stream that won't decode
-  is a fault, never its raw bytes. `forms::check` reads a `/DA`'s font
-  (the last `Tf`'s name) by lexing it, and the stamp library's page form
+  `PageContent::read` decodes them within `Limits.content` (see the Core
+  idea) into one buffer (`Concat`), and maps any place in it back to a
+  stream and an offset (`Pos`, `SpanAcross`). A missing entry reads as
+  nothing, as PDFium draws nothing for it; a stream that won't decode is
+  a fault, never its raw bytes. `forms::check` reads a `/DA`'s font (the
+  last `Tf`'s name) by its operations, and the stamp library's page form
   takes its page's content through the concatenation, so a page of
   several streams, state carried across them, draws as it shows.
 - **Inline images end where PDFium ends them** (`ReadInlineStream`'s
-  rules, in order): unfiltered data by its exact count (rows padded; no
-  `/CS`, or a name the resources don't have, counts as one 1-bit
-  component, as in PDFium); `/AHx`, `/A85` and `/RL` data at its end of
-  data; DCT at the JPEG's end of image, the search remembered so many
-  such images stay linear; then `/L` or `/Length`; and only then a scan
-  for `EI` with white-space either side. After the first four the image
-  ends at the next `EI` operator. An image whose end marker or exact
-  count runs past the content is an error; PDFium loses the rest of the
-  page then. An ignored test compares the lexer's painting operators by
-  kind (text, paths, images inline or not, forms, shadings) with
-  PDFium's page objects on the 402-file pool: they agree on all 23,628
-  pages.
-- **Marked content, balance and names.** `marked` gives every marked
-  range with its tag, its property list (inline, or named in the
-  resources' `/Properties`) and how deep it is; marked content that
-  doesn't balance is an error, which no page in the corpus or the pool
-  has. `balance` is the `q`/`Q` count: what's left open at the end
-  (`net`) and the lowest it went (`min_prefix`). `names_used` gives the
-  resource names the content uses (fonts, XObjects, graphics states,
-  shadings, color spaces and patterns, named property lists), for slice
-  16's pruning.
+  rules, by the first filter): unfiltered data by its exact count (rows
+  padded; no `/CS`, or a name the resources don't have, counts as one
+  1-bit component, as in PDFium, and a space is counted as PDFium counts
+  it, `[/Pattern /DeviceRGB]` as 4); `/AHx`, `/A85` and `/RL` data at
+  its end of data; `/Fl` and `/LZW` data decoded to where the decoder
+  stops; DCT and CCITTFax data by a stand-in, a JPEG past its first end
+  of image, else the first `EI` with white-space either side
+  (pdf-content-streams' `image-ends` feature, which decodes them as
+  PDFium does, stays off: on the one pool page with such an image, the
+  tokens agree with PDFium's page objects without it). `/L` and
+  `/Length` aren't read, as PDFium reads neither. Past the data the
+  image ends at the next `EI` operator; where a filter's end has no `EI`
+  after it, its data is read on as content to the next one, as PDFium
+  reads it. An image no `EI` ends is an error; PDFium loses the rest of
+  the page then. What finding the ends of a reading's images costs,
+  decoding and reading past an end in vain, is capped (256 MiB). An
+  ignored test (`just tier-lexer`) compares the painting operators of a
+  page's content as sheaf reads it (`PageContent`, and the color spaces
+  `res_cx` reads) by kind (text, paths, images inline or not, forms,
+  shadings) with PDFium's page objects on the 402-file pool: they agree
+  on all 23,628 pages.
+- **Marked content, balance and names** are pdf-content-streams' too.
+  Its `marked` (named at the door) gives every marked range with its
+  tag, its property list (inline, or named in the resources'
+  `/Properties`, read by `content::properties`) and how deep it is;
+  marked content that doesn't balance, or whose ranges and lists come
+  to more than 2²² values in a reading, is an error, which no page in
+  the corpus or the pool has. A
+  page's blocks keep the ranges they need as sheaf's own
+  (`content::Marked`, the list held by value), since a source keeps
+  them past the lists they were read from. `content::balance` is the
+  `q`/`Q` count: what's left open at the end (`net`) and the lowest it
+  went (`min_prefix`). `content::names_used` gives the resource names
+  the content uses (fonts, XObjects, graphics states, shadings, color
+  spaces and patterns, named property lists, and an inline image's
+  color space by the name PDFium looks it up by), and `content::kept`
+  the two of what's left once ranges are taken out, for slice 16's
+  pruning.
 - **Splicing is safe or refused.** The splice is pdf-content-streams'
   (`splice`, `splice_each`, `Spliced`, `without_keys`, re-exported by
-  `content`), called with the same color spaces (`ResCx::family`) and
-  caps (`ContentLimits::family`) sheaf's lexer reads with. `splice` takes
-  ranges out of a page's
-  streams and keeps every other byte as it was; a stream nothing is taken
-  from is borrowed, and a space goes where what's kept either side of a
-  cut (or of cuts that touch) would join two tokens. A range is taken out
-  only when that can't change what's drawn after it, lexically. It sets
-  no graphics state outside a `q`…`Q` of its own (no `cm`, color, line
-  style, `gs`, clip or text state, which would last past it). Outside a
-  text object its `q`s and `Q`s and its `BT`s and `ET`s balance on their
-  own. Inside one it stays inside, its `q`s balance, it moves no line
-  (`Td TD Tm T* ' "`, which `q` doesn't save), and if it shows text no
-  text is shown after it before the line moves or the object ends, since
-  shown text moves the next on; setting text state doesn't move a line.
-  It starts and ends outside a path being made. Marked content draws
-  nothing, but for optional content (`/OC`), which hides what it marks:
-  so a range may open marked content, none of it optional, that a later
-  range closes, as long as no marked content is kept between them, and
-  closes only what it or an earlier range opened. A range must also
-  start and end between operators, never inside a token or a comment or
-  between an operator and its operands. It shows no text and moves no
-  line outside a text object (PDFium draws such text), moves no line
-  inside a `q`…`Q` of its own, and shows no text while the rendering
-  mode may add it to the clip (`Tr` 4 to 7), but in a text object of its
-  own inside a `q`…`Q` of its own. What's kept is read again and must
-  read as the same tokens: a cut that would move an inline image's end,
-  or make a lone `BI` an image, is refused. Anything else is refused:
-  removing a running head drawn in the middle of a text object can't
-  shift the body text, and a color an artifact sets can't leak onto what
-  follows. Content that can't be read, or whose checks would read more
-  than `Limits::splice_reads`, is an error of the call, not a refusal of
-  one range: `splice_each` and `Spliced::streams` return it, and the
-  emitter then takes nothing out, each range counted as staying
-  (`taken_or_none`). (The splice has a third such error, for an inline
-  image sized by a color space whose components it counted past a cap;
-  sheaf gives it the counts its own lexer reads with, `ResCx::family`,
-  which are never capped, so that one doesn't come until the family's
-  tokens replace the lexer.) `without_keys` writes a marked range's property
-  list again without some keys, read from the content's start and read
-  again once written; lists that read otherwise made together with what's
-  taken out are refused together, and the emitter then leaves them as
-  they were, counted, and makes what's taken out alone (`streams_made`).
-  An op reports a refusal as a `ContentError` that names the
-  page ("page 12's content can't be changed without changing what else
-  it draws; nothing was changed"; one that can't be read, "page 12's
-  content can't be read; nothing was changed").
+  `content`), called with the color spaces content was read with
+  (`content::res_cx`) and its caps (`ContentLimits::family`), so the
+  ranges it's given were found by the tokens it judges them by. `splice`
+  takes ranges out of a page's streams and keeps every other byte as it
+  was; a stream nothing is taken from is borrowed, and a space goes
+  where what's kept either side of a cut (or of cuts that touch) would
+  join two tokens. A range is taken out only when that can't change
+  what's drawn after it, lexically. It sets no graphics state outside a
+  `q`…`Q` of its own (no `cm`, color, line style, `gs`, clip or text
+  state, which would last past it). Outside a text object its `q`s and
+  `Q`s and its `BT`s and `ET`s balance on their own. Inside one it stays
+  inside, its `q`s balance, it moves no line (`Td TD Tm T* ' "`, which
+  `q` doesn't save), and if it shows text no text is shown after it
+  before the line moves or the object ends, since shown text moves the
+  next on; setting text state doesn't move a line. It starts and ends
+  outside a path being made. Marked content draws nothing, but for
+  optional content (`/OC`), which hides what it marks: so a range may
+  open marked content, none of it optional, that a later range closes,
+  as long as no marked content is kept between them, and closes only
+  what it or an earlier range opened. A range must also start and end
+  between operators, never inside a token or a comment or between an
+  operator and its operands. It shows no text and moves no line outside
+  a text object (PDFium draws such text), moves no line inside a `q`…`Q`
+  of its own, and shows no text while the rendering mode may add it to
+  the clip (`Tr` 4 to 7), but in a text object of its own inside a
+  `q`…`Q` of its own. What's kept is read again and must read as the
+  same tokens: a cut that would move an inline image's end, or make a
+  lone `BI` an image, is refused. Anything else is refused: removing a
+  running head drawn in the middle of a text object can't shift the body
+  text, and a color an artifact sets can't leak onto what follows.
+  Content that can't be read, or whose checks would read more than
+  `Limits::splice_reads`, is an error of the call, not a refusal of one
+  range: `splice_each` and `Spliced::streams` return it, and the emitter
+  then takes nothing out, each range counted as staying
+  (`taken_or_none`). The splice has a third such error, `Capped`, for an
+  inline image sized by a color space whose components were counted past
+  a cap, which no corpus page has. A page whose color spaces can't be
+  read for a reason that isn't the file's damage (`res_cx`'s error: I/O,
+  a password, a cap) has its content left as it is by a save, as content
+  that can't be read has. `without_keys` writes a marked range's
+  property list again without some keys, read from the content's start
+  and read again once written; lists that read otherwise made together
+  with what's taken out are refused together, and the emitter then
+  leaves them as they were, counted, and makes what's taken out alone
+  (`streams_made`). An op reports a refusal as a `ContentError` that
+  names the page ("page 12's content can't be changed without changing
+  what else it draws; nothing was changed"; one that can't be read,
+  "page 12's content can't be read; nothing was changed").
 - **What a page draws, classified: `Source::blocks(i)`**, a
   `PageBlocks`, read the first time an op asks and kept by the source,
   one per page, for as long as the source lives: a fact of the bytes,
@@ -713,15 +746,21 @@ lint ledger) keeps them out of everything but tests.
   `/Watermark` or `/Background`, the outermost one) with who drew each,
   sheaf's blocks by stream marker (`/SHEF_Block`) and by marked-content
   marker (`/SHEF_Gen`, `/SHEF_OcrBlock`), the isolating streams
-  (`/SHEF_Block << /K /Isolate >>`), the balance, and
-  whether a form the page draws outside its pagination artifacts has one
-  inside, which removing the page's would leave in place. A source reads
-  each XObject its pages draw once, whatever names and pages draw it
-  (`DrawnForms`); a form with no resources of its own draws with its
-  page's, so it's read for each page. Forms are read within what the
-  page's streams leave of `Limits.content.decompressed`: one past the
-  cap, or met once that's spent, counts as having an artifact inside.
-  Who drew an artifact (`PagOrigin`):
+  (`/SHEF_Block << /K /Isolate >>`), the balance, and whether a form the
+  page draws outside its pagination artifacts has one inside, which
+  removing the page's would leave in place. A source reads each XObject
+  its pages draw once, whatever names and pages draw it (`DrawnForms`);
+  a form with no resources of its own draws with its page's, so it's
+  read for each page. Forms are read within what the page's streams
+  leave of `Limits.content.decompressed`: one past the cap, or met once
+  that's spent, or one whose color spaces can't be read for a reason
+  that isn't the file's damage, counts as having an artifact inside. A
+  page has no blocks where its streams don't decode or come to more than
+  the cap (`ContentFault::Stream`, `TooLarge`), its tokens stop or its
+  marked content doesn't balance (`ContentFault::Syntax`, a cap among
+  them), or its color spaces can't be read for a reason that isn't the
+  file's damage (`ContentFault::Resources`); an op that needs them says
+  the page's content can't be read. Who drew an artifact (`PagOrigin`):
   - **`Sheaf`:** it's in a `/SHEF_Block` stream or its list has
     `/SHEF_Gen` (watermarks and backgrounds from slice 16, the header and
     footer from slice 17; from slice 18 the recognized text's blocks are
@@ -753,6 +792,38 @@ lint ledger) keeps them out of everything but tests.
   Watermark and Remove Header/Footer take them by origin,
   `include_authored` taking the author's too (Watermarks and backgrounds
   as generators; Headers, footers and Bates as generators).
+- **What reads otherwise than sheaf's lexer did** (M18 slice 17, each
+  asked of PDFium chromium/8152, by pdf-content-streams' own cases or on
+  the input itself; every corpus page and the forms it draws read both
+  ways by `just content-dump`, a line each). PDFium sides with the
+  family in each: 0x80 and 0xFF are white-space; an array inside an
+  array opens none, and a dictionary ends at a key that's no name or a
+  value that's no object; a name's `#` takes the two bytes after it, a
+  byte that's no hex digit read as 0, and a name is the first 255 bytes
+  written, its `/` among them; a string keeps a raw CR as written, and
+  its first 32,767 bytes; a number is read as PDFium reads it (`--5` is
+  0, `1.2.3` is 1.2); a dictionary with a key that's no name is none,
+  and of a key written twice both are kept, a lookup giving the last; an
+  inline image's `/L` isn't read, nor the image ended by it (`BI /F /Fl
+  /L 6 ID x EI y EI` ends at the first `EI`), and its dictionary ends at
+  what's no name, a keyword there making `BI` an operator of its own; a
+  color space is counted as PDFium counts it (`[/Pattern /DeviceRGB]` 4,
+  not 1, a DeviceN space with no tint transform 3, an Indexed space over
+  a base that doesn't load 3). On the corpus only two of them show: the
+  `[/Pattern …]` counts, on 341 pages of 53 files, where no inline image
+  is drawn in such a space, so no token moves; and a list with a key
+  written twice, on one file's four pages, where the lists written out
+  keep both and what's classified, cut and written doesn't move. No
+  page's blocks, cuts or splices move. Content PDFium reads past (0x80
+  and 0xFF, an array or dictionary ended early) has blocks, marked
+  ranges and splices now, where the lexer refused it, as its text bag
+  has since slice 23; content with arrays and dictionaries nested 65 to
+  512 deep has none, where the lexer read it and PDFium reads on (no
+  corpus page). And caps the lexer didn't have stop a page's blocks:
+  marked content's 2²² values and the 256 MiB inline images' ends may
+  cost (`SyntaxErrorKind::MarkedSize`, `ImageEnds`), and an inline image
+  sized by a color space counted past a cap refuses a splice of the page
+  (no corpus page).
 - **`ContentWriter`** (pdf-content-streams', re-exported by `content`)
   writes content the same bytes for the same calls, on any thread:
   `q`/`Q` and `cm`, gray, RGB and CMYK colors, graphics states
@@ -889,13 +960,13 @@ lint ledger) keeps them out of everything but tests.
   written to disk for them.
 
 Every corpus page's content (24,256 pages, 575 MB, and the 5,273 forms
-they draw) reads, lexes into tokens that tile it, splices back to each
-stream's own bytes read apart, balances as lopdf's decoder counts it, is
-classified, and has each pagination artifact spliced out, in about 8 s
-in the test profile; classifying every page of the 7k fixtures, cold,
-takes 141 ms (synthetic), 203 ms (heavy) and 77 ms (scanned), which was
-most of what a first Bates apply cost there until slice 17 made it one
-op that reads no page's content (under 1 ms).
+they draw) reads, reads as tokens that tile it, splices back to each
+stream's own bytes read apart, balances as a count of its operators'
+`q`s and `Q`s does, is classified, and has each pagination artifact
+spliced out, in about 8 s in the test profile; classifying every page of
+the 7k fixtures, cold, takes 141 ms (synthetic), 203 ms (heavy) and 77
+ms (scanned), which was most of what a first Bates apply cost there
+until slice 17 made it one op that reads no page's content (under 1 ms).
 
 ### The content interpreter (M11 slice 3, between milestones)
 
@@ -908,8 +979,8 @@ state, what it reads past told to a sink, a text page of its own);
 sheaf's own (`content/interp/`, 6,120 lines) went then. It reads
 content as PDFium interprets it (`CPDF_StreamContentParser`), so
 where it says a glyph is, PDFium draws it, from pdf-content-streams'
-tokens and its `ResCx` (sheaf's lexer, which blocks, marked ranges and
-splices still read, is slice 17's).
+tokens and its `ResCx`, which a page's blocks, marked ranges and
+splices read too (from M18 slice 17, when sheaf's lexer went).
 
 - **`content::interp`, where sheaf meets the family.** It re-exports the
   door's names (`Event`, `Kind`, `State`, `Summary`, `Error`, `Opts`,
@@ -997,7 +1068,7 @@ splices still read, is slice 17's).
     with its tag, properties, `/MCID`, `/ActualText` decoded, its `/OC`
     list, the form use it's in and where its operator is).
 
-  `Summary` counts operators, glyphs, bytes of content lexed, bytes
+  `Summary` counts operators, glyphs, bytes of content read, bytes
   taken from the page's budget (`decompressed`: its content, each form's
   data once, what the fonts it picks decompress to, and what drawing
   their programs' glyphs costs), path segments,
@@ -1163,35 +1234,35 @@ splices still read, is slice 17's).
   once by `source::Limits::gfx`: `ContentLimits`' `form_depth` (40);
   `states`, the `q`s saved at once (65,536: PDFium has no cap, so this
   one bounds memory only); `operators` and `glyphs` (2²⁴ each),
-  `interpreted`, the bytes of content lexed (2³⁰), and `segments`, path
+  `interpreted`, the bytes of content read (2³⁰), and `segments`, path
   segments (2²³: of all painted, and of the clip and the path being
   built together, which bounds what paths and the clip hold), each but
   `states` counted across every form use, so a form drawn many times
   costs each time, one of whitespace too; marked nesting (`marked`,
-  `Cap::Marked`) as content's `depth` (512); the lexer's caps as
+  `Cap::Marked`) as content's `depth` (512); content's caps as
   `ContentLimits::family` gives them (`operands` is the operand stack)
   and fonts' as `Limits::fonts`; and forms and fonts decompress within
   what the page's streams leave of `decompressed`. pdf-gfx counts some
   of them its own way: `states` within each content stream (a form's
   `q`s apart from what draws it), `marked` every range open across a
   form and what draws it, and content longer than `decompressed` is past
-  it before it's read. Text in a clipping mode
-  past the 1,024 objects PDFium's clip takes keeps no glyphs. Past a cap
-  is `GfxError::Limit(Cap)`, never a partial answer; content that doesn't
-  lex, or past the lexer's caps (arrays and dictionaries nested past the
-  64 levels PDFium builds among them, whatever `depth` says), is
+  it before it's read. Text in a clipping mode past the 1,024 objects
+  PDFium's clip takes keeps no glyphs. Past a cap is
+  `GfxError::Limit(Cap)`, never a partial answer; content whose tokens
+  don't read, or past their caps (arrays and dictionaries nested past
+  the 64 levels PDFium builds among them, whatever `depth` says), is
   `GfxError::Content`, a form whose stream doesn't decode
-  `GfxError::FormStream`, an object a reason stops `GfxError::Unreadable`
-  (Failing closed, above); and geometry an `f32` can't
-  hold (a CTM, a form's matrix, the line, a glyph's box by a bound
+  `GfxError::FormStream`, an object a reason stops
+  `GfxError::Unreadable` (Failing closed, above); and geometry an `f32`
+  can't hold (a CTM, a form's matrix, the line, a glyph's box by a bound
   worked from its font's extent, its outlines' reach included, a path,
-  an image's corners, a shading) is `Error::NotFinite`. It never
-  panics or recurses past `form_depth`. The most any page of the corpus
-  comes to: 1,217,210 operators (13.8× under the cap), 41,050 glyphs,
-  17,864,912 bytes lexed, 17,980,634 bytes decompressed with its fonts'
-  programs (6.7% of `decompressed`), 995,739 path segments (`segments`
-  stays 2²³, 8.4× that), 745 form uses, forms 10 deep, 67 states saved,
-  marked content 9 deep.
+  an image's corners, a shading) is `Error::NotFinite`. It never panics
+  or recurses past `form_depth`. The most any page of the corpus comes
+  to: 1,217,210 operators (13.8× under the cap), 41,050 glyphs,
+  17,864,912 bytes of content read, 17,980,634 bytes decompressed with
+  its fonts' programs (6.7% of `decompressed`), 995,739 path segments
+  (`segments` stays 2²³, 8.4× that), 745 form uses, forms 10 deep, 67
+  states saved, marked content 9 deep.
 - **Written again** (`interp::encode`, pdf-gfx's `encode_with`, giving
   `EncodedPage { content, forms }`): the page's operators as one stream,
   and once each the content of every form it draws, as written
@@ -1217,38 +1288,39 @@ splices still read, is slice 17's).
   decode (`Error::PageStream`). Since slice 23 no corpus page is written
   otherwise than sheaf's own encoder wrote it, byte for byte, and none
   it wrote is refused.
-- **What reads otherwise than sheaf's own did** (M18 slice 23, each asked
-  of PDFium, its page objects, text page or pixels; the corpus read by
-  both, page for page, by `just glyph-dump` and `just events-dump`).
-  Where PDFium sided with the family it stands: a raw CR in a literal
-  string is code 13, and a CRLF two codes, as PDFium's `ReadString`
-  keeps them, where sheaf's lexer read LF (one corpus page: a glyph and
-  the pen after it); a stroked path of one point reaches half the width
-  by its cap, not the miter limit, since PDFium paints no join there (8
-  pages, 15 paths); a font that reads but PDFium doesn't load (a Type 0
-  with no CIDFont) leaves the font as it was at `Tf` and none at `gs`,
-  where sheaf's picked it; an inline image PDFium makes no stream of (a
-  filter it has no decoder for) draws no image; `/ActualText` is decoded
-  as PDFium's text page decodes it (a language escape dropped, bad UTF-8
-  after its byte order mark passed over). None of the last three
-  changes what a corpus page reads as. Nor does content PDFium reads
-  past, which sheaf's lexer refused and a text bag now reads as
-  PDFium's text page shows it: a dictionary that doesn't end is dropped
-  with what it holds, or ends at a key that's no name or a value that's
-  no object, the rest read on as content; an array inside an array opens
-  none; 0x80 and 0xFF are white-space; a string shows its first 32,767
-  bytes and a name `Tj` shows its first 254. (sheaf's lexer, which
-  blocks, marked ranges and splices are still read by, refuses the
-  unended ones.) One goes the other way: arrays and dictionaries nested
-  past the 64 levels PDFium builds fail, where PDFium reads on and
-  sheaf's own read them to its depth. Where PDFium sided with sheaf's,
-  the family changed: `Tj`, `'` and `"` of a name show its bytes, as
-  PDFium's `GetString` reads them. Two more changed in the family or in
-  sheaf's use of it, not readings PDFium rules: a clip's segments are
-  counted as it's built, where pdf-gfx walked the clip at every path
-  operator (100,000 clips took two minutes); and `Forms::Skip` reads an
-  XObject's dictionary, to tell a form from an image, where sheaf's own
-  mode for forms judged on their own read none.
+- **What reads otherwise than sheaf's own did** (M18 slice 23, each
+  asked of PDFium, its page objects, text page or pixels; the corpus
+  read by both, page for page, by `just glyph-dump` and `just
+  events-dump`). Where PDFium sided with the family it stands: a raw CR
+  in a literal string is code 13, and a CRLF two codes, as PDFium's
+  `ReadString` keeps them, where sheaf's lexer read LF (one corpus page:
+  a glyph and the pen after it); a stroked path of one point reaches
+  half the width by its cap, not the miter limit, since PDFium paints no
+  join there (8 pages, 15 paths); a font that reads but PDFium doesn't
+  load (a Type 0 with no CIDFont) leaves the font as it was at `Tf` and
+  none at `gs`, where sheaf's picked it; an inline image PDFium makes no
+  stream of (a filter it has no decoder for) draws no image;
+  `/ActualText` is decoded as PDFium's text page decodes it (a language
+  escape dropped, bad UTF-8 after its byte order mark passed over). None
+  of the last three changes what a corpus page reads as. Nor does
+  content PDFium reads past, which sheaf's lexer refused and a text bag
+  now reads as PDFium's text page shows it: a dictionary that doesn't
+  end is dropped with what it holds, or ends at a key that's no name or
+  a value that's no object, the rest read on as content; an array inside
+  an array opens none; 0x80 and 0xFF are white-space; a string shows its
+  first 32,767 bytes and a name `Tj` shows its first 254. (sheaf's
+  lexer, which blocks, marked ranges and splices were read by until
+  slice 17, refused the unended ones; see What reads otherwise than
+  sheaf's lexer did, under the toolkit.) One goes the other way: arrays
+  and dictionaries nested past the 64 levels PDFium builds fail, where
+  PDFium reads on and sheaf's own read them to its depth. Where PDFium
+  sided with sheaf's, the family changed: `Tj`, `'` and `"` of a name
+  show its bytes, as PDFium's `GetString` reads them. Two more changed
+  in the family or in sheaf's use of it, not readings PDFium rules: a
+  clip's segments are counted as it's built, where pdf-gfx walked the
+  clip at every path operator (100,000 clips took two minutes); and
+  `Forms::Skip` reads an XObject's dictionary, to tell a form from an
+  image, where sheaf's own mode for forms judged on their own read none.
 - **Tests and the corpus.** `content::fixture` (in other crates' tests
   through the `fixtures` feature) builds a page for each operator, font
   kind, nesting of forms, kind of image, clip and marked range, each
@@ -5386,18 +5458,20 @@ API wrote (its own names, before they were second-class `SHEF_` ones)
 is neither read nor recognized nor stripped. `found(pdf)` lists what of them a file holds (dictionary keys and
 names anywhere, sheaf `/NM`s, and the names and inline lists' keys in
 the content of pages, forms and tiling patterns; content that can't be
-read whole is read a stream at a time, and content that can't be lexed
-or a stream that can't be decoded but says `/SHEF_` counts, as does a
-stream past the content limit), and a Strip output whose graph holds
-any fails (`verify::private`, §11.9 item 4), so a clean copy can't hold
-them. A Scrub output (print, with markup or without) is written as Strip
-writes it, and what's left is a note (`verify::private_left`): a
-printer's or a page image's file, or text read from it, mustn't fail for
-what sheaf left on a page sheaf can't read. Print with markup
-kept sheaf's private data until the backlog-fixes PR (B13): its header
-stayed live in `/SHEF_Generators`, so the file opened in sheaf again
-numbered it against its own pages ("Page 1 of 2" for pages 5 and 6 of
-10). Everything else sheaf writes is standard keys.
+read whole is read a stream at a time, and content whose tokens or
+color spaces can't be read (the color spaces for a reason that isn't
+the file's damage) or a stream that can't be decoded but says `/SHEF_`
+counts, as does a stream past the content limit), and a Strip output
+whose graph holds any fails (`verify::private`, §11.9 item 4), so a
+clean copy can't hold them. A Scrub output (print, with markup or
+without) is written as Strip writes it, and what's left is a note
+(`verify::private_left`): a printer's or a page image's file, or text
+read from it, mustn't fail for what sheaf left on a page sheaf can't
+read. Print with markup kept sheaf's private data until the
+backlog-fixes PR (B13): its header stayed live in `/SHEF_Generators`, so
+the file opened in sheaf again numbered it against its own pages ("Page
+1 of 2" for pages 5 and 6 of 10). Everything else sheaf writes is
+standard keys.
 
 | Name | Where | Under Strip |
 |---|---|---|

@@ -62,8 +62,9 @@ checking each one's sha256:
 ```sh
 cargo install --locked --git https://github.com/sheaf-pdf/fetch-pdf-corpus --tag v0.1.1
 fetch-pdf-corpus fetch --out ../pdf-corpus        # 4.3 GB
-fetch-pdf-corpus fetch --out ../pdf-corpus pool   # 1.9 GB more: the pool files the
-                                                  #   ignored realize and lexer tiers
+fetch-pdf-corpus fetch --out ../pdf-corpus pool   # 1.9 GB more: the pool sample the
+                                                  #   ignored corpus tiers (tier-realize,
+                                                  #   tier-lexer, tier-interp and others)
                                                   #   and bench/real.py read
 ```
 
