@@ -25,9 +25,11 @@ pdf-objects.workspace = true
 pdf-filters.workspace = true
 pdf-crypt.workspace = true
 pdf-structure.workspace = true
-# Content written, its resources named by what they are, and content
-# spliced (M18 slice 19). Its default features only: `image-ends` would
-# find an inline image's end by decoding, which sheaf's lexer doesn't.
+# Content read as tokens, written, its resources named by what they are,
+# and content spliced (M18 slices 17 and 19). Its default features only:
+# `image-ends` would find a DCT or CCITTFax inline image's end by decoding
+# it, with two decoders more, where the default finds the end PDFium does
+# on every pool page that has one.
 pdf-content-streams.workspace = true
 # The fonts files draw in, as read, and the standard 14 (M18 slice 22).
 # pdf-gfx: the content interpreter, and content written again from what

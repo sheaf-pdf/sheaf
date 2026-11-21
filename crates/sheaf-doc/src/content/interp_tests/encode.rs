@@ -3,8 +3,9 @@
 //! their encoding draws, event for event but for the operators
 //! themselves: each glyph and its box, each path, image and shading, the
 //! clip each is drawn in, the marked ranges each is in, and each form
-//! drawn, refused, begun and ended, to the bit. The encoding lexes, and
-//! its `q`s and `Q`s and the resource names it uses are the content's.
+//! drawn, refused, begun and ended, to the bit. The encoding's tokens
+//! read, and its `q`s and `Q`s and the resource names it uses are the
+//! content's.
 
 use std::cell::RefCell;
 use std::ops::ControlFlow;
@@ -16,8 +17,9 @@ use crate::content::interp::{
     EncodedPage, Error, Event, GfxError, ImageOf, Kind, Mark, Matrix, Opts, Rect, Seg, Unwritable,
     encode, interpret,
 };
-use crate::content::{Balance, Concat, Fonts, NameSet, ResCx, balance, names_used, res_cx};
-use crate::pdf::content::{Tok, tokens};
+use crate::content::{
+    Balance, Concat, Fonts, NameSet, ResCx, Tok, balance, names_used, res_cx, tokens,
+};
 use crate::pdf::gfx::{ClipPart, ImageDrawn, UseId};
 use crate::pdf::{Object, ObjectId, StreamExt};
 use crate::source::Limits;
@@ -216,22 +218,22 @@ pub(super) fn assert_alike(before: &[Seen], after: &[Seen], what: &str) {
 }
 
 /// How `content`'s `q`s and `Q`s balance, and the names it uses, read
-/// with `resources` of `f`'s file; and that its tokens read,
-/// pdf-content-streams', with the color spaces it counts ([`res_cx`]).
+/// with `resources` of `f`'s file, its color spaces as [`res_cx`] counts
+/// them; and that its tokens read.
 fn facts(f: &Fixture, content: &[u8], resources: Option<&Object>) -> (Balance, NameSet) {
     let lim = &Limits::DEFAULT;
-    let spaces = res_cx(&f.pdf, resources, lim).expect("its resources read");
+    let res = res_cx(&f.pdf, resources, lim).expect("its resources read");
     let family = lim.content.family();
-    assert!(tokens(content, &spaces, &family).all(|t| t.is_ok()));
-    let res = &ResCx::read(&f.pdf, resources);
+    assert!(tokens(content, &res, &family).all(|t| t.is_ok()));
     let content = Concat::new(&[content]);
-    let balance = balance(&content, res, lim).expect("it lexes");
-    let names = names_used(&content, res, lim, &[]).expect("it lexes");
+    let balance = balance(&content, &res, &family).expect("its tokens read");
+    let names = names_used(&content, &res, &family, &[]).expect("its tokens read");
     (balance, names)
 }
 
-/// `content`, drawn on `f`'s page, draws as its encoding, which lexes, and
-/// whose forms' do; each balances as it did and uses the names it did.
+/// `content`, drawn on `f`'s page, draws as its encoding, whose tokens
+/// read, and whose forms' do; each balances as it did and uses the names
+/// it did.
 fn round_trip(f: &Fixture, content: &[u8], what: &str) -> EncodedPage {
     let lim = &Limits::DEFAULT;
     let concat = Concat::new(&[content]);
@@ -417,7 +419,7 @@ fn an_inline_image_is_written_where_it_ends_whatever_follows() {
         &b"Q\n".repeat(12),
     ]
     .concat();
-    let (none, lim) = (crate::pdf::content::ResCx::none(), Limits::DEFAULT);
+    let (none, lim) = (ResCx::none(), Limits::DEFAULT);
     let read: Vec<_> = (tokens(&bytes, &none, &lim.content.family()))
         .map(Result::unwrap)
         .collect();

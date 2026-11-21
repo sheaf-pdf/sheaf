@@ -11,17 +11,18 @@
 //! [`object`]), as its splice reads content and a list; and a set of
 //! operators ([`Operators`]), what an interpretation's events are asked
 //! for by ([`super::gfx::Wants`]).
-//! `crate::content` re-exports them, and is where sheaf lexes content.
-//! Content's reading as the family has it is here too: its tokens and
+//!
+//! Content's reading is the family's too (M18 slice 17): its tokens and
 //! operations ([`Tok`], [`operations`], [`ContentOperation`], [`Operand`],
-//! [`name`]), which what reads only a content's tokens reads it by (the
-//! private names a file holds, the XObject a saved generator drew, a
-//! `/DA`'s font), with the color spaces `crate::content::res_cx` counts;
-//! and, for the tests that set the family's reading beside sheaf's lexer,
-//! the operations' error ([`SyntaxError`], [`SyntaxErrorKind`]), a page's
-//! `q`/`Q` balance ([`balance`]), its marked ranges ([`marked`],
-//! [`MarkedNest`], [`Properties`]) and the resource names it uses
-//! ([`names_used`], [`kept`]).
+//! [`name`]), with the color spaces `crate::content::res_cx` counts, and
+//! what stops them ([`SyntaxError`], [`SyntaxErrorKind`]); a page's `q`/`Q`
+//! balance ([`Balance`], [`balance`]), its marked ranges ([`marked`],
+//! [`MarkedNest`], [`Marked`], with the lists of [`Properties`]) and the
+//! resource names it uses ([`names_used`], [`kept`]).
+//!
+//! `crate::content` re-exports them but [`Limits`], [`Join`],
+//! [`Operators`] and the marked ranges, which only the door names: a page's
+//! blocks keep ranges of sheaf's own (`crate::content::Marked`).
 //!
 //! Also a minimal content-stream operation builder for test fixtures and
 //! examples ([`Content`]), with a test-only `Content::decode`.

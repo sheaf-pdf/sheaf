@@ -1,6 +1,6 @@
 //! The content toolkit over Greg's corpus of real forms
 //! ([`forms::corpus`](crate::forms::corpus)): every page's content, and
-//! every form XObject it draws, reads, lexes into tokens that tile it and
+//! every form XObject it draws, reads, reads into tokens that tile it and
 //! splices back to each stream's own bytes, read apart; its marked content
 //! balances; its `q`/`Q` balance is what `Content::decode` counts;
 //! its words decode through its fonts; its pagination artifacts are
@@ -151,12 +151,12 @@ fn xobject(src: &crate::store::Src, resources: Option<&Object>, name: &[u8]) -> 
     xobjects.as_dict()?.get(name)?.as_reference()
 }
 
-/// Where `s`'s tokens, lexed with `res`, don't tile it: an error, a
+/// Where `s`'s tokens, read with `res`, don't tile it: an error, a
 /// token out of order, or something between or after them that isn't
 /// white-space or a comment.
 fn untiled(s: &[u8], res: &ResCx) -> Option<String> {
     let mut at = 0;
-    for token in lex(s, res, LIM) {
+    for token in tokens(s, res, &LIM.content.family()) {
         let r = match token {
             Ok((r, _)) => r,
             Err(e) => return Some(e.to_string()),
@@ -174,7 +174,14 @@ fn decoded_balance(bytes: &[u8]) -> Option<Balance> {
     let content = crate::pdf::content::Content::decode(bytes).ok()?;
     let mut balance = Balance::default();
     for op in &content.operations {
-        balance.take(op.operator.as_bytes());
+        match op.operator.as_str() {
+            "q" => balance.net = balance.net.saturating_add(1),
+            "Q" => {
+                balance.net = balance.net.saturating_sub(1);
+                balance.min_prefix = balance.min_prefix.min(balance.net);
+            }
+            _ => {}
+        }
     }
     Some(balance)
 }
@@ -194,7 +201,7 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
     let mut forms_seen = HashSet::new();
     let known = DrawnForms::default();
     let fonts = Fonts::for_text();
-    // The splice reads with pdf-content-streams' limits.
+    // Content is read with pdf-content-streams' limits.
     let cs = &LIM.content.family();
     for (i, page) in src.pages().iter().enumerate() {
         out.pages += 1;
@@ -207,7 +214,14 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
             }
         };
         let resources = page.resources.as_deref();
-        let res = ResCx::read(src.pdf(), resources);
+        let res = match res_cx(src.pdf(), resources, LIM) {
+            Ok(res) => res,
+            Err(e) => {
+                out.unread
+                    .push(format!("{at}: {}", ContentFault::Resources(e)));
+                continue;
+            }
+        };
         let concat = content.concat();
         out.bytes += concat.bytes().len();
         if let Some(wrong) = untiled(concat.bytes(), &res) {
@@ -223,7 +237,7 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
                 stream.decompressed_content().unwrap()
             })
             .collect();
-        match splice(concat, res.family(), cs, &[]) {
+        match splice(concat, &res, cs, &[]) {
             Ok(streams) => {
                 for (n, (stream, own)) in streams.iter().zip(&own).enumerate() {
                     if **stream != **own || concat.stream(n) != own {
@@ -236,9 +250,11 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
                 continue;
             }
         }
-        let lexed: Vec<_> = lex(concat.bytes(), &res, LIM).map(Result::unwrap).collect();
-        let has_image = lexed.iter().any(|(_, t)| matches!(t, Tok::InlineImage(_)));
-        let ours = balance(concat, &res, LIM).unwrap();
+        let read: Vec<_> = (tokens(concat.bytes(), &res, cs))
+            .map(Result::unwrap)
+            .collect();
+        let has_image = read.iter().any(|(_, t)| matches!(t, Tok::InlineImage(_)));
+        let ours = balance(concat, &res, cs).unwrap();
         if !has_image && let Some(reference) = decoded_balance(concat.bytes()) {
             out.counted += 1;
             if ours != reference {
@@ -250,7 +266,7 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
             .unwrap()
             .len();
         // The forms it draws, each once a file.
-        let names = names_used(concat, &res, LIM, &[]).unwrap();
+        let names = names_used(concat, &res, cs, &[]).unwrap();
         for name in names.of(ResKind::XObject) {
             let Some(id) = xobject(&src, resources, name) else {
                 continue;
@@ -271,13 +287,20 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
                 continue;
             };
             let own = form.dict.get(b"Resources");
-            let res = ResCx::read(src.pdf(), own.or(resources));
+            let res = match res_cx(src.pdf(), own.or(resources), LIM) {
+                Ok(res) => res,
+                Err(e) => {
+                    out.unread
+                        .push(format!("{at}: {}", ContentFault::Resources(e)));
+                    continue;
+                }
+            };
             if let Some(wrong) = untiled(&data, &res) {
                 out.unread.push(format!("{at}: tokens don't tile {wrong}"));
                 continue;
             }
             let one = Concat::new(&[&data]);
-            match splice(&one, res.family(), cs, &[]) {
+            match splice(&one, &res, cs, &[]) {
                 Ok(streams) if *streams[0] == *data => {}
                 Ok(_) => out.changed.push(at),
                 Err(e) => out.unread.push(format!("{at}: {e}")),
@@ -292,14 +315,14 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
                         out.acrobat_found.insert(p.kind);
                     }
                     let cuts = p.cuts(concat, &res, LIM).unwrap();
-                    let made = splice(concat, res.family(), cs, &cuts).is_ok();
+                    let made = splice(concat, &res, cs, &cuts).is_ok();
                     *out.splices.entry((p.origin, made)).or_default() += 1;
                     if p.origin == PagOrigin::Acrobat && !made {
                         out.acrobat_refused.push(format!("{at}: {:?}", p.kind));
                     }
                     let range = blocks.marked.iter().find(|m| m.span == p.span);
                     let inline = range.is_some_and(|m| matches!(m.props, Some(Props::Inline(_))));
-                    let made = match without_keys(concat, res.family(), cs, p.span, &[b"Type"]) {
+                    let made = match without_keys(concat, &res, cs, p.span, &[b"Type"]) {
                         Ok(_) => true,
                         Err(e) => {
                             if inline {
@@ -320,7 +343,7 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
                     let cuts: Vec<SpanAcross> = (blocks.selected(&kinds, &origins))
                         .flat_map(|p| p.cuts(concat, &res, LIM).unwrap())
                         .collect();
-                    if let Err(e) = splice(concat, res.family(), cs, &cuts) {
+                    if let Err(e) = splice(concat, &res, cs, &cuts) {
                         out.unstrippable.push(format!("{at}, {kinds:?}: {e}"));
                     }
                 }
@@ -335,7 +358,7 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
 }
 
 /// Every page of every form in the corpus, its content and the forms it
-/// draws: read, lexed, spliced with nothing taken out, counted,
+/// draws: read, read into tokens, spliced with nothing taken out, counted,
 /// classified, and spliced without each pagination artifact.
 #[test]
 fn corpus_content_lexes_splices_and_classifies() {
@@ -838,8 +861,9 @@ fn dump_file(corpus: &Corpus, path: &str, full: bool) -> Vec<String> {
             Ok(bag) => bag_records(&mut records, &bag),
             Err(e) => why.push(format!("text bag: {e}")),
         }
-        let res = ResCx::read(src.pdf(), resources);
-        let names = names_used(concat, &res, LIM, &[]);
+        let family = LIM.content.family();
+        let names = (res_cx(src.pdf(), resources, LIM).ok())
+            .and_then(|res| names_used(concat, &res, &family, &[]).ok());
         let forms: BTreeSet<ObjectId> = (names.iter())
             .flat_map(|names| names.of(ResKind::XObject))
             .filter_map(|name| xobject(&src, resources, name))
@@ -1846,81 +1870,34 @@ const CONTENT: &str = "SHEAF_CONTENT_DUMP";
 /// stderr, reading that file alone.
 const CONTENT_ONLY: &str = "SHEAF_CONTENT_DUMP_ONLY";
 
-/// Whose reading [`content_dump`]'s columns 3 to 11 are: `lexer`, sheaf's
-/// (unset, too), or `family`, pdf-content-streams' ([`family_lines`]).
-const CONTENT_ARM: &str = "SHEAF_CONTENT_ARM";
-
-/// Whose reading the content dump's columns 3 to 11 are ([`CONTENT_ARM`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Arm {
-    /// sheaf's lexer, and what's built on it: 14 columns.
-    Lexer,
-    /// pdf-content-streams' tokens, operations, balance, marked ranges and
-    /// names, read with its own color spaces' counts: 16 columns.
-    Family,
-}
-
-impl Arm {
-    /// The arm [`CONTENT_ARM`] names; sheaf's lexer where it's unset.
-    fn from_env() -> Arm {
-        match std::env::var(CONTENT_ARM) {
-            Err(std::env::VarError::NotPresent) => Arm::Lexer,
-            Ok(arm) if arm == "lexer" => Arm::Lexer,
-            Ok(arm) if arm == "family" => Arm::Family,
-            arm => panic!("{CONTENT_ARM} is lexer or family, not {arm:?}"),
-        }
-    }
-
-    /// How many columns a line of its dump has.
-    fn columns(self) -> usize {
-        match self {
-            Arm::Lexer => CONTENT_COLUMNS,
-            Arm::Family => FAMILY_COLUMNS,
-        }
-    }
-}
-
 /// How many columns a line of the content dump has.
 const CONTENT_COLUMNS: usize = 14;
 
-/// How many columns a line of the family's content dump has: the lexer's,
-/// and 15, the color spaces whose counts met a cap, and 16, the inline
-/// images by their first filter ([`family_columns`]).
-const FAMILY_COLUMNS: usize = 16;
-
 /// The content dump's line for a page, a form or a file that wasn't read
-/// as content: `class` says why.
+/// as content: `class` says why, and the rest are `-`.
 fn content_none(path: &str, page: &str, class: &str) -> String {
-    none_of(CONTENT_COLUMNS, path, page, class)
-}
-
-/// A line of `columns` for a page, a form or a file that wasn't read as
-/// content: `class` says why, and the rest are `-`.
-fn none_of(columns: usize, path: &str, page: &str, class: &str) -> String {
-    format!("{path}\t{page}\t{}", unread_columns(columns, class))
-}
-
-/// Columns 3 on of a line of `columns` for what wasn't read: `class`, and
-/// the rest `-`.
-fn unread_columns(columns: usize, class: &str) -> String {
-    let dashes = ["-"; FAMILY_COLUMNS - 3][..columns - 3].join("\t");
-    format!("{class}\t{dashes}")
+    let dashes = ["-"; CONTENT_COLUMNS - 3].join("\t");
+    format!("{path}\t{page}\t{class}\t{dashes}")
 }
 
 /// The class of what stopped content's tokens, or its marked content,
 /// never its wording.
-fn lex_class(kind: LexErrorKind) -> &'static str {
+fn syntax_class(kind: SyntaxErrorKind) -> &'static str {
+    use SyntaxErrorKind as K;
     match kind {
-        LexErrorKind::String => "string",
-        LexErrorKind::HexString => "hex-string",
-        LexErrorKind::Array => "array",
-        LexErrorKind::Dict => "dict",
-        LexErrorKind::InlineImage => "inline-image",
-        LexErrorKind::Depth => "depth",
-        LexErrorKind::Operands => "operands",
-        LexErrorKind::InlineImageSize => "image-size",
-        LexErrorKind::Marked => "marked",
-        LexErrorKind::Emc => "emc",
+        K::String => "string",
+        K::HexString => "hex-string",
+        K::Array => "array",
+        K::Dict => "dict",
+        K::InlineImage => "inline-image",
+        K::Depth => "depth",
+        K::Operands => "operands",
+        K::InlineImageSize => "image-size",
+        K::ImageEnds => "image-ends",
+        K::Marked => "marked",
+        K::Emc => "emc",
+        K::MarkedSize => "marked-size",
+        _ => "other",
     }
 }
 
@@ -1929,14 +1906,15 @@ fn fault_class(fault: &ContentFault) -> &'static str {
     match fault {
         ContentFault::Stream { .. } => "unread:stream",
         ContentFault::TooLarge(_) => "unread:too-large",
-        ContentFault::Lex { error, .. } => lex_class(error.kind),
+        ContentFault::Syntax { error, .. } => syntax_class(error.kind),
+        ContentFault::Resources(_) => "resources",
     }
 }
 
 /// The color spaces a resources context names, each with its
 /// components, in the order of their names, read from what its `Debug`
-/// writes (`spaces: {[67, 83, 48]: 3, …}`), as neither sheaf's nor
-/// pdf-content-streams' lends them. Anything else written there panics.
+/// writes (`spaces: {[67, 83, 48]: 3, …}`), as pdf-content-streams'
+/// doesn't lend them. Anything else written there panics.
 fn spaces_of(res: &impl std::fmt::Debug) -> Vec<(Vec<u8>, u32)> {
     let debug = format!("{res:?}");
     let field = "spaces: {";
@@ -2038,14 +2016,20 @@ fn spliced_records(r: &mut Records, made: Result<Option<Vec<Cow<'_, [u8]>>>, Spl
 /// columns 3 to 12, and what reading on needs of it.
 struct ContentRead {
     columns: String,
-    res: ResCx,
+    /// The color spaces it's read with, where they read.
+    res: Option<ResCx>,
     /// The resource names it uses, where its tokens read.
     names: Option<NameSet>,
 }
 
 /// The content dump's columns 3 to 12 for `content`, drawn with
-/// `resources` from `objects`' objects, as sheaf reads it:
-/// 3. `ok`, or the class of what stopped its tokens ([`lex_class`]);
+/// `resources` from `objects`' objects, as sheaf reads it, by
+/// pdf-content-streams under [`ContentLimits::family`](crate::source::ContentLimits::family),
+/// with the color spaces [`res_cx`] counts and the lists [`properties`]
+/// reads:
+/// 3. `ok`, or the class of what stopped its tokens ([`syntax_class`]), or
+///    `resources` where its color spaces don't read, every column after
+///    it `-` but 12;
 /// 4. how many tokens; 5. a checksum of each token's kind and range, an
 ///    inline image's data's range, and where the tokens stopped;
 /// 6. how many operators, an inline image one;
@@ -2059,11 +2043,7 @@ struct ContentRead {
 /// 11. the operands sheaf reads as more than bytes, how many and a
 ///     checksum of each: a name, decoded, and a dictionary, read as an
 ///     object and written, or that it isn't one;
-/// 12. what the private names' walk hears of it ([`crate::private::heard`],
-///     which reads pdf-content-streams' tokens with the color spaces it
-///     counts, [`res_cx`](super::page::res_cx)): how many and a checksum of
-///     each name, and `,unread` where it took the content to hold some it
-///     couldn't read.
+/// 12. what the private names' walk hears of it ([`heard_column`]).
 ///
 /// Its records in full go to stderr under `at`, where `full`.
 fn content_columns<R: ReadObjects>(
@@ -2072,37 +2052,46 @@ fn content_columns<R: ReadObjects>(
     resources: Option<&Object>,
     (at, full): (&str, bool),
 ) -> ContentRead {
-    let res = ResCx::read(objects, resources);
+    let lim = &LIM.content.family();
     let s = content.bytes();
-    let (mut tokens, mut operands) = (Records::new(full), Records::new(full));
+    let Ok(res) = res_cx(objects, resources, LIM) else {
+        let dashes = ["-"; 8].join("\t");
+        let heard = heard_column(s, None, (at, full));
+        return ContentRead {
+            columns: format!("resources\t{dashes}\t{heard}"),
+            res: None,
+            names: None,
+        };
+    };
+    let (mut read_tokens, mut operands) = (Records::new(full), Records::new(full));
     let (mut count, mut operators, mut read) = (0usize, 0usize, 0usize);
     let mut class = "ok";
-    for token in lex(s, &res, LIM) {
+    for token in tokens(s, &res, lim) {
         let (r, tok) = match token {
             Ok(token) => token,
             Err(e) => {
-                class = lex_class(e.kind);
-                tokens.begin("stopped");
-                tokens.number("at", e.at as u64);
-                tokens.bytes("class", Some(class.as_bytes()));
-                tokens.end();
+                class = syntax_class(e.kind);
+                read_tokens.begin("stopped");
+                read_tokens.number("at", e.at as u64);
+                read_tokens.bytes("class", Some(class.as_bytes()));
+                read_tokens.end();
                 break;
             }
         };
         count += 1;
-        tokens.begin(match tok {
+        read_tokens.begin(match tok {
             Tok::Op(_) => "op",
             Tok::Operand(_) => "operand",
             Tok::InlineImage(_) => "image",
         });
-        tokens.number("start", r.start as u64);
-        tokens.number("end", r.end as u64);
+        read_tokens.number("start", r.start as u64);
+        read_tokens.number("end", r.end as u64);
         match tok {
             Tok::Op(_) => operators += 1,
             Tok::InlineImage(data) => {
                 operators += 1;
-                tokens.number("data_start", data.start as u64);
-                tokens.number("data_end", data.end as u64);
+                read_tokens.number("data_start", data.start as u64);
+                read_tokens.number("data_end", data.end as u64);
             }
             Tok::Operand(operand) => {
                 if let Some(decoded) = name(operand) {
@@ -2113,15 +2102,15 @@ fn content_columns<R: ReadObjects>(
                 } else if operand.starts_with(b"<<") {
                     read += 1;
                     operands.begin("dict");
-                    operands.object("object", object(operand, LIM.content.depth).as_ref());
+                    operands.object("object", object(operand, lim).as_ref());
                     operands.end();
                 }
             }
         }
-        tokens.end();
+        read_tokens.end();
     }
-    let tokens = tokens.finish(&format!("{at}: tokens"));
-    let counted = match balance(content, &res, LIM) {
+    let read_tokens = read_tokens.finish(&format!("{at}: tokens"));
+    let counted = match balance(content, &res, lim) {
         Ok(b) => format!("{},{}", b.net, b.min_prefix),
         Err(_) => "-".into(),
     };
@@ -2134,7 +2123,7 @@ fn content_columns<R: ReadObjects>(
         r.end();
     }
     let spaces = format!("{}:{}", spaces.len(), r.finish(&format!("{at}: spaces")));
-    let names = names_used(content, &res, LIM, &[]).ok();
+    let names = names_used(content, &res, lim, &[]).ok();
     let used = match &names {
         Some(names) => {
             let mut r = Records::new(full);
@@ -2148,20 +2137,36 @@ fn content_columns<R: ReadObjects>(
         }
         None => "-".into(),
     };
-    let lists = PropertiesDict::read(objects, resources);
-    let ranges = match marked(content, &lists, &res, LIM) {
+    let lists = properties(objects, resources);
+    let ranges = match crate::pdf::content::marked(content, &lists, &res, lim) {
         Ok(found) => {
             let mut r = Records::new(full);
             for m in &found {
-                marked_records(&mut r, m);
+                marked_records(&mut r, &Marked::from(m));
             }
             format!("{}:{}", found.len(), r.finish(&format!("{at}: marked")))
         }
-        Err(e) => format!("err:{}", lex_class(e.kind)),
+        Err(e) => format!("err:{}", syntax_class(e.kind)),
     };
     let operands = format!("{read}:{}", operands.finish(&format!("{at}: operands")));
-    let heard_with = super::page::res_cx(objects, resources, LIM).ok();
-    let heard = crate::private::heard(s, heard_with.as_ref(), LIM);
+    let heard = heard_column(s, Some(&res), (at, full));
+    ContentRead {
+        columns: format!(
+            "{class}\t{count}\t{read_tokens}\t{operators}\t{counted}\t{spaces}\t{used}\t\
+             {ranges}\t{operands}\t{heard}"
+        ),
+        res: Some(res),
+        names,
+    }
+}
+
+/// The content dump's column 12 for content `s`, read with `res` (None
+/// where its resources don't read): what the private names' walk hears
+/// of it ([`crate::private::heard`]), how many and a checksum of each
+/// name, and `,unread` where it took the content to hold some it couldn't
+/// read.
+fn heard_column(s: &[u8], res: Option<&ResCx>, (at, full): (&str, bool)) -> String {
+    let heard = crate::private::heard(s, res, LIM);
     let mut r = Records::new(full);
     for said in &heard {
         match said {
@@ -2177,19 +2182,11 @@ fn content_columns<R: ReadObjects>(
         true => ",unread",
         false => "",
     };
-    let heard = format!(
+    format!(
         "{}:{}{unread}",
         heard.len(),
         r.finish(&format!("{at}: heard"))
-    );
-    ContentRead {
-        columns: format!(
-            "{class}\t{count}\t{tokens}\t{operators}\t{counted}\t{spaces}\t{used}\t{ranges}\t\
-             {operands}\t{heard}"
-        ),
-        res,
-        names,
-    }
+    )
 }
 
 /// The content dump's number for who drew a pagination artifact.
@@ -2284,7 +2281,7 @@ fn written_column<R: ReadObjects>(
     let cs = &LIM.content.family();
     let mut r = Records::new(full);
     r.begin("nothing");
-    match splice(concat, res.family(), cs, &[]) {
+    match splice(concat, res, cs, &[]) {
         Ok(streams) => {
             r.number("made", 1);
             r.number("streams", streams.len() as u64);
@@ -2318,20 +2315,17 @@ fn written_column<R: ReadObjects>(
                 for &cut in &cuts {
                     r.span("cut", cut);
                 }
-                let spliced = splice(concat, res.family(), cs, &cuts);
+                let spliced = splice(concat, res, cs, &cuts);
                 made += usize::from(spliced.is_ok());
                 spliced_records(&mut r, spliced.map(Some));
             }
-            Err(e) => r.bytes("stopped", Some(lex_class(e.kind).as_bytes())),
+            Err(e) => r.bytes("stopped", Some(syntax_class(e.kind).as_bytes())),
         }
-        match without_keys(concat, res.family(), cs, p.span, &[b"Type"]) {
+        match without_keys(concat, res, cs, p.span, &[b"Type"]) {
             Ok(Some(rewrite)) => {
                 r.number("rewrite", 2);
                 let nothing = Spliced::default();
-                spliced_records(
-                    &mut r,
-                    nothing.streams(concat, res.family(), cs, &[rewrite]),
-                );
+                spliced_records(&mut r, nothing.streams(concat, res, cs, &[rewrite]));
             }
             Ok(None) => r.number("rewrite", 1),
             Err(e) => {
@@ -2355,16 +2349,16 @@ fn written_column<R: ReadObjects>(
         for kind in kinds {
             r.bytes("kind", Some(kind.name()));
         }
-        let cuts: Result<Vec<Vec<SpanAcross>>, LexError> = (b.selected(kinds, &origins))
+        let cuts: Result<Vec<Vec<SpanAcross>>, SyntaxError> = (b.selected(kinds, &origins))
             .map(|p| p.cuts(concat, res, LIM))
             .collect();
         match cuts {
             Ok(cuts) => {
                 let cuts: Vec<SpanAcross> = cuts.into_iter().flatten().collect();
                 r.number("cuts", cuts.len() as u64);
-                spliced_records(&mut r, splice(concat, res.family(), cs, &cuts).map(Some));
+                spliced_records(&mut r, splice(concat, res, cs, &cuts).map(Some));
             }
-            Err(e) => r.bytes("stopped", Some(lex_class(e.kind).as_bytes())),
+            Err(e) => r.bytes("stopped", Some(syntax_class(e.kind).as_bytes())),
         }
         r.end();
     }
@@ -2418,7 +2412,8 @@ fn forms_drawn<'s, 'n>(
 
 /// The content dump's lines for a file of `bytes`, at `path`: a line a
 /// page, `{path}\t{page}\t` and its columns 3 to 12 ([`content_columns`]),
-/// 13 ([`blocks_column`]) and 14 ([`written_column`]); and after it a
+/// 13 ([`blocks_column`]) and 14 ([`written_column`], `-` where its
+/// resources don't read); and after it a
 /// line for each form XObject the page draws that no page before it
 /// drew ([`forms_drawn`]), its page `{page} form {n} {generation}`, its
 /// columns 3 to 12 read with its own resources or its page's, and 13 and
@@ -2448,13 +2443,12 @@ fn content_lines(path: &str, bytes: Vec<u8>, full: bool) -> Vec<String> {
         let read = content_columns(src.pdf(), concat, resources, (&at, full));
         let blocks = PageBlocks::of(src.pdf(), &content, resources, LIM, &known);
         let kept = blocks_column(&blocks, (&at, full));
-        let written = written_column(
-            src.pdf(),
-            &content,
-            &read.res,
-            blocks.as_ref().ok(),
-            (&at, full),
-        );
+        let written = match &read.res {
+            Some(res) => {
+                written_column(src.pdf(), &content, res, blocks.as_ref().ok(), (&at, full))
+            }
+            None => "-".into(),
+        };
         lines.push(format!("{path}\t{n}\t{}\t{kept}\t{written}", read.columns));
         let names = read
             .names
@@ -2478,320 +2472,19 @@ fn content_lines(path: &str, bytes: Vec<u8>, full: bool) -> Vec<String> {
     lines
 }
 
-/// The class of what stopped pdf-content-streams' tokens, or its marked
-/// content, as [`lex_class`] names sheaf's lexer's, never its wording:
-/// the same words for the same kinds, and its own for the kinds sheaf's
-/// lexer hasn't (`image-ends`, `marked-size`).
-fn syntax_class(kind: crate::pdf::content::SyntaxErrorKind) -> &'static str {
-    use crate::pdf::content::SyntaxErrorKind as K;
-    match kind {
-        K::String => "string",
-        K::HexString => "hex-string",
-        K::Array => "array",
-        K::Dict => "dict",
-        K::InlineImage => "inline-image",
-        K::Depth => "depth",
-        K::Operands => "operands",
-        K::InlineImageSize => "image-size",
-        K::ImageEnds => "image-ends",
-        K::Marked => "marked",
-        K::Emc => "emc",
-        K::MarkedSize => "marked-size",
-        _ => "other",
-    }
-}
-
-/// A marked range's record, pdf-content-streams' as [`marked_records`]
-/// writes sheaf's: its tag, its list, its span and its depth.
-fn family_marked_records(r: &mut Records, m: &crate::pdf::content::Marked<'_>) {
-    use crate::pdf::content::Props as P;
-    r.begin("marked");
-    r.bytes("tag", Some(&m.tag));
-    match &m.props {
-        None => r.number("props", 0),
-        Some(P::Inline(list)) => {
-            r.number("props", 1);
-            r.object("list", Some(&Object::from(list.clone())));
-        }
-        Some(P::Named(name, list)) => {
-            r.number("props", 2);
-            r.bytes("named", Some(name));
-            r.object("list", list.map(|l| Object::from(l.clone())).as_ref());
-        }
-    }
-    r.span("span", m.span);
-    r.number("depth", u64::from(m.depth));
-    r.end();
-}
-
-/// The family's column 16: the inline images' first filters, in this
-/// order, each `name:count`.
-const FILTERS: [&str; 9] = [
-    "none", "fl", "lzw", "a85", "ahx", "rl", "dct", "ccf", "other",
-];
-
-/// An inline image's first filter, by [`FILTERS`]' names, as
-/// pdf-content-streams reads it to find the image's end: its `/F` or
-/// `/Filter` ([`InlineImage::entry`]), an array's first element that's an
-/// object; a name, its abbreviation expanded, or a string's bytes, naming
-/// it; a dictionary, `null` or what's no object none; `true`, `false` or a
-/// number one PDFium has no decoder for, `other`.
-///
-/// [`InlineImage::entry`]: pdf_content_streams::InlineImage::entry
-fn first_filter(
-    filter: Option<crate::pdf::content::Operand<'_>>,
-    lim: &crate::pdf::content::Limits,
-) -> &'static str {
-    let Some(filter) = filter else {
-        return "none";
-    };
-    let first = match filter.bytes().first() {
-        Some(b'[') => match filter.elements().find(|e| e.object(lim).is_some()) {
-            Some(first) => first,
-            None => return "none",
-        },
-        _ => filter,
-    };
-    let string = || {
-        first
-            .object(lim)
-            .and_then(|o| o.as_bytes().map(<[u8]>::to_vec))
-    };
-    let (named, abbreviated) = match first.bytes() {
-        [b'/', ..] => match first.name() {
-            Some(name) => (name.into_owned(), true),
-            None => return "none",
-        },
-        [b'<', b'<', ..] => return "none",
-        [b'(' | b'<', ..] => match string() {
-            Some(bytes) => (bytes, false),
-            None => return "none",
-        },
-        b"true" | b"false" => return "other",
-        _ if first.is_number() => return "other",
-        _ => return "none",
-    };
-    match (&named[..], abbreviated) {
-        (b"FlateDecode", _) | (b"Fl", true) => "fl",
-        (b"LZWDecode", _) | (b"LZW", true) => "lzw",
-        (b"ASCII85Decode", _) | (b"A85", true) => "a85",
-        (b"ASCIIHexDecode", _) | (b"AHx", true) => "ahx",
-        (b"RunLengthDecode", _) | (b"RL", true) => "rl",
-        (b"DCTDecode", _) | (b"DCT", true) => "dct",
-        (b"CCITTFaxDecode", _) | (b"CCF", true) => "ccf",
-        _ => "other",
-    }
-}
-
-/// What the family's content dump reads of one page's content, or one
-/// form's: its columns 3 to 16, and the resource names it uses, where its
-/// operations read, which find the forms it draws.
-struct FamilyRead {
-    columns: String,
-    names: Option<crate::pdf::content::NameSet>,
-}
-
-/// The family's content dump's columns 3 to 16 for `content`, drawn with
-/// `resources` from `objects`' objects, as pdf-content-streams reads it
-/// under [`ContentLimits::family`](crate::source::ContentLimits::family):
-/// its color spaces counted by its [`ResCx::read`] over [`Objects`]
-/// ([`res_cx`](super::page::res_cx)), and its property lists read
-/// as sheaf's are ([`properties`](super::page::properties)).
-/// Columns 3 to 11 are [`content_columns`]', each by the family's call of
-/// the same name ([`syntax_class`], [`family_marked_records`]), but 6,
-/// its operations; 12 to 14 are `-`; 15 is how many color spaces met a
-/// cap ([`ResCx::capped`]), and 16 the inline images by their first
-/// filter ([`first_filter`]), each of [`FILTERS`] and its count. Where the
-/// resources don't read ([`ResCx::read`]'s `Err`), it's `resources` and
-/// every column after `-`.
-///
-/// [`ResCx::read`]: crate::pdf::content::ResCx::read
-/// [`ResCx::capped`]: crate::pdf::content::ResCx::capped
-fn family_columns<R: ReadObjects>(
-    objects: &R,
-    content: &Concat,
-    resources: Option<&Object>,
-    (at, full): (&str, bool),
-) -> FamilyRead {
-    use crate::pdf::content as family;
-    let lim = &LIM.content.family();
-    let Ok(res) = super::page::res_cx(objects, resources, LIM) else {
-        return FamilyRead {
-            columns: unread_columns(FAMILY_COLUMNS, "resources"),
-            names: None,
-        };
-    };
-    let s = content.bytes();
-    let (mut tokens, mut operands) = (Records::new(full), Records::new(full));
-    let (mut count, mut read) = (0usize, 0usize);
-    let mut class = "ok";
-    for token in family::tokens(s, &res, lim) {
-        let (r, tok) = match token {
-            Ok(token) => token,
-            Err(e) => {
-                class = syntax_class(e.kind);
-                tokens.begin("stopped");
-                tokens.number("at", e.at as u64);
-                tokens.bytes("class", Some(class.as_bytes()));
-                tokens.end();
-                break;
-            }
-        };
-        count += 1;
-        tokens.begin(match tok {
-            family::Tok::Op(_) => "op",
-            family::Tok::Operand(_) => "operand",
-            family::Tok::InlineImage(_) => "image",
-        });
-        tokens.number("start", r.start as u64);
-        tokens.number("end", r.end as u64);
-        match tok {
-            family::Tok::Op(_) => {}
-            family::Tok::InlineImage(data) => {
-                tokens.number("data_start", data.start as u64);
-                tokens.number("data_end", data.end as u64);
-            }
-            family::Tok::Operand(operand) => {
-                if let Some(decoded) = family::name(operand) {
-                    read += 1;
-                    operands.begin("name");
-                    operands.bytes("name", Some(&decoded));
-                    operands.end();
-                } else if operand.starts_with(b"<<") {
-                    read += 1;
-                    operands.begin("dict");
-                    operands.object("object", family::object(operand, lim).as_ref());
-                    operands.end();
-                }
-            }
-        }
-        tokens.end();
-    }
-    let tokens = tokens.finish(&format!("{at}: tokens"));
-    // The operations, and each inline image's first filter.
-    let mut operators = 0usize;
-    let mut filters = [0usize; FILTERS.len()];
-    for op in family::operations(s, &res, lim) {
-        let Ok(op) = op else { break };
-        operators += 1;
-        if let Some(image) = op.inline_image() {
-            let filter = first_filter(image.entry(b"Filter"), lim);
-            let i = FILTERS.iter().position(|&f| f == filter).unwrap_or(0);
-            filters[i] += 1;
-        }
-    }
-    let filters: Vec<String> = (FILTERS.iter().zip(filters))
-        .map(|(f, n)| format!("{f}:{n}"))
-        .collect();
-    let filters = filters.join(",");
-    let counted = match family::balance(content, &res, lim) {
-        Ok(b) => format!("{},{}", b.net, b.min_prefix),
-        Err(_) => "-".into(),
-    };
-    let mut r = Records::new(full);
-    let spaces = spaces_of(&res);
-    for (space, n) in &spaces {
-        r.begin("space");
-        r.bytes("name", Some(space));
-        r.number("components", u64::from(*n));
-        r.end();
-    }
-    let spaces = format!("{}:{}", spaces.len(), r.finish(&format!("{at}: spaces")));
-    let names = family::names_used(content, &res, lim, &[]).ok();
-    let used = match &names {
-        Some(names) => {
-            let mut r = Records::new(full);
-            for (kind, name) in names.iter() {
-                r.begin("name");
-                r.bytes("kind", Some(kind.key()));
-                r.bytes("name", Some(name));
-                r.end();
-            }
-            format!("{}:{}", names.len(), r.finish(&format!("{at}: names")))
-        }
-        None => "-".into(),
-    };
-    let lists = super::page::properties(objects, resources);
-    let ranges = match family::marked(content, &lists, &res, lim) {
-        Ok(found) => {
-            let mut r = Records::new(full);
-            for m in &found {
-                family_marked_records(&mut r, m);
-            }
-            format!("{}:{}", found.len(), r.finish(&format!("{at}: marked")))
-        }
-        Err(e) => format!("err:{}", syntax_class(e.kind)),
-    };
-    let operands = format!("{read}:{}", operands.finish(&format!("{at}: operands")));
-    let capped = res.capped().count();
-    FamilyRead {
-        columns: format!(
-            "{class}\t{count}\t{tokens}\t{operators}\t{counted}\t{spaces}\t{used}\t{ranges}\t\
-             {operands}\t-\t-\t-\t{capped}\t{filters}"
-        ),
-        names,
-    }
-}
-
-/// The family's content dump's lines for a file of `bytes`, at `path`, as
-/// [`content_lines`] writes sheaf's, but each page's and form's columns 3
-/// to 16 [`family_columns`]', and the forms a page draws found by the
-/// XObject names the family finds it uses.
-fn family_lines(path: &str, bytes: Vec<u8>, full: bool) -> Vec<String> {
-    let none = |page: &str, class: &str| none_of(FAMILY_COLUMNS, path, page, class);
-    let kind = BlobKind::file(Path::new(path), None);
-    let Ok(src) = Store::new().open(bytes.into(), kind) else {
-        return vec![none("-", "unopened")];
-    };
-    let mut seen = HashSet::new();
-    let mut lines = Vec::new();
-    for (i, page) in src.pages().iter().enumerate() {
-        let n = (i + 1).to_string();
-        let at = format!("{path} page {n}");
-        let content = match PageContent::read(src.pdf(), &page.contents, LIM) {
-            Ok(content) => content,
-            Err(fault) => {
-                lines.push(none(&n, fault_class(&fault)));
-                continue;
-            }
-        };
-        let resources = page.resources.as_deref();
-        let read = family_columns(src.pdf(), content.concat(), resources, (&at, full));
-        lines.push(format!("{path}\t{n}\t{}", read.columns));
-        let names = (read.names.iter()).flat_map(|names| names.of(ResKind::XObject));
-        for form in forms_drawn(&src, resources, &n, names, &mut seen) {
-            let label = form.label;
-            let (data, own) = match form.read {
-                Ok(read) => read,
-                Err(class) => {
-                    lines.push(none(&label, class));
-                    continue;
-                }
-            };
-            let at = format!("{path} page {label}");
-            let one = Concat::new(&[&data]);
-            let read = family_columns(src.pdf(), &one, own, (&at, full));
-            lines.push(format!("{path}\t{label}\t{}", read.columns));
-        }
-    }
-    lines
-}
-
-/// The content dump's lines for the file at `path` of the corpus, by
-/// `arm`'s reading ([`content_lines`], [`family_lines`]).
-fn content_file(corpus: &Corpus, path: &str, full: bool, arm: Arm) -> Vec<String> {
-    match (std::fs::read(corpus.root.join(path)), arm) {
-        (Ok(bytes), Arm::Lexer) => content_lines(path, bytes, full),
-        (Ok(bytes), Arm::Family) => family_lines(path, bytes, full),
-        (Err(_), arm) => vec![none_of(arm.columns(), path, "-", "unopened")],
+/// The content dump's lines for the file at `path` of the corpus
+/// ([`content_lines`]).
+fn content_file(corpus: &Corpus, path: &str, full: bool) -> Vec<String> {
+    match std::fs::read(corpus.root.join(path)) {
+        Ok(bytes) => content_lines(path, bytes, full),
+        Err(_) => vec![content_none(path, "-", "unopened")],
     }
 }
 
 /// What every page of the corpus's files reads as content, and every
 /// form XObject a page draws, once a file, to set beside itself after a
-/// change to what reads content: a line each ([`content_lines`]; with
-/// [`CONTENT_ARM`] `family`, [`family_lines`]), numbers and checksums
-/// only, the files in the order of their paths ([`dump_picks`]: the
+/// change to what reads content: a line each ([`content_lines`]), numbers
+/// and checksums only, the files in the order of their paths ([`dump_picks`]: the
 /// glyph dump's), written to the path in [`CONTENT`]. Two runs over the
 /// same code write the same file. With [`CONTENT_ONLY`] it reads the one
 /// file named, and prints each record in full to stderr.
@@ -2809,14 +2502,13 @@ fn content_dump() {
     };
     let started = Instant::now();
     let full = only.is_some();
-    let arm = Arm::from_env();
     let lines = each_dumped(
         &corpus,
         (only.as_deref(), CONTENT_ONLY),
-        |path| content_file(&corpus, path, full, arm),
+        |path| content_file(&corpus, path, full),
         |path, said| {
             eprintln!("{path} panicked: {said}");
-            none_of(arm.columns(), path, "-", "panicked")
+            content_none(path, "-", "panicked")
         },
     );
     let column = |line: &String, n: usize| line.split('\t').nth(n).map(str::to_owned);
@@ -2985,63 +2677,12 @@ fn the_content_dump_says_what_content_reads_as() {
     );
 }
 
-/// The family's content dump reads [`the_content_dump_says_what_content_reads_as`]'s
-/// pages as sheaf's lexer reads them, the same twice and where its records
-/// are printed in full: columns 3 to 11 the same, checksums and all, as
-/// pdf-content-streams reads these pages as sheaf does; 12 to 14 `-`; no
-/// color space capped; and the one inline image, the first page's, with
-/// no filter. A page of inline images under each kind of first filter
-/// counts each by it: a name, abbreviated or not, an array's first, a
-/// string's bytes, and one PDFium has no decoder for.
-#[test]
-fn the_family_s_content_dump_reads_as_the_family_reads() {
-    let lines = |content: &[u8]| {
-        let file = content_fixture(content);
-        let lines = family_lines("fixture.pdf", file.clone(), false);
-        assert_eq!(family_lines("fixture.pdf", file.clone(), false), lines);
-        assert_eq!(family_lines("fixture.pdf", file.clone(), true), lines);
-        (content_lines("fixture.pdf", file, false), lines)
-    };
-    let columns = |line: &str| line.split('\t').map(str::to_owned).collect::<Vec<_>>();
-    let unfiltered = "none:1,fl:0,lzw:0,a85:0,ahx:0,rl:0,dct:0,ccf:0,other:0";
-    let no_image = "none:0,fl:0,lzw:0,a85:0,ahx:0,rl:0,dct:0,ccf:0,other:0";
-    let pages: [(&[u8], &[&str]); 2] = [
-        (DUMP_PAGE, &[unfiltered, no_image]),
-        (DUMP_UNENDED, &[no_image]),
-    ];
-    for (content, images) in pages {
-        let (lexer, family) = lines(content);
-        assert_eq!(lexer.len(), images.len(), "{family:#?}");
-        assert_eq!(family.len(), images.len(), "{family:#?}");
-        for ((lexer, family), images) in lexer.iter().zip(&family).zip(images) {
-            let (lexer, family) = (columns(lexer), columns(family));
-            assert_eq!(family.len(), FAMILY_COLUMNS, "{family:?}");
-            assert_eq!(lexer[..11], family[..11]);
-            assert_eq!(family[11..], ["-", "-", "-", "0", *images]);
-        }
-    }
-    let filters = b"BI /W 1 /H 1 /BPC 8 /CS /G /F /AHx ID 41> EI \
-        BI /W 1 /H 1 /Filter [/DCTDecode /Fl] ID \xff\xd8\xff\xd9 EI \
-        BI /W 1 /H 1 /F (CCITTFaxDecode) ID x EI \
-        BI /W 1 /H 1 /F /A85 ID 9jqo^~> EI \
-        BI /W 1 /H 1 /F /JBIG2Decode ID x EI";
-    let (_, family) = lines(filters);
-    let line = columns(&family[0]);
-    assert_eq!(line[2..6], ["ok", "5", line[4].as_str(), "5"]);
-    assert_eq!(
-        line[15],
-        "none:0,fl:0,lzw:0,a85:1,ahx:1,rl:0,dct:1,ccf:1,other:1"
-    );
-}
-
 /// The color spaces a resources context names are read from what it
-/// writes, sheaf's and pdf-content-streams' alike, in the order of their
-/// names, an empty name among them.
+/// writes, in the order of their names, an empty name among them.
 #[test]
 fn the_content_dump_reads_a_resources_context_s_spaces() {
     let res = ResCx::new([(b"CS3".to_vec(), 3), (b"A".to_vec(), 1), (Vec::new(), 4)]);
     let want = [(Vec::new(), 4), (b"A".to_vec(), 1), (b"CS3".to_vec(), 3)];
     assert_eq!(spaces_of(&res), want);
-    assert_eq!(spaces_of(res.family()), want);
     assert_eq!(spaces_of(&ResCx::none()), []);
 }

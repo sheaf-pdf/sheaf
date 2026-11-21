@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use sheaf_doc::content::{
-    DrawnForms, PagOrigin, PageBlocks, PageContent, PaginationKind, ResCx, contents, splice_each,
+    DrawnForms, PagOrigin, PageBlocks, PageContent, PaginationKind, contents, res_cx, splice_each,
 };
 use sheaf_doc::pdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_doc::source::Limits;
@@ -89,15 +89,15 @@ fn strip(pdf: &mut Pdf, page: ObjectId) -> bool {
     let content = PageContent::read(pdf, &contents(&dict), &lim).unwrap();
     let resources = dict.get(b"Resources");
     let blocks = PageBlocks::of(pdf, &content, resources, &lim, &DrawnForms::default()).unwrap();
-    let res = ResCx::read(pdf, resources);
+    let res = res_cx(pdf, resources, &lim).unwrap();
     let kinds = BTreeSet::from([PaginationKind::Header, PaginationKind::Footer]);
     let origins = BTreeSet::from(PagOrigin::REPLACED);
     let groups: Vec<_> = (blocks.selected(&kinds, &origins))
         .map(|p| p.cuts(content.concat(), &res, &lim).unwrap())
         .collect();
     let cs = lim.content.family();
-    let spliced = splice_each(content.concat(), res.family(), &cs, &groups).unwrap();
-    let streams = spliced.streams(content.concat(), res.family(), &cs, &[]);
+    let spliced = splice_each(content.concat(), &res, &cs, &groups).unwrap();
+    let streams = spliced.streams(content.concat(), &res, &cs, &[]);
     let Some(streams) = streams.unwrap() else {
         return false;
     };

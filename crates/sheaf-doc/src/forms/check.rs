@@ -34,8 +34,8 @@ use quick_xml::events::{BytesStart, Event};
 
 use super::read::FormClass;
 use crate::attachments::resolve;
+use crate::content::{ResCx, operations};
 use crate::file::pdf_text;
-use crate::pdf::content::{ResCx, operations};
 use crate::source::{FormLimits, Limits};
 
 /// How much of a widget's name, read up its `/Parent` chain, a finding

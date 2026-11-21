@@ -3,8 +3,8 @@
 # Test code is allowed them (the crate root's `cfg_attr(test, allow(...))`); a
 # legitimate use elsewhere carries an `#[allow]` with its reason.
 disallowed-methods = [
-    { path = "sheaf_doc::pdf::content::Content::decode", reason = "content is read by sheaf_doc::content's lexer, which keeps every byte; decoding to operations loses them", allow-invalid = true },
+    { path = "sheaf_doc::pdf::content::Content::decode", reason = "content is read as tokens through sheaf_doc::content, which keep every byte; decoding to operations loses them", allow-invalid = true },
     { path = "sheaf_doc::pdf::content::Content::encode", reason = "content is written by sheaf_doc::content's writer or spliced, never re-encoded from operations" },
-    { path = "sheaf_doc::pdf::Document::get_page_content", reason = "a page's content is read through its Source and sheaf_doc::content's lexer, stream by stream" },
+    { path = "sheaf_doc::pdf::Document::get_page_content", reason = "a page's content is read through its Source and sheaf_doc::content's tokens, stream by stream" },
     { path = "std::env::temp_dir", reason = "sheaf writes no document content to the temp directory: memory sources, and durable writes beside their target" },
 ]

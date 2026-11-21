@@ -800,10 +800,10 @@ fn res_cx_counts_named_spaces_as_the_family_does() {
 
 /// A document in memory whose object `failing` fails to read with the
 /// error `error` makes; every other object as the document has it.
-struct Failing<'a> {
-    doc: &'a Document,
-    failing: ObjectId,
-    error: fn() -> crate::pdf::Error,
+pub(in crate::content) struct Failing<'a> {
+    pub(in crate::content) doc: &'a Document,
+    pub(in crate::content) failing: ObjectId,
+    pub(in crate::content) error: fn() -> crate::pdf::Error,
 }
 
 impl ReadObjects for Failing<'_> {

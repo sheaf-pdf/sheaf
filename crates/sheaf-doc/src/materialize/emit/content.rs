@@ -612,8 +612,9 @@ fn wrapped(
 /// only what's set aside or cut used are dropped from the page's resources,
 /// which a block drawn anew may name again. A stream the file has that
 /// isolates as many as now is referenced as it is. What of what the filters
-/// select stays, as a splice or a rewrite refuses it; None when its content
-/// can't be read. Each of `on` is laid out on the page `ctxs` says; `laid`
+/// select stays, as a splice or a rewrite refuses it; None when its content,
+/// or the resources it's read with ([`content::res_cx`]), can't be read.
+/// Each of `on` is laid out on the page `ctxs` says; `laid`
 /// is what of their layouts is digested already.
 fn rebuilt(
     cx: &mut Cx,
@@ -633,7 +634,10 @@ fn rebuilt(
         false => Some(src.blocks(index).ok()?),
     };
     let resources = facts.resources.as_deref();
-    let res = ResCx::read(src.pdf(), resources);
+    // None where its resources don't read, as where its content doesn't.
+    let res = content::res_cx(src.pdf(), resources, lim).ok()?;
+    // The content is read with pdf-content-streams' limits.
+    let cs = &lim.content.family();
     let filtered = |dict: &Dictionary| {
         let Some(Marker::Gen { id, .. }) = Marker::of(dict) else {
             return false;
@@ -762,9 +766,7 @@ fn rebuilt(
             Err(_) => stayed += 1,
         }
     }
-    // The splice reads with pdf-content-streams' limits.
-    let cs = &lim.content.family();
-    let each = content::splice_each(concat, res.family(), cs, &groups);
+    let each = content::splice_each(concat, &res, cs, &groups);
     let spliced = taken_or_none(each, groups.len());
     let refused = |taken: &[bool]| taken.iter().filter(|t| !**t).count();
     let text_stayed = refused(&spliced.taken[..texts_cut]);
@@ -792,10 +794,10 @@ fn rebuilt(
         .map(whole)
         .collect();
     out_of.extend(&cuts);
-    let mut kept = content::kept(concat, &res, lim, &out_of).ok()?;
+    let mut kept = content::kept(concat, &res, cs, &out_of).ok()?;
     if !saved_layers.is_empty() {
         let streams: Vec<&[u8]> = saved_layers.iter().map(|&i| concat.stream(i)).collect();
-        let drawn = content::names_used(&Concat::new(&streams), &res, lim, &[]).ok()?;
+        let drawn = content::names_used(&Concat::new(&streams), &res, cs, &[]).ok()?;
         for (kind, name) in drawn.iter() {
             kept.dropped.remove(kind, name);
         }
@@ -820,7 +822,7 @@ fn rebuilt(
         {
             continue;
         }
-        match content::without_keys(concat, res.family(), cs, span, &private::LIST_KEYS) {
+        match content::without_keys(concat, &res, cs, span, &private::LIST_KEYS) {
             Ok(rewrite) => rewrites.extend(rewrite),
             Err(_) => lists += 1,
         }
@@ -951,12 +953,12 @@ fn streams_made<'a>(
     cs: &crate::pdf::content::Limits,
     rewrites: &[Rewrite],
 ) -> (Option<Vec<Cow<'a, [u8]>>>, usize) {
-    match spliced.streams(concat, res.family(), cs, rewrites) {
+    match spliced.streams(concat, res, cs, rewrites) {
         Ok(streams) => (streams, 0),
         Err(e) => {
             log::warn!("a page's lists keep sheaf's private data: {e}");
             // Without lists it's refused only another content's ranges.
-            let alone = spliced.streams(concat, res.family(), cs, &[]);
+            let alone = spliced.streams(concat, res, cs, &[]);
             let alone =
                 alone.inspect_err(|e| log::warn!("nothing is taken out of a page's content: {e}"));
             (alone.ok().flatten(), rewrites.len())
@@ -1688,7 +1690,7 @@ mod tests {
             vec![span_of(s, b"/A BMC EMC")],
             vec![span_of(s, b"/B BMC EMC")],
         ];
-        let each = content::splice_each(&c, res.family(), &cs, &groups);
+        let each = content::splice_each(&c, &res, &cs, &groups);
         assert!(matches!(each, Err(SpliceError::Read(_))), "{each:?}");
         let spliced = taken_or_none(each, groups.len());
         assert_eq!(spliced.taken, [false, false]);
@@ -1698,7 +1700,7 @@ mod tests {
         let s: &[u8] = b"/A BMC EMC 0 g";
         let c = Concat::new(&[s]);
         let groups = [vec![span_of(s, b"/A BMC EMC")]];
-        let each = content::splice_each(&c, res.family(), &cs, &groups);
+        let each = content::splice_each(&c, &res, &cs, &groups);
         let spliced = taken_or_none(each, groups.len());
         assert_eq!(spliced.taken, [true]);
         let (streams, unwritten) = streams_made(&spliced, &c, &res, &cs, &[]);
@@ -1714,7 +1716,7 @@ mod tests {
     fn lists_that_cant_be_written_again_together_stay() {
         let (res, cs) = (ResCx::none(), Limits::DEFAULT.content.family());
         let list = |c: &Concat, range: SpanAcross| {
-            let rewrite = content::without_keys(c, res.family(), &cs, range, &LIST_KEYS);
+            let rewrite = content::without_keys(c, &res, &cs, range, &LIST_KEYS);
             rewrite.unwrap().unwrap()
         };
         let nothing = Spliced::default();
@@ -1738,7 +1740,7 @@ mod tests {
             /A <</SHEF_Gen (>%) /B 1>> BDC EMC 0 0 9 9 re f EI";
         let c = Concat::new(&[s]);
         let cut = span_of(s, b"q % > (\n Q");
-        let each = content::splice_each(&c, res.family(), &cs, &[vec![cut]]);
+        let each = content::splice_each(&c, &res, &cs, &[vec![cut]]);
         let spliced = taken_or_none(each, 1);
         assert_eq!(spliced.taken, [true]);
         let rewrite = list(&c, span_of(s, b"/A <</SHEF_Gen (>%) /B 1>> BDC EMC"));

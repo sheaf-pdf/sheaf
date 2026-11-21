@@ -16,10 +16,9 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use sheaf_doc::content::{ContentWriter, Reserved};
+use sheaf_doc::content::{ContentWriter, ResCx, Reserved, Tok, tokens};
 use sheaf_doc::file::ForeignAnnot;
 use sheaf_doc::open::{FileAnnot, FileAnnots, FileBody};
-use sheaf_doc::pdf::content::{ResCx, Tok, tokens};
 use sheaf_doc::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StreamExt, Value};
 use sheaf_doc::source::Limits;
 use sheaf_doc::{Actor, Annot, AnnotId, AnnotKind, Box2, Document, FixedCount, Pt, Store};

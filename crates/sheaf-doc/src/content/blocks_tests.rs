@@ -1,10 +1,12 @@
 //! Marked content, balance, names and blocks: ranges found across streams
-//! and their lists, the cuts that take an artifact out and the keys a list
-//! loses, as pdf-content-streams' splice makes them, and pages classified
-//! by who drew their pagination artifacts.
+//! and their lists, as pdf-content-streams finds them and sheaf reads
+//! their lists ([`properties`]); the cuts that take an artifact out and the
+//! keys a list loses, as its splice makes them; and pages classified by
+//! who drew their pagination artifacts, the ranges they keep sheaf's own.
 
 use std::sync::Arc;
 
+use crate::pdf::content as family;
 use crate::pdf::{
     Dictionary, Document as Pdf, Object, ObjectId, Stream, StreamExt, dictionary, literal,
 };
@@ -14,8 +16,18 @@ use crate::source::Limits;
 
 const LIM: &Limits = &Limits::DEFAULT;
 
-fn found(streams: &[&[u8]], props: &PropertiesDict) -> Result<Vec<Marked>, LexError> {
-    marked(&Concat::new(streams), props, &ResCx::none(), LIM)
+/// The marked ranges of `streams`, as pdf-content-streams finds them under
+/// sheaf's limits, named lists looked up in `props`.
+fn found<'p>(
+    streams: &[&[u8]],
+    props: &'p Properties,
+) -> Result<Vec<family::Marked<'p>>, SyntaxError> {
+    family::marked(
+        &Concat::new(streams),
+        props,
+        &ResCx::none(),
+        &LIM.content.family(),
+    )
 }
 
 fn span(start: (u32, u32), end: (u32, u32)) -> SpanAcross {
@@ -32,6 +44,8 @@ fn span_of(s: &[u8], part: &[u8]) -> SpanAcross {
     span((0, at), (0, at + part.len() as u32))
 }
 
+/// Marked ranges, found across streams, have their lists: written in the
+/// content, or named and looked up in what [`properties`] reads.
 #[test]
 fn marked_ranges_have_their_lists() {
     let mut pdf = Pdf::with_version("1.7");
@@ -43,7 +57,7 @@ fn marked_ranges_have_their_lists() {
         },
     }
     .into();
-    let props = PropertiesDict::read(&pdf, Some(&resources));
+    let props = properties(&pdf, Some(&resources));
     let first: &[u8] =
         b"/Artifact <</Type /Pagination /S#75btype /Footer /A [1 (b\\)) <0a>]>> BDC q";
     let second: &[u8] =
@@ -57,7 +71,7 @@ fn marked_ranges_have_their_lists() {
     );
     // The first runs from the first stream into the second.
     assert_eq!(m[0].span, span((0, 0), (1, 36)));
-    let Some(Props::Inline(list)) = &m[0].props else {
+    let Some(family::Props::Inline(list)) = &m[0].props else {
         panic!("{:?}", m[0].props)
     };
     assert_eq!(list.get(b"Subtype").unwrap(), &Object::name(b"Footer"));
@@ -68,35 +82,40 @@ fn marked_ranges_have_their_lists() {
     // Named lists, found or not.
     assert_eq!(
         m[1].props,
-        Some(Props::Named(
+        Some(family::Props::Named(
             b"oc1".to_vec(),
-            Some(dictionary! { "Type" => Object::name("OCG") })
+            Some(&dictionary! { "Type" => Object::name("OCG") })
         ))
     );
     assert_eq!(m[2].props, None);
     assert_eq!(
-        m[3].props.as_ref().and_then(Props::dict),
+        m[3].props.as_ref().and_then(family::Props::dict),
         Some(&dictionary! { "Subtype" => Object::name("Header") })
     );
-    assert_eq!(m[4].props, Some(Props::Named(b"None".to_vec(), None)));
+    assert_eq!(
+        m[4].props,
+        Some(family::Props::Named(b"None".to_vec(), None))
+    );
 }
 
+/// Marked content must balance, within the depth cap; inside a string
+/// or an inline image's data, it isn't marked content.
 #[test]
 fn marked_content_must_balance() {
-    let props = PropertiesDict::default();
+    let props = Properties::default();
     let kind = |s: &[u8]| found(&[s], &props).unwrap_err();
     assert_eq!(
         kind(b"q /A BMC Q EMC EMC"),
-        LexError {
+        SyntaxError {
             at: 15,
-            kind: LexErrorKind::Emc
+            kind: SyntaxErrorKind::Emc
         }
     );
     assert_eq!(
         kind(b"/A BMC /B BMC EMC"),
-        LexError {
+        SyntaxError {
             at: 0,
-            kind: LexErrorKind::Marked
+            kind: SyntaxErrorKind::Marked
         }
     );
     let deep = Limits {
@@ -106,23 +125,28 @@ fn marked_content_must_balance() {
         },
         ..*LIM
     };
-    let e = marked(
+    let e = family::marked(
         &Concat::new(&[b"/A BMC /B BMC /C BMC EMC EMC EMC"]),
         &props,
         &ResCx::none(),
-        &deep,
+        &deep.content.family(),
     )
     .unwrap_err();
-    assert_eq!(e.kind, LexErrorKind::Depth);
+    assert_eq!(e.kind, SyntaxErrorKind::Depth);
     // Marked content inside a string or an inline image isn't.
     assert!(found(&[b"(EMC) Tj BI /W 3 /H 1 /CS /G /BPC 8 ID EMC EI"], &props).is_ok());
 }
 
+/// A page's balance is its `q`/`Q` count, each balance its two counts.
 #[test]
 fn balance_is_the_q_count() {
-    let of = |s: &[u8]| balance(&Concat::new(&[s]), &ResCx::none(), LIM).unwrap();
+    let counts = |c: &Concat| {
+        let b = balance(c, &ResCx::none(), &LIM.content.family()).unwrap();
+        (b.net, b.min_prefix)
+    };
+    let of = |s: &[u8]| counts(&Concat::new(&[s]));
     // §3.4's worked bases.
-    let b = |net, min_prefix| Balance { net, min_prefix };
+    let b = |net, min_prefix| (net, min_prefix);
     assert_eq!(of(b"q 1 0 0 1 0 0 cm"), b(1, 0));
     assert_eq!(of(b"Q q"), b(0, -1));
     assert_eq!(of(b"Q"), b(-1, -1));
@@ -134,7 +158,7 @@ fn balance_is_the_q_count() {
     );
     // Across streams.
     let c = Concat::new(&[b"q", b"Q Q"]);
-    assert_eq!(balance(&c, &ResCx::none(), LIM).unwrap(), b(-1, -1));
+    assert_eq!(counts(&c), b(-1, -1));
 }
 
 /// The cuts that take an artifact out are the splice's to make
@@ -147,10 +171,10 @@ fn an_artifacts_cuts_keep_the_q_it_opens_with() {
     let (res, lim) = (ResCx::none(), LIM.content.family());
     let s: &[u8] = b"q 0 g /Artifact <</Subtype /Header>> BDC Q q 1 0 0 1 9 9 cm /X0 Do Q EMC 1 g";
     let c = Concat::new(&[s]);
-    let header = marked(&c, &PropertiesDict::default(), &res, LIM).unwrap()[0].span;
+    let header = found(&[s], &Properties::default()).unwrap()[0].span;
     // Alone, it would end the page's `q`.
     assert!(matches!(
-        splice(&c, res.family(), &lim, &[header]),
+        splice(&c, &res, &lim, &[header]),
         Err(SpliceError::Unsafe(_))
     ));
     let pagination = Pagination {
@@ -167,7 +191,7 @@ fn an_artifacts_cuts_keep_the_q_it_opens_with() {
             span_of(s, b" q 1 0 0 1 9 9 cm /X0 Do Q EMC")
         ]
     );
-    let kept = splice(&c, res.family(), &lim, &cuts).unwrap();
+    let kept = splice(&c, &res, &lim, &cuts).unwrap();
     assert_eq!(kept[0], &b"q 0 g Q 1 g"[..]);
     // A range with no `Q` to keep is one cut.
     let plain = Pagination {
@@ -190,9 +214,9 @@ fn a_list_loses_sheafs_private_keys() {
     let made = |s: &[u8], part: &[u8]| {
         let c = Concat::new(&[s]);
         let keys = crate::private::LIST_KEYS;
-        let rewrite = without_keys(&c, res.family(), &lim, span_of(s, part), &keys);
+        let rewrite = without_keys(&c, &res, &lim, span_of(s, part), &keys);
         let rewrite = rewrite.unwrap().unwrap();
-        let streams = Spliced::default().streams(&c, res.family(), &lim, &[rewrite]);
+        let streams = Spliced::default().streams(&c, &res, &lim, &[rewrite]);
         streams.unwrap().unwrap().remove(0).into_owned()
     };
     // With no space between entries.
@@ -227,6 +251,8 @@ fn a_list_loses_sheafs_private_keys() {
     }
 }
 
+/// The resource names content uses are by category, but for those only
+/// what's taken out uses.
 #[test]
 fn names_used_are_by_category() {
     let s: &[u8] = b"/GS0 gs /F1 9 Tf /CS0 cs /DeviceRGB CS /P0 scn 0.5 /P1 SCN /Im1 Do \
@@ -235,7 +261,7 @@ fn names_used_are_by_category() {
         /Artifact BMC /F9 1 Tf EMC";
     let c = Concat::new(&[s]);
     let except = [span_of(s, b"/Artifact BMC /F9 1 Tf EMC")];
-    let names = names_used(&c, &ResCx::none(), LIM, &except).unwrap();
+    let names = names_used(&c, &ResCx::none(), &LIM.content.family(), &except).unwrap();
     let of = |kind| names.of(kind).collect::<Vec<_>>();
     assert_eq!(of(ResKind::ExtGState), [b"GS0"]);
     assert_eq!(of(ResKind::Font), [b"F1"]);
@@ -281,9 +307,10 @@ fn sheafs_blocks_are_found_by_their_markers() {
         "Subtype" => Object::name("Header"),
         "SHEF_Gen" => literal("g1f"),
     };
+    let ocr_list = dictionary! { "SHEF_OcrBlock" => literal("b2a") };
     let resources = dictionary! { "Properties" => dictionary! {
-        "ShP0" => gen_list,
-        "ShP1" => dictionary! { "SHEF_OcrBlock" => literal("b2a") },
+        "ShP0" => gen_list.clone(),
+        "ShP1" => ocr_list.clone(),
     } };
     let block = |k: &str, key: &str, id: &str| {
         dictionary! { "SHEF_Block" => dictionary! { "K" => Object::name(k), key => literal(id) } }
@@ -333,6 +360,32 @@ fn sheafs_blocks_are_found_by_their_markers() {
         ]
     );
     assert_eq!(&*blocks.isolation, &[ids[0], ids[2]]);
+    // The ranges it keeps, its artifacts and sheaf's, of its own type, each
+    // named list held by value.
+    let named =
+        |name: &[u8], list: &Dictionary| Some(Props::Named(name.to_vec(), Some(list.clone())));
+    let kept = |tag: &[u8], props, span| Marked {
+        tag: tag.to_vec(),
+        props,
+        span,
+        depth: 0,
+    };
+    assert_eq!(
+        &*blocks.marked,
+        [
+            kept(
+                b"Artifact",
+                named(b"ShP0", &gen_list),
+                span((1, 4), (1, 39))
+            ),
+            kept(b"ShOCR", named(b"ShP1", &ocr_list), span((1, 40), (1, 60))),
+            kept(
+                b"Artifact",
+                named(b"ShP0", &gen_list),
+                span((3, 0), (3, 33))
+            ),
+        ]
+    );
     // A stream's dictionary alone says what it is.
     let marker = |id: ObjectId| Marker::of(&pdf.get_object(id).unwrap().as_stream().unwrap().dict);
     let header = Marker::Gen {
@@ -352,13 +405,7 @@ fn sheafs_blocks_are_found_by_their_markers() {
             Some(Marker::Flat(BlockId(0x2c))),
         ]
     );
-    assert_eq!(
-        blocks.balance,
-        Balance {
-            net: 0,
-            min_prefix: 0
-        }
-    );
+    assert_eq!((blocks.balance.net, blocks.balance.min_prefix), (0, 0));
     // Ids written otherwise are no ids.
     for bad in [&b"g"[..], b"b1", b"gx1", b"g12345678901234567"] {
         assert_eq!(GenId::parse(bad), None);
@@ -386,6 +433,62 @@ fn a_block_id_round_trips() {
         assert_eq!(BlockId::parse(id.to_string().as_bytes()), Some(id));
     }
     assert_eq!(BlockId(0x2a).to_string(), "b2a");
+}
+
+/// Resources that don't read for a reason that isn't the file's damage,
+/// here the source's I/O, stop a page's blocks
+/// ([`ContentFault::Resources`]); a space that's damaged isn't there, and
+/// the page reads. A form drawn with such resources may hold an artifact,
+/// so counts as holding one, and that isn't kept: a read of it again may
+/// read them.
+#[test]
+fn resources_that_dont_read_stop_a_pages_blocks() {
+    use super::page::tests::Failing;
+    use crate::pdf::{Error as E, Why};
+    let mut pdf = Pdf::with_version("1.7");
+    let gray = pdf.add_object(Object::name("DeviceGray"));
+    let spaces = dictionary! { "G" => gray };
+    let header = pdf.add_object(Stream::new(
+        dictionary! {},
+        b"/Artifact <</Subtype /Header>> BDC (h) Tj EMC".to_vec(),
+    ));
+    let form = pdf.add_object(Stream::new(
+        dictionary! {
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
+            "BBox" => vec![0.into(), 0.into(), 9.into(), 9.into()],
+            "Resources" => dictionary! { "ColorSpace" => spaces.clone() },
+        },
+        b"0 0 9 9 re f".to_vec(),
+    ));
+    let draws = pdf.add_object(Stream::new(dictionary! {}, b"q /Fm0 Do Q".to_vec()));
+    let colored = Object::from(dictionary! { "ColorSpace" => spaces });
+    let forms = Object::from(dictionary! { "XObject" => dictionary! { "Fm0" => form } });
+    let io = Failing {
+        doc: &pdf,
+        failing: gray,
+        error: || E::IO(std::io::Error::other("gone")),
+    };
+    let damaged = Failing {
+        doc: &pdf,
+        failing: gray,
+        error: || E::Syntax("bad".into()),
+    };
+    let known = DrawnForms::default();
+    let read = PageBlocks::read(&io, &[header], Some(&colored), LIM, &known);
+    assert!(
+        matches!(&read, Err(ContentFault::Resources(u)) if u.id == gray && u.why == Why::Source),
+        "{read:?}"
+    );
+    let blocks = PageBlocks::read(&damaged, &[header], Some(&colored), LIM, &known).unwrap();
+    assert!(blocks.has(&[PaginationKind::Header]));
+
+    let blocks = PageBlocks::read(&io, &[draws], Some(&forms), LIM, &known).unwrap();
+    assert!(blocks.nested_in_forms);
+    assert_eq!(known.nested_known(form), None);
+    let blocks = PageBlocks::read(&damaged, &[draws], Some(&forms), LIM, &known).unwrap();
+    assert!(!blocks.nested_in_forms);
+    assert_eq!(known.nested_known(form), Some(false));
 }
 
 /// A form of Acrobat's, its `/PieceInfo` naming `private`, and resources

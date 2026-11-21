@@ -18,7 +18,7 @@ verapdf_version := "1.30.3"
 verapdf_key := "13DD102B4DD69354D12DE5A83184863278B17FE7"
 
 # The fuzz targets the nightly CI job runs (.github/workflows/fuzz.yml).
-fuzz_targets := "lazy_reader page_tree sheaf_annot lexer splice interp op_json sheaf_generators"
+fuzz_targets := "lazy_reader page_tree sheaf_annot splice interp op_json sheaf_generators"
 
 # List the recipes.
 default:
@@ -317,7 +317,7 @@ precommit: (_steps "precommit" "markers plan-check fmt-check locks corpus intero
 
 # Before a PR merges: the ignored corpus tiers, in full (append_corpus's,
 # the export tier, realize_corpus's pixels and predicate, PDFium's resave
-# of a watermark, the content lexer and the content interpreter against
+# of a watermark, content's tokens and the content interpreter against
 # PDFium, codes over scans/, Arlington over what sheaf writes, and the
 # size of an unsigned Save As beside qpdf's). Two hours or more, the
 # interpreter's tiers about one of them.
@@ -417,8 +417,8 @@ tier-realize:
 tier-watermark:
     scripts/test-capped.sh cargo test -p sheaf-ops --test watermark -- --ignored --nocapture
 
-# The content lexer against PDFium over the pool sample;
-# SHEAF_CONTENT_ARM=family counts from pdf-content-streams' tokens.
+# Content's tokens, as sheaf reads a page through pdf-content-streams,
+# against PDFium's page objects over the pool sample.
 [group('corpus')]
 tier-lexer:
     scripts/test-capped.sh cargo test -p sheaf-render --test content_lexer -- --ignored --nocapture
@@ -498,7 +498,8 @@ events-dump out:
 # page draws (once a file), reads as content, a line each, written to
 # `out`, numbers and checksums only: `ok` or the class of what stopped its
 # tokens (`unread:stream`, `unread:too-large` or `unopened` where nothing
-# was read); its tokens, their ranges, its operators, its `q`/`Q`
+# was read, `resources` where its color spaces weren't); its tokens, as
+# pdf-content-streams reads them, their ranges, its operators, its `q`/`Q`
 # balance, the color spaces it's read with, the resource names it uses,
 # its marked ranges, the names and dictionaries read from its operands,
 # and what the private names' walk hears of it; and for a page, its
@@ -508,9 +509,7 @@ events-dump out:
 # it before and after a change to what reads content, over the same
 # corpus, and `diff` the two files; SHEAF_CONTENT_DUMP_ONLY=<a corpus
 # path> prints that file's records in full. Two runs over the same code
-# write the same file. SHEAF_CONTENT_ARM=family reads columns 3 to 11 by
-# pdf-content-streams instead (12 to 14 are `-`), and adds two: how many
-# color spaces met a cap, and the inline images by their first filter.
+# write the same file.
 [doc("What every corpus page's and form's content reads as, a line each, written to a file: diff two runs across a change to what reads content")]
 [group('corpus')]
 content-dump out:
@@ -557,7 +556,7 @@ gates *names:
 
 # A fuzz target for `secs` seconds, as the nightly CI job runs it: seeded
 # from the stable test's fixtures, its corpus kept in fuzz/corpus/. Targets:
-# lazy_reader page_tree sheaf_annot lexer splice interp op_json
+# lazy_reader page_tree sheaf_annot splice interp op_json
 # sheaf_generators.
 [doc("A fuzz target for `secs` seconds, as nightly CI runs it")]
 [group('fuzz')]

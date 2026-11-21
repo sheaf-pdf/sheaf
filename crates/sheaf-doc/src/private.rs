@@ -15,8 +15,7 @@ use std::collections::BTreeSet;
 
 use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, StreamExt, Value, literal};
 
-use crate::content::{self, ContentFault, PageContent};
-use crate::pdf::content::{ResCx, Tok, tokens};
+use crate::content::{self, ContentFault, PageContent, ResCx, Tok, tokens};
 use crate::source::Limits;
 
 /// Where a private name appears.
@@ -349,10 +348,10 @@ fn lexed(
                 break;
             }
         };
-        if let Some(name) = crate::pdf::content::name(operand) {
+        if let Some(name) = content::name(operand) {
             f(at, Said::Name(&name));
         } else if operand.starts_with(b"<<")
-            && let Some(list) = crate::pdf::content::object(operand, &family)
+            && let Some(list) = content::object(operand, &family)
         {
             object(at, &list, f);
         }

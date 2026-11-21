@@ -11,8 +11,8 @@ use sheaf_edit::{GridPos, HeaderFooterSpec, Z};
 
 use super::{EditError, Lower, Notice, OthersFound};
 use crate::content::{
-    self, BlockAt, ContentError, DrawFont, GenId, PagOrigin, PageContent, Pagination,
-    PaginationKind, PropertiesDict, ResCx, SheafBlock, SpanAcross, std14_of,
+    self, BlockAt, ContentError, ContentFault, DrawFont, GenId, PagOrigin, PageContent, Pagination,
+    PaginationKind, SheafBlock, SpanAcross, std14_of,
 };
 use crate::generate::{self, header};
 use crate::model::{
@@ -143,7 +143,7 @@ fn private_lists(src: &Src, index: u32) -> bool {
     let Some(facts) = src.page(index) else {
         return false;
     };
-    let lists = PropertiesDict::read(src.pdf(), facts.resources.as_deref());
+    let lists = content::properties(src.pdf(), facts.resources.as_deref());
     (lists.lists()).any(|l| (l.iter()).any(|(k, _)| private::LIST_KEYS.contains(&k)))
 }
 
@@ -157,8 +157,9 @@ fn cut_together(src: &Src, index: u32, spans: &[SpanAcross]) -> Result<(), Conte
     };
     let read = |fault| ContentError::Read { page: index, fault };
     let content = PageContent::read(src.pdf(), &facts.contents, lim).map_err(read)?;
-    let res = ResCx::read(src.pdf(), facts.resources.as_deref());
-    match content::splice(content.concat(), res.family(), &lim.content.family(), spans) {
+    let res = content::res_cx(src.pdf(), facts.resources.as_deref(), lim)
+        .map_err(|e| read(ContentFault::Resources(e)))?;
+    match content::splice(content.concat(), &res, &lim.content.family(), spans) {
         Ok(_) => Ok(()),
         Err(error) => Err(ContentError::Unsafe { page: index, error }),
     }
@@ -399,7 +400,8 @@ fn found_on(
 
 /// Which of `ranges`, pagination artifacts of page `index` of `src`, a
 /// save can take out, as it cuts them ([`content::splice_each`]): none
-/// when the page's content can't be read.
+/// when the page's content, or the resources it's read with, can't be
+/// read.
 fn cut_alone<T, U>(src: &Src, index: u32, ranges: &[(T, &Pagination, U)]) -> Vec<bool> {
     let none = || vec![false; ranges.len()];
     if ranges.is_empty() {
@@ -411,15 +413,16 @@ fn cut_alone<T, U>(src: &Src, index: u32, ranges: &[(T, &Pagination, U)]) -> Vec
     let Ok(content) = PageContent::read(src.pdf(), &facts.contents, lim) else {
         return none();
     };
-    let res = ResCx::read(src.pdf(), facts.resources.as_deref());
+    let Ok(res) = content::res_cx(src.pdf(), facts.resources.as_deref(), lim) else {
+        return none();
+    };
     let concat = content.concat();
     let cuts: Vec<Option<Vec<SpanAcross>>> = (ranges.iter())
         .map(|(_, p, _)| p.cuts(concat, &res, lim).ok())
         .collect();
     let groups: Vec<Vec<SpanAcross>> = cuts.iter().flatten().cloned().collect();
     // Content the splice can't read has nothing taken out of it.
-    let Ok(spliced) = content::splice_each(concat, res.family(), &lim.content.family(), &groups)
-    else {
+    let Ok(spliced) = content::splice_each(concat, &res, &lim.content.family(), &groups) else {
         return none();
     };
     let mut taken = spliced.taken.into_iter();

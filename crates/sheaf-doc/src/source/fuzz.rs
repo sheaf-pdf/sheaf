@@ -15,9 +15,7 @@ use crate::pdf::{LazyPdf, Object, Stream, Value, dictionary, literal};
 
 use super::Limits;
 use crate::PageId;
-use crate::content::{
-    self, Concat, DrawnForms, PageBlocks, PageContent, PropertiesDict, ResCx, SpanAcross,
-};
+use crate::content::{self, Concat, DrawnForms, PageBlocks, PageContent, ResCx, SpanAcross};
 use crate::private::LIST_KEYS;
 use crate::store::{BlobKind, Src, Store};
 
@@ -101,40 +99,17 @@ pub fn sheaf_generators(data: &[u8]) {
     }
 }
 
-/// `data` as a page's content, lexed under the default caps, every token
-/// taken: whole, and as two streams split at its middle. The resources
-/// name a color space of each size an inline image may be drawn in.
-pub fn lexer(data: &[u8]) {
-    let res = ResCx::new([
-        (b"CS1".to_vec(), 1),
-        (b"CS3".to_vec(), 3),
-        (b"CS4".to_vec(), 4),
-    ]);
-    let (first, second) = data.split_at(data.len() / 2);
-    let split = Concat::new(&[first, second]);
-    for content in [Concat::new(&[data]), split] {
-        for token in content::lex(content.bytes(), &res, &Limits::DEFAULT) {
-            let Ok((range, _)) = token else { break };
-            let _ = content.span(range);
-        }
-    }
-}
-
 /// `data` as a page's content, two streams split at its middle, drawn
 /// with resources that name a property list, a color space, a form of
 /// Acrobat's and one with an artifact in it: its marked ranges, names and
 /// blocks, and a splice of each range at the top, of all of them at once
 /// widened to touch ([`touching`]), and of its pagination artifacts as a
 /// strip cuts them; and each range at the top with sheaf's private data
-/// taken out of its list. Where a splice is made, what it
-/// keeps lexes as the tokens it kept; where a list is written again, the
-/// content lexes as it did but for the list, which reads as it did without
-/// those keys. The splice is pdf-content-streams', which reads content by
-/// its own tokens, and the ranges are found by sheaf's lexer: what's made
-/// is held to those tokens always, and to sheaf's lexer too where the two
-/// read the content as the same tokens ([`read_alike`]), which they do
-/// but where PDFium's rules read otherwise than sheaf's lexer does
-/// ([`Reader`]). Returns how many were made.
+/// taken out of its list. Where a splice is made, what it keeps reads as
+/// the tokens it kept; where a list is written again, the content reads as
+/// it did but for the list, which reads as it did without those keys. The
+/// ranges, the splice and what's made are all read by pdf-content-streams'
+/// tokens, as PDFium reads content. Returns how many were made.
 pub fn splice(data: &[u8]) -> usize {
     let lim = &Limits::DEFAULT;
     let mut pdf = crate::pdf::Document::with_version("1.7");
@@ -164,13 +139,17 @@ pub fn splice(data: &[u8]) -> usize {
         return 0;
     };
     let concat = content.concat();
-    let res = ResCx::read(&pdf, Some(&resources));
-    let _ = content::balance(concat, &res, lim);
-    let _ = content::names_used(concat, &res, lim, &[]);
-    let props = PropertiesDict::read(&pdf, Some(&resources));
+    let Ok(res) = content::res_cx(&pdf, Some(&resources), lim) else {
+        return 0;
+    };
+    // Content is read with pdf-content-streams' limits.
+    let cs = &lim.content.family();
+    let _ = content::balance(concat, &res, cs);
+    let _ = content::names_used(concat, &res, cs, &[]);
+    let props = content::properties(&pdf, Some(&resources));
     let mut drops: Vec<Vec<SpanAcross>> = Vec::new();
     let mut top: Vec<SpanAcross> = Vec::new();
-    if let Ok(found) = content::marked(concat, &props, &res, lim) {
+    if let Ok(found) = crate::pdf::content::marked(concat, &props, &res, cs) {
         top = found
             .iter()
             .filter(|m| m.depth == 0)
@@ -192,33 +171,22 @@ pub fn splice(data: &[u8]) -> usize {
     {
         drops.push(cuts.concat());
     }
-    // The splice reads with pdf-content-streams' limits.
-    let cs = &lim.content.family();
-    // Who what's made is held to.
-    let mut readers = vec![Reader::Splice];
-    if read_alike(concat, &res) {
-        readers.push(Reader::Lexer);
-    }
     let mut made = 0;
     for drop in drops {
-        if let Ok(kept) = content::splice(concat, res.family(), cs, &drop) {
-            for &reader in &readers {
-                assert_kept(concat, &res, &kept, &drop, reader);
-            }
+        if let Ok(kept) = content::splice(concat, &res, cs, &drop) {
+            assert_kept(concat, &res, &kept, &drop);
             made += 1;
         }
     }
     for span in top {
-        let rewrite = content::without_keys(concat, res.family(), cs, span, &LIST_KEYS);
+        let rewrite = content::without_keys(concat, &res, cs, span, &LIST_KEYS);
         if let Ok(Some(rewrite)) = rewrite {
             // Made alone, with nothing taken out, as `without_keys` read it.
             let nothing = content::Spliced::default();
-            let rewritten = (nothing.streams(concat, res.family(), cs, &[rewrite]))
+            let rewritten = (nothing.streams(concat, &res, cs, &[rewrite]))
                 .expect("a list written again alone is made")
                 .expect("a list written again");
-            for &reader in &readers {
-                assert_rewritten(concat, &res, &rewritten, reader);
-            }
+            assert_rewritten(concat, &res, &rewritten);
             made += 1;
         }
     }
@@ -293,8 +261,14 @@ fn with_fonts(page: &content::fixture::Fixture, parts: &[&[u8]]) -> content::fix
             Some(obj) => obj.as_array()?.first().and_then(Object::as_reference),
             None => None,
         };
+    // Read as a dictionary's value, where PDFium's content parser nests
+    // an array in an array, as `/W` does; outside one, the inner `[`
+    // opens none.
     let array = |part: &[u8]| {
-        content::object(part, Limits::DEFAULT.content.depth).filter(|o| o.as_array().is_some())
+        let lim = &Limits::DEFAULT.content.family();
+        let dict = content::object(&[b"<</A ", part, b">>"].concat(), lim)?;
+        let array = dict.as_dict()?.get(b"A")?;
+        array.as_array().is_some().then(|| array.clone())
     };
     let mut set_stream = |id: Option<crate::pdf::ObjectId>, data: &[u8]| {
         if let Some(stream) = id.and_then(|id| pdf.get_object_mut(id).ok()?.as_stream_mut()) {
@@ -634,83 +608,44 @@ fn touching(content: &Concat, spans: &[SpanAcross]) -> Vec<SpanAcross> {
     cuts.into_iter().map(|r| content.span(r)).collect()
 }
 
-/// Who reads content into tokens: sheaf's lexer, which finds the ranges
-/// a splice is asked for, or pdf-content-streams' tokens, which its splice
-/// reads by. They part where PDFium's rules, which the tokens follow,
-/// read otherwise than sheaf's lexer: a 0x80 or a 0xFF, white-space
-/// there, ends a token; a dictionary ends at a key that's no name or a
-/// value that's no object, and an array at the first `]`; and some inline
-/// images end elsewhere.
-#[derive(Clone, Copy)]
-enum Reader {
-    Lexer,
-    Splice,
+/// The tokens of `c`, which a splice read or made, each where it is and
+/// its bytes, read with `res` under the default caps.
+fn tokens_of<'a>(c: &'a Concat, res: &ResCx) -> Vec<(Range<usize>, &'a [u8])> {
+    let lim = &Limits::DEFAULT.content.family();
+    (content::tokens(c.bytes(), res, lim))
+        .map(|t| {
+            let (r, _) = t.expect("what a splice read, and what it makes, reads");
+            (r.clone(), &c.bytes()[r])
+        })
+        .collect()
 }
 
-impl Reader {
-    /// Where each token of `s` is, or None when it can't be read.
-    fn read(self, s: &[u8], res: &ResCx) -> Option<Vec<Range<usize>>> {
-        let lim = &Limits::DEFAULT;
-        match self {
-            Reader::Lexer => (content::lex(s, res, lim))
-                .map(|t| t.ok().map(|(r, _)| r))
-                .collect(),
-            Reader::Splice => crate::pdf::content::tokens(s, res.family(), &lim.content.family())
-                .map(|t| t.ok().map(|(r, _)| r))
-                .collect(),
-        }
-    }
-
-    /// The tokens of `c`, which a splice read or made.
-    fn tokens<'a>(self, c: &'a Concat, res: &ResCx) -> Vec<(Range<usize>, &'a [u8])> {
-        let read = self.read(c.bytes(), res);
-        let read = read.expect("what a splice read, and what it makes, reads");
-        read.into_iter()
-            .map(|r| (r.clone(), &c.bytes()[r]))
-            .collect()
-    }
-}
-
-/// Whether sheaf's lexer and pdf-content-streams' tokens give `content`
-/// as the same tokens, each where the other has it.
-fn read_alike(content: &Concat, res: &ResCx) -> bool {
-    let ours = Reader::Lexer.read(content.bytes(), res);
-    ours.is_some() && ours == Reader::Splice.read(content.bytes(), res)
-}
-
-/// That `kept`, `content` spliced without `drop`, reads by `reader` as
-/// the tokens of `content` outside `drop`.
-fn assert_kept(
-    content: &Concat,
-    res: &ResCx,
-    kept: &[Cow<[u8]>],
-    drop: &[SpanAcross],
-    reader: Reader,
-) {
+/// That `kept`, `content` spliced without `drop`, reads as the tokens of
+/// `content` outside `drop`.
+fn assert_kept(content: &Concat, res: &ResCx, kept: &[Cow<[u8]>], drop: &[SpanAcross]) {
     let drop: Vec<_> = drop.iter().filter_map(|&d| content.offsets(d)).collect();
-    let before: Vec<&[u8]> = (reader.tokens(content, res).into_iter())
+    let before: Vec<&[u8]> = (tokens_of(content, res).into_iter())
         .filter(|(r, _)| !drop.iter().any(|d| d.start <= r.start && r.end <= d.end))
         .map(|(_, token)| token)
         .collect();
     let kept: Vec<&[u8]> = kept.iter().map(|s| &**s).collect();
     let kept = Concat::new(&kept);
-    let after: Vec<&[u8]> = (reader.tokens(&kept, res).into_iter())
+    let after: Vec<&[u8]> = (tokens_of(&kept, res).into_iter())
         .map(|(_, token)| token)
         .collect();
     assert_eq!(before, after, "the tokens a splice kept");
 }
 
 /// That `rewritten`, `content` with a list written again without
-/// [`LIST_KEYS`], reads by `reader` as `content` does but for that list,
-/// which reads as it did without them. The list is read as the splice
-/// that wrote it reads one, by PDFium's rules: a 0x80 or a 0xFF ends a
-/// key there, where sheaf's lexer reads it as one of a name's bytes, so
+/// [`LIST_KEYS`], reads as `content` does but for that list, which reads
+/// as it did without them. The list is read as the splice that wrote it
+/// reads one, by PDFium's rules: a 0x80 or a 0xFF ends a key there, so
 /// `/SHEF_Gen` with a 0xFF after it is a key taken out.
-fn assert_rewritten(content: &Concat, res: &ResCx, rewritten: &[Cow<[u8]>], reader: Reader) {
+fn assert_rewritten(content: &Concat, res: &ResCx, rewritten: &[Cow<[u8]>]) {
     let lim = &Limits::DEFAULT;
     let streams: Vec<&[u8]> = rewritten.iter().map(|s| &**s).collect();
     let rewritten = Concat::new(&streams);
-    let (before, after) = (reader.tokens(content, res), reader.tokens(&rewritten, res));
+    let (before, after) = (tokens_of(content, res), tokens_of(&rewritten, res));
     assert_eq!(
         before.len(),
         after.len(),
@@ -723,7 +658,7 @@ fn assert_rewritten(content: &Concat, res: &ResCx, rewritten: &[Cow<[u8]>], read
     let [(was, now)] = changed[..] else {
         panic!("a list written again is one token: {changed:?}")
     };
-    let read = |list: &[u8]| crate::pdf::content::object(list, &lim.content.family());
+    let read = |list: &[u8]| content::object(list, &lim.content.family());
     let Some(Value::Dict(mut left)) = read(was).map(Object::into_value) else {
         panic!("a list written again was one")
     };
@@ -1184,7 +1119,7 @@ mod tests {
         vec![bytes[at(b"4 0 obj")..at(b"xref")].to_vec()]
     }
 
-    /// [`lexer`]'s fixtures: page content with an inline image found by
+    /// Content's fixtures: page content with an inline image found by
     /// each of PDFium's rules, ` EI ` in its data where the data is
     /// counted, and strings, arrays, dictionaries and marked content.
     fn content_fixtures() -> Vec<Vec<u8>> {
@@ -1209,7 +1144,7 @@ mod tests {
         ]
     }
 
-    /// [`splice`]'s fixtures, beside the lexer's: pagination artifacts
+    /// [`splice`]'s fixtures, beside content's: pagination artifacts
     /// of each origin, Acrobat's opening with the `Q` that ends the page's
     /// `q`, a range across the two streams, ranges inside text objects,
     /// ranges with white-space between, and forms drawn in and out of
@@ -1583,7 +1518,7 @@ mod tests {
     /// `SHEAF_FUZZ_SEEDS` names: `fuzz.yml` seeds each night's run with
     /// them, so the repository holds no PDF. The target
     /// `SHEAF_FUZZ_TARGET` names takes the marks' fixtures when it's
-    /// `sheaf_annot`, the content when it's `lexer`, `splice` or
+    /// `sheaf_annot`, the content when it's `splice` or
     /// `interp` (the interpreter's pages' too), Op JSON when it's
     /// `op_json`, files sheaf saved with watermarks when it's
     /// `sheaf_generators`, and the files otherwise.
@@ -1601,7 +1536,6 @@ mod tests {
         };
         let seeds: Vec<(String, Vec<u8>)> = match std::env::var("SHEAF_FUZZ_TARGET").as_deref() {
             Ok("sheaf_annot") => named(mark_fixtures(), |n| format!("marks-{n}")).collect(),
-            Ok("lexer") => named(content_fixtures(), |n| format!("content-{n}")).collect(),
             Ok("splice") => named(splice_fixtures(), |n| format!("content-{n}")).collect(),
             Ok("interp") => {
                 let content = splice_fixtures().into_iter().chain(interp_fixtures());
@@ -1651,6 +1585,17 @@ mod tests {
             assert_eq!(tt.program(), content::FontProgram::Read);
             // Its bytes, and what drawing its glyphs costs.
             assert!(Limits::DEFAULT.content.decompressed - budget > parts[5].len());
+            // `/I2`'s widths, an array in an array as `/W` is written.
+            let pdf = &page.pdf;
+            let font = |name: &[u8]| fonts.as_dict()?.get(name)?.as_reference();
+            let cid = font(b"I2").and_then(|id| {
+                let descendants = pdf.get_dictionary(id).ok()?.get(b"DescendantFonts")?;
+                descendants.as_array()?.first()?.as_reference()
+            });
+            let widths = cid.and_then(|id| pdf.get_dictionary(id).ok()?.get(b"W").cloned());
+            let pair = Object::from(vec![400.into(), 500.into()]);
+            let want = vec![1.into(), pair, 10.into(), 20.into(), 700.into()];
+            assert_eq!(widths, Some(Object::from(want)));
         }
     }
 
@@ -1729,29 +1674,31 @@ mod tests {
             }
         }
         // A key ended by 0xFF, which PDFium reads as white-space: the list
-        // is written again without it, read as the splice reads it.
-        let high = b"/Artifact <</Subtype /Watermark /SHEF_Gen\xff (g1)>> BDC q 0.5 g Q EMC";
-        assert_eq!(splice(high), 2);
-        let mut alike = 0;
+        // is written again without it, read as the splice reads it. The
+        // range spans the two streams, cut between `0.5` and `g`; it
+        // splices out alone and as a strip cuts it, a watermark.
+        let high = b"/Artifact <</Subtype /Watermark /SHEF_Gen\xff (g1)>> BDC q 0.5 g Q EMC \
+            0 0 9 9 re f 1 1 8 8 re f 2 2 7 7 re f 3 3 6 6 re f";
+        assert_eq!(splice(high), 3);
+        // Cut at its middle, `/Watermark /`, `SHEF_Gen`, the list is no
+        // list: its value `SHEF_Gen`, a keyword, ends the dictionary, as
+        // PDFium reads it, so the range is what `(g1)` and a stray `>>`
+        // open, which has none. It splices out, and has no list to write.
+        let cut = b"/Artifact <</Subtype /Watermark /SHEF_Gen\xff (g1)>> BDC q 0.5 g Q EMC";
+        assert_eq!(splice(cut), 1);
+        let lim = Limits::DEFAULT.content.family();
         for (n, fixture) in splice_fixtures().iter().enumerate() {
-            // Unmutated, each lexes, and those with marked content splice.
+            // Unmutated, each reads, and those with marked content splice.
             let res = ResCx::new([(b"CS3".to_vec(), 3)]);
-            assert!(crate::content::lex(fixture, &res, &Limits::DEFAULT).all(|t| t.is_ok()));
+            assert!(content::tokens(fixture, &res, &lim).all(|t| t.is_ok()));
             let marks = fixture.windows(3).any(|w| w == b"BDC");
             assert_eq!(splice(fixture) > 0, marks, "fixture {n}");
-            // Where both readers read it alike, split at its middle as
-            // the body splits it, what's made of it is held to sheaf's
-            // lexer too.
-            let (first, second) = fixture.split_at(fixture.len() / 2);
-            let joined = Concat::new(&[first, second]);
-            alike += usize::from(read_alike(&joined, &res));
             for case in 0..CASES {
                 let mut data = fixture.clone();
                 for _ in 0..rng.usize(1..=4) {
                     mutate(&mut rng, &mut data, CONTENT_TOKENS);
                 }
                 let ran = std::panic::catch_unwind(|| {
-                    lexer(&data);
                     splice(&data);
                     interp(&data);
                 });
@@ -1763,9 +1710,7 @@ mod tests {
                 }
             }
         }
-        // The others a split at the middle breaks a dictionary or an
-        // image's of, or hold what the two readers end otherwise.
-        assert_eq!((alike, splice_fixtures().len()), (12, 19));
+        assert_eq!(splice_fixtures().len(), 19);
         let pages = interp_fixtures().into_iter().chain(font_part_fixtures());
         for (n, fixture) in pages.chain(hostile_program_fixtures()).enumerate() {
             // Unmutated, each draws on the fuzz page.

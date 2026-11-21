@@ -8,7 +8,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::pdf::content::{ResCx, operations};
 use crate::pdf::{LazyPdf, Object, ObjectId, StreamExt, Value};
 use serde::Deserialize;
 use sheaf_edit::Z;
@@ -17,7 +16,7 @@ use super::{
     STORED_VERSION, StoredArt, StoredContent, StoredGen, StoredKind, StoredScope, StoredSpec,
     StoredWatermark, header, unfit_values,
 };
-use crate::content::{BlockAt, Marker, SheafBlock};
+use crate::content::{BlockAt, Marker, ResCx, SheafBlock, operations};
 use crate::materialize::emit::catalog::GENERATORS;
 use crate::model::{
     Frozen, GenId, GenSpec, Generator, ImageRef, PageForm, PageId, Placed, Scope, WatermarkContent,
