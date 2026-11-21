@@ -613,7 +613,11 @@ module, brought forward from M11, never through lopdf's
 comments and spacing, and end an inline image at the first `EI` they
 meet. The flatten (until 19) was their last user, the watermark's install
 and read having gone in slice 16, and slice 19's clippy ban (the plan's
-lint ledger) keeps them out of everything but tests.
+lint ledger) kept them out of everything but tests. `Content::decode`
+went in M18 slice 17, with the two corpus checks that held sheaf's lexer
+to it: once both read through pdf-content-streams there was one reader
+on each side. `Content` is left as the fixtures' builder, and its
+`encode` stays banned outside tests.
 
 - **Tokens** (`content::tokens`, and `content::operations`, each
   operator with its operands) are pdf-content-streams' from M18 slice

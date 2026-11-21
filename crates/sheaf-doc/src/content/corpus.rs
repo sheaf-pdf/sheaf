@@ -1,9 +1,8 @@
 //! The content toolkit over Greg's corpus of real forms
 //! ([`forms::corpus`](crate::forms::corpus)): every page's content, and
-//! every form XObject it draws, reads, reads into tokens that tile it and
+//! every form XObject it draws, reads, has tokens that tile it and
 //! splices back to each stream's own bytes, read apart; its marked content
-//! balances; its `q`/`Q` balance is what `Content::decode` counts;
-//! its words decode through its fonts; its pagination artifacts are
+//! balances; its words decode through its fonts; its pagination artifacts are
 //! classified as the tools that made the files drew them; each of them
 //! splices out, as a strip cuts it, or is refused, Acrobat's never; and
 //! each list of theirs written in the content can be written again without
@@ -37,7 +36,7 @@ struct Outcome {
     pages: usize,
     forms: usize,
     bytes: usize,
-    /// Content that can't be read or lexed, or whose tokens don't tile
+    /// Content that can't be read, or whose tokens stop or don't tile
     /// it, with its page: each a line.
     unread: Vec<String>,
     /// Pages whose marked content doesn't balance.
@@ -45,10 +44,6 @@ struct Outcome {
     /// Streams the concatenation, or a splice of nothing, changed from
     /// their own bytes.
     changed: Vec<String>,
-    /// Pages `Content::decode` counts `q` and `Q` on (no inline images, and decoded),
-    /// and those whose count differs.
-    counted: usize,
-    miscounted: Vec<String>,
     origins: BTreeMap<(PaginationKind, PagOrigin), usize>,
     /// Pagination artifacts spliced out alone, as a strip cuts them, by
     /// who drew them and whether the splice was made; Acrobat's refused,
@@ -169,23 +164,6 @@ fn untiled(s: &[u8], res: &ResCx) -> Option<String> {
     (!blank(&s[at..])).then(|| format!("bytes after {at}"))
 }
 
-/// `Content::decode`'s count of `bytes`' `q`s and `Q`s, the reference.
-fn decoded_balance(bytes: &[u8]) -> Option<Balance> {
-    let content = crate::pdf::content::Content::decode(bytes).ok()?;
-    let mut balance = Balance::default();
-    for op in &content.operations {
-        match op.operator.as_str() {
-            "q" => balance.net = balance.net.saturating_add(1),
-            "Q" => {
-                balance.net = balance.net.saturating_sub(1);
-                balance.min_prefix = balance.min_prefix.min(balance.net);
-            }
-            _ => {}
-        }
-    }
-    Some(balance)
-}
-
 fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
     let mut out = Outcome::default();
     let path = corpus.path(entry);
@@ -248,18 +226,6 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
             Err(e) => {
                 out.unread.push(format!("{at}: {e}"));
                 continue;
-            }
-        }
-        let read: Vec<_> = (tokens(concat.bytes(), &res, cs))
-            .map(Result::unwrap)
-            .collect();
-        let has_image = read.iter().any(|(_, t)| matches!(t, Tok::InlineImage(_)));
-        let ours = balance(concat, &res, cs).unwrap();
-        if !has_image && let Some(reference) = decoded_balance(concat.bytes()) {
-            out.counted += 1;
-            if ours != reference {
-                out.miscounted
-                    .push(format!("{at}: {ours:?}, decoded {reference:?}"));
             }
         }
         out.words += text_bag(src.pdf(), concat, resources, LIM, &fonts)
@@ -358,10 +324,10 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
 }
 
 /// Every page of every form in the corpus, its content and the forms it
-/// draws: read, read into tokens, spliced with nothing taken out, counted,
+/// draws: read, its tokens tiling it, spliced with nothing taken out,
 /// classified, and spliced without each pagination artifact.
 #[test]
-fn corpus_content_lexes_splices_and_classifies() {
+fn corpus_content_reads_splices_and_classifies() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
@@ -372,7 +338,7 @@ fn corpus_content_lexes_splices_and_classifies() {
     let sum = |f: fn(&Outcome) -> usize| outcomes.iter().map(f).sum::<usize>();
     let all = |f: fn(&Outcome) -> &Vec<String>| outcomes.iter().flat_map(f).collect::<Vec<_>>();
     let (unread, unbalanced) = (all(|o| &o.unread), all(|o| &o.unbalanced));
-    let (changed, miscounted) = (all(|o| &o.changed), all(|o| &o.miscounted));
+    let changed = all(|o| &o.changed);
     let (refused, unstrippable) = (all(|o| &o.acrobat_refused), all(|o| &o.unstrippable));
     let unrewritable = all(|o| &o.unrewritable);
     let mut origins: BTreeMap<(PaginationKind, PagOrigin), usize> = BTreeMap::new();
@@ -391,14 +357,13 @@ fn corpus_content_lexes_splices_and_classifies() {
     }
     eprintln!(
         "{} pages ({} MB of content) and {} forms in {} files, in {took:?}: \
-         {} unread, {} with marked content unbalanced, {} decoded counted, {} nested in forms",
+         {} unread, {} with marked content unbalanced, {} nested in forms",
         sum(|o| o.pages),
         sum(|o| o.bytes) >> 20,
         sum(|o| o.forms),
         entries.len(),
         unread.len(),
         unbalanced.len(),
-        sum(|o| o.counted),
         sum(|o| o.nested),
     );
     eprintln!(
@@ -439,7 +404,6 @@ fn corpus_content_lexes_splices_and_classifies() {
         "{unrewritable:#?}"
     );
     assert!(changed.is_empty(), "{changed:#?}");
-    assert!(miscounted.is_empty(), "{miscounted:#?}");
     // One page of Acrobat's watermark has the body's `q` and `BT` inside
     // its range, which no splice can take without the body.
     let opens_the_body = "forms/safedocs/0112530.pdf page 1";

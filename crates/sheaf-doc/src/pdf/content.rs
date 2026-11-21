@@ -26,7 +26,7 @@
 //! blocks keep ranges of sheaf's own (`crate::content::Marked`).
 //!
 //! Also a minimal content-stream operation builder for test fixtures and
-//! examples ([`Content`]), with a test-only `Content::decode`.
+//! examples ([`Content`]).
 
 use pdf_objects::Object;
 
@@ -87,26 +87,5 @@ impl Content {
             out.extend_from_slice(op.operator.as_bytes());
         }
         Ok(out)
-    }
-
-    /// Parses `bytes` into [`Content`] through `pdf-content-streams` (test
-    /// oracle for `content::corpus`, `forms::check`, and `file::tests`).
-    #[cfg(test)]
-    pub fn decode(bytes: &[u8]) -> Result<Self> {
-        let limits = Limits::DEFAULT;
-        let res = pdf_content_streams::ResCx::none();
-        let mut operations = Vec::new();
-        for item in pdf_content_streams::operations(bytes, &res, &limits) {
-            let Ok(op) = item else { break };
-            let operator = String::from_utf8_lossy(op.name()).into_owned();
-            let mut operands = Vec::with_capacity(op.operands().len());
-            for operand in op.operands() {
-                if let Some(obj) = operand.object(&limits) {
-                    operands.push(obj);
-                }
-            }
-            operations.push(Operation { operator, operands });
-        }
-        Ok(Self { operations })
     }
 }

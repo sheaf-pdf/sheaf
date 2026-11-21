@@ -1371,10 +1371,7 @@ fn examples(names: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
     use super::*;
-    use crate::forms::corpus::{Corpus, each_entry};
 
     /// A report finding `findings` alone.
     fn finding(findings: Vec<Finding>) -> Report {
@@ -1475,39 +1472,6 @@ mod tests {
         );
     }
 
-    /// The font a `/DA` sets, as `da_font` read it through
-    /// `Content::decode` before it lexed: what it must still find.
-    fn decoded_font(da: &[u8]) -> Option<Vec<u8>> {
-        let content = crate::pdf::content::Content::decode(da).ok()?;
-        let tf = content
-            .operations
-            .iter()
-            .rev()
-            .find(|op| op.operator == "Tf")?;
-        Some(tf.operands.first()?.as_name()?.to_vec())
-    }
-
-    /// Every `/DA` in `pdf` the check would read: a widget's, a field's
-    /// and the form's among them.
-    fn every_da(pdf: &Pdf) -> Vec<&[u8]> {
-        let mut out = Vec::new();
-        let mut todo: Vec<&Object> = pdf.objects.values().collect();
-        while let Some(object) = todo.pop() {
-            let dict = match object.value() {
-                Value::Dict(d) => d,
-                Value::Stream(s) => &s.dict,
-                Value::Array(items) => {
-                    todo.extend(items);
-                    continue;
-                }
-                _ => continue,
-            };
-            out.extend(da_of(pdf, dict));
-            todo.extend(dict.iter().map(|(_, v)| v));
-        }
-        out
-    }
-
     #[test]
     fn da_fonts_are_the_last_tf_names() {
         for (da, font) in [
@@ -1523,42 +1487,6 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(da)
             );
-            assert_eq!(da_font(da), decoded_font(da));
         }
-    }
-
-    /// `da_font` finds the font lopdf's `Content::decode` found in every
-    /// `/DA` the corpus's forms hold.
-    #[test]
-    fn corpus_da_fonts_are_as_decoded() {
-        let Some(corpus) = Corpus::or_skip() else {
-            return;
-        };
-        let entries = corpus.forms().unwrap();
-        let started = Instant::now();
-        let outcomes = each_entry(&entries, |entry| {
-            let Ok(bytes) = std::fs::read(corpus.path(entry)) else {
-                return (0, Vec::new());
-            };
-            let Ok(pdf) = crate::file::load_pdf_mem(&bytes, None) else {
-                return (0, Vec::new());
-            };
-            let das = every_da(&pdf);
-            let differ: Vec<String> = das
-                .iter()
-                .filter(|da| da_font(da) != decoded_font(da))
-                .map(|da| format!("{}: {:?}", entry.path, String::from_utf8_lossy(da)))
-                .collect();
-            (das.len(), differ)
-        });
-        let read: usize = outcomes.iter().map(|(n, _)| n).sum();
-        let differ: Vec<&String> = outcomes.iter().flat_map(|(_, d)| d).collect();
-        eprintln!(
-            "{read} /DA strings in {} forms, {} differ, in {:?}",
-            entries.len(),
-            differ.len(),
-            started.elapsed()
-        );
-        assert!(differ.is_empty(), "{differ:#?}");
     }
 }
