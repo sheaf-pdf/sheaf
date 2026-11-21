@@ -92,17 +92,19 @@ fn marker(object: &Object) -> Option<i64> {
     object.as_stream()?.dict.get(b"Marker")?.as_integer()
 }
 
-/// A source lends a stream's dictionary and keeps nothing of the stream;
-/// its data comes decoded, as sheaf decodes it, and still nothing is
-/// kept.
+/// A source lends a stream's dictionary and keeps nothing of the stream,
+/// not even the dictionary, which what it's lent to holds; its data comes
+/// decoded, as sheaf decodes it, and still nothing is kept.
 #[test]
 fn a_stream_s_dictionary_is_lent_and_its_data_isn_t_kept() {
     let pdf = lazy();
-    let objects = Objects(&pdf);
+    let unkept = Unkept::default();
+    let objects = Objects::new(&pdf, &unkept);
 
     let lent = objects.resolve(id(3)).expect("stream 3");
     assert_eq!(marker(lent), Some(7));
-    assert!(!pdf.is_kept(id(3)), "peeking kept the stream");
+    assert!(!pdf.is_read(id(3)), "peeking kept the stream");
+    assert!(matches!(pdf.peek(id(3)), Ok(Some(Cow::Owned(_)))));
 
     let decoded = objects.decoded(id(3), 1 << 20).unwrap();
     assert_eq!(&*decoded, PROGRAM);
@@ -114,10 +116,11 @@ fn a_stream_s_dictionary_is_lent_and_its_data_isn_t_kept() {
         .decompressed_content_with_limit(1 << 20)
         .unwrap();
     assert_eq!(&*decoded, sheaf_s);
-    assert!(!pdf.is_kept(id(3)), "decoding kept the stream");
+    assert!(!pdf.is_read(id(3)), "decoding kept the stream");
 
-    // The same object every time it's asked for.
+    // The same object every time it's asked for, read once.
     assert!(std::ptr::eq(lent, objects.resolve(id(3)).unwrap()));
+    assert!(!pdf.is_read(id(3)));
 }
 
 /// What isn't a stream is read and kept as ever, and a stream already
@@ -125,7 +128,8 @@ fn a_stream_s_dictionary_is_lent_and_its_data_isn_t_kept() {
 #[test]
 fn what_s_kept_is_lent_as_kept() {
     let pdf = lazy();
-    let objects = Objects(&pdf);
+    let unkept = Unkept::default();
+    let objects = Objects::new(&pdf, &unkept);
 
     let plain = objects.resolve(id(7)).expect("dictionary 7");
     assert!(plain.as_dict().is_some_and(|d| d.has(b"Plain")));
@@ -145,12 +149,13 @@ fn what_s_kept_is_lent_as_kept() {
 #[test]
 fn a_chain_of_references_is_followed() {
     let pdf = lazy();
-    let objects = Objects(&pdf);
+    let unkept = Unkept::default();
+    let objects = Objects::new(&pdf, &unkept);
     for chained in [4, 5] {
         assert_eq!(marker(objects.resolve(id(chained)).unwrap()), Some(7));
         assert_eq!(&*objects.decoded(id(chained), 1 << 20).unwrap(), PROGRAM);
     }
-    assert!(!pdf.is_kept(id(3)));
+    assert!(!pdf.is_read(id(3)));
 
     let mut doc = Document::new();
     let stream = doc.add_object(Stream::new(
@@ -159,7 +164,8 @@ fn a_chain_of_references_is_followed() {
     ));
     let first = doc.add_object(Object::from(stream));
     let second = doc.add_object(Object::from(first));
-    let objects = Objects(&doc);
+    let unkept = Unkept::default();
+    let objects = Objects::new(&doc, &unkept);
     for at in [stream, first, second] {
         assert_eq!(marker(objects.resolve(at).unwrap()), Some(7));
         assert_eq!(&*objects.decoded(at, 1 << 20).unwrap(), PROGRAM);
@@ -172,7 +178,8 @@ fn a_chain_of_references_is_followed() {
 #[test]
 fn why_a_stream_doesn_t_decode() {
     let pdf = lazy();
-    let objects = Objects(&pdf);
+    let unkept = Unkept::default();
+    let objects = Objects::new(&pdf, &unkept);
     let why = |at: u32, limit: usize| objects.decoded(id(at), limit).map_err(|e| (e.id, e.why));
 
     assert_eq!(why(3, PROGRAM.len()).as_deref(), Ok(PROGRAM));
@@ -190,7 +197,8 @@ fn why_a_stream_doesn_t_decode() {
     );
 
     let doc = Document::new();
-    let objects = Objects(&doc);
+    let unkept = Unkept::default();
+    let objects = Objects::new(&doc, &unkept);
     assert!(objects.resolve(id(1)).is_none());
     assert_eq!(
         objects.decoded(id(1), 1 << 20).map_err(|e| e.why),
@@ -203,7 +211,8 @@ fn why_a_stream_doesn_t_decode() {
 #[test]
 fn a_font_is_read_through_a_source_that_keeps_none_of_its_streams() {
     let pdf = lazy();
-    let objects = Objects(&pdf);
+    let unkept = Unkept::default();
+    let objects = Objects::new(&pdf, &unkept);
     let dict = objects.resolve(id(8)).and_then(Object::as_dict).unwrap();
     let limits = Limits::DEFAULT.fonts();
     let mut budget = 1 << 20;
@@ -211,7 +220,7 @@ fn a_font_is_read_through_a_source_that_keeps_none_of_its_streams() {
     assert_eq!(font.code_text(0x41).as_deref(), Some("sheaf"));
     assert_eq!(font.text(b"AA").as_deref(), Some("sheafsheaf"));
     assert_eq!(budget, (1 << 20) - TO_UNICODE.len());
-    assert!(!pdf.is_kept(id(9)), "reading the font kept its /ToUnicode");
+    assert!(!pdf.is_read(id(9)), "reading the font kept its /ToUnicode");
 
     // Past its budget, the font is too large: the limit is told as one.
     let mut budget = TO_UNICODE.len() - 1;
@@ -276,7 +285,14 @@ fn a_cmap_chain_is_cut_at_content_s_depth() {
             "DescendantFonts" => vec![Object::from(descendant)],
         };
         let limits = lim.fonts();
-        let font = Font::read(Objects(&doc), &font, &limits, &mut (1 << 20), &mut ()).unwrap();
+        let font = Font::read(
+            Objects::new(&doc, &Unkept::default()),
+            &font,
+            &limits,
+            &mut (1 << 20),
+            &mut (),
+        )
+        .unwrap();
         font.approx().codes
     };
     assert!(!guessed(depth), "a chain of {depth} CMaps is read whole");
@@ -338,7 +354,8 @@ fn a_stream_whose_data_doesn_t_read_is_lent_the_same_kept_or_not() {
         .expect("no last byte fails the stream's padding");
 
     let lent = |pdf: &LazyPdf| {
-        let objects = Objects(pdf);
+        let unkept = Unkept::default();
+        let objects = Objects::new(pdf, &unkept);
         (
             objects.resolve(stream).and_then(marker),
             (objects.decoded(stream, 1 << 20))
@@ -356,64 +373,122 @@ fn a_stream_whose_data_doesn_t_read_is_lent_the_same_kept_or_not() {
     assert_eq!(lent(&kept), (Some(7), Err(Why::Locked)));
 }
 
-/// A page interpreted from a source keeps none of its fonts' streams:
-/// each font's program, CMap and map of CIDs is read as the font is,
-/// through [`Objects`], and the source holds no slot for one afterwards,
-/// though every font's program was read and its glyphs laid out.
+/// A page interpreted from a source keeps none of its streams, nor their
+/// dictionaries: each font's program, CMap and map of CIDs is read as the
+/// font is, and each XObject drawn (images, a stencil mask, a form) as
+/// it's drawn, through [`Objects`], what isn't kept held for the
+/// interpretation alone ([`Unkept`]); so the source has read and kept
+/// none of them afterwards, though every font's program was read, its
+/// glyphs laid out and every image drawn, and interpreted again, the page
+/// gives the same.
 #[test]
-fn a_page_interpreted_keeps_no_font_s_stream() {
+fn a_page_interpreted_keeps_none_of_its_streams() {
     use std::ops::ControlFlow;
 
     use crate::content::fixture;
-    use crate::content::interp::{Kind, Opts, interpret};
+    use crate::content::interp::{ImageOf, Kind, Opts, interpret};
     use crate::content::{FontProgram, Fonts};
 
-    let mut built = fixture::programs();
-    let page = built.pdf.page_iter().next().expect("one page");
-    let content: Vec<ObjectId> = contents(built.page());
-    // Every stream of the file but the page's content is a font's.
-    let streams: Vec<ObjectId> = (built.pdf.objects.iter())
-        .filter(|(id, object)| object.as_stream().is_some() && !content.contains(id))
-        .map(|(id, _)| *id)
-        .collect();
-    assert_eq!(streams.len(), 3, "a TrueType, a CFF and a Type 1 program");
+    // Each fixture, how many streams it has but its content, and how
+    // many image XObjects it draws: three fonts' programs (a TrueType, a
+    // CFF and a Type 1); and eight XObjects, five of them drawn as images
+    // (one in a form), one a stencil `/Mask`, one a soft mask that isn't
+    // read, and a PostScript XObject that isn't drawn.
+    for (mut built, count, images) in [(fixture::programs(), 3, 0), (fixture::images(), 8, 5)] {
+        let page = built.pdf.page_iter().next().expect("one page");
+        let content: Vec<ObjectId> = contents(built.page());
+        // Every stream of the file but the page's content is a font's or
+        // an XObject's.
+        let streams: Vec<ObjectId> = (built.pdf.objects.iter())
+            .filter(|(id, object)| object.as_stream().is_some() && !content.contains(id))
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(streams.len(), count, "fonts' programs, or XObjects");
 
-    let lim = &Limits::DEFAULT;
-    let pdf = LazyPdf::open(Arc::<[u8]>::from(built.bytes()), None, &lim.reader).unwrap();
-    let dict = pdf.get_dictionary(page).expect("the page");
-    let resources = dict.get(b"Resources");
-    let read = PageContent::read(&pdf, &contents(dict), lim).expect("its content");
+        let lim = &Limits::DEFAULT;
+        let pdf = LazyPdf::open(Arc::<[u8]>::from(built.bytes()), None, &lim.reader).unwrap();
+        let dict = pdf.get_dictionary(page).expect("the page");
+        let resources = dict.get(b"Resources");
+        let read = PageContent::read(&pdf, &contents(dict), lim).expect("its content");
 
-    let (mut glyphs, mut programs) = (0, 0);
-    let fonts = Fonts::default();
-    let done = interpret(
-        &pdf,
-        read.concat(),
-        resources,
-        lim,
-        &fonts,
-        Opts::default(),
-        |event| {
-            if let Kind::Text(show) = event.kind {
-                glyphs += show.glyphs().count();
-                let read = show.font.map(|font| font.program());
-                programs += usize::from(read == Some(FontProgram::Read));
-            }
-            ControlFlow::Continue(())
-        },
-    );
-    done.expect("the page is interpreted");
-    assert!(glyphs > 20, "{glyphs} glyphs");
-    assert!(
-        programs >= 6,
-        "{programs} strings in a font whose program read"
-    );
-    for id in &streams {
-        assert!(!pdf.is_kept(*id), "{id:?}, a font's stream, was kept");
+        let fonts = Fonts::default();
+        let interpreted = || {
+            let (mut glyphs, mut programs, mut drawn) = (0, 0, Vec::new());
+            let done = interpret(
+                &pdf,
+                read.concat(),
+                resources,
+                lim,
+                &fonts,
+                Opts::default(),
+                |event| {
+                    match event.kind {
+                        Kind::Text(show) => {
+                            glyphs += show.glyphs().count();
+                            let read = show.font.map(|font| font.program());
+                            programs += usize::from(read == Some(FontProgram::Read));
+                        }
+                        Kind::Image(image) => {
+                            drawn.push((image.of.clone(), image.mask, image.stencil))
+                        }
+                        _ => {}
+                    }
+                    ControlFlow::Continue(())
+                },
+            );
+            done.expect("the page is interpreted");
+            (glyphs, programs, drawn)
+        };
+        let (glyphs, programs, drawn) = interpreted();
+        let xobjects = drawn
+            .iter()
+            .filter(|(of, ..)| matches!(of, ImageOf::XObject(_)))
+            .count();
+        assert_eq!(xobjects, images, "image XObjects drawn");
+        if images == 0 {
+            assert!(glyphs > 20, "{glyphs} glyphs");
+            assert!(
+                programs >= 6,
+                "{programs} strings in a font whose program read"
+            );
+        }
+        for id in &streams {
+            assert!(!pdf.is_read(*id), "{id:?}, a stream, was kept");
+        }
+        assert_eq!(
+            interpreted(),
+            (glyphs, programs, drawn),
+            "interpreted again"
+        );
+        for id in &streams {
+            assert!(!pdf.is_read(*id), "{id:?}, a stream, was kept");
+        }
+        // One asked for as an object is kept, so the check above can see one.
+        pdf.get(streams[0]).expect("a stream");
+        assert!(pdf.is_read(streams[0]));
     }
-    // One asked for as an object is kept, so the check above can see one.
-    pdf.get(streams[0]).expect("a program");
-    assert!(pdf.is_kept(streams[0]));
+}
+
+/// What isn't kept is held once for each id it's asked by, however many
+/// are held, each where it was first held for as long as the holder
+/// lives: what's lent for an interpretation doesn't move under it.
+#[test]
+fn what_isn_t_kept_is_held_once_each_and_doesn_t_move() {
+    let unkept = Unkept::default();
+    let n = 1000;
+    let held: Vec<&Object> = (0..n)
+        .map(|i| unkept.hold(id(i + 1), Object::from(i64::from(i))))
+        .collect();
+    for (i, object) in held.iter().enumerate() {
+        let again = unkept.get(id(i as u32 + 1)).expect("held");
+        assert!(std::ptr::eq(*object, again), "{i} moved");
+        assert_eq!(again.as_integer(), Some(i as i64));
+    }
+    // Held again, an id gives the one held first.
+    let first = unkept.hold(id(1), Object::from(-1i64));
+    assert!(std::ptr::eq(first, held[0]));
+    assert_eq!(first.as_integer(), Some(0));
+    assert!(unkept.get(id(n + 1)).is_none());
 }
 
 /// A file with `objects` (each written as it's given, numbered from 1)
@@ -480,7 +555,8 @@ fn a_source_s_failure_keeps_its_reason() {
     bad.dict.set("Filter", Object::name("FlateDecode"));
     objects.push(Object::from(bad));
     let pdf = source(&objects, b"Broken");
-    let objects = Objects(&pdf);
+    let unkept = Unkept::default();
+    let objects = Objects::new(&pdf, &unkept);
     let reason = |id: ObjectId| {
         let told = (objects.try_resolve(id))
             .map(|o| o.is_some())
@@ -517,7 +593,9 @@ fn a_source_s_failure_keeps_its_reason() {
     // A document in memory: what isn't there is none.
     let doc = Document::new();
     assert_eq!(
-        Objects(&doc).try_resolve(id(1)).map(|o| o.is_some()),
+        Objects::new(&doc, &Unkept::default())
+            .try_resolve(id(1))
+            .map(|o| o.is_some()),
         Ok(false)
     );
 }

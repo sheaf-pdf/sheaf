@@ -15,6 +15,8 @@
 //! [`ContentLimits::decompressed`]: crate::source::ContentLimits
 
 use std::borrow::Cow;
+use std::cell::{OnceCell, RefCell};
+use std::collections::HashMap;
 
 use crate::pdf::content::Join;
 pub use crate::pdf::content::{Concat, Pos, SpanAcross};
@@ -38,17 +40,19 @@ pub trait ReadObjects {
     /// lex.
     fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> crate::pdf::Result<R>;
 
-    /// Object `id`, its references followed as [`object`] follows them,
-    /// borrowed: None where there's no such object, and the error where
-    /// it's there and doesn't read. A source lends a stream's dictionary
-    /// without reading or keeping its data, which [`read`] gives: what
-    /// the PDF layer's crates find a page's and a font's objects by
-    /// ([`Objects`]), so a font's program and CMaps aren't held once the
-    /// font is read.
+    /// Object `id`, its references followed as [`object`] follows them:
+    /// borrowed where the source keeps it, and where it doesn't, read for
+    /// the asker and not kept. None where there's no such object, and the
+    /// error where it's there and doesn't read. A source keeps what
+    /// [`object`] keeps, but a stream it hasn't kept is read as its
+    /// dictionary alone, its data neither read nor kept (which [`read`]
+    /// gives), and handed over: what the PDF layer's crates find a page's
+    /// and a font's objects by ([`Objects`]), so neither an XObject drawn
+    /// nor a font's program or CMaps is held once a page is interpreted.
     ///
     /// [`object`]: ReadObjects::object
     /// [`read`]: ReadObjects::read
-    fn peek(&self, id: ObjectId) -> crate::pdf::Result<Option<&Object>>;
+    fn peek(&self, id: ObjectId) -> crate::pdf::Result<Option<Cow<'_, Object>>>;
 }
 
 /// Why `error`, a source's failure to read an object, is: the reason the
@@ -72,17 +76,32 @@ fn unreadable(id: ObjectId, error: &crate::pdf::Error) -> Unreadable {
 }
 
 /// A source's or a document's objects as the PDF layer's crates read
-/// them: [`Resolve`] by [`ReadObjects::peek`], so a reference to a
-/// reference is followed as sheaf follows it everywhere, and [`Streams`]
-/// by [`ReadObjects::read`] and sheaf's own decoding, a stream read once
-/// and not kept; an object that doesn't read, or a stream that doesn't
-/// decode, with its reason: the source's I/O is [`Why::Source`], a
+/// them, for as long as `unkept` lives: [`Resolve`] by
+/// [`ReadObjects::peek`], so a reference to a reference is followed as
+/// sheaf follows it everywhere, what the source keeps lent from it, and
+/// what it doesn't (a stream's dictionary, its data unread) read once and
+/// held by `unkept`, not the source ([`Unkept`]); and [`Streams`] by
+/// [`ReadObjects::read`] and sheaf's own decoding, a stream read once and
+/// not kept. An object that doesn't read, or a stream that doesn't
+/// decode, has its reason: the source's I/O is [`Why::Source`], a
 /// password or decryption that fails [`Why::Locked`], one of the reader's
 /// caps [`Why::Capped`], and anything else, the file's, [`Why::Damaged`].
-/// What pdf-fonts reads a font from, and pdf-gfx a page
-/// ([`interp`](super::interp)).
+/// What pdf-fonts reads a font from, and pdf-gfx a page, each
+/// interpretation with an `unkept` of its own ([`interp`](super::interp)),
+/// so interpreting pages keeps nothing more of the source than its kept
+/// objects.
 #[derive(Debug)]
-pub struct Objects<'a, R: ?Sized>(pub &'a R);
+pub struct Objects<'a, R: ?Sized> {
+    source: &'a R,
+    unkept: &'a Unkept,
+}
+
+impl<'a, R: ?Sized> Objects<'a, R> {
+    /// `source`'s objects, what it doesn't keep held by `unkept`.
+    pub fn new(source: &'a R, unkept: &'a Unkept) -> Objects<'a, R> {
+        Objects { source, unkept }
+    }
+}
 
 impl<R: ?Sized> Clone for Objects<'_, R> {
     fn clone(&self) -> Self {
@@ -94,14 +113,23 @@ impl<R: ?Sized> Copy for Objects<'_, R> {}
 
 impl<'a, R: ReadObjects + ?Sized> Resolve<'a> for Objects<'a, R> {
     fn resolve(&self, id: ObjectId) -> Option<&'a Object> {
-        self.0.peek(id).ok().flatten()
+        self.try_resolve(id).ok().flatten()
     }
 
-    /// Object `id` as [`ReadObjects::peek`] lends it: none where there's
+    /// Object `id` as [`ReadObjects::peek`] lends it, what the source
+    /// doesn't keep held by [`Unkept`] and read once: none where there's
     /// no such object, and why where it doesn't read, as [`Objects`]
     /// says.
     fn try_resolve(&self, id: ObjectId) -> Result<Option<&'a Object>, Unreadable> {
-        self.0.peek(id).map_err(|error| unreadable(id, &error))
+        if let Some(held) = self.unkept.get(id) {
+            return Ok(Some(held));
+        }
+        match self.source.peek(id) {
+            Ok(Some(Cow::Borrowed(kept))) => Ok(Some(kept)),
+            Ok(Some(Cow::Owned(read))) => Ok(Some(self.unkept.hold(id, read))),
+            Ok(None) => Ok(None),
+            Err(error) => Err(unreadable(id, &error)),
+        }
     }
 }
 
@@ -111,7 +139,7 @@ impl<R: ReadObjects + ?Sized> Streams for Objects<'_, R> {
     /// one the source doesn't read (no such object among them), or whose
     /// filters fail, has its error's reason, as [`Objects`] says.
     fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
-        let read = self.0.read(id, |object| {
+        let read = self.source.read(id, |object| {
             let stream = object.as_stream()?;
             Some(stream.decompressed_content_with_limit(limit))
         });
@@ -123,6 +151,65 @@ impl<R: ReadObjects + ?Sized> Streams for Objects<'_, R> {
             Ok(Some(Err(error))) | Err(error) => Err(unreadable(id, &error)),
             Ok(None) => Err(Unreadable::new(id, Why::Damaged, "not a stream")),
         }
+    }
+}
+
+/// What [`Objects`] lends that its source doesn't keep, such as an
+/// XObject's or a font's stream's dictionary: each object read once, by
+/// the id it was asked for by, and held here, not by the source, until
+/// this is dropped. An interpretation has one of its own, so a page
+/// interpreted holds nothing of the source once it's done, however many
+/// pages are.
+#[derive(Debug, Default)]
+pub struct Unkept {
+    /// Where each is among `held`, by the id it was asked for by.
+    at: RefCell<HashMap<ObjectId, usize>>,
+    held: Places,
+}
+
+impl Unkept {
+    /// The object held for `id`, if one is.
+    fn get(&self, id: ObjectId) -> Option<&Object> {
+        let n = *self.at.borrow().get(&id)?;
+        self.held.at(n).get()
+    }
+
+    /// `object`, read for `id`, held for as long as this lives; or the one
+    /// held for it already.
+    fn hold(&self, id: ObjectId, object: Object) -> &Object {
+        let n = {
+            let mut at = self.at.borrow_mut();
+            let next = at.len();
+            *at.entry(id).or_insert(next)
+        };
+        self.held.at(n).get_or_init(|| object)
+    }
+}
+
+/// Places for objects, none moved once it's filled, so that each can be
+/// lent for as long as they live: a run of them, then the next run, twice
+/// as long, made when it's first needed.
+#[derive(Debug, Default)]
+struct Places {
+    run: Box<[OnceCell<Object>]>,
+    next: OnceCell<Box<Places>>,
+}
+
+impl Places {
+    /// The `n`th place, counted across the runs.
+    fn at(&self, mut n: usize) -> &OnceCell<Object> {
+        let mut places = self;
+        while n >= places.run.len() {
+            n -= places.run.len();
+            let len = (2 * places.run.len()).max(8);
+            places = places.next.get_or_init(|| {
+                Box::new(Places {
+                    run: (0..len).map(|_| OnceCell::new()).collect(),
+                    next: OnceCell::new(),
+                })
+            });
+        }
+        &places.run[n]
     }
 }
 
@@ -144,7 +231,7 @@ impl ReadObjects for LazyPdf {
         Ok(read(&object))
     }
 
-    fn peek(&self, id: ObjectId) -> crate::pdf::Result<Option<&Object>> {
+    fn peek(&self, id: ObjectId) -> crate::pdf::Result<Option<Cow<'_, Object>>> {
         LazyPdf::peek(self, id)
     }
 }
@@ -158,9 +245,10 @@ impl ReadObjects for crate::pdf::Document {
         self.get_object(id).map(read)
     }
 
-    fn peek(&self, id: ObjectId) -> crate::pdf::Result<Option<&Object>> {
+    /// Object `id`, which a document in memory keeps, as every object.
+    fn peek(&self, id: ObjectId) -> crate::pdf::Result<Option<Cow<'_, Object>>> {
         match self.get_object(id) {
-            Ok(object) => Ok(Some(object)),
+            Ok(object) => Ok(Some(Cow::Borrowed(object))),
             Err(crate::pdf::Error::ObjectNotFound(_)) => Ok(None),
             Err(error) => Err(error),
         }

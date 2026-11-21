@@ -9,6 +9,7 @@
 //! each list of theirs written in the content can be written again without
 //! a key, as Clean Copy writes sheaf's without what marks it.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::path::Path;
@@ -1443,9 +1444,9 @@ impl<O: ReadObjects> ReadObjects for Rewritten<'_, O> {
         }
     }
 
-    fn peek(&self, id: ObjectId) -> crate::pdf::Result<Option<&Object>> {
+    fn peek(&self, id: ObjectId) -> crate::pdf::Result<Option<Cow<'_, Object>>> {
         match self.forms.get(&id) {
-            Some(form) => Ok(Some(form)),
+            Some(form) => Ok(Some(Cow::Borrowed(form))),
             None => ReadObjects::peek(self.old, id),
         }
     }

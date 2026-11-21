@@ -88,7 +88,7 @@ pub use lex::{LexError, LexErrorKind, ResCx, Tok, lex, name, object};
 pub use marked::{Marked, PropertiesDict, Props, marked};
 pub use names::{Kept, NameSet, kept, names_used};
 pub use page::{
-    Concat, ContentFault, Objects, PageContent, Pos, ReadObjects, SpanAcross, contents,
+    Concat, ContentFault, Objects, PageContent, Pos, ReadObjects, SpanAcross, Unkept, contents,
 };
 pub use place::place_form;
 pub use text_bag::{TextBag, text_bag};

@@ -23,7 +23,7 @@ use crate::pdf::{
 use image::{Rgb, RgbImage};
 
 use super::interp::EncodedPage;
-use super::{Font, Glyphless, Objects, PageContent, contents};
+use super::{Font, Glyphless, Objects, PageContent, Unkept, contents};
 use crate::source::Limits;
 
 /// A one-page PDF.
@@ -223,7 +223,7 @@ pub fn standard_14(subtype: &str, name: &str) -> Dictionary {
     };
     let none = Pdf::new();
     let read = Font::read(
-        Objects(&none),
+        Objects::new(&none, &Unkept::default()),
         &font,
         &Limits::DEFAULT.fonts(),
         &mut 0,

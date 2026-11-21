@@ -47,6 +47,7 @@
 //! counted, which stops the Append unless the reader agreed that what the
 //! check finds stays readable too.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::OnceLock;
@@ -784,9 +785,9 @@ impl ReadObjects for Joined<'_> {
         }
     }
 
-    fn peek(&self, id: ObjectId) -> crate::pdf::Result<Option<&Object>> {
+    fn peek(&self, id: ObjectId) -> crate::pdf::Result<Option<Cow<'_, Object>>> {
         match self.section.get(&id) {
-            Some((_, obj)) => Ok(Some(obj)),
+            Some((_, obj)) => Ok(Some(Cow::Borrowed(obj))),
             None => ReadObjects::peek(self.old, id),
         }
     }

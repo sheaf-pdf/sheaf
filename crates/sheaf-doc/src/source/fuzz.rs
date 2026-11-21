@@ -1641,7 +1641,7 @@ mod tests {
             let mut budget = Limits::DEFAULT.content.decompressed;
             let tt = read
                 .get(
-                    content::Objects(&page.pdf),
+                    content::Objects::new(&page.pdf, &content::Unkept::default()),
                     tt,
                     &Limits::DEFAULT.fonts(),
                     &mut budget,

@@ -1,6 +1,7 @@
 //! M18 slices 8 and 11–12: `LazyPdf` backed directly by
 //! `pdf_structure::Reading` and `pdf_objects::Object`, with zero conversion.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
@@ -351,19 +352,21 @@ impl LazyPdf {
         Ok(Arc::new(loaded))
     }
 
-    /// Object `id`, its references followed, borrowed: None where it isn't
-    /// there (no entry in the cross-reference table, or none where its
-    /// entry points), and why where it's there and doesn't read, a chain
-    /// of references past the reader's depth among them
-    /// ([`Error::ReferenceLimit`]). A stream that isn't kept yet is lent
-    /// as the file has it, its dictionary alone: its data isn't read and
-    /// nothing of it is kept, so asking for a stream's dictionary doesn't
-    /// hold its bytes for the life of the reader as [`LazyPdf::get`]
-    /// does. Its `/Length` is then the file's (a kept stream's is its
+    /// Object `id`, its references followed: None where it isn't there
+    /// (no entry in the cross-reference table, or none where its entry
+    /// points), and why where it's there and doesn't read, a chain of
+    /// references past the reader's depth among them
+    /// ([`Error::ReferenceLimit`]). What's kept is borrowed. A stream that
+    /// isn't kept is read as the file has it, its dictionary alone, and
+    /// handed over, kept nowhere: its data isn't read, and nothing of it
+    /// stays, so asking for a stream's dictionary holds neither its bytes,
+    /// as [`LazyPdf::get`] does, nor the dictionary, for the life of the
+    /// reader. Its `/Length` is then the file's (a kept stream's is its
     /// data's), and its data is read by [`LazyPdf::object_unkept`]. A
-    /// stream whose data doesn't read is lent the same way, kept as that
-    /// error or not. Anything else is read and kept as `get` keeps it.
-    pub fn peek(&self, id: ObjectId) -> Result<Option<&Object>> {
+    /// stream whose data doesn't read is handed over the same way, kept as
+    /// that error or not. Anything else is read and kept as `get` keeps
+    /// it.
+    pub fn peek(&self, id: ObjectId) -> Result<Option<Cow<'_, Object>>> {
         let Some(mut object) = self.peek_one(id)? else {
             return Ok(None);
         };
@@ -381,21 +384,34 @@ impl LazyPdf {
         Ok(Some(object))
     }
 
-    /// [`LazyPdf::peek`], no reference followed. A stream kept as the
-    /// error its data gave ([`LazyPdf::get`] keeps one) is lent as one
-    /// not kept yet is, by its dictionary: what a stream is lent as
-    /// doesn't turn on whether something asked for its data first.
-    fn peek_one(&self, id: ObjectId) -> Result<Option<&Object>> {
+    /// [`LazyPdf::peek`], no reference followed. A stream the reading
+    /// keeps as written, read for something else, is lent so; one kept as
+    /// the error its data gave ([`LazyPdf::get`] keeps one) is as one not
+    /// kept at all, by its dictionary: what a stream is lent as doesn't
+    /// turn on whether something asked for its data first. Anything else
+    /// read here is kept as `get` would keep it, so it's read once.
+    fn peek_one(&self, id: ObjectId) -> Result<Option<Cow<'_, Object>>> {
         let Some(slot) = self.slot(id) else {
             return Ok(None);
         };
         if let Some(Ok(kept)) = slot.get() {
-            return Ok(Some(&**kept));
+            return Ok(Some(Cow::Borrowed(&**kept)));
         }
-        match self.reading.get(id) {
-            Ok(object) if object.as_stream().is_some() => Ok(Some(object)),
+        if self.reading.record(id).is_some()
+            && let Ok(kept) = self.reading.get(id)
+            && kept.as_stream().is_some()
+        {
+            return Ok(Some(Cow::Borrowed(kept)));
+        }
+        match self.reading.object_unrecorded(id) {
+            Ok(object) if object.as_stream().is_some() => Ok(Some(Cow::Owned(object))),
+            Ok(object) if slot.get().is_none() => {
+                let kept = slot.get_or_init(|| Ok(Arc::new(object)));
+                let kept = kept.as_ref().map_err(KeptError::to_error)?;
+                Ok(Some(Cow::Borrowed(&**kept)))
+            }
             _ => match self.get(id) {
-                Ok(object) => Ok(Some(object)),
+                Ok(object) => Ok(Some(Cow::Borrowed(object))),
                 Err(Error::MissingXrefEntry | Error::ObjectNotFound(_)) => Ok(None),
                 Err(error) => Err(error),
             },

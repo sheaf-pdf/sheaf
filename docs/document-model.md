@@ -918,13 +918,32 @@ splices still read, is slice 17's).
   `interpret(objects, &Concat, resources, &Limits, &Fonts, Opts, visit)`
   and `encode(objects, &Concat, resources, &Limits, &Fonts)`. Each reads
   any of sheaf's sources (`ReadObjects`, as `content::Objects` lends
-  them, below), under sheaf's caps as `Limits::gfx` gives them (Bounded,
-  below), with sheaf's rule for an object that doesn't read: no sink
+  them, below), what the source doesn't keep held for that call alone
+  (What a page interpreted keeps, below), under sheaf's caps as
+  `Limits::gfx` gives them (Bounded, below), with sheaf's rule for an
+  object that doesn't read: no sink
   where each form is judged on its own (`&mut ()`, so pdf-gfx makes none
   of the lookups only a sink wants), and `FailClosed` where forms are
   drawn and in `encode` (Failing closed, below). sheaf's callers call
   these, never pdf-gfx's own (only the interpreter's tests do, where
   they test the family), so the rule can't be left out at one call.
+- **What a page interpreted keeps: nothing it didn't.** pdf-gfx borrows
+  each object it reads for the whole run (a form's resources, an
+  XObject's dictionary), so the provider lends for as long as the run.
+  `ReadObjects::peek` gives what the source keeps borrowed and the rest
+  read for the asker (`Cow`): a lazy source keeps every object `get`
+  reads but a stream, whose dictionary it reads as written, its data
+  unread, and hands over without keeping (pdf-structure's
+  `Reading::object_unrecorded`: no record, so the data isn't hashed for
+  a copy's check either). `content::Objects` holds what it's handed in
+  an `Unkept` of the call's, read once each, and the call drops it. So
+  interpreting every page of an open document keeps none of their image
+  or form XObjects' dictionaries, nor their fonts' streams': on the
+  scanned 7k (an image a page) interpreting every page keeps no object
+  and adds 0.9 MB, in 34 ms (the gate's row, each page's content read
+  too). Kept, the dictionaries were 9.2 MB there; and sheaf's own
+  interpreter, which read every XObject again with its data, took 172
+  ms, most of it hashing each image's data for a record nobody used.
 - **The provider's reasons.** `ReadObjects::peek` lends an object, its
   references followed: none where there's no such object, the error
   where it's there and doesn't read. `content::Objects` gives the family
@@ -1021,10 +1040,11 @@ splices still read, is slice 17's).
   went then, and pdf-fonts began as a copy of it). It reads a source
   through `content::Objects`, any `ReadObjects` as the PDF layer's
   `Resolve` and `Streams`: `peek` lends an object, its references
-  followed, a stream's dictionary without its data read or kept, and a
-  stream is decoded by sheaf's own decoding within the limit, never
-  kept, so a font's program, CMaps and CharProcs don't stay in a lazy
-  reader's slots; the limits are `Limits::fonts`. The interpreter takes
+  followed, a stream's dictionary without its data read, neither kept by
+  the source (held by the call's `Unkept`, above), and a stream is
+  decoded by sheaf's own decoding within the limit, never kept, so a
+  font's program, CMaps and CharProcs don't stay in a lazy reader; the
+  limits are `Limits::fonts`. The interpreter takes
   the same provider and the same `Fonts` (from slice 23). `Font::read`
   reads a file's font as
   PDFium does, failing only past the budget it decompresses within

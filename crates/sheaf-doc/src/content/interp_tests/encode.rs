@@ -13,7 +13,7 @@ use proptest::prelude::*;
 
 use crate::content::fixture::{self, Fixture};
 use crate::content::{
-    Balance, Concat, Fonts, NameSet, Objects, ResCx, Tok, balance, lex, names_used,
+    Balance, Concat, Fonts, NameSet, Objects, ResCx, Tok, Unkept, balance, lex, names_used,
 };
 use crate::pdf::gfx::{
     ClipPart, EncodedPage, Error, Event, ImageDrawn, ImageOf, Kind, Mark, Matrix, Opts, Rect, Seg,
@@ -35,7 +35,7 @@ pub(super) struct Seen {
 fn drawn(f: &Fixture, content: &[u8]) -> Result<Vec<Seen>, Error> {
     let mut seen = Vec::new();
     interpret(
-        Objects(&f.pdf),
+        Objects::new(&f.pdf, &Unkept::default()),
         &Concat::new(&[content]),
         f.resources(),
         &Limits::DEFAULT.gfx(),
@@ -232,7 +232,7 @@ fn round_trip(f: &Fixture, content: &[u8], what: &str) -> EncodedPage {
     let lim = &Limits::DEFAULT;
     let concat = Concat::new(&[content]);
     let encoded = encode(
-        Objects(&f.pdf),
+        Objects::new(&f.pdf, &Unkept::default()),
         &concat,
         f.resources(),
         &lim.gfx(),
@@ -313,7 +313,7 @@ fn every_fixture_draws_as_its_encoding() {
 fn encode_of(f: &Fixture) -> String {
     let content = f.content();
     let encoded = encode(
-        Objects(&f.pdf),
+        Objects::new(&f.pdf, &Unkept::default()),
         content.concat(),
         f.resources(),
         &Limits::DEFAULT.gfx(),
@@ -333,7 +333,7 @@ fn a_line_is_written_where_it_moves_to() {
     let written = |content: &[u8]| {
         let concat = Concat::new(&[content]);
         let encoded = encode(
-            Objects(&f.pdf),
+            Objects::new(&f.pdf, &Unkept::default()),
             &concat,
             f.resources(),
             &Limits::DEFAULT.gfx(),
@@ -383,7 +383,7 @@ fn an_inline_image_is_written_where_it_ends_whatever_follows() {
     let written = |content: &[u8]| {
         let concat = Concat::new(&[content]);
         encode(
-            Objects(&f.pdf),
+            Objects::new(&f.pdf, &Unkept::default()),
             &concat,
             f.resources(),
             &Limits::DEFAULT.gfx(),

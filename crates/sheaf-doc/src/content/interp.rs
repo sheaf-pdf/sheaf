@@ -13,7 +13,10 @@
 //! doesn't read meet the family's: [`interpret`] and [`encode`] read a
 //! page from any of sheaf's sources ([`ReadObjects`], as [`Objects`]
 //! gives them, with the reason each object that doesn't read gives),
-//! under sheaf's caps ([`Limits::gfx`]). An object the source can't read
+//! what the source doesn't keep (an XObject's dictionary, a font's
+//! stream's) held for the call alone ([`Unkept`]), so that interpreting
+//! pages, however many, keeps nothing more of the source, under sheaf's
+//! caps ([`Limits::gfx`]). An object the source can't read
 //! for a reason that isn't the file's (I/O, a password, a cap) stops
 //! either; one that is damaged, which pdf-gfx reads as none, stops one
 //! that draws forms ([`Forms::Descend`]), where text is to be taken out of
@@ -32,14 +35,15 @@ pub use crate::pdf::gfx::{
 };
 
 use super::Fonts;
-use super::page::{Concat, Objects, ReadObjects};
+use super::page::{Concat, Objects, ReadObjects, Unkept};
 use crate::source::Limits;
 
 /// Interprets `content`, drawn with `resources` (a page's or a form's
 /// `/Resources` as written), its objects read from `objects` and its
 /// fonts through `fonts`, a source's, within `lim`, handing each event to
 /// `visit` in order, until the end or until `visit` breaks: pdf-gfx's
-/// [`interpret_with`](crate::pdf::gfx::interpret_with). Where forms are
+/// [`interpret_with`](crate::pdf::gfx::interpret_with), what `objects`
+/// doesn't keep held until it ends ([`Unkept`]). Where forms are
 /// drawn, an object pdf-gfx is told is damaged, and reads as none, fails
 /// it ([`Error::Unreadable`], [`Why::Damaged`]), after the events it
 /// handed.
@@ -52,7 +56,8 @@ pub fn interpret<R: ReadObjects + ?Sized>(
     opts: Opts,
     visit: impl FnMut(Event<'_>) -> ControlFlow<()>,
 ) -> Result<Summary, Error> {
-    let (objects, lim) = (Objects(objects), lim.gfx());
+    let unkept = Unkept::default();
+    let (objects, lim) = (Objects::new(objects, &unkept), lim.gfx());
     match opts.forms {
         Forms::Skip => gfx::interpret_with(
             objects,
@@ -76,9 +81,9 @@ pub fn interpret<R: ReadObjects + ?Sized>(
 
 /// `content`, drawn with `resources` from `objects`' objects in `fonts`
 /// within `lim`, and each form it draws, written again so no line depends
-/// on another: pdf-gfx's [`encode_with`](crate::pdf::gfx::encode_with).
-/// It draws forms, so an object it's told is damaged fails it, as in
-/// [`interpret`].
+/// on another: pdf-gfx's [`encode_with`](crate::pdf::gfx::encode_with),
+/// what `objects` doesn't keep held until it ends, as in [`interpret`].
+/// It draws forms, so an object it's told is damaged fails it.
 pub fn encode<R: ReadObjects + ?Sized>(
     objects: &R,
     content: &Concat,
@@ -86,9 +91,9 @@ pub fn encode<R: ReadObjects + ?Sized>(
     lim: &Limits,
     fonts: &Fonts,
 ) -> Result<EncodedPage, Error> {
-    let mut sink = FailClosed::default();
+    let (unkept, mut sink) = (Unkept::default(), FailClosed::default());
     let written = gfx::encode_with(
-        Objects(objects),
+        Objects::new(objects, &unkept),
         content,
         resources,
         &lim.gfx(),

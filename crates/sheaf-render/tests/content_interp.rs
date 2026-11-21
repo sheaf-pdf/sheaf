@@ -150,7 +150,7 @@ use pdfium_render::prelude::*;
 use sheaf_doc::content::fixture::{self, Fixture};
 use sheaf_doc::content::interp::{Error, Glyph, Kind, Opts, Refused, encode, interpret};
 use sheaf_doc::content::{
-    Font, FontApprox, FontKind, FontProgram, Fonts, Objects, PageContent, Std14,
+    Font, FontApprox, FontKind, FontProgram, Fonts, Objects, PageContent, Std14, Unkept,
 };
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::geom::{Affine, Rect};
@@ -604,8 +604,14 @@ fn standard_14_widths_are_pdfium_s_faces_but_where_guessed() {
             };
             let none = sheaf_doc::pdf::Document::new();
             let limits = Limits::DEFAULT.fonts();
-            let font =
-                Font::read(Objects(&none), &dict, &limits, &mut 0, &mut ()).expect("no stream");
+            let font = Font::read(
+                Objects::new(&none, &Unkept::default()),
+                &dict,
+                &limits,
+                &mut 0,
+                &mut (),
+            )
+            .expect("no stream");
             // Lines far enough apart that PDFium takes no `A` for one of
             // the line's before it (`CPDF_TextPage::ProcessTextObjectItems`).
             let y = |code: u32| (20 * (code - 127)) as f32;
