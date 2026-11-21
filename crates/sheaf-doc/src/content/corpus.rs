@@ -25,6 +25,7 @@ use super::tests::blank;
 use super::*;
 use crate::forms::corpus::{Corpus, Entry, each_entry};
 use crate::pdf::Why;
+use crate::pdf::gfx::{ActiveColorSpace, BlendState, RenderingIntent, SoftMask, SoftMaskKind};
 use crate::source::Limits;
 use crate::store::{BlobKind, Store};
 
@@ -1168,18 +1169,114 @@ fn mark_records(r: &mut EventRecords, mark: &Mark) {
     r.id("oc", mark.oc);
 }
 
-/// The state an event is in: the CTM, the line's width, cap, join and
-/// miter limit, the clip's bounds, and the text state: the font's being
-/// the stock one, its size, the spacing, scale, leading, rise and mode,
-/// the text matrix, where the line starts and the pen. All but the
-/// leading are what's drawn. (What sheaf's own interpreter kept, which
-/// this dump was set beside.)
+/// A color space's record: which it is, and its name where it's a
+/// resource's.
+fn space_records(r: &mut EventRecords, name: &'static str, space: &ActiveColorSpace) {
+    let number = match space {
+        ActiveColorSpace::DeviceGray => 0,
+        ActiveColorSpace::DeviceRgb => 1,
+        ActiveColorSpace::DeviceCmyk => 2,
+        ActiveColorSpace::Pattern => 3,
+        ActiveColorSpace::Named(_) => 4,
+        _ => 5,
+    };
+    r.number(name, number);
+    r.bytes(name, space.resource_name());
+}
+
+fn blend_number(blend: Blend) -> u64 {
+    match blend {
+        Blend::Normal => 0,
+        Blend::Multiply => 1,
+        Blend::Screen => 2,
+        Blend::Overlay => 3,
+        Blend::Darken => 4,
+        Blend::Lighten => 5,
+        Blend::ColorDodge => 6,
+        Blend::ColorBurn => 7,
+        Blend::HardLight => 8,
+        Blend::SoftLight => 9,
+        Blend::Difference => 10,
+        Blend::Exclusion => 11,
+        Blend::Hue => 12,
+        Blend::Saturation => 13,
+        Blend::Color => 14,
+        Blend::Luminosity => 15,
+    }
+}
+
+/// The state an event is in, every field of pdf-gfx's [`State`] but one:
+/// the CTM; the line's width, cap, join, miter limit and dash; the
+/// rendering intent and the flatness; each color's space, components and
+/// pattern; each alpha, whether it's a shape's, and the text knockout;
+/// the blend mode and the soft mask; the overprints and their mode; the
+/// clip's bounds; and the text state: the font's being the stock one, its
+/// size, the spacing, scale, leading, rise and mode, the text matrix,
+/// where the line starts, the pen, and whether a width before it was
+/// guessed. All but the leading are what's drawn. The one left out is
+/// which font is picked, a place among the run's fonts in the order it
+/// picked them, which says nothing of the font: the glyph dump has each
+/// font's glyphs.
 fn state_records(r: &mut EventRecords, state: &State) {
     r.reals("ctm", &matrix(state.ctm));
     r.reals("line_width", &[state.line_width]);
     r.number("cap", cap_number(state.line_cap));
     r.number("join", join_number(state.line_join));
     r.reals("miter", &[state.miter_limit]);
+    r.number("dash_len", state.dash.array.len() as u64);
+    r.reals("dash", &state.dash.array);
+    r.reals("dash_phase", &[state.dash.phase]);
+    let intent = match &state.rendering_intent {
+        RenderingIntent::AbsoluteColorimetric => (0, None),
+        RenderingIntent::RelativeColorimetric => (1, None),
+        RenderingIntent::Saturation => (2, None),
+        RenderingIntent::Perceptual => (3, None),
+        RenderingIntent::Other(name) => (4, Some(&name[..])),
+        _ => (5, None),
+    };
+    r.number("intent", intent.0);
+    r.bytes("intent", intent.1);
+    r.reals("flatness", &[state.flatness]);
+    space_records(r, "stroke_space", &state.stroke_color_space);
+    space_records(r, "fill_space", &state.fill_color_space);
+    for (name, color) in [
+        ("stroke_color", &state.stroke_color),
+        ("fill_color", &state.fill_color),
+    ] {
+        r.number("components", color.as_slice().len() as u64);
+        r.reals(name, color.as_slice());
+    }
+    r.bytes("stroke_pattern", state.stroke_pattern.as_deref());
+    r.bytes("fill_pattern", state.fill_pattern.as_deref());
+    r.reals("alpha", &[state.stroke_alpha, state.fill_alpha]);
+    r.number("alpha_is_shape", u64::from(state.alpha_is_shape));
+    r.number("text_knockout", u64::from(state.text_knockout));
+    let blend = match &state.blend_mode {
+        BlendState::Mode(blend) => (blend_number(*blend), None),
+        BlendState::Compatible => (16, None),
+        BlendState::Other(name) => (17, Some(&name[..])),
+        _ => (18, None),
+    };
+    r.number("blend", blend.0);
+    r.bytes("blend", blend.1);
+    match state.soft_mask {
+        SoftMask::None => r.number("soft_mask", 0),
+        SoftMask::Mask { kind, group } => {
+            r.number("soft_mask", 1);
+            let kind = kind.map(|kind| match kind {
+                SoftMaskKind::Alpha => 0,
+                SoftMaskKind::Luminosity => 1,
+                _ => 2,
+            });
+            r.maybe("soft_mask_kind", kind);
+            r.id("soft_mask_group", group);
+        }
+        _ => r.number("soft_mask", 2),
+    }
+    r.number("stroke_overprint", u64::from(state.stroke_overprint));
+    r.number("fill_overprint", u64::from(state.fill_overprint));
+    let mode = u32::from_le_bytes(state.overprint_mode.to_le_bytes());
+    r.number("overprint_mode", u64::from(mode));
     r.maybe_reals(
         "clip",
         state.clip_bounds().map(rect).as_ref().map(|r| &r[..]),
@@ -1197,6 +1294,7 @@ fn state_records(r: &mut EventRecords, state: &State) {
     r.reals("matrix", &matrix(text.matrix));
     r.reals("line", &[text.line.x, text.line.y]);
     r.reals("pen", &[text.pen.x, text.pen.y]);
+    r.number("guessed", u64::from(text.guessed));
 }
 
 /// `event`'s record, by fields it names: what it is, the state it's in,

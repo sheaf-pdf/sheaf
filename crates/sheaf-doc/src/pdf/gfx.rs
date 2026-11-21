@@ -27,3 +27,8 @@ pub use pdf_gfx::{
 /// glyph's quad, and which use of a form is drawn.
 #[cfg(test)]
 pub use pdf_gfx::{ClipPart, ImageDrawn, Marks, Point, Quad, ShadingDrawn, UseId};
+
+/// What a [`State`] holds that only the corpus's events dump names: its
+/// color spaces, rendering intent, blend mode and soft mask.
+#[cfg(test)]
+pub use pdf_gfx::{ActiveColorSpace, BlendState, RenderingIntent, SoftMask, SoftMaskKind};
