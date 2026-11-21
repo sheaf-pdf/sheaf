@@ -1452,13 +1452,13 @@ fn corners(x: f32, y: f32, w: f32, h: f32) -> [(f32, f32); 4] {
 /// Each image of [`fixture::images`] is the unit square through its CTM,
 /// in a form too; each inline image's data is where it's written, by
 /// each rule that finds its end; what's said of each is read; and the
-/// PostScript XObject is reported, not drawn. Where XObjects are judged
-/// on their own ([`Forms::Skip`]), none is read, and only the inline
-/// images are drawn.
+/// PostScript XObject is reported, not drawn. Where forms are judged on
+/// their own ([`Forms::Skip`]), none is entered, but each XObject's
+/// dictionary is read to tell a form from an image (pdf-gfx's reading,
+/// where sheaf's own interpreter read none): the page's stream draws its
+/// images as before, inline and XObject, and ignores the PostScript one,
+/// and the form's image isn't drawn.
 #[test]
-#[ignore = "G6: Forms::Skip reads each XObject's dictionary, so an image XObject is drawn \
-            and a PostScript one ignored where Forms::Report read none; the forms drawn \
-            (Descend) read as sheaf's interpreter read them"]
 fn each_image_is_its_unit_square_through_the_ctm() {
     let f = fixture::images();
     let content = f.content();
@@ -1548,13 +1548,16 @@ fn each_image_is_its_unit_square_through_the_ctm() {
         ..Opts::default()
     };
     let mut reported = Vec::new();
+    let mut passed_over = Vec::new();
     each(&f, opts, |event| match event.kind {
         Kind::Image(image) => reported.push(image.of),
-        Kind::Ignored(id) => panic!("{id:?} read"),
+        Kind::Ignored(id) => passed_over.push(id),
+        Kind::FormBegin(shown) => panic!("{:?} entered", shown.form),
         _ => {}
     });
-    assert_eq!(reported.len(), 8);
-    assert!((reported.iter()).all(|of| matches!(of, ImageOf::Inline { .. })));
+    let drawn: Vec<ImageOf> = images[..12].iter().map(|(i, _)| i.of.clone()).collect();
+    assert_eq!(reported, drawn);
+    assert_eq!(passed_over, [xobject(b"PS")]);
 }
 
 /// A path as a test sees it: its segments, paint and bounds, and the
