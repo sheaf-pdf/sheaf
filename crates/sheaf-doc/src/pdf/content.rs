@@ -12,13 +12,16 @@
 //! operators ([`Operators`]), what an interpretation's events are asked
 //! for by ([`super::gfx::Wants`]).
 //! `crate::content` re-exports them, and is where sheaf lexes content.
-//! Content's reading as the family has it is here too, for the tests
-//! that set it beside sheaf's lexer: its operations ([`operations`],
-//! [`ContentOperation`], [`Operand`], [`name`]) and their error
-//! ([`SyntaxError`], [`SyntaxErrorKind`]), a page's `q`/`Q` balance
-//! ([`balance`]), its marked ranges ([`marked`], [`MarkedNest`],
-//! [`Properties`]) and the resource names it uses ([`names_used`],
-//! [`kept`]).
+//! Content's reading as the family has it is here too: its tokens and
+//! operations ([`Tok`], [`operations`], [`ContentOperation`], [`Operand`],
+//! [`name`]), which what reads only a content's tokens reads it by (the
+//! private names a file holds, the XObject a saved generator drew, a
+//! `/DA`'s font), with the color spaces `crate::content::res_cx` counts;
+//! and, for the tests that set the family's reading beside sheaf's lexer,
+//! the operations' error ([`SyntaxError`], [`SyntaxErrorKind`]), a page's
+//! `q`/`Q` balance ([`balance`]), its marked ranges ([`marked`],
+//! [`MarkedNest`], [`Properties`]) and the resource names it uses
+//! ([`names_used`], [`kept`]).
 //!
 //! Also a minimal content-stream operation builder for test fixtures and
 //! examples ([`Content`]), with a test-only `Content::decode`.

@@ -34,8 +34,8 @@ use quick_xml::events::{BytesStart, Event};
 
 use super::read::FormClass;
 use crate::attachments::resolve;
-use crate::content::{self, ResCx, Tok};
 use crate::file::pdf_text;
+use crate::pdf::content::{ResCx, operations};
 use crate::source::{FormLimits, Limits};
 
 /// How much of a widget's name, read up its `/Parent` chain, a finding
@@ -886,21 +886,13 @@ fn da_of<'a>(pdf: &'a Pdf, d: &'a Dictionary) -> Option<&'a [u8]> {
 }
 
 /// The font a `/DA` sets: its last `Tf`'s first operand, when that's a
-/// name, up to what can't be lexed.
+/// name, up to what can't be read (pdf-content-streams' operations).
 fn da_font(da: &[u8]) -> Option<Vec<u8>> {
-    let mut operands = Vec::new();
     let mut font = None;
-    for token in content::lex(da, &ResCx::none(), &Limits::DEFAULT) {
-        let Ok((_, token)) = token else { break };
-        match token {
-            Tok::Operand(operand) => operands.push(operand),
-            Tok::Op(op) => {
-                if op == b"Tf" {
-                    font = operands.first().and_then(|&o| content::name(o));
-                }
-                operands.clear();
-            }
-            Tok::InlineImage(_) => operands.clear(),
+    for op in operations(da, &ResCx::none(), &Limits::DEFAULT.content.family()) {
+        let Ok(op) = op else { break };
+        if op.name() == b"Tf" {
+            font = op.operands().next().and_then(|o| o.name());
         }
     }
     Some(font?.into_owned())
@@ -1535,7 +1527,7 @@ mod tests {
         }
     }
 
-    /// The lexer finds the font lopdf's `Content::decode` found in every
+    /// `da_font` finds the font lopdf's `Content::decode` found in every
     /// `/DA` the corpus's forms hold.
     #[test]
     fn corpus_da_fonts_are_as_decoded() {

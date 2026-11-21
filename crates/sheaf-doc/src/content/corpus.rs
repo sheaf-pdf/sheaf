@@ -2059,9 +2059,11 @@ struct ContentRead {
 /// 11. the operands sheaf reads as more than bytes, how many and a
 ///     checksum of each: a name, decoded, and a dictionary, read as an
 ///     object and written, or that it isn't one;
-/// 12. what the private names' walk hears of it ([`crate::private::heard`]):
-///     how many and a checksum of each name, and `,unread` where it took
-///     the content to hold some it couldn't read.
+/// 12. what the private names' walk hears of it ([`crate::private::heard`],
+///     which reads pdf-content-streams' tokens with the color spaces it
+///     counts, [`res_cx`](super::page::res_cx)): how many and a checksum of
+///     each name, and `,unread` where it took the content to hold some it
+///     couldn't read.
 ///
 /// Its records in full go to stderr under `at`, where `full`.
 fn content_columns<R: ReadObjects>(
@@ -2158,7 +2160,8 @@ fn content_columns<R: ReadObjects>(
         Err(e) => format!("err:{}", lex_class(e.kind)),
     };
     let operands = format!("{read}:{}", operands.finish(&format!("{at}: operands")));
-    let heard = crate::private::heard(s, &res, LIM);
+    let heard_with = super::page::res_cx(objects, resources, LIM).ok();
+    let heard = crate::private::heard(s, heard_with.as_ref(), LIM);
     let mut r = Records::new(full);
     for said in &heard {
         match said {
@@ -2592,8 +2595,8 @@ struct FamilyRead {
 /// `resources` from `objects`' objects, as pdf-content-streams reads it
 /// under [`ContentLimits::family`](crate::source::ContentLimits::family):
 /// its color spaces counted by its [`ResCx::read`] over [`Objects`]
-/// ([`res_cx`](super::family_tests::res_cx)), and its property lists read
-/// as sheaf's are ([`properties`](super::family_tests::properties)).
+/// ([`res_cx`](super::page::res_cx)), and its property lists read
+/// as sheaf's are ([`properties`](super::page::properties)).
 /// Columns 3 to 11 are [`content_columns`]', each by the family's call of
 /// the same name ([`syntax_class`], [`family_marked_records`]), but 6,
 /// its operations; 12 to 14 are `-`; 15 is how many color spaces met a
@@ -2612,7 +2615,7 @@ fn family_columns<R: ReadObjects>(
 ) -> FamilyRead {
     use crate::pdf::content as family;
     let lim = &LIM.content.family();
-    let Ok(res) = super::family_tests::res_cx(objects, resources, LIM) else {
+    let Ok(res) = super::page::res_cx(objects, resources, LIM) else {
         return FamilyRead {
             columns: unread_columns(FAMILY_COLUMNS, "resources"),
             names: None,
@@ -2708,7 +2711,7 @@ fn family_columns<R: ReadObjects>(
         }
         None => "-".into(),
     };
-    let lists = super::family_tests::properties(objects, resources);
+    let lists = super::page::properties(objects, resources);
     let ranges = match family::marked(content, &lists, &res, lim) {
         Ok(found) => {
             let mut r = Records::new(full);

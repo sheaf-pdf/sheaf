@@ -472,6 +472,60 @@ fn components(objects: &impl ReadObjects, space: &Object) -> u32 {
     }
 }
 
+/// The color spaces `resources` names, a page's or a form's `/Resources`
+/// as written, each with its components as pdf-content-streams counts
+/// them, as PDFium does ([`ResCx::read`](crate::pdf::content::ResCx::read)),
+/// read from `objects` through [`Objects`] under `lim`'s content caps
+/// ([`ContentLimits::family`](crate::source::ContentLimits::family)), with
+/// what the source doesn't keep held for this call alone. An object that's
+/// the file's damage isn't there; one that doesn't read for any other
+/// reason (the source's I/O, a password, a cap) is the `Err`.
+///
+/// # Errors
+///
+/// [`Unreadable`] where an object of the dictionary or a space it names
+/// doesn't read, but for the file's damage ([`Why::Damaged`]).
+pub fn res_cx(
+    objects: &impl ReadObjects,
+    resources: Option<&Object>,
+    lim: &Limits,
+) -> Result<crate::pdf::content::ResCx, Unreadable> {
+    let unkept = Unkept::default();
+    crate::pdf::content::ResCx::read(
+        Objects::new(objects, &unkept),
+        resources,
+        &lim.content.family(),
+    )
+}
+
+/// The property lists `resources` names, a page's or a form's
+/// `/Properties`, each a dictionary, references followed, for
+/// pdf-content-streams' marked content to look a named list up in. A list,
+/// or the dictionary of them, that doesn't read or isn't a dictionary is
+/// none.
+pub fn properties(
+    objects: &impl ReadObjects,
+    resources: Option<&Object>,
+) -> crate::pdf::content::Properties {
+    fn plain_dict(o: &Object) -> Option<&Dictionary> {
+        match o.value() {
+            Value::Dict(d) => Some(d),
+            _ => None,
+        }
+    }
+    let direct = |o| direct(objects, o);
+    let lists = resources
+        .and_then(direct)
+        .and_then(plain_dict)
+        .and_then(|r| direct(r.get(b"Properties")?))
+        .and_then(plain_dict);
+    crate::pdf::content::Properties::new(
+        (lists.into_iter())
+            .flat_map(|lists| lists.iter())
+            .filter_map(|(name, list)| Some((name.to_vec(), plain_dict(direct(list)?)?.clone()))),
+    )
+}
+
 /// `object`, or what the reference it is names.
 pub(super) fn direct<'a>(objects: &'a impl ReadObjects, object: &'a Object) -> Option<&'a Object> {
     match object.as_reference() {

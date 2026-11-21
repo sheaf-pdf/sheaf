@@ -7,9 +7,8 @@
 //! the family does, and the copy expects the family's reading, saying which
 //! difference it is and where PDFium's answer is: a case the family holds
 //! to PDFium (pdf-content-streams' `tests/pdfium`, or pdf-color's, by
-//! name), PDFium having been asked of the copy's own input too. The
-//! functions sheaf's readings of its sources would give the family are
-//! here too: [`res_cx`] and [`properties`].
+//! name), PDFium having been asked of the copy's own input too. sheaf's
+//! sources are read for the family by [`res_cx`] and [`properties`].
 //!
 //! The differences, as the copies name them (sheaf's lexer, then the
 //! family, which is PDFium's):
@@ -40,57 +39,13 @@ use std::ops::Range;
 
 use proptest::prelude::*;
 
-use super::page::direct;
-use super::{Objects, ReadObjects, Unkept};
+use super::page::{properties, res_cx};
 use crate::pdf::content::{
     Concat, Pos, Properties, Props, ResCx, ResKind, SpanAcross, SyntaxError, SyntaxErrorKind, Tok,
     balance, marked, name, names_used, object, tokens,
 };
-use crate::pdf::{
-    Dictionary, Document as Pdf, Object, Stream, Unreadable, Value, dictionary, literal,
-};
+use crate::pdf::{Document as Pdf, Object, Stream, Value, dictionary, literal};
 use crate::source::{ContentLimits, Limits};
-
-/// The color spaces `resources` names, a page's or a form's, counted as
-/// pdf-content-streams counts them ([`ResCx::read`]), read from `objects`
-/// through [`Objects`], with what the source doesn't keep held for this
-/// call alone.
-pub(super) fn res_cx(
-    objects: &impl ReadObjects,
-    resources: Option<&Object>,
-    lim: &Limits,
-) -> Result<ResCx, Unreadable> {
-    let unkept = Unkept::default();
-    ResCx::read(
-        Objects::new(objects, &unkept),
-        resources,
-        &lim.content.family(),
-    )
-}
-
-/// The property lists `resources` names, a page's or a form's
-/// `/Properties`, each a dictionary, references followed, for
-/// pdf-content-streams' marked content: what sheaf's `PropertiesDict::read`
-/// reads, a list that doesn't read none.
-pub(super) fn properties(objects: &impl ReadObjects, resources: Option<&Object>) -> Properties {
-    fn plain_dict(o: &Object) -> Option<&Dictionary> {
-        match o.value() {
-            Value::Dict(d) => Some(d),
-            _ => None,
-        }
-    }
-    let direct = |o| direct(objects, o);
-    let lists = resources
-        .and_then(direct)
-        .and_then(plain_dict)
-        .and_then(|r| direct(r.get(b"Properties")?))
-        .and_then(plain_dict);
-    Properties::new(
-        (lists.into_iter())
-            .flat_map(|lists| lists.iter())
-            .filter_map(|(name, list)| Some((name.to_vec(), plain_dict(direct(list)?)?.clone()))),
-    )
-}
 
 const LIM: &Limits = &Limits::DEFAULT;
 

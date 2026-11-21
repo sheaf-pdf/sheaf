@@ -24,6 +24,7 @@ use crate::export::Export;
 use crate::model::{
     Document, Filter, ImageRef, MarkedSel, PageId, Scope, StreamSel, WatermarkContent as Content,
 };
+use crate::pdf::content::{Tok, tokens};
 use crate::realize::ViewInputs;
 use crate::source::Limits;
 use crate::tx::fixture as fx;
@@ -105,10 +106,11 @@ pub(super) fn depth(pdf: &Pdf, page: ObjectId) -> (i32, Balance) {
     let concat = Concat::new(&streams);
     let lim = Limits::DEFAULT;
     let (mut now, mut deepest) = (0, 0);
-    for token in crate::content::lex(concat.bytes(), &ResCx::default(), &lim) {
+    let none = crate::pdf::content::ResCx::none();
+    for token in tokens(concat.bytes(), &none, &lim.content.family()) {
         match token.unwrap().1 {
-            crate::content::Tok::Op(b"q") => now += 1,
-            crate::content::Tok::Op(b"Q") => now -= 1,
+            Tok::Op(b"q") => now += 1,
+            Tok::Op(b"Q") => now -= 1,
             _ => {}
         }
         deepest = deepest.max(now);

@@ -8,7 +8,10 @@
 //! - [`page`]: a page's `/Contents` as one, the concatenation PDFium lexes,
 //!   read within [`ContentLimits`](crate::source::ContentLimits), and
 //!   places in it mapped back to a stream ([`Concat`], [`Pos`] and
-//!   [`SpanAcross`], which are pdf-content-streams').
+//!   [`SpanAcross`], which are pdf-content-streams'); and what of its
+//!   resources pdf-content-streams reads it with, read from sheaf's
+//!   sources: its color spaces ([`res_cx`]) and property lists
+//!   ([`properties`]).
 //! - [`marked`], [`balance`] and [`names_used`]: its marked ranges, its
 //!   `q`/`Q` balance and the resource names it uses; [`kept`], the last
 //!   two of what's left once ranges are taken out.
@@ -90,6 +93,7 @@ pub use marked::{Marked, PropertiesDict, Props, marked};
 pub use names::{Kept, NameSet, kept, names_used};
 pub use page::{
     Concat, ContentFault, Objects, PageContent, Pos, ReadObjects, SpanAcross, Unkept, contents,
+    properties, res_cx,
 };
 pub use place::place_form;
 pub use text_bag::{TextBag, text_bag};

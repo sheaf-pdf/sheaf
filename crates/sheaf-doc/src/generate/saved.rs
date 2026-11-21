@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use crate::pdf::content::{ResCx, operations};
 use crate::pdf::{LazyPdf, Object, ObjectId, StreamExt, Value};
 use serde::Deserialize;
 use sheaf_edit::Z;
@@ -16,7 +17,7 @@ use super::{
     STORED_VERSION, StoredArt, StoredContent, StoredGen, StoredKind, StoredScope, StoredSpec,
     StoredWatermark, header, unfit_values,
 };
-use crate::content::{self, BlockAt, Marker, ResCx, SheafBlock, Tok};
+use crate::content::{BlockAt, Marker, SheafBlock};
 use crate::materialize::emit::catalog::GENERATORS;
 use crate::model::{
     Frozen, GenId, GenSpec, Generator, ImageRef, PageForm, PageId, Placed, Scope, WatermarkContent,
@@ -448,16 +449,12 @@ fn rebind(src: &Source, blocks: &[Block], subtype: &[u8]) -> Option<ObjectId> {
         let data = (stream.as_stream()?)
             .decompressed_content_with_limit(lim.content.decompressed)
             .ok()?;
-        let mut operand = None;
         let mut name = None;
-        for token in content::lex(&data, &ResCx::none(), lim) {
-            match token.ok()?.1 {
-                Tok::Operand(o) => operand = Some(o),
-                Tok::Op(b"Do") => {
-                    name = operand.and_then(content::name);
-                    break;
-                }
-                _ => operand = None,
+        for op in operations(&data, &ResCx::none(), &lim.content.family()) {
+            let op = op.ok()?;
+            if op.name() == b"Do" {
+                name = op.arg(0).and_then(|o| o.name());
+                break;
             }
         }
         let name = name?;
