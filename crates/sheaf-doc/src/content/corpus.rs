@@ -1464,7 +1464,7 @@ impl<O: ReadObjects> ReadObjects for Rewritten<'_, O> {
 /// `class` says why.
 fn events_none(path: &str, page: &str, class: &str) -> String {
     let dashes = ["-"; SUMMARY_COLUMNS + 2].join("\t");
-    format!("{path}\t{page}\t{dashes}\t{class}\t-\t-")
+    format!("{path}\t{page}\t{dashes}\t{class}\t-")
 }
 
 /// `content`, drawn with `resources` from `objects`' objects, its forms
@@ -1520,11 +1520,8 @@ fn drawn_again<R: ReadObjects>(
 /// again ([`encode`]: its content, then each form's id and bytes), `ok` or
 /// the class of what failed, whether the page written again, interpreted
 /// again, draws what it drew ([`drawn_again`]: `same`, `differs`, or `-`
-/// where it isn't written again), and `-`: how many times the run was
-/// told an object is damaged, which the dumps' side of pdf-gfx's counted
-/// while it was set beside sheaf's own interpreter (M18 slice 23), and
-/// which sheaf's rule fails on now (`unreadable:damaged`). Its records in
-/// full go to stderr under `at`, where `full`.
+/// where it isn't written again). Its records in full go to stderr under
+/// `at`, where `full`.
 fn page_events<R: ReadObjects>(
     objects: &R,
     content: &Concat,
@@ -1560,7 +1557,7 @@ fn page_events<R: ReadObjects>(
             }
         },
     };
-    format!("{summary}\t{events:032x}\t{encoding}\t{why}\t{redrawn}\t-")
+    format!("{summary}\t{events:032x}\t{encoding}\t{why}\t{redrawn}")
 }
 
 /// The events dump's lines for the file at `path` of the corpus, one a
@@ -1629,12 +1626,12 @@ fn events_dump() {
             .filter(|line| column(line, from_end).as_deref() == Some(is))
             .count()
     };
-    let not_ok = lines.len() - count(2, "ok");
+    let not_ok = lines.len() - count(1, "ok");
     eprintln!(
         "{} lines, {not_ok} not ok, {} written again and drawn the same, {} drawn otherwise, in {:.0} s",
         lines.len(),
-        count(1, "same"),
-        count(1, "differs"),
+        count(0, "same"),
+        count(0, "differs"),
         started.elapsed().as_secs_f64()
     );
     written(&lines, full, to);
@@ -1652,8 +1649,8 @@ fn each_fixture_s_events_are_drawn_the_same_written_again() {
         let content = f.content();
         let at = (name, false);
         let line = page_events(&f.pdf, content.concat(), f.resources(), &fonts, at);
-        let last: Vec<&str> = line.rsplit('\t').take(3).collect();
-        assert_eq!(last, ["-", "same", "ok"], "{name}: {line}");
+        let last: Vec<&str> = line.rsplit('\t').take(2).collect();
+        assert_eq!(last, ["same", "ok"], "{name}: {line}");
         let again = page_events(&f.pdf, content.concat(), f.resources(), &fonts, at);
         assert_eq!(again, line, "{name}");
     }

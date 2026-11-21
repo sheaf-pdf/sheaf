@@ -477,15 +477,13 @@ glyph-dump out:
 # form, marked range and string shown, by the fields it names, in the
 # state it's in, but a show's string and glyphs, which glyph-dump has);
 # one of the page written again; `ok` or the class of what failed
-# (`lex`, `xobject`, `limit:<cap>`, `not-finite`, `unwritable:<why>`,
-# `unreadable:<why>` (`damaged` where forms are drawn through one),
-# `page-stream`, `capped-inline`, `other`; `encode:` and one of those
-# where only writing it again did; `unread` or `unopened` where there was
-# nothing to interpret); whether the page written again, interpreted
-# again, draws the same (`same`, `differs`, or `-` where it isn't written
-# again); and `-`, the column that counted the objects pdf-gfx was told
-# are damaged while it was set beside sheaf's own interpreter (M18 slice
-# 23), kept so the dumps of then set beside these. It asserts nothing:
+# (`content`, `form-stream`, `limit:<cap>`, `not-finite`, `unwritable:<why>`,
+# `unreadable:<why>`, `damaged` where forms are drawn through a damaged
+# object, `page-stream`, `capped-inline`, `other`; `encode:` and one of
+# those where only writing it again did; `unread` or `unopened` where
+# there was nothing to interpret); and whether the page written again,
+# interpreted again, draws the same (`same`, `differs`, or `-` where it
+# isn't written again). It asserts nothing:
 # run it before and after a change to the interpreter, over the same
 # corpus, and `diff` the two files; SHEAF_EVENTS_DUMP_ONLY=<a corpus
 # path> prints that file's records in full. Two runs over the same code
