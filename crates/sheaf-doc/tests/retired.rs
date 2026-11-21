@@ -1210,6 +1210,15 @@ const RETIRED_M18: &[(&str, u8)] = &[
     ("content::marked::Nest", 17),
     ("content::page::ContentFault::Lex", 17),
     ("source::fuzz::lexer", 17),
+    // What was left of the lexer's company: the tests' reference reader,
+    // which had come to read through the same operations as what it was
+    // set beside; the copies of the family's marked range and its list
+    // that a page's blocks kept, now `content::KeptRange`; and the
+    // private names' walk of content, now `in_content`.
+    ("pdf::content::Content::decode", 17),
+    ("content::blocks::Marked", 17),
+    ("content::blocks::Props", 17),
+    ("private::lexed", 17),
 ];
 
 /// The ledgers, with the words a hit names its slice by.
@@ -1299,6 +1308,15 @@ const QUALIFIED_ONLY: &[&str] = &[
     // own lexer, `ResCx::family` and `steps` (M18 slice 17).
     "family",
     "steps",
+    // pdf-content-streams' marked range and its list, a block that's a
+    // marked range (`BlockAt::Marked`) and a selection of them; a reader's
+    // `decode` of anything else; and a test's local: not the copies a
+    // page's blocks kept, `Content::decode`, or the private names' walk
+    // (M18 slice 17).
+    "Marked",
+    "Props",
+    "decode",
+    "lexed",
     // The header and footer a document's state draws: not the view's.
     "header_footer",
     "Mode",
