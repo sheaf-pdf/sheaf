@@ -2,13 +2,16 @@
 //! `sheaf-doc` and every other crate in the workspace reaches the PDF
 //! object, structure, filter and encryption types through here
 //! (`pdf-objects`, `pdf-structure`, `pdf-filters`, `pdf-crypt`), and
-//! content's (`content`: `pdf-content-streams`, M18 slice 19) and fonts'
-//! (`fonts`: `pdf-fonts` and `pdf-gfx`, M18 slice 22).
+//! content's (`content`: `pdf-content-streams`, M18 slice 19), fonts'
+//! (`fonts`: `pdf-fonts` and `pdf-gfx`, M18 slice 22), and content
+//! interpreted and written again (`gfx`: `pdf-gfx`, M18 slice 23), with
+//! where its readers tell what they read past (`fault`).
 
 pub mod content;
 mod document;
 mod error;
 pub mod fonts;
+pub mod gfx;
 mod reader;
 mod stream;
 #[cfg(any(test, feature = "fixtures"))]
@@ -27,6 +30,15 @@ pub use pdf_objects::{
 pub use pdf_structure::{ByteSource, FileBytes};
 pub use reader::{LazyPdf, RawCopies, ReadLimits, XrefFacts, XrefKind};
 pub use stream::{StreamExt, deflate, deflate_best, deflate_fast, deflate_options, inflate};
+
+/// Where a family reader tells what it read past and went on: a [`Sink`]
+/// of faults, each at its [`Place`]. `()` is the sink that wants none.
+///
+/// [`Sink`]: fault::Sink
+/// [`Place`]: fault::Place
+pub mod fault {
+    pub use pdf_objects::fault::{Place, Sink};
+}
 
 /// Constructs a literal PDF byte string (`(…)`), setting `Some(StringFormat::Literal)`
 /// so `Object::eq` matches strings parsed from `(…)` tokens.

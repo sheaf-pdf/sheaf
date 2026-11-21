@@ -51,6 +51,8 @@ mod corpus;
 pub mod fixture;
 mod font;
 pub mod interp;
+#[cfg(test)]
+mod interp_tests;
 mod lex;
 mod marked;
 mod names;
