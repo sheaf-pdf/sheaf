@@ -2779,6 +2779,8 @@ fn digest<'a>(
 }
 
 #[cfg(test)]
+mod corpus;
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::serialize::built::{Written, to_pdf, to_pdf_in};

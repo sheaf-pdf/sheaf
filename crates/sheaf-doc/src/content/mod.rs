@@ -59,7 +59,7 @@ mod blocks;
 #[cfg(test)]
 mod blocks_tests;
 #[cfg(test)]
-mod corpus;
+pub(crate) mod corpus;
 #[cfg(any(test, feature = "fixtures"))]
 pub mod fixture;
 mod font;
