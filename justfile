@@ -466,9 +466,6 @@ tier-interp:
 # SHEAF_GLYPH_DUMP_ONLY=<a corpus path> prints that file's records in
 # full, to read the two runs side by side. Two runs over the same code
 # write the same file. In release, under a minute once built.
-# SHEAF_DUMP_INTERP=gfx reads the pages by pdf-gfx's interpreter, through a
-# source that says why an object doesn't read, where it's sheaf's own
-# (M18 slice 23, until sheaf's goes); events-dump takes it too.
 [doc("What every corpus page shows, a line a page, written to a file: diff two runs across a change to fonts or the interpreter")]
 [group('corpus')]
 glyph-dump out:
@@ -481,17 +478,18 @@ glyph-dump out:
 # state it's in, but a show's string and glyphs, which glyph-dump has);
 # one of the page written again; `ok` or the class of what failed
 # (`lex`, `xobject`, `limit:<cap>`, `not-finite`, `unwritable:<why>`,
-# `encode:` and one of the first four where only writing it again did,
-# `unread` or `unopened` where there was nothing to interpret; pdf-gfx's
-# also `unreadable:<why>`, `page-stream`, `capped-inline` and `other`);
-# whether the page written again, interpreted again, draws the same
-# (`same`, `differs`, or `-` where it isn't written again); and how many
-# times the run was told an object is damaged (`-` where the interpreter
-# tells of none: sheaf's). It asserts nothing: run it before and after
-# a change to the interpreter, over the same corpus, and `diff` the two
-# files; SHEAF_EVENTS_DUMP_ONLY=<a corpus path> prints that file's
-# records in full. Two runs over the same code write the same file.
-# SHEAF_DUMP_INTERP=gfx as for glyph-dump.
+# `unreadable:<why>` (`damaged` where forms are drawn through one),
+# `page-stream`, `capped-inline`, `other`; `encode:` and one of those
+# where only writing it again did; `unread` or `unopened` where there was
+# nothing to interpret); whether the page written again, interpreted
+# again, draws the same (`same`, `differs`, or `-` where it isn't written
+# again); and `-`, the column that counted the objects pdf-gfx was told
+# are damaged while it was set beside sheaf's own interpreter (M18 slice
+# 23), kept so the dumps of then set beside these. It asserts nothing:
+# run it before and after a change to the interpreter, over the same
+# corpus, and `diff` the two files; SHEAF_EVENTS_DUMP_ONLY=<a corpus
+# path> prints that file's records in full. Two runs over the same code
+# write the same file.
 [doc("What every corpus page's interpretation does, a line a page, written to a file: diff two runs across a change to the interpreter")]
 [group('corpus')]
 events-dump out:

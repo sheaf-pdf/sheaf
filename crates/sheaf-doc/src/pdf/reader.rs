@@ -351,8 +351,11 @@ impl LazyPdf {
         Ok(Arc::new(loaded))
     }
 
-    /// Object `id`, its references followed, borrowed; None where it
-    /// isn't there or doesn't read. A stream that isn't kept yet is lent
+    /// Object `id`, its references followed, borrowed: None where it isn't
+    /// there (no entry in the cross-reference table, or none where its
+    /// entry points), and why where it's there and doesn't read, a chain
+    /// of references past the reader's depth among them
+    /// ([`Error::ReferenceLimit`]). A stream that isn't kept yet is lent
     /// as the file has it, its dictionary alone: its data isn't read and
     /// nothing of it is kept, so asking for a stream's dictionary doesn't
     /// hold its bytes for the life of the reader as [`LazyPdf::get`]
@@ -360,30 +363,42 @@ impl LazyPdf {
     /// data's), and its data is read by [`LazyPdf::object_unkept`]. A
     /// stream whose data doesn't read is lent the same way, kept as that
     /// error or not. Anything else is read and kept as `get` keeps it.
-    pub fn peek(&self, id: ObjectId) -> Option<&Object> {
-        let mut object = self.peek_one(id)?;
+    pub fn peek(&self, id: ObjectId) -> Result<Option<&Object>> {
+        let Some(mut object) = self.peek_one(id)? else {
+            return Ok(None);
+        };
         let mut chain = 0;
         while let Some(next) = object.as_reference() {
             chain += 1;
             if chain > self.limits.max_depth {
-                return None;
+                return Err(Error::ReferenceLimit);
             }
-            object = self.peek_one(next)?;
+            match self.peek_one(next)? {
+                Some(next) => object = next,
+                None => return Ok(None),
+            }
         }
-        Some(object)
+        Ok(Some(object))
     }
 
     /// [`LazyPdf::peek`], no reference followed. A stream kept as the
     /// error its data gave ([`LazyPdf::get`] keeps one) is lent as one
     /// not kept yet is, by its dictionary: what a stream is lent as
     /// doesn't turn on whether something asked for its data first.
-    fn peek_one(&self, id: ObjectId) -> Option<&Object> {
-        if let Some(Ok(kept)) = self.slot(id)?.get() {
-            return Some(&**kept);
+    fn peek_one(&self, id: ObjectId) -> Result<Option<&Object>> {
+        let Some(slot) = self.slot(id) else {
+            return Ok(None);
+        };
+        if let Some(Ok(kept)) = slot.get() {
+            return Ok(Some(&**kept));
         }
         match self.reading.get(id) {
-            Ok(object) if object.as_stream().is_some() => Some(object),
-            _ => self.get(id).ok(),
+            Ok(object) if object.as_stream().is_some() => Ok(Some(object)),
+            _ => match self.get(id) {
+                Ok(object) => Ok(Some(object)),
+                Err(Error::MissingXrefEntry | Error::ObjectNotFound(_)) => Ok(None),
+                Err(error) => Err(error),
+            },
         }
     }
 

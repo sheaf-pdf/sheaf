@@ -380,11 +380,6 @@ impl<'a> Step<'a, '_> {
     pub fn name(&self, i: usize) -> Option<Cow<'a, [u8]>> {
         name(self.arg(i)?)
     }
-
-    /// Every operand, in order.
-    pub fn args(&self) -> impl Iterator<Item = &'a [u8]> + '_ {
-        self.operands.iter().map(|r| &self.s[r.clone()])
-    }
 }
 
 /// `s`'s steps ([`lex`]), each handed to `step`, until the end or an
@@ -694,12 +689,6 @@ pub(crate) fn image_entry<'s>(
     })
     .ok()?;
     found.map(|r| &s[r])
-}
-
-/// The length the inline image `image` (its token in `s`) gives its data,
-/// its `/L` or `/Length`, where that's a length, as the lexer reads it.
-pub(crate) fn image_length(s: &[u8], image: Range<usize>, depth: usize) -> Option<u64> {
-    image_entry(s, image, depth, &[b"L", b"Length"]).and_then(int)
 }
 
 enum Filter {

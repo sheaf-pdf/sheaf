@@ -16,7 +16,7 @@
 //! [`Streams`]: super::Streams
 
 pub use pdf_gfx::{
-    Cap, ClipPart, EncodedPage, Error, Event, Fault, Forms, ImageDrawn, ImageOf, Kind, Limits,
-    Mark, MarkProps, Marks, Matrix, Opts, Point, Quad, Rect, Refused, Seg, ShadingDrawn, State,
-    Summary, Unwritable, UseId, Wants, encode, encode_with, interpret, interpret_with,
+    Cap, ClipPart, EncodedPage, Error, Event, Fault, Forms, Glyph, ImageDrawn, ImageOf, Kind,
+    Limits, Mark, MarkProps, Marks, Matrix, Opts, Point, Quad, Rect, Refused, Seg, ShadingDrawn,
+    State, Summary, Unwritable, UseId, Wants, encode, encode_with, interpret, interpret_with,
 };

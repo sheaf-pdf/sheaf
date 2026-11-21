@@ -784,9 +784,9 @@ impl ReadObjects for Joined<'_> {
         }
     }
 
-    fn peek(&self, id: ObjectId) -> Option<&Object> {
+    fn peek(&self, id: ObjectId) -> crate::pdf::Result<Option<&Object>> {
         match self.section.get(&id) {
-            Some((_, obj)) => Some(obj),
+            Some((_, obj)) => Ok(Some(obj)),
             None => ReadObjects::peek(self.old, id),
         }
     }

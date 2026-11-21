@@ -1,15 +1,15 @@
-//! The content interpreter's tests, on pdf-gfx's ([`interpret`],
-//! [`encode`](crate::pdf::gfx::encode)) through the door (M18 slice 23):
-//! each of sheaf's interpreter's tests, under its own name, its pages
-//! read through [`Objects`] and its caps sheaf's ([`Limits::gfx`]). Over
-//! pages built in code ([`fixture`]): each glyph where it was worked out
-//! by hand to be, to a thousandth of a point; forms drawn per use, and
-//! refused within themselves or too deep; each image, path, clip and
-//! shading where it was worked out to be, paths built as PDFium builds
-//! them; marked content read as PDFium reads it; each cap on its work
-//! held to; operands read as PDFium reads them. A copy that holds what
-//! pdf-gfx reads otherwise than sheaf's interpreter did is ignored with
-//! the difference's class (`G<n>`), and not edited to pass.
+//! The content interpreter's tests: pdf-gfx's ([`interpret`],
+//! [`encode`](crate::pdf::gfx::encode)), called through the door, its
+//! pages read through [`Objects`] and its caps sheaf's ([`Limits::gfx`]),
+//! and sheaf's rule for an object that doesn't read through
+//! [`content::interp`](crate::content::interp). They were sheaf's own
+//! interpreter's, and kept their names when M18 slice 23 moved them onto
+//! pdf-gfx's. Over pages built in code ([`fixture`]): each glyph where it
+//! was worked out by hand to be, to a thousandth of a point; forms drawn
+//! per use, and refused within themselves or too deep; each image, path,
+//! clip and shading where it was worked out to be, paths built as PDFium
+//! builds them; marked content read as PDFium reads it; each cap on its
+//! work held to; operands read as PDFium reads them.
 
 mod encode;
 
@@ -1080,16 +1080,20 @@ fn reported_forms_are_not_drawn() {
     assert_eq!((seen.ops, summary.operators, summary.uses), (6, 6, 0));
 }
 
-/// A fixture's objects, but for one that can't be read.
+/// A fixture's objects, but for one that can't be read: reading it gives
+/// `error`, and where `lent` it's lent all the same, as a source lends a
+/// stream's dictionary without reading its data.
 struct Unreadable<'a> {
     pdf: &'a Pdf,
     id: ObjectId,
+    error: fn() -> crate::pdf::Error,
+    lent: bool,
 }
 
 impl ReadObjects for Unreadable<'_> {
     fn object(&self, id: ObjectId) -> crate::pdf::Result<&Object> {
         match id == self.id {
-            true => Err(crate::pdf::Error::InvalidStream("unreadable".into())),
+            true => Err((self.error)()),
             false => self.pdf.get_object(id),
         }
     }
@@ -1098,9 +1102,22 @@ impl ReadObjects for Unreadable<'_> {
         self.object(id).map(read)
     }
 
-    fn peek(&self, id: ObjectId) -> Option<&Object> {
-        self.object(id).ok()
+    fn peek(&self, id: ObjectId) -> crate::pdf::Result<Option<&Object>> {
+        match id == self.id && !self.lent {
+            true => Err((self.error)()),
+            false => ReadObjects::peek(self.pdf, id),
+        }
     }
+}
+
+/// What an object the file has damaged gives a source.
+fn damaged() -> crate::pdf::Error {
+    crate::pdf::Error::InvalidStream("unreadable".into())
+}
+
+/// What an object the source's I/O fails to read gives it.
+fn gone() -> crate::pdf::Error {
+    crate::pdf::Error::IO(std::io::Error::other("the source went away"))
 }
 
 /// The form an error says couldn't be read, as sheaf's interpreter's
@@ -1115,11 +1132,10 @@ fn unread_form(e: &Error) -> Option<ObjectId> {
 }
 
 /// A form that can't be read stops what draws it, but not where XObjects
-/// are judged on their own, which reads none.
+/// are judged on their own, which reads none: sheaf's rule
+/// ([`content::interp::interpret`](crate::content::interp::interpret)),
+/// where pdf-gfx reads a damaged object as none.
 #[test]
-#[ignore = "G7: through Objects, which gives no reason why an object doesn't read, \
-            pdf-gfx reads the form as absent and draws the page; sheaf's interpreter \
-            failed what draws it"]
 fn a_form_that_cant_be_read_stops_only_what_draws_it() {
     let f = fixture::forms();
     let xobjects = f
@@ -1133,6 +1149,8 @@ fn a_form_that_cant_be_read_stops_only_what_draws_it() {
     let broken = Unreadable {
         pdf: &f.pdf,
         id: fm1,
+        error: damaged,
+        lent: false,
     };
     let content = f.content();
     let drawn = |forms| {
@@ -1141,11 +1159,11 @@ fn a_form_that_cant_be_read_stops_only_what_draws_it() {
             ..Opts::default()
         };
         let (lim, fonts) = (Limits::DEFAULT, Fonts::default());
-        interpret(
-            Objects(&broken),
+        crate::content::interp::interpret(
+            &broken,
             content.concat(),
             f.resources(),
-            &lim.gfx(),
+            &lim,
             &fonts,
             opts,
             |_| ControlFlow::Continue(()),
@@ -1154,6 +1172,55 @@ fn a_form_that_cant_be_read_stops_only_what_draws_it() {
     let e = drawn(Forms::Descend).unwrap_err();
     assert!(unread_form(&e) == Some(fm1), "{e}");
     assert_eq!(drawn(Forms::Skip).unwrap().operators, 6);
+}
+
+/// A font whose program the source's I/O fails to read stops the page,
+/// its forms drawn or not, where sheaf's own interpreter read the font
+/// without its program: the reason isn't the file's, and another read may
+/// give the program. A program the file has damaged is read as none, as
+/// before, whatever is drawn: pdf-fonts reads a font's objects itself,
+/// and tells no sink.
+#[test]
+fn a_font_whose_program_fails_by_io_stops_the_page() {
+    use crate::pdf::Why;
+
+    let f = fixture::programs();
+    let fonts = f.resources().and_then(|r| r.as_dict()?.get(b"Font"));
+    let font = fonts.and_then(|f| f.as_dict()?.get(b"PT")?.as_reference());
+    let get = |id: ObjectId, key: &[u8]| f.pdf.get_dictionary(id).ok()?.get(key)?.as_reference();
+    let descriptor = font.and_then(|font| get(font, b"FontDescriptor"));
+    let program = descriptor.and_then(|d| get(d, b"FontFile2"));
+    let program = program.expect("/PT's program");
+    let content = f.content();
+    let read = |error, forms| {
+        let source = Unreadable {
+            pdf: &f.pdf,
+            id: program,
+            error,
+            lent: true,
+        };
+        let opts = Opts {
+            forms,
+            ..Opts::default()
+        };
+        crate::content::interp::interpret(
+            &source,
+            content.concat(),
+            f.resources(),
+            &Limits::DEFAULT,
+            &Fonts::default(),
+            opts,
+            |_| ControlFlow::Continue(()),
+        )
+    };
+    for forms in [Forms::Descend, Forms::Skip] {
+        match read(gone, forms) {
+            Err(Error::Unreadable(u)) => assert_eq!((u.id, u.why), (program, Why::Source)),
+            other => panic!("{forms:?}: {other:?}"),
+        }
+        let damaged = read(damaged, forms).expect("read without its program");
+        assert!(damaged.glyphs > 0, "{forms:?}");
+    }
 }
 
 /// The visitor can stop it: the summary says so.
@@ -1232,7 +1299,7 @@ fn faults_say_where() {
 #[test]
 fn a_smaller_interest_only_filters() {
     let wants = [
-        crate::content::corpus::gfx::TEXT_BAG_WANTS,
+        crate::content::text_bag::WANTS,
         Wants {
             text: true,
             ..Wants::NONE

@@ -39,22 +39,48 @@ pub trait ReadObjects {
     fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> crate::pdf::Result<R>;
 
     /// Object `id`, its references followed as [`object`] follows them,
-    /// borrowed; None where it can't be read. A source lends a stream's
-    /// dictionary without reading or keeping its data, which [`read`]
-    /// gives: what a font's objects are found by ([`Objects`]), so a
-    /// font's program and CMaps aren't held once the font is read.
+    /// borrowed: None where there's no such object, and the error where
+    /// it's there and doesn't read. A source lends a stream's dictionary
+    /// without reading or keeping its data, which [`read`] gives: what
+    /// the PDF layer's crates find a page's and a font's objects by
+    /// ([`Objects`]), so a font's program and CMaps aren't held once the
+    /// font is read.
     ///
     /// [`object`]: ReadObjects::object
     /// [`read`]: ReadObjects::read
-    fn peek(&self, id: ObjectId) -> Option<&Object>;
+    fn peek(&self, id: ObjectId) -> crate::pdf::Result<Option<&Object>>;
+}
+
+/// Why `error`, a source's failure to read an object, is: the reason the
+/// PDF layer's crates are told ([`Unreadable`]). The source's I/O is
+/// [`Why::Source`]; a password or decryption that fails, [`Why::Locked`];
+/// one of the reader's caps, [`Why::Capped`]; anything else, the file's,
+/// [`Why::Damaged`].
+pub(crate) fn why(error: &crate::pdf::Error) -> Why {
+    use crate::pdf::Error as E;
+    match error {
+        E::IO(_) => Why::Source,
+        E::InvalidPassword | E::Decryption(_) => Why::Locked,
+        E::Limit(_) | E::ReferenceLimit => Why::Capped,
+        _ => Why::Damaged,
+    }
+}
+
+/// `error`, reading `id`, as the PDF layer's crates are told it.
+fn unreadable(id: ObjectId, error: &crate::pdf::Error) -> Unreadable {
+    Unreadable::new(id, why(error), error.to_string())
 }
 
 /// A source's or a document's objects as the PDF layer's crates read
 /// them: [`Resolve`] by [`ReadObjects::peek`], so a reference to a
 /// reference is followed as sheaf follows it everywhere, and [`Streams`]
 /// by [`ReadObjects::read`] and sheaf's own decoding, a stream read once
-/// and not kept. What pdf-fonts reads a font from, and what interprets a
-/// page with it takes the same.
+/// and not kept; an object that doesn't read, or a stream that doesn't
+/// decode, with its reason: the source's I/O is [`Why::Source`], a
+/// password or decryption that fails [`Why::Locked`], one of the reader's
+/// caps [`Why::Capped`], and anything else, the file's, [`Why::Damaged`].
+/// What pdf-fonts reads a font from, and pdf-gfx a page
+/// ([`interp`](super::interp)).
 #[derive(Debug)]
 pub struct Objects<'a, R: ?Sized>(pub &'a R);
 
@@ -68,15 +94,22 @@ impl<R: ?Sized> Copy for Objects<'_, R> {}
 
 impl<'a, R: ReadObjects + ?Sized> Resolve<'a> for Objects<'a, R> {
     fn resolve(&self, id: ObjectId) -> Option<&'a Object> {
-        self.0.peek(id)
+        self.0.peek(id).ok().flatten()
+    }
+
+    /// Object `id` as [`ReadObjects::peek`] lends it: none where there's
+    /// no such object, and why where it doesn't read, as [`Objects`]
+    /// says.
+    fn try_resolve(&self, id: ObjectId) -> Result<Option<&'a Object>, Unreadable> {
+        self.0.peek(id).map_err(|error| unreadable(id, &error))
     }
 }
 
 impl<R: ReadObjects + ?Sized> Streams for Objects<'_, R> {
     /// Stream `id` decoded, as sheaf decodes every stream. Past `limit`
-    /// it's [`Why::Limit`]; anything else that gives no data (no such
-    /// object, not a stream, a filter that fails, a source that doesn't
-    /// read) is [`Why::Damaged`], which a font reads as none.
+    /// it's [`Why::Limit`]; what isn't a stream is [`Why::Damaged`]; and
+    /// one the source doesn't read (no such object among them), or whose
+    /// filters fail, has its error's reason, as [`Objects`] says.
     fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
         let read = self.0.read(id, |object| {
             let stream = object.as_stream()?;
@@ -87,9 +120,8 @@ impl<R: ReadObjects + ?Sized> Streams for Objects<'_, R> {
             Ok(Some(Err(crate::pdf::Error::Limit(crate::pdf::Limit::Decompressed)))) => {
                 Err(Unreadable::new(id, Why::Limit, "decodes past the limit"))
             }
-            Ok(Some(Err(error))) => Err(Unreadable::new(id, Why::Damaged, error.to_string())),
+            Ok(Some(Err(error))) | Err(error) => Err(unreadable(id, &error)),
             Ok(None) => Err(Unreadable::new(id, Why::Damaged, "not a stream")),
-            Err(error) => Err(Unreadable::new(id, Why::Damaged, error.to_string())),
         }
     }
 }
@@ -112,7 +144,7 @@ impl ReadObjects for LazyPdf {
         Ok(read(&object))
     }
 
-    fn peek(&self, id: ObjectId) -> Option<&Object> {
+    fn peek(&self, id: ObjectId) -> crate::pdf::Result<Option<&Object>> {
         LazyPdf::peek(self, id)
     }
 }
@@ -126,8 +158,12 @@ impl ReadObjects for crate::pdf::Document {
         self.get_object(id).map(read)
     }
 
-    fn peek(&self, id: ObjectId) -> Option<&Object> {
-        self.get_object(id).ok()
+    fn peek(&self, id: ObjectId) -> crate::pdf::Result<Option<&Object>> {
+        match self.get_object(id) {
+            Ok(object) => Ok(Some(object)),
+            Err(crate::pdf::Error::ObjectNotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }
 

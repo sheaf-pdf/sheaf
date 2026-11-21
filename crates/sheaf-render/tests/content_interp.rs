@@ -148,9 +148,7 @@ use std::time::Instant;
 
 use pdfium_render::prelude::*;
 use sheaf_doc::content::fixture::{self, Fixture};
-use sheaf_doc::content::interp::{
-    EncodeError, Glyph, InterpError, Kind, Opts, Refused, encode, interpret,
-};
+use sheaf_doc::content::interp::{Error, Glyph, Kind, Opts, Refused, encode, interpret};
 use sheaf_doc::content::{
     Font, FontApprox, FontKind, FontProgram, Fonts, Objects, PageContent, Std14,
 };
@@ -231,7 +229,7 @@ fn placed(f: &Fixture) -> Vec<Placed> {
                 glyphs.extend(show.glyphs().map(|g| Placed {
                     code: g.code,
                     origin: (g.origin.x, g.origin.y),
-                    bounds: g.quad.bounds(),
+                    bounds: g.quad.bounds().into(),
                     approx,
                     stock: show.stock,
                     exact: show.font.is_some_and(|f| exact(f, g.approx)),
@@ -657,10 +655,11 @@ fn source(bytes: &[u8]) -> Src {
 enum Unwritten {
     /// It can't be read: there's no content to interpret.
     Unread(String),
-    /// It can't be interpreted ([`InterpError`]).
+    /// It can't be interpreted ([`Error`]).
     Interp(String),
-    /// What it does can't be written so it reads back the same
-    /// ([`EncodeError::Unwritable`]).
+    /// What it does can't be written so it reads back the same: an
+    /// operator ([`Error::Unwritable`]), or an inline image sized under a
+    /// cap ([`Error::CappedInlineImage`]).
     Unwritable(String),
 }
 
@@ -719,8 +718,10 @@ fn written_again(src: &Src) -> anyhow::Result<Option<Written>> {
             .and_then(|content| {
                 let resources = page.resources.as_deref();
                 encode(pdf, content.concat(), resources, lim, &fonts).map_err(|e| match e {
-                    EncodeError::Interp(e) => Unwritten::Interp(e.to_string()),
-                    e @ EncodeError::Unwritable { .. } => Unwritten::Unwritable(e.to_string()),
+                    Error::Unwritable { .. }
+                    | Error::CappedInlineImage { .. }
+                    | Error::PageStream(_) => Unwritten::Unwritable(e.to_string()),
+                    e => Unwritten::Interp(e.to_string()),
                 })
             })
             .and_then(|encoded| match dict {
@@ -967,23 +968,21 @@ fn tier<T: Send>(
 }
 
 /// The measures of a page's interpretation a cap bounds, and the cap:
-/// its name in [`ContentLimits`](sheaf_doc::source::ContentLimits), and
-/// its value. A form's use is a `Do`, an operator.
+/// its name in the interpreter's limits as sheaf sets them
+/// ([`Limits::gfx`]), and its value. A form's use is a `Do`, an operator.
 type Cap = (&'static str, &'static str, fn(&Limits) -> usize);
 const MEASURES: [Cap; 9] = [
-    ("operators", "operators", |l| l.content.operators),
-    ("glyphs", "glyphs", |l| l.content.glyphs),
-    ("bytes interpreted", "interpreted", |l| {
-        l.content.interpreted
-    }),
+    ("operators", "operators", |l| l.gfx().operators),
+    ("glyphs", "glyphs", |l| l.gfx().glyphs),
+    ("bytes interpreted", "interpreted", |l| l.gfx().interpreted),
     ("bytes decompressed", "decompressed", |l| {
-        l.content.decompressed
+        l.gfx().decompressed
     }),
-    ("path segments", "segments", |l| l.content.segments),
-    ("form uses", "operators", |l| l.content.operators),
-    ("form depth", "form_depth", |l| l.content.form_depth),
-    ("saved states", "states", |l| l.content.states),
-    ("marked nesting", "depth", |l| l.content.depth),
+    ("path segments", "segments", |l| l.gfx().segments),
+    ("form uses", "operators", |l| l.gfx().operators),
+    ("form depth", "form_depth", |l| l.gfx().form_depth),
+    ("saved states", "states", |l| l.gfx().states),
+    ("marked nesting", "marked", |l| l.gfx().marked),
 ];
 
 /// What interpreting a file's pages came to.
@@ -993,7 +992,7 @@ struct Interpreted {
     /// Pages whose content can't be read, which there's nothing of to
     /// interpret.
     unread: Vec<String>,
-    /// Pages past a cap ([`InterpError::Limit`]).
+    /// Pages past a cap ([`Error::Limit`]).
     limited: Vec<String>,
     /// Pages whose content, or a form's, doesn't lex, or that draw an
     /// XObject that can't be read.
@@ -1074,6 +1073,9 @@ fn interpreted(src: &Src) -> Interpreted {
                     Kind::FormRefused { why, .. } => match why {
                         Refused::Cycle => cycles += 1,
                         Refused::Depth => deep += 1,
+                        // A refusal of a kind the interpreter adds later
+                        // is neither.
+                        _ => {}
                     },
                     _ => {}
                 }
@@ -1087,7 +1089,7 @@ fn interpreted(src: &Src) -> Interpreted {
         );
         let summary = match read {
             Ok(summary) => summary,
-            Err(InterpError::Limit(cap)) => {
+            Err(Error::Limit(cap)) => {
                 out.limited.push(format!("{at}: past the cap on {cap}"));
                 continue;
             }
@@ -1578,7 +1580,7 @@ fn showing(src: &Src, page: &PageFacts, fonts: &Fonts) -> Result<Showing, String
                     let Some(font) = show.font else {
                         return ControlFlow::Continue(());
                     };
-                    let trm = show.trm();
+                    let trm = Affine::from(show.trm());
                     let metrics = font.metrics();
                     let id = std::ptr::from_ref(font) as usize;
                     let actual = (event.marks.iter())
@@ -1599,7 +1601,7 @@ fn showing(src: &Src, page: &PageFacts, fonts: &Fonts) -> Result<Showing, String
                     let next = streams.len();
                     let stream = *streams.entry(event.at.stream.cloned()).or_insert(next);
                     let along = trm.a.hypot(trm.b);
-                    let s = show.start;
+                    let s = Affine::from(show.start);
                     let unscaled = (s.a, s.b, s.c, s.d) == (1.0, 0.0, 0.0, 1.0);
                     let program = program_of(src, font);
                     for g in show.glyphs() {
@@ -1616,7 +1618,7 @@ fn showing(src: &Src, page: &PageFacts, fonts: &Fonts) -> Result<Showing, String
                                 .or_insert_with(|| font_label(src, font, g.approx));
                             *out.approx.entry(label.clone()).or_default() += 1;
                         }
-                        let quad = g.quad.bounds();
+                        let quad = Rect::from(g.quad.bounds());
                         let exact = class != Class::Approx && exact(font, g.approx);
                         let (bounds, off_cell, exact) = match vertical_cell(font, &g, show.size) {
                             Some(_) if unscaled && exact => (quad, 0.0, true),

@@ -12,7 +12,6 @@ use std::ops::ControlFlow;
 use proptest::prelude::*;
 
 use crate::content::fixture::{self, Fixture};
-use crate::content::interp::Encoded;
 use crate::content::{
     Balance, Concat, Fonts, NameSet, Objects, ResCx, Tok, balance, lex, names_used,
 };
@@ -240,7 +239,7 @@ fn round_trip(f: &Fixture, content: &[u8], what: &str) -> EncodedPage {
         &Fonts::default(),
     )
     .unwrap_or_else(|e| panic!("{what}: {e}"));
-    let again = f.encoded(&sheaf_s(&encoded));
+    let again = f.encoded(&encoded);
     let before = drawn(f, content).unwrap();
     let after = drawn(&again, &encoded.content).unwrap();
     assert_alike(&before, &after, what);
@@ -308,14 +307,6 @@ fn every_fixture_draws_as_its_encoding() {
     assert!(written.contains("[(ab) -1000 (a)] TJ\n"));
     let f = fixture::images();
     assert!(encode_of(&f).contains("BI /W 2 /H 2 /BPC 8 /CS /G /F /AHx ID 00FF00FF> EI\n"));
-}
-
-/// `encoded` as [`Fixture::encoded`] takes it.
-fn sheaf_s(encoded: &EncodedPage) -> Encoded {
-    Encoded {
-        content: encoded.content.clone(),
-        forms: encoded.forms.clone(),
-    }
 }
 
 /// `f`'s page's content written again, as text.

@@ -890,9 +890,16 @@ fn an_unknown_encoding_counts_as_differing() {
 fn a_re_subset_font_with_the_same_text_passes() {
     let dir = scratch();
     let subset = |name: &str| {
+        // With the CIDFont PDFium loads a Type0 font by, which shows
+        // nothing without one.
+        let descendant = dictionary! {
+            "Type" => Object::name("Font"), "Subtype" => Object::name("CIDFontType2"),
+            "BaseFont" => Object::name(name),
+        };
         dictionary! {
             "Type" => Object::name("Font"), "Subtype" => Object::name("Type0"), "BaseFont" => Object::name(name),
             "Encoding" => Object::name("Identity-H"),
+            "DescendantFonts" => vec![Object::from(descendant)],
         }
     };
     let first = "1 begincodespacerange <0000> <FFFF> endcodespacerange\n\

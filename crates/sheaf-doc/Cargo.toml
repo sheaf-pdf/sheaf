@@ -29,9 +29,10 @@ pdf-structure.workspace = true
 # spliced (M18 slice 19). Its default features only: `image-ends` would
 # find an inline image's end by decoding, which sheaf's lexer doesn't.
 pdf-content-streams.workspace = true
-# The fonts files draw in, as read, and the standard 14 (M18 slice 22);
-# of pdf-gfx, the trait a font text is laid out in gives its codes and
-# widths by.
+# The fonts files draw in, as read, and the standard 14 (M18 slice 22).
+# pdf-gfx: the content interpreter, and content written again from what
+# it draws (M18 slice 23); and the trait a font text is laid out in gives
+# its codes and widths by.
 pdf-fonts.workspace = true
 pdf-gfx.workspace = true
 anyhow.workspace = true

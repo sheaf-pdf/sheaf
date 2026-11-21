@@ -2,10 +2,15 @@
 //! page, so the layout's size for a page is the size the engine renders,
 //! and the one conversion between the page's default user space
 //! (PageSpace, §5) and the page as it's shown.
+//!
+//! The content interpreter's events carry the PDF layer's geometry
+//! (`content::interp`'s `Rect` and `Matrix`, pdf-gfx's); they become
+//! sheaf's here, field for field ([`From`]), and nowhere else.
 
 use sheaf_edit::{PageSize, Rotation};
 
 use crate::annot::{Box2, Pt};
+use crate::pdf::gfx;
 
 /// The smallest a page's box may be left on either side, in points: a
 /// quarter inch.
@@ -67,6 +72,14 @@ impl Rect {
         } else {
             shared
         }
+    }
+}
+
+/// A rectangle the content interpreter gives, its sides as they are.
+impl From<gfx::Rect> for Rect {
+    fn from(r: gfx::Rect) -> Rect {
+        let gfx::Rect { x0, y0, x1, y1 } = r;
+        Rect { x0, y0, x1, y1 }
     }
 }
 
@@ -216,6 +229,14 @@ impl Affine {
             e: (self.c * self.f - self.d * self.e) / det,
             f: (self.b * self.e - self.a * self.f) / det,
         }
+    }
+}
+
+/// A matrix the content interpreter gives, its six numbers as they are.
+impl From<gfx::Matrix> for Affine {
+    fn from(m: gfx::Matrix) -> Affine {
+        let gfx::Matrix { a, b, c, d, e, f } = m;
+        Affine { a, b, c, d, e, f }
     }
 }
 

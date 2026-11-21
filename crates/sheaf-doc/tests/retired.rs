@@ -1169,6 +1169,26 @@ const RETIRED_M18: &[(&str, u8)] = &[
     // A program for a test of the reader's own, which pdf-fonts holds
     // now with a fixture of its own.
     ("content::fixture::composite_bomb_program", 22),
+    // The content interpreter is pdf-gfx's, its types used again under
+    // the same names through `content::interp`, which keeps `interpret`
+    // and `encode` of sheaf's own over the family's. What has no like
+    // there goes: why it stopped or didn't write a page again is the
+    // family's `Error` (its `Unwritable` among them), content written
+    // again its `EncodedPage`, the operators a visitor wants
+    // pdf-content-streams' `Operators`, forms judged on their own
+    // `Forms::Skip`, and where an operator is `At::operator()` and
+    // `At::op_range()`.
+    ("content::interp::InterpError", 23),
+    ("content::interp::EncodeError", 23),
+    ("content::interp::Encoded", 23),
+    ("content::interp::Ops", 23),
+    ("content::interp::Forms::Report", 23),
+    ("content::interp::At::tok", 23),
+    ("content::interp::At::op", 23),
+    // What only sheaf's interpreter read of the lexer's: an inline
+    // image's `/L`, and a step's operands in order.
+    ("content::lex::image_length", 23),
+    ("content::lex::Step::args", 23),
 ];
 
 /// The ledgers, with the words a hit names its slice by.
@@ -1246,6 +1266,14 @@ const QUALIFIED_ONLY: &[&str] = &[
     // How many snapshots the policy may drop (`HistoryStats`), and the
     // locals that hold them.
     "droppable",
+    // The plugin API's `Ops` and the forms check's `Report`; a token, an
+    // operator and a command's arguments as other code names them: not
+    // what sheaf's content interpreter had (M18 slice 23).
+    "Ops",
+    "Report",
+    "tok",
+    "op",
+    "args",
     // The header and footer a document's state draws: not the view's.
     "header_footer",
     "Mode",

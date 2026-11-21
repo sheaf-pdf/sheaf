@@ -30,10 +30,12 @@
 //! - [`interp`]: what it draws, an operator at a time, in the graphics
 //!   and text state it's drawn in: each glyph and where it is, each
 //!   path, image and shading, the clip and the marked content each is
-//!   in, and each form it draws, interpreted where it's drawn (M11 slice
-//!   3); content written again from what it draws ([`interp::encode`]);
-//!   and [`fixture`], pages built to test it, for other crates' tests
-//!   too.
+//!   in, and each form it draws, interpreted where it's drawn; content
+//!   written again from what it draws ([`interp::encode`]). The
+//!   interpreter is pdf-gfx's (M18 slice 23; sheaf's own from M11 slice
+//!   3), read from sheaf's sources ([`Objects`]) under sheaf's caps, an
+//!   object that doesn't read stopping it as its reason says; and
+//!   [`fixture`], pages built to test it, for other crates' tests too.
 //! - [`ContentWriter`]: content written, its resources ([`Res`]) named at
 //!   the end ([`Reserved`], [`ResourceNeeds`]): pdf-content-streams', as
 //!   are the types its calls take. Text goes in through [`DrawText`], in a

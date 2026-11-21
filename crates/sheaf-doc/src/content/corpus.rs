@@ -17,16 +17,15 @@ use std::time::Instant;
 use crate::pdf::{Object, ObjectId, StreamExt};
 
 use super::interp::{
-    Cap, EncodeError, Encoded, Event, ImageOf, InterpError, Kind, Mark, Opts, Refused, Seg, State,
-    Summary, Unwritable, encode, interpret,
+    Cap, EncodedPage, Error, Event, ImageOf, Kind, Mark, MarkProps, Matrix, Opts, Rect, Refused,
+    Seg, State, Summary, Unwritable, encode, interpret,
 };
 use super::tests::blank;
 use super::*;
 use crate::forms::corpus::{Corpus, Entry, each_entry};
+use crate::pdf::Why;
 use crate::source::Limits;
 use crate::store::{BlobKind, Store};
-
-pub(in crate::content) mod gfx;
 
 const LIM: &Limits = &Limits::DEFAULT;
 
@@ -472,26 +471,6 @@ const DUMP: &str = "SHEAF_GLYPH_DUMP";
 /// alone: to set two runs beside each other.
 const DUMP_ONLY: &str = "SHEAF_GLYPH_DUMP_ONLY";
 
-/// Which interpreter both dumps read pages with: `gfx` for pdf-gfx's
-/// ([`gfx`]), unset (or `sheaf`) for sheaf's own. The two set side by
-/// side are what moving onto pdf-gfx changes (M18 slice 23).
-const DUMP_INTERP: &str = "SHEAF_DUMP_INTERP";
-
-/// The interpreter a dump reads pages with ([`DUMP_INTERP`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Arm {
-    Sheaf,
-    Gfx,
-}
-
-fn arm() -> Arm {
-    match std::env::var(DUMP_INTERP).as_deref() {
-        Err(_) | Ok("sheaf") => Arm::Sheaf,
-        Ok("gfx") => Arm::Gfx,
-        Ok(other) => panic!("{DUMP_INTERP}={other}: neither `gfx` nor `sheaf`"),
-    }
-}
-
 /// Every file the dump reads, with the set that picks it, each once, in
 /// the order of their paths: every form, the pool's sample
 /// (`bench/pool-sample.txt`), every scan, and the conformance suites'
@@ -658,9 +637,8 @@ fn show_records(records: &mut Records, font: Option<&Font>, stock: bool, string:
     records.end();
 }
 
-/// A glyph's record, by what both interpreters' glyphs have: its code
-/// and CID, its quad's corners, its origin and advance, what of it is
-/// guessed, whether it's invisible, and its text.
+/// A glyph's record: its code and CID, its quad's corners, its origin and
+/// advance, what of it is guessed, whether it's invisible, and its text.
 struct GlyphRecord<'g> {
     code: u32,
     cid: Option<u32>,
@@ -686,8 +664,8 @@ fn glyph_records(records: &mut Records, g: GlyphRecord<'_>) {
 }
 
 /// The glyph dump's records of what `content`, drawn with `resources`
-/// from `objects`' objects in `fonts`, shows, forms drawn, by sheaf's
-/// interpreter: each string, and each glyph, counted in `glyphs`.
+/// from `objects`' objects in `fonts`, shows, forms drawn: each string,
+/// and each glyph, counted in `glyphs`.
 fn shown<R: ReadObjects>(
     objects: &R,
     content: &Concat,
@@ -752,9 +730,8 @@ fn bag_records(records: &mut Records, bag: &TextBag) {
 /// the file, the page, how many glyphs it lays out, the checksum of every
 /// string it shows and each of its glyphs, the checksum of its text bag
 /// and of the bags of the forms its content draws, and `ok` or why it
-/// wasn't read. A file that doesn't open is one line, its page `-`. Its
-/// pages are read by `arm`'s interpreter.
-fn dump_file(corpus: &Corpus, path: &str, full: bool, arm: Arm) -> Vec<String> {
+/// wasn't read. A file that doesn't open is one line, its page `-`.
+fn dump_file(corpus: &Corpus, path: &str, full: bool) -> Vec<String> {
     let none = |why: String| vec![format!("{path}\t-\t0\t-\t-\t{why}")];
     let bytes = match std::fs::read(corpus.root.join(path)) {
         Ok(bytes) => bytes,
@@ -784,24 +761,14 @@ fn dump_file(corpus: &Corpus, path: &str, full: bool, arm: Arm) -> Vec<String> {
         // Every string shown, its forms' among them, and each glyph.
         let mut glyphs = 0usize;
         let mut records = Records::new(full);
-        let read = match arm {
-            Arm::Sheaf => shown(
-                src.pdf(),
-                concat,
-                resources,
-                &fonts,
-                &mut records,
-                &mut glyphs,
-            ),
-            Arm::Gfx => gfx::shown(
-                src.pdf(),
-                concat,
-                resources,
-                &fonts,
-                &mut records,
-                &mut glyphs,
-            ),
-        };
+        let read = shown(
+            src.pdf(),
+            concat,
+            resources,
+            &fonts,
+            &mut records,
+            &mut glyphs,
+        );
         if let Err(e) = read {
             why.push(format!("interpreting: {e}"));
         }
@@ -809,12 +776,8 @@ fn dump_file(corpus: &Corpus, path: &str, full: bool, arm: Arm) -> Vec<String> {
 
         // Its text bag, and those of the forms its content draws, each
         // judged on its own, as the removal check reads them.
-        let bag = |content: &Concat, resources: Option<&Object>| match arm {
-            Arm::Sheaf => {
-                text_bag(src.pdf(), content, resources, LIM, &for_text).map_err(|e| e.to_string())
-            }
-            Arm::Gfx => gfx::text_bag(gfx::Reasoned(src.pdf()), content, resources, LIM, &for_text)
-                .map_err(|e| e.to_string()),
+        let bag = |content: &Concat, resources: Option<&Object>| {
+            text_bag(src.pdf(), content, resources, LIM, &for_text).map_err(|e| e.to_string())
         };
         let mut records = Records::new(full);
         match bag(concat, resources) {
@@ -874,7 +837,7 @@ fn dump_file(corpus: &Corpus, path: &str, full: bool, arm: Arm) -> Vec<String> {
 /// ([`Fonts::default`]), and its text bag read with those read for text
 /// ([`Fonts::for_text`]). Two runs over the same code write the same
 /// file. With [`DUMP_ONLY`] it reads the one file named, and prints each
-/// record in full to stderr. [`DUMP_INTERP`] picks the interpreter.
+/// record in full to stderr.
 #[test]
 #[ignore = "a dump of the corpus's glyphs and text, written to $SHEAF_GLYPH_DUMP"]
 fn glyphs_and_text_dump() {
@@ -889,12 +852,10 @@ fn glyphs_and_text_dump() {
     };
     let started = Instant::now();
     let full = only.is_some();
-    let arm = arm();
-    eprintln!("read by {arm:?}'s interpreter");
     let lines = each_dumped(
         &corpus,
         (only.as_deref(), DUMP_ONLY),
-        |path| dump_file(&corpus, path, full, arm),
+        |path| dump_file(&corpus, path, full),
         |path, said| format!("{path}\t-\t0\t-\t-\tpanicked: {said}"),
     );
     let glyphs: usize = (lines.iter())
@@ -1126,17 +1087,17 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn affine(m: crate::geom::Affine) -> [f32; 6] {
+fn matrix(m: Matrix) -> [f32; 6] {
     [m.a, m.b, m.c, m.d, m.e, m.f]
 }
 
-fn rect(r: crate::geom::Rect) -> [f32; 4] {
+fn rect(r: Rect) -> [f32; 4] {
     [r.x0, r.y0, r.x1, r.y1]
 }
 
 /// The dump's numbers for what the events carry: each numbered by the
 /// dump, never by a type's `Debug`, so the same reading is the same
-/// record whichever interpreter's types hold it.
+/// record whatever types hold it.
 fn paint_number(paint: Paint) -> u64 {
     match paint {
         Paint::Fill => 0,
@@ -1193,9 +1154,9 @@ fn mark_records(r: &mut EventRecords, mark: &Mark) {
     r.bytes("tag", Some(&mark.tag));
     let props = match &mark.props {
         None => 0,
-        Some(Props::Inline(_)) => 1,
-        Some(Props::Named(_, None)) => 2,
-        Some(Props::Named(_, Some(_))) => 3,
+        Some(MarkProps::Inline(_)) => 1,
+        Some(MarkProps::Named(_, None)) => 2,
+        Some(MarkProps::Named(_, Some(_))) => 3,
     };
     r.number("props", props);
     r.maybe("mcid", mark.mcid.map(u64::from));
@@ -1206,13 +1167,14 @@ fn mark_records(r: &mut EventRecords, mark: &Mark) {
     r.id("oc", mark.oc);
 }
 
-/// The state an event is in, as both interpreters keep it: the CTM, the
-/// line's width, cap, join and miter limit, the clip's bounds, and the
-/// text state: the font's being the stock one, its size, the spacing,
-/// scale, leading, rise and mode, the text matrix, where the line starts
-/// and the pen. All but the leading are what's drawn.
+/// The state an event is in: the CTM, the line's width, cap, join and
+/// miter limit, the clip's bounds, and the text state: the font's being
+/// the stock one, its size, the spacing, scale, leading, rise and mode,
+/// the text matrix, where the line starts and the pen. All but the
+/// leading are what's drawn. (What sheaf's own interpreter kept, which
+/// this dump was set beside.)
 fn state_records(r: &mut EventRecords, state: &State) {
-    r.reals("ctm", &affine(state.ctm));
+    r.reals("ctm", &matrix(state.ctm));
     r.reals("line_width", &[state.line_width]);
     r.number("cap", cap_number(state.line_cap));
     r.number("join", join_number(state.line_join));
@@ -1231,7 +1193,7 @@ fn state_records(r: &mut EventRecords, state: &State) {
     r.undrawn(|r| r.reals("leading", &[text.leading]));
     r.reals("rise", &[text.rise]);
     r.number("mode", mode_number(text.mode));
-    r.reals("matrix", &affine(text.matrix));
+    r.reals("matrix", &matrix(text.matrix));
     r.reals("line", &[text.line.x, text.line.y]);
     r.reals("pen", &[text.pen.x, text.pen.y]);
 }
@@ -1239,27 +1201,24 @@ fn state_records(r: &mut EventRecords, state: &State) {
 /// `event`'s record, by fields it names: what it is, the state it's in,
 /// and the marked ranges it's in, innermost first. An operator's is its
 /// name and where it is, from its first operand and itself; a show's its
-/// own fields, its string and glyphs being the glyph dump's.
+/// own fields, its string and glyphs being the glyph dump's. A kind of
+/// event the dump has no record for is one of its own (`other`).
 fn event_records(r: &mut EventRecords, event: &Event<'_>) {
     match &event.kind {
         Kind::Op => {
             r.begin("op", true);
-            let name: &[u8] = match &event.at.tok {
-                Tok::Op(name) => name,
-                Tok::InlineImage(_) => b"BI",
-                Tok::Operand(_) => b"",
-            };
-            r.bytes("name", Some(name));
+            r.bytes("name", Some(event.at.name()));
             let range = event.at.range();
             r.number("from", range.start as u64);
-            r.number("start", event.at.op.start as u64);
-            r.number("end", event.at.op.end as u64);
+            let op = event.at.op_range();
+            r.number("start", op.start as u64);
+            r.number("end", op.end as u64);
         }
         Kind::Text(show) => {
             r.begin("text", false);
             r.reals("size", &[show.size]);
             r.number("mode", mode_number(show.mode));
-            r.reals("start", &affine(show.start));
+            r.reals("start", &matrix(show.start));
             r.reals("offset", &[show.offset]);
             r.number("stock", u64::from(show.stock));
             r.drawn_only(show.string, show.font.and_then(Font::id));
@@ -1268,7 +1227,7 @@ fn event_records(r: &mut EventRecords, event: &Event<'_>) {
             let begins = matches!(event.kind, Kind::FormBegin(_));
             r.begin(if begins { "form-begin" } else { "form-end" }, false);
             r.id("form", Some(form.form));
-            r.reals("matrix", &affine(form.matrix));
+            r.reals("matrix", &matrix(form.matrix));
             r.maybe_reals("bbox", form.bbox.map(rect).as_ref().map(|r| &r[..]));
             r.id("oc", form.oc);
         }
@@ -1278,6 +1237,7 @@ fn event_records(r: &mut EventRecords, event: &Event<'_>) {
             let why = match why {
                 Refused::Cycle => 0,
                 Refused::Depth => 1,
+                _ => 255,
             };
             r.number("why", why);
         }
@@ -1303,6 +1263,7 @@ fn event_records(r: &mut EventRecords, event: &Event<'_>) {
             let (inline, xobject) = match image.of {
                 ImageOf::XObject(id) => (false, Some(id)),
                 ImageOf::Inline { .. } => (true, None),
+                _ => (true, Some(ObjectId::new(0, u16::MAX))),
             };
             r.number("inline", u64::from(inline));
             r.id("xobject", xobject);
@@ -1329,6 +1290,7 @@ fn event_records(r: &mut EventRecords, event: &Event<'_>) {
             r.begin(what, false);
             mark_records(r, mark);
         }
+        _ => r.begin("other", false),
     }
     state_records(r, event.state);
     for mark in event.marks.iter() {
@@ -1339,13 +1301,24 @@ fn event_records(r: &mut EventRecords, event: &Event<'_>) {
 }
 
 /// The class of what stopped an interpretation, never its wording, which
-/// changes with the error's type.
-fn interp_class(e: &InterpError) -> String {
+/// changes with the error's type: content that doesn't lex is `lex`, a
+/// form whose stream doesn't decode `xobject`, a cap `limit:<cap>`,
+/// geometry past an `f32` `not-finite`, an operator that can't be written
+/// again `unwritable:<why>`, an object that doesn't read
+/// `unreadable:<why>` (`damaged` where forms are drawn through one), a
+/// page stream that wasn't decoded `page-stream`, an inline image sized
+/// under a cap `capped-inline`. Anything else is `other`, a finding.
+fn interp_class(e: &Error) -> String {
     match e {
-        InterpError::Lex { .. } => "lex".into(),
-        InterpError::XObject { .. } => "xobject".into(),
-        InterpError::Limit(cap) => format!("limit:{}", cap_name(*cap)),
-        InterpError::NotFinite => "not-finite".into(),
+        Error::Content { .. } => "lex".into(),
+        Error::FormStream { .. } => "xobject".into(),
+        Error::Limit(cap) => format!("limit:{}", cap_name(*cap)),
+        Error::NotFinite => "not-finite".into(),
+        Error::Unwritable { why, .. } => format!("unwritable:{}", unwritable_name(*why)),
+        Error::Unreadable(unreadable) => format!("unreadable:{}", why_name(unreadable.why)),
+        Error::PageStream(_) => "page-stream".into(),
+        Error::CappedInlineImage { .. } => "capped-inline".into(),
+        _ => "other".into(),
     }
 }
 
@@ -1358,18 +1331,42 @@ fn cap_name(cap: Cap) -> &'static str {
         Cap::States => "states",
         Cap::Marked => "marked",
         Cap::Decompressed => "decompressed",
+        _ => "other",
     }
 }
 
-/// The class of why a page wasn't written again: an operator that can't
-/// be, or an interpretation that stopped where the page's didn't.
-fn encode_class(e: &EncodeError) -> String {
+fn unwritable_name(why: Unwritable) -> &'static str {
+    match why {
+        Unwritable::Line => "line",
+        Unwritable::InlineLength => "inline-length",
+        Unwritable::InlineStream => "inline-stream",
+        Unwritable::LoneBi => "lone-bi",
+        _ => "other",
+    }
+}
+
+fn why_name(why: Why) -> &'static str {
+    match why {
+        Why::Damaged => "damaged",
+        Why::Capped => "capped",
+        Why::Locked => "locked",
+        Why::Source => "source",
+        Why::Limit => "limit",
+        Why::Filter => "filter",
+        Why::Detached => "detached",
+        _ => "other",
+    }
+}
+
+/// The class of why a page wasn't written again: the encoder's own
+/// refusals as [`interp_class`] names them, and an interpretation in the
+/// encoder that stopped where the page's didn't as `encode:<class>`.
+fn encode_class(e: &Error) -> String {
     match e {
-        EncodeError::Unwritable { why, .. } => match why {
-            Unwritable::Line => "unwritable:line".into(),
-            Unwritable::InlineLength => "unwritable:inline-length".into(),
-        },
-        EncodeError::Interp(e) => format!("encode:{}", interp_class(e)),
+        Error::Unwritable { .. } | Error::PageStream(_) | Error::CappedInlineImage { .. } => {
+            interp_class(e)
+        }
+        _ => format!("encode:{}", interp_class(e)),
     }
 }
 
@@ -1387,6 +1384,7 @@ fn summary_columns(s: &Summary) -> String {
         deepest_q,
         deepest_marked,
         stopped,
+        ..
     } = *s;
     let fields = [
         operators,
@@ -1445,9 +1443,9 @@ impl<O: ReadObjects> ReadObjects for Rewritten<'_, O> {
         }
     }
 
-    fn peek(&self, id: ObjectId) -> Option<&Object> {
+    fn peek(&self, id: ObjectId) -> crate::pdf::Result<Option<&Object>> {
         match self.forms.get(&id) {
-            Some(form) => Some(form),
+            Some(form) => Ok(Some(form)),
             None => ReadObjects::peek(self.old, id),
         }
     }
@@ -1469,7 +1467,7 @@ fn recorded<R: ReadObjects>(
     resources: Option<&Object>,
     fonts: &Fonts,
     records: &mut EventRecords,
-) -> Result<Summary, InterpError> {
+) -> Result<Summary, Error> {
     interpret(
         objects,
         content,
@@ -1492,7 +1490,7 @@ fn recorded<R: ReadObjects>(
 /// stderr under `title`.
 fn drawn_again<R: ReadObjects>(
     objects: &R,
-    encoded: &Encoded,
+    encoded: &EncodedPage,
     resources: Option<&Object>,
     fonts: &Fonts,
     drawn: u128,
@@ -1513,9 +1511,11 @@ fn drawn_again<R: ReadObjects>(
 /// again ([`encode`]: its content, then each form's id and bytes), `ok` or
 /// the class of what failed, whether the page written again, interpreted
 /// again, draws what it drew ([`drawn_again`]: `same`, `differs`, or `-`
-/// where it isn't written again), and how many objects that didn't read
-/// the run was told of (`-`: sheaf's interpreter tells of none). Its
-/// records in full go to stderr under `at`, where `full`.
+/// where it isn't written again), and `-`: how many times the run was
+/// told an object is damaged, which the dumps' side of pdf-gfx's counted
+/// while it was set beside sheaf's own interpreter (M18 slice 23), and
+/// which sheaf's rule fails on now (`unreadable:damaged`). Its records in
+/// full go to stderr under `at`, where `full`.
 fn page_events<R: ReadObjects>(
     objects: &R,
     content: &Concat,
@@ -1556,10 +1556,9 @@ fn page_events<R: ReadObjects>(
 
 /// The events dump's lines for the file at `path` of the corpus, one a
 /// page: the file, the page, and its columns ([`page_events`]), each page
-/// interpreted in fonts whose programs are read ([`Fonts::default`]), by
-/// `arm`'s interpreter. A file that doesn't open is one line, its page
-/// `-`.
-fn events_file(corpus: &Corpus, path: &str, full: bool, arm: Arm) -> Vec<String> {
+/// interpreted in fonts whose programs are read ([`Fonts::default`]). A
+/// file that doesn't open is one line, its page `-`.
+fn events_file(corpus: &Corpus, path: &str, full: bool) -> Vec<String> {
     let Ok(bytes) = std::fs::read(corpus.root.join(path)) else {
         return vec![events_none(path, "-", "unopened")];
     };
@@ -1578,10 +1577,7 @@ fn events_file(corpus: &Corpus, path: &str, full: bool, arm: Arm) -> Vec<String>
         };
         let resources = page.resources.as_deref();
         let concat = content.concat();
-        let columns = match arm {
-            Arm::Sheaf => page_events(src.pdf(), concat, resources, &fonts, (&at, full)),
-            Arm::Gfx => gfx::page_events(src.pdf(), concat, resources, &fonts, (&at, full)),
-        };
+        let columns = page_events(src.pdf(), concat, resources, &fonts, (&at, full));
         lines.push(format!("{path}\t{n}\t{columns}"));
     }
     lines
@@ -1594,7 +1590,6 @@ fn events_file(corpus: &Corpus, path: &str, full: bool, arm: Arm) -> Vec<String>
 /// Two runs over the same code write the same file. With [`EVENTS_ONLY`]
 /// it reads the one file named, and prints each record in full to
 /// stderr, those of each page written again after its own.
-/// [`DUMP_INTERP`] picks the interpreter.
 #[test]
 #[ignore = "a dump of what the corpus's pages do as they're interpreted, written to $SHEAF_EVENTS_DUMP"]
 fn events_dump() {
@@ -1609,12 +1604,10 @@ fn events_dump() {
     };
     let started = Instant::now();
     let full = only.is_some();
-    let arm = arm();
-    eprintln!("read by {arm:?}'s interpreter");
     let lines = each_dumped(
         &corpus,
         (only.as_deref(), EVENTS_ONLY),
-        |path| events_file(&corpus, path, full, arm),
+        |path| events_file(&corpus, path, full),
         |path, said| {
             eprintln!("{path} panicked: {said}");
             events_none(path, "-", "panicked")

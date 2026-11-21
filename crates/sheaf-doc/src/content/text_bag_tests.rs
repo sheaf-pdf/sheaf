@@ -13,6 +13,17 @@ fn bag(pdf: &Pdf, resources: &Object, content: &[u8]) -> TextBag {
     text_bag(pdf, &content, Some(resources), &lim, &Fonts::for_text()).unwrap()
 }
 
+/// A Type0 font's `/DescendantFonts`: one CIDFont by `name`, with no
+/// program, without which PDFium loads no Type0 font and shows nothing in
+/// it.
+fn descendant(name: &str) -> Vec<Object> {
+    vec![Object::from(dictionary! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("CIDFontType2"),
+        "BaseFont" => Object::name(name),
+    })]
+}
+
 /// A bag of `text`'s words.
 fn words(text: &str) -> TextBag {
     let mut bag = TextBag::default();
@@ -71,6 +82,7 @@ fn the_same_text_in_two_subsets_gives_equal_bags() {
         "Subtype" => Object::name("Type0"),
         "BaseFont" => Object::name("GHIJKL+Arial"),
         "Encoding" => Object::name("Identity-H"),
+        "DescendantFonts" => descendant("GHIJKL+Arial"),
         "ToUnicode" => cmap,
     });
     let resources: Object = dictionary! {
@@ -272,6 +284,7 @@ fn codespace_ranges_split_mixed_codes() {
         "Subtype" => Object::name("Type0"),
         "BaseFont" => Object::name("MSGothic"),
         "Encoding" => Object::name("90ms-RKSJ-H"),
+        "DescendantFonts" => descendant("MSGothic"),
         "ToUnicode" => cmap,
     });
     let resources: Object = dictionary! { "Font" => dictionary! { "J" => font } }.into();
@@ -290,10 +303,10 @@ fn content_that_doesnt_lex_is_an_error() {
     let lim = Limits::DEFAULT;
     let content = Concat::new(&[b"BT (Hello) Tj (open"]);
     let e = text_bag(&Pdf::new(), &content, None, &lim, &Fonts::for_text()).unwrap_err();
-    assert!(matches!(e, interp::InterpError::Lex { form: None, error } if error.at == 14));
+    assert!(matches!(e, interp::Error::Content { form: None, error } if error.at == 14));
 }
 
-/// A form the content draws is judged on its own, and isn't read: its
+/// A form the content draws is judged on its own, and isn't drawn: its
 /// words aren't the content's. An ExtGState's `/Font` picks the font, as
 /// in PDFium, which takes one given by reference for a name it hasn't
 /// got: its text is drawn in the stock Helvetica, and is its bytes' hash.

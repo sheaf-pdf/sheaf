@@ -14,8 +14,9 @@ use crate::pdf::Object;
 use unicode_normalization::UnicodeNormalization;
 
 use super::Fonts;
-use super::interp::{Forms, InterpError, Kind, Ops, Opts, Wants, interpret};
+use super::interp::{Error, Forms, Kind, Opts, Wants, interpret};
 use super::page::{Concat, ReadObjects};
+use crate::pdf::content::Operators;
 use crate::source::Limits;
 
 /// Words, each with how many times it's drawn, and what isn't words, by
@@ -86,24 +87,27 @@ impl TextBag {
 /// `/Resources` as written), draws in `fonts`, a source's (read for text,
 /// [`Fonts::for_text`]), as the content interpreter reads it
 /// ([`interpret`]), each form it draws judged on its own
-/// ([`Forms::Report`]). `Tf` picks the font, or an ExtGState's
+/// ([`Forms::Skip`]): not drawn, though its dictionary is read to tell
+/// it from an image. `Tf` picks the font, or an ExtGState's
 /// `/Font`, and `Q` restores the one `q` saved. The strings `Tj`, `TJ`,
 /// `'` and `"` show are decoded and run together, and a word ends at
 /// white-space, at `BT` and `ET`, and where the text moves to a new place
 /// (`Td`, `TD`, `Tm`, `T*`, `'`, `"`); `TJ`'s adjustments don't end one.
 /// A string with a code its font doesn't say the text of, or shown in no
-/// font the resources have, is its bytes' hash, and ends a word.
+/// font the resources have, is its bytes' hash, and ends a word. A
+/// damaged object reads as none; one the source can't read for another
+/// reason (I/O, a password, a cap) fails it ([`Error::Unreadable`]).
 pub fn text_bag(
     objects: &impl ReadObjects,
     content: &Concat,
     resources: Option<&Object>,
     lim: &Limits,
     fonts: &Fonts,
-) -> Result<TextBag, InterpError> {
+) -> Result<TextBag, Error> {
     let mut bag = TextBag::default();
     let mut run = String::new();
     let opts = Opts {
-        forms: Forms::Report,
+        forms: Forms::Skip,
         wants: WANTS,
     };
     interpret(objects, content, resources, lim, fonts, opts, |event| {
@@ -131,7 +135,7 @@ pub fn text_bag(
 /// What [`text_bag`] reads of content: the strings shown, and the
 /// operators that end a word.
 pub(crate) const WANTS: Wants = Wants {
-    ops: Ops::of(&[b"BT", b"ET", b"Td", b"TD", b"Tm", b"T*", b"'", b"\""]),
+    ops: Operators::of(&[b"BT", b"ET", b"Td", b"TD", b"Tm", b"T*", b"'", b"\""]),
     text: true,
     ..Wants::NONE
 };
