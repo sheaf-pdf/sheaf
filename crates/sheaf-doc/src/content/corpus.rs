@@ -1835,7 +1835,7 @@ const CONTENT: &str = "SHEAF_CONTENT_DUMP";
 const CONTENT_ONLY: &str = "SHEAF_CONTENT_DUMP_ONLY";
 
 /// How many columns a line of the content dump has.
-const CONTENT_COLUMNS: usize = 14;
+const CONTENT_COLUMNS: usize = 13;
 
 /// The content dump's line for a page, a form or a file that wasn't read
 /// as content: `class` says why, and the rest are `-`.
@@ -1875,47 +1875,14 @@ fn fault_class(fault: &ContentFault) -> &'static str {
     }
 }
 
-/// The color spaces a resources context names, each with its
-/// components, in the order of their names, read from what its `Debug`
-/// writes (`spaces: {[67, 83, 48]: 3, …}`), as pdf-content-streams'
-/// doesn't lend them. Anything else written there panics.
-fn spaces_of(res: &impl std::fmt::Debug) -> Vec<(Vec<u8>, u32)> {
-    let debug = format!("{res:?}");
-    let field = "spaces: {";
-    let at = debug
-        .find(field)
-        .unwrap_or_else(|| panic!("no spaces in {debug}"));
-    let mut rest = &debug[at + field.len()..];
-    let mut spaces = Vec::new();
-    loop {
-        rest = rest.trim_start_matches([',', ' ']);
-        if rest.starts_with('}') {
-            break;
-        }
-        let wrong = || panic!("a space that isn't a name and a count in {debug}");
-        let Some(open) = rest.strip_prefix('[') else {
-            wrong()
-        };
-        let Some(close) = open.find(']') else { wrong() };
-        let name: Vec<u8> = (open[..close].split(", "))
-            .filter(|b| !b.is_empty())
-            .map(|b| b.parse().unwrap_or_else(|_| wrong()))
-            .collect();
-        let Some(count) = open[close + 1..].strip_prefix(": ") else {
-            wrong()
-        };
-        let end = (count.find(|c: char| !c.is_ascii_digit())).unwrap_or(count.len());
-        spaces.push((name, count[..end].parse().unwrap_or_else(|_| wrong())));
-        rest = &count[end..];
-    }
-    spaces.sort();
-    spaces
-}
-
-/// A marked range's list: none, written in the content, or named, with
-/// the list the resources have under the name.
-fn props_records(r: &mut Records, props: Option<&Props>) {
-    match props {
+/// A marked range's record, as pdf-content-streams found it: its tag, its
+/// list (none, written in the content, or named, with the list the
+/// resources have under the name), its span and its depth.
+fn marked_records(r: &mut Records, m: &crate::pdf::content::Marked) {
+    use crate::pdf::content::Props;
+    r.begin("marked");
+    r.bytes("tag", Some(&m.tag));
+    match &m.props {
         None => r.number("props", 0),
         Some(Props::Inline(list)) => {
             r.number("props", 1);
@@ -1924,18 +1891,26 @@ fn props_records(r: &mut Records, props: Option<&Props>) {
         Some(Props::Named(name, list)) => {
             r.number("props", 2);
             r.bytes("named", Some(name));
-            r.object("list", list.clone().map(Object::from).as_ref());
+            r.object("list", list.cloned().map(Object::from).as_ref());
         }
     }
-}
-
-/// A marked range's record: its tag, its list, its span and its depth.
-fn marked_records(r: &mut Records, m: &Marked) {
-    r.begin("marked");
-    r.bytes("tag", Some(&m.tag));
-    props_records(r, m.props.as_ref());
     r.span("span", m.span);
     r.number("depth", u64::from(m.depth));
+    r.end();
+}
+
+/// The record of a marked range a page's blocks keep: its tag, its list,
+/// whether the list is named in the resources, and its span.
+fn kept_records(r: &mut Records, m: &Marked) {
+    r.begin("kept");
+    r.bytes("tag", Some(&m.tag));
+    r.number(
+        "named",
+        u64::from(matches!(m.props, Some(Props::Named(..)))),
+    );
+    let list = m.props.as_ref().and_then(Props::dict);
+    r.object("list", list.cloned().map(Object::from).as_ref());
+    r.span("span", m.span);
     r.end();
 }
 
@@ -1977,7 +1952,7 @@ fn spliced_records(r: &mut Records, made: Result<Option<Vec<Cow<'_, [u8]>>>, Spl
 }
 
 /// What the content dump reads of one page's content, or one form's: its
-/// columns 3 to 12, and what reading on needs of it.
+/// columns 3 to 11, and what reading on needs of it.
 struct ContentRead {
     columns: String,
     /// The color spaces it's read with, where they read.
@@ -1986,28 +1961,29 @@ struct ContentRead {
     names: Option<NameSet>,
 }
 
-/// The content dump's columns 3 to 12 for `content`, drawn with
+/// The content dump's columns 3 to 11 for `content`, drawn with
 /// `resources` from `objects`' objects, as sheaf reads it, by
 /// pdf-content-streams under [`ContentLimits::family`](crate::source::ContentLimits::family),
 /// with the color spaces [`res_cx`] counts and the lists [`properties`]
 /// reads:
 /// 3. `ok`, or the class of what stopped its tokens ([`syntax_class`]), or
 ///    `resources` where its color spaces don't read, every column after
-///    it `-` but 12;
+///    it `-` but 11;
 /// 4. how many tokens; 5. a checksum of each token's kind and range, an
 ///    inline image's data's range, and where the tokens stopped;
 /// 6. how many operators, an inline image one;
 /// 7. its `q`/`Q` balance, `net,min`, or `-`;
-/// 8. the color spaces it's read with, how many and a checksum of each
-///    name and its components ([`spaces_of`]);
-/// 9. the resource names it uses, how many and a checksum of each
+/// 8. the resource names it uses, how many and a checksum of each
 ///    category and name, or `-`;
-/// 10. its marked ranges, how many and a checksum of each ([`marked_records`]),
-///     or `err:` and the class of what stopped them;
-/// 11. the operands sheaf reads as more than bytes, how many and a
+/// 9. its marked ranges, how many and a checksum of each ([`marked_records`]),
+///    or `err:` and the class of what stopped them;
+/// 10. the operands sheaf reads as more than bytes, how many and a
 ///     checksum of each: a name, decoded, and a dictionary, read as an
 ///     object and written, or that it isn't one;
-/// 12. what the private names' walk hears of it ([`heard_column`]).
+/// 11. what the private names' walk hears of it ([`heard_column`]).
+///
+/// The color spaces it's read with ([`res_cx`]) have no column:
+/// pdf-content-streams' `ResCx` doesn't lend its names and counts.
 ///
 /// Its records in full go to stderr under `at`, where `full`.
 fn content_columns<R: ReadObjects>(
@@ -2019,7 +1995,7 @@ fn content_columns<R: ReadObjects>(
     let lim = &LIM.content.family();
     let s = content.bytes();
     let Ok(res) = res_cx(objects, resources, LIM) else {
-        let dashes = ["-"; 8].join("\t");
+        let dashes = ["-"; 7].join("\t");
         let heard = heard_column(s, None, (at, full));
         return ContentRead {
             columns: format!("resources\t{dashes}\t{heard}"),
@@ -2078,15 +2054,6 @@ fn content_columns<R: ReadObjects>(
         Ok(b) => format!("{},{}", b.net, b.min_prefix),
         Err(_) => "-".into(),
     };
-    let mut r = Records::new(full);
-    let spaces = spaces_of(&res);
-    for (space, n) in &spaces {
-        r.begin("space");
-        r.bytes("name", Some(space));
-        r.number("components", u64::from(*n));
-        r.end();
-    }
-    let spaces = format!("{}:{}", spaces.len(), r.finish(&format!("{at}: spaces")));
     let names = names_used(content, &res, lim, &[]).ok();
     let used = match &names {
         Some(names) => {
@@ -2106,7 +2073,7 @@ fn content_columns<R: ReadObjects>(
         Ok(found) => {
             let mut r = Records::new(full);
             for m in &found {
-                marked_records(&mut r, &Marked::from(m));
+                marked_records(&mut r, m);
             }
             format!("{}:{}", found.len(), r.finish(&format!("{at}: marked")))
         }
@@ -2116,7 +2083,7 @@ fn content_columns<R: ReadObjects>(
     let heard = heard_column(s, Some(&res), (at, full));
     ContentRead {
         columns: format!(
-            "{class}\t{count}\t{read_tokens}\t{operators}\t{counted}\t{spaces}\t{used}\t\
+            "{class}\t{count}\t{read_tokens}\t{operators}\t{counted}\t{used}\t\
              {ranges}\t{operands}\t{heard}"
         ),
         res: Some(res),
@@ -2124,7 +2091,7 @@ fn content_columns<R: ReadObjects>(
     }
 }
 
-/// The content dump's column 12 for content `s`, read with `res` (None
+/// The content dump's column 11 for content `s`, read with `res` (None
 /// where its resources don't read): what the private names' walk hears
 /// of it ([`crate::private::heard`]), how many and a checksum of each
 /// name, and `,unread` where it took the content to hold some it couldn't
@@ -2162,7 +2129,7 @@ fn origin_number(origin: PagOrigin) -> u64 {
     }
 }
 
-/// The content dump's column 13 for a page: its blocks, field by field
+/// The content dump's column 12 for a page: its blocks, field by field
 /// (each marked range kept, each pagination artifact's kind, origin,
 /// generator and span, each of sheaf's blocks and where it is, the
 /// streams that isolate, whether a stream is marked as sheaf's, the
@@ -2176,7 +2143,7 @@ fn blocks_column(blocks: &Result<PageBlocks, ContentFault>, (at, full): (&str, b
     };
     let mut r = Records::new(full);
     for m in b.marked.iter() {
-        marked_records(&mut r, m);
+        kept_records(&mut r, m);
     }
     for p in b.pagination.iter() {
         r.begin("pagination");
@@ -2224,7 +2191,7 @@ fn blocks_column(blocks: &Result<PageBlocks, ContentFault>, (at, full): (&str, b
     format!("{},{}:{sum}", b.marked.len(), b.pagination.len())
 }
 
-/// The content dump's column 14 for a page, `content` read with `res`
+/// The content dump's column 13 for a page, `content` read with `res`
 /// from `objects`' objects: what's cut and written, as a strip, a filter
 /// and a save make it. Whether a splice of nothing is made and gives
 /// each stream's own bytes, read apart; for each pagination artifact of
@@ -2375,13 +2342,13 @@ fn forms_drawn<'s, 'n>(
 }
 
 /// The content dump's lines for a file of `bytes`, at `path`: a line a
-/// page, `{path}\t{page}\t` and its columns 3 to 12 ([`content_columns`]),
-/// 13 ([`blocks_column`]) and 14 ([`written_column`], `-` where its
+/// page, `{path}\t{page}\t` and its columns 3 to 11 ([`content_columns`]),
+/// 12 ([`blocks_column`]) and 13 ([`written_column`], `-` where its
 /// resources don't read); and after it a
 /// line for each form XObject the page draws that no page before it
 /// drew ([`forms_drawn`]), its page `{page} form {n} {generation}`, its
-/// columns 3 to 12 read with its own resources or its page's, and 13 and
-/// 14 `-`. A page, or a form, that isn't read is [`content_none`]'s line,
+/// columns 3 to 11 read with its own resources or its page's, and 12 and
+/// 13 `-`. A page, or a form, that isn't read is [`content_none`]'s line,
 /// its class `unread:stream` or `unread:too-large`; a file that doesn't
 /// open is one, its page `-` and its class `unopened`.
 fn content_lines(path: &str, bytes: Vec<u8>, full: bool) -> Vec<String> {
@@ -2585,7 +2552,7 @@ fn the_content_dump_says_what_content_reads_as() {
     };
     let read = lines(DUMP_PAGE);
     assert_eq!(read.len(), 2, "{read:#?}");
-    // 32 tokens, 19 operators, the image among them; one space; a font,
+    // 32 tokens, 19 operators, the image among them; a font,
     // a list, a form and the image's space used; two ranges; five names
     // and the header's list read from operands; and the walk hears the
     // names and the list's keys and names, nine.
@@ -2599,7 +2566,6 @@ fn the_content_dump_says_what_content_reads_as() {
             "#",
             "19",
             "0,0",
-            "1:#",
             "4:#",
             "2:#",
             "6:#",
@@ -2617,7 +2583,7 @@ fn the_content_dump_says_what_content_reads_as() {
     assert_eq!(
         form[2..],
         [
-            "ok", "10", "#", "4", "0,0", "1:#", "0:#", "1:#", "2:#", "2:#", "-", "-"
+            "ok", "10", "#", "4", "0,0", "0:#", "1:#", "2:#", "2:#", "-", "-"
         ]
     );
     let read = lines(DUMP_UNENDED);
@@ -2630,7 +2596,6 @@ fn the_content_dump_says_what_content_reads_as() {
             "#",
             "2",
             "-",
-            "1:#",
             "-",
             "err:string",
             "1:#",
@@ -2639,14 +2604,4 @@ fn the_content_dump_says_what_content_reads_as() {
             "0/0:#",
         ]
     );
-}
-
-/// The color spaces a resources context names are read from what it
-/// writes, in the order of their names, an empty name among them.
-#[test]
-fn the_content_dump_reads_a_resources_context_s_spaces() {
-    let res = ResCx::new([(b"CS3".to_vec(), 3), (b"A".to_vec(), 1), (Vec::new(), 4)]);
-    let want = [(Vec::new(), 4), (b"A".to_vec(), 1), (b"CS3".to_vec(), 3)];
-    assert_eq!(spaces_of(&res), want);
-    assert_eq!(spaces_of(&ResCx::none()), []);
 }

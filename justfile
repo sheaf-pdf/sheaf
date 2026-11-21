@@ -500,7 +500,7 @@ events-dump out:
 # tokens (`unread:stream`, `unread:too-large` or `unopened` where nothing
 # was read, `resources` where its color spaces weren't); its tokens, as
 # pdf-content-streams reads them, their ranges, its operators, its `q`/`Q`
-# balance, the color spaces it's read with, the resource names it uses,
+# balance, the resource names it uses,
 # its marked ranges, the names and dictionaries read from its operands,
 # and what the private names' walk hears of it; and for a page, its
 # blocks, field by field, and what's cut and written: each pagination
