@@ -153,8 +153,10 @@ impl Limits {
     /// sheaf has always held it to. pdf-gfx counts some of them its own
     /// way: the states one content stream saves, not every stream open;
     /// every marked range open, a form's with its page's; a path's
-    /// segments with the clip's. Every interpretation through pdf-gfx
-    /// takes its limits from here.
+    /// segments with the clip's. And content's `depth` holds less than it
+    /// says: pdf-content-streams fails arrays and dictionaries nested
+    /// past the 64 levels PDFium builds, whatever the cap (512). Every
+    /// interpretation through pdf-gfx takes its limits from here.
     pub fn gfx(&self) -> crate::pdf::gfx::Limits {
         let c = &self.content;
         let mut limits = crate::pdf::gfx::Limits::DEFAULT;
