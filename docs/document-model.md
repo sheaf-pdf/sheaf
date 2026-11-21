@@ -950,17 +950,20 @@ splices still read, is slice 17's).
   that error's reason (`Unreadable`, `Why`): the source's I/O is
   `Source`; a password or decryption that fails, `Locked`; one of the
   reader's caps (a chain of references past `max_depth`, an object past
-  one of its `ReadLimits`), `Capped`; anything else, the file's, `Damaged`.
+  one of its `ReadLimits`), `Capped`; anything else, the file's, `Damaged`:
+  a loop of references among them (`ReferenceCycle`), which is the same
+  under any cap, where a chain that is only long is the cap's.
   A stream that decodes past its limit is `Limit`. An unknown filter
   isn't told from a damaged stream (`Filter`): sheaf's decoding gives
   both as one error, and pdf-gfx reads the two alike. Until slice 23
   every failure was `Damaged`.
 - **Failing closed.** pdf-gfx reads a `Damaged` object as none and tells
   its sink (`Fault::Damaged`); any other reason stops the run
-  (`Error::Unreadable`), a text bag's too. Where forms are drawn, sheaf's
+  (`GfxError::Unreadable`), a text bag's too. Where forms are drawn, sheaf's
   sink keeps the first damaged object it's told of and fails the run for
-  it (`Error::Unreadable`, `Why::Damaged`), after the events pdf-gfx
-  handed: a page drawn through an object sheaf can't read isn't one to
+  it, by an error of sheaf's own (`content::interp::Error::Damaged`; what
+  pdf-gfx stops for is `Error::Gfx`, so the two are told apart by the
+  variant), after the events pdf-gfx handed: a page drawn through an object sheaf can't read isn't one to
   take text out of (M11's redaction). sheaf's own interpreter failed
   only for a form that couldn't be read, and read a damaged ExtGState
   or property list as none. A font's objects are read by
@@ -1048,7 +1051,7 @@ splices still read, is slice 17's).
   the same provider and the same `Fonts` (from slice 23). `Font::read`
   reads a file's font as
   PDFium does, failing only past the budget it decompresses within
-  (`FontError::TooLarge`): its kind (Type1, MMType1, TrueType, Type3, or Type0 over
+  (pdf-fonts' `Error::TooLarge`): its kind (Type1, MMType1, TrueType, Type3, or Type0 over
   CIDFontType0 or 2); its codes (`codes`, split as PDFium's
   `CPDF_CMap::GetNextChar` splits them: by an embedded CMap's codespace,
   a byte each by one range but two where it's of two bytes, by more each
@@ -1174,9 +1177,11 @@ splices still read, is slice 17's).
   form and what draws it, and content longer than `decompressed` is past
   it before it's read. Text in a clipping mode
   past the 1,024 objects PDFium's clip takes keeps no glyphs. Past a cap
-  is `Error::Limit(Cap)`, never a partial answer; content that doesn't
-  lex, or past the lexer's caps, is `Error::Content`, a form whose stream doesn't decode
-  `Error::FormStream`, an object a reason stops `Error::Unreadable`
+  is `GfxError::Limit(Cap)`, never a partial answer; content that doesn't
+  lex, or past the lexer's caps (arrays and dictionaries nested past the
+  64 levels PDFium builds among them, whatever `depth` says), is
+  `GfxError::Content`, a form whose stream doesn't decode
+  `GfxError::FormStream`, an object a reason stops `GfxError::Unreadable`
   (Failing closed, above); and geometry an `f32` can't
   hold (a CTM, a form's matrix, the line, a glyph's box by a bound
   worked from its font's extent, its outlines' reach included, a path,
@@ -1226,7 +1231,17 @@ splices still read, is slice 17's).
   filter it has no decoder for) draws no image; `/ActualText` is decoded
   as PDFium's text page decodes it (a language escape dropped, bad UTF-8
   after its byte order mark passed over). None of the last three
-  changes what a corpus page reads as. Where PDFium sided with sheaf's,
+  changes what a corpus page reads as. Nor does content PDFium reads
+  past, which sheaf's lexer refused and a text bag now reads as
+  PDFium's text page shows it: a dictionary that doesn't end is dropped
+  with what it holds, or ends at a key that's no name or a value that's
+  no object, the rest read on as content; an array inside an array opens
+  none; 0x80 and 0xFF are white-space; a string shows its first 32,767
+  bytes and a name `Tj` shows its first 254. (sheaf's lexer, which
+  blocks, marked ranges and splices are still read by, refuses the
+  unended ones.) One goes the other way: arrays and dictionaries nested
+  past the 64 levels PDFium builds fail, where PDFium reads on and
+  sheaf's own read them to its depth. Where PDFium sided with sheaf's,
   the family changed: `Tj`, `'` and `"` of a name show its bytes, as
   PDFium's `GetString` reads them. Two more changed in the family or in
   sheaf's use of it, not readings PDFium rules: a clip's segments are
