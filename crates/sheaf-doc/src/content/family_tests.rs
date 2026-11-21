@@ -1,24 +1,30 @@
 //! sheaf's lexer's tests, and those of its balance, marked ranges, names
 //! and color spaces' counts, each copied onto pdf-content-streams' calls of
 //! the same name, as sheaf would make them (its limits by
-//! [`ContentLimits::family`], its sources read through [`Objects`]), with
-//! what each expects unchanged: where the family reads content as sheaf's
-//! lexer does, a copy passes; where it doesn't, it's ignored, saying which
-//! difference it is and the assertion that fails. The functions sheaf's
-//! readings of its sources would give the family are here too:
-//! [`res_cx`] and [`properties`].
+//! [`ContentLimits::family`], its sources read through [`Objects`]): where
+//! the family reads content as sheaf's lexer does, a copy expects what the
+//! lexer's test did; where it doesn't, PDFium (chromium/8152) reads it as
+//! the family does, and the copy expects the family's reading, saying which
+//! difference it is and where PDFium's answer is: a case the family holds
+//! to PDFium (pdf-content-streams' `tests/pdfium`, or pdf-color's, by
+//! name), PDFium having been asked of the copy's own input too. The
+//! functions sheaf's readings of its sources would give the family are
+//! here too: [`res_cx`] and [`properties`].
 //!
-//! The differences, as the ignored copies name them (sheaf's lexer, then
-//! the family):
+//! The differences, as the copies name them (sheaf's lexer, then the
+//! family, which is PDFium's):
 //! - L1: white-space is six bytes; those, 0x80 and 0xFF.
 //! - L2: an array or a dictionary is one token to its closer; ended where
 //!   PDFium's `ReadNextObject` ends it (an array in an array opens none, a
 //!   dictionary ends at a key that's no name or a value that's no object).
 //! - L3: arrays and dictionaries nest to the depth cap; past 64 levels,
-//!   an error.
+//!   an error (PDFium reads what's nested deeper as no object and reads
+//!   on: the family's case `deep-65`, which it reads otherwise on
+//!   purpose).
 //! - L4: a name's `#` escapes only two hex digits; any two bytes, a
 //!   non-digit 0, as PDFium's `PDF_NameDecode`.
 //! - L5: a raw CR or CR LF in a literal string is LF; kept as written.
+//!   And a string read as an object is whole; its first 32,767 bytes.
 //! - L6: a number is ISO's; PDFium's (`--5` is 0, `1.2.3` is 1.2).
 //! - L7: a dictionary passes over a key that's no name and keeps a key's
 //!   last value; it's none, and keeps both.
@@ -35,7 +41,6 @@ use std::ops::Range;
 use proptest::prelude::*;
 
 use super::page::direct;
-use super::tests::blank;
 use super::{Objects, ReadObjects, Unkept};
 use crate::pdf::content::{
     Concat, Pos, Properties, Props, ResCx, ResKind, SpanAcross, SyntaxError, SyntaxErrorKind, Tok,
@@ -109,6 +114,25 @@ fn error(s: &[u8], lim: &Limits) -> SyntaxError {
         .expect("an error")
 }
 
+/// Whether `gap` is only white-space and comments, as the family reads
+/// them: ISO 32000-2's six bytes of white-space, and 0x80 and 0xFF, as
+/// PDFium reads them (L1); a comment to the end of its line.
+fn blank(gap: &[u8]) -> bool {
+    let mut comment = false;
+    gap.iter().all(|&c| {
+        comment = match c {
+            b'%' => true,
+            b'\r' | b'\n' => false,
+            _ => comment,
+        };
+        comment
+            || matches!(
+                c,
+                b'\0' | b'\t' | b'\n' | b'\x0c' | b'\r' | b' ' | b'\x80' | b'\xff'
+            )
+    })
+}
+
 /// Read until the end or an error, `s`'s tokens are in order, each
 /// within it, and only white-space and comments are between them; to the
 /// end, after the last one too. The tokens stop after an error.
@@ -139,10 +163,13 @@ const PAGE: &[u8] = b"%!comment (not a string\n\
     BT /F#311 12 Tf [(a\\)(b) c) -250 <4142 43>] TJ (\\\\)Tj ET EMC\n\
     [1 [2 [3]] <</A <</B (c)>>>>] true false null Q { } ) ] >> > %end";
 
-/// The copy of `content::tests::tokens_are_as_written`.
+/// The copy of `content::tests::tokens_are_as_written`, on the family's
+/// reading of the page's last array (L2): an array inside an array opens
+/// none, so `[1 [2 [3]]` ends at its first `]`, and the second `]`, the
+/// dictionary and the last `]` are operands of their own, as PDFium reads
+/// them (the family's PDFium cases `nested-array-operand` and
+/// `triple-array`).
 #[test]
-#[ignore = "L2: `[1 [2 [3]] <</A <</B (c)>>>>]` is one operand to sheaf's lexer; \
-            the family ends it at its first `]` (`assert_eq!(toks(PAGE), …)`)"]
 fn tokens_are_as_written() {
     use Tok::{Op, Operand};
     assert_eq!(
@@ -169,7 +196,10 @@ fn tokens_are_as_written() {
             Op(b"Tj"),
             Op(b"ET"),
             Op(b"EMC"),
-            Operand(b"[1 [2 [3]] <</A <</B (c)>>>>]"),
+            Operand(b"[1 [2 [3]"),
+            Operand(b"]"),
+            Operand(b"<</A <</B (c)>>>>"),
+            Operand(b"]"),
             Operand(b"true"),
             Operand(b"false"),
             Operand(b"null"),
@@ -185,18 +215,19 @@ fn tokens_are_as_written() {
     assert_tiles(PAGE, &ResCx::none(), LIM);
 }
 
-/// The copy of `content::tests::names_decode_their_escapes`.
+/// The copy of `content::tests::names_decode_their_escapes`, on the
+/// family's reading of `/#zz` (L4): a `#` and the two bytes after it are
+/// one byte, a byte that's no hex digit read as 0, as PDFium's
+/// `PDF_NameDecode` reads it (the family's PDFium case `name-lax-both`).
 #[test]
-#[ignore = "L4: `/#zz` is `#zz` to sheaf's lexer, a `#` an escape only before two hex digits; \
-            the family reads `#` and the two bytes after it as one byte, a non-digit as 0 \
-            (`assert_eq!(name(b\"/#zz\")…, Some(&b\"#zz\"[..]))`)"]
 fn names_decode_their_escapes() {
     assert_eq!(name(b"/F#311").as_deref(), Some(&b"F11"[..]));
     assert_eq!(name(b"/A#20B").as_deref(), Some(&b"A B"[..]));
     assert!(matches!(name(b"/Plain"), Some(Cow::Borrowed(b"Plain"))));
-    // An escape with no two hex digits stays as written.
+    // An escape without two bytes after it stays as written; with two
+    // that aren't hex digits, it's a byte, each read as 0.
     assert_eq!(name(b"/A#2").as_deref(), Some(&b"A#2"[..]));
-    assert_eq!(name(b"/#zz").as_deref(), Some(&b"#zz"[..]));
+    assert_eq!(name(b"/#zz").as_deref(), Some(&b"\0"[..]));
     assert_eq!(name(b"/").as_deref(), Some(&b""[..]));
     assert_eq!(name(b"(F1)"), None);
 }
@@ -211,12 +242,17 @@ fn nested_to(depth: usize) -> crate::pdf::content::Limits {
     content.family()
 }
 
-/// The copy of `content::tests::operands_read_as_objects`.
+/// The copy of `content::tests::operands_read_as_objects`, on the family's
+/// reading where PDFium's `ReadNextObject` parts from sheaf's lexer's: a
+/// raw CR LF in a literal string is kept (L5; the family's PDFium cases
+/// `tj-cr`, `tj-cr-cr-lf`); an array inside an array, outside any
+/// dictionary, opens none, and a `]` that ends a dictionary ends the array
+/// it's in too (L2; `nested-array-dash`, `triple-array`,
+/// `array-dict-ended-by-bracket`); a dictionary with a key that's no name
+/// is none (L7; `bdc-broken`); and a word of digits, signs and points is a
+/// number, `--5` 0 and `1.2.3` 1.2 (L6; `mcid---5`, `dash---5`,
+/// `dash-1.2.3`).
 #[test]
-#[ignore = "L5: a raw CR LF in a literal string read as an object is kept as written by the \
-            family, where sheaf's lexer reads it as LF (`assert_eq!(o(b\"(a\\\\(b…\"), …)`); \
-            and after it L2 (`[2]` in an array opens none), L7 (a key that's no name makes the \
-            dictionary none) and L6 (`--5` is 0, `1.2.3` is 1.2)"]
 fn operands_read_as_objects() {
     let o = |s: &[u8]| object(s, &nested_to(8));
     assert_eq!(o(b"12"), Some(Object::from(12)));
@@ -225,66 +261,83 @@ fn operands_read_as_objects() {
     assert_eq!(o(b"true"), Some(Object::from(true)));
     assert_eq!(o(b"null"), Some(Object::null()));
     assert_eq!(o(b"/A#20B"), Some(Object::name(b"A B")));
-    // Escapes, octal codes, a line continued, and an end of line.
+    // Escapes, octal codes, a line continued, and a raw end of line, kept.
     assert_eq!(
         o(b"(a\\(b\\)\\101\\0533\\\nc\r\nd)"),
-        Some(literal(&b"a(b)A+3c\nd"[..]))
+        Some(literal(&b"a(b)A+3c\r\nd"[..]))
     );
     assert_eq!(o(b"<48 65 6>"), Some(Object::hex(b"He`".to_vec())));
+    // An array inside an array opens none: its `[` is dropped, its
+    // elements are the outer one's, and its `]` ends that.
     assert_eq!(
         o(b"[1 /N (s) [2]]"),
         Some(Object::from(vec![
             1.into(),
             Object::name(b"N"),
             literal("s"),
-            Object::from(vec![2.into()]),
+            2.into(),
         ]))
     );
-    // A key that isn't a name is passed over.
-    assert_eq!(
-        o(b"<</A 1 2 /B /C>>"),
-        Some(Object::from(
-            dictionary! { "A" => 1, "B" => Object::name("C") }
-        ))
-    );
-    for not in [&b"--5"[..], b")", b"Tj", b"1.2.3"] {
+    // A key that isn't a name makes the dictionary none.
+    assert_eq!(o(b"<</A 1 2 /B /C>>"), None);
+    // Signs and points make a number, as PDFium reads one.
+    assert_eq!(o(b"--5"), Some(Object::from(0)));
+    assert_eq!(o(b"1.2.3"), Some(Object::from(1.2)));
+    for not in [&b")"[..], b"Tj"] {
         assert_eq!(o(not), None, "{}", String::from_utf8_lossy(not));
     }
-    // Stray closers inside are no elements; one past `depth`, or one that
-    // doesn't end, is no object.
+    // A stray `>>` inside is no element; the `]` that ends the dictionary
+    // where a value should be ends the array too.
+    assert_eq!(o(b"[1 >> <</A 2 ]>>]"), Some(Object::from(vec![1.into()])));
+    // Arrays nest no deeper; dictionaries do, and one past `depth`, or one
+    // that doesn't end, is no object.
     assert_eq!(
-        o(b"[1 >> <</A 2 ]>>]"),
-        Some(Object::from(vec![
-            1.into(),
-            Object::from(dictionary! { "A" => 2 }),
-        ]))
+        object(b"[[[1]]]", &nested_to(2)),
+        Some(Object::from(vec![1.into()]))
     );
-    assert_eq!(object(b"[[[1]]]", &nested_to(2)), None);
-    assert!(object(b"[[1]]", &nested_to(2)).is_some());
+    assert_eq!(object(b"<</A <</B <</C 1>>>>>>", &nested_to(2)), None);
+    assert!(object(b"<</A <</B 1>>>>", &nested_to(2)).is_some());
     assert_eq!(o(b"[1 (2"), None);
 }
 
-/// The copy of `content::tests::deep_operands_read_in_one_pass`.
+/// The copy of `content::tests::deep_operands_read_in_one_pass`, on the
+/// family's reading of what nests (L2): an array inside an array opens
+/// none, so 500 `[` around a string are one array holding it, as PDFium
+/// reads them (the family's PDFium case `triple-array`); and deep by
+/// dictionaries, which nest, 60 levels, under PDFium's 64, each operand
+/// read in one pass. The string is its first 32,767 bytes (L5), as PDFium
+/// reads a string (`hex-32768-bytes`, `literal-32768-bytes`).
 #[test]
-#[ignore = "L2: an array inside an array opens none to the family, so 500 `[` read as one \
-            array holding the string (`let Value::Array(mut inner) = o.into_value() else { \
-            panic!(\"an array\") }`, at the second level)"]
 fn deep_operands_read_in_one_pass() {
+    let string = |s: &mut Vec<u8>| {
+        s.push(b'<');
+        s.resize(s.len() + (8 << 20), b'0');
+        s.push(b'>');
+    };
     let mut s = b"[".repeat(500);
-    s.push(b'<');
-    s.resize(s.len() + (8 << 20), b'0');
-    s.push(b'>');
+    string(&mut s);
     s.extend(b"]".repeat(500));
+    let started = std::time::Instant::now();
+    let o = object(&s, &LIM.content.family()).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    let Value::Array(inner) = o.into_value() else {
+        panic!("an array")
+    };
+    assert!(matches!(&inner[..], [o] if o.as_bytes().is_some_and(|b| b.len() == 32_767)));
+
+    let mut s = b"<</A ".repeat(60);
+    string(&mut s);
+    s.extend(b">>".repeat(60));
     let started = std::time::Instant::now();
     let mut o = object(&s, &LIM.content.family()).unwrap();
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
-    for _ in 0..500 {
-        let Value::Array(mut inner) = o.into_value() else {
-            panic!("an array")
+    for _ in 0..60 {
+        let Value::Dict(mut inner) = o.into_value() else {
+            panic!("a dictionary")
         };
-        o = inner.pop().unwrap();
+        o = inner.remove(b"A").unwrap();
     }
-    assert!(matches!(o.as_bytes(), Some(bytes) if bytes.len() == 4 << 20));
+    assert!(matches!(o.as_bytes(), Some(bytes) if bytes.len() == 32_767));
 }
 
 /// `s`'s one inline image: where the token is, and its data.
@@ -314,12 +367,11 @@ fn assert_image(dict: &str, data: &[u8], res: &ResCx) {
     assert_tiles(&s, res, LIM);
 }
 
-/// The copy of `content::tests::unfiltered_data_is_its_exact_size`.
+/// The copy of `content::tests::unfiltered_data_is_its_exact_size`, on the
+/// family's reading of an image whose color space nests an array (L2,
+/// L9), which PDFium reads as it does (the family's PDFium case
+/// `devicen-nested-names`).
 #[test]
-#[ignore = "L2 and L9: in `/CS [/DeviceN [/Cyan /Spot] /DeviceCMYK {}]` the family ends the \
-            array at its first `]`, as an array in an array opens none, and the image's \
-            dictionary where a key should be and isn't a name, its data from there, 6 bytes of a \
-            space it can't load, counted 3 (`assert_eq!(found, data, \"{dict}\")`)"]
 fn unfiltered_data_is_its_exact_size() {
     let none = ResCx::none();
     // Data with ` EI ` in it: 4 bytes of gray.
@@ -344,11 +396,16 @@ fn unfiltered_data_is_its_exact_size() {
         b"EI E",
         &none,
     );
-    assert_image(
-        "/W 2 /H 1 /BPC 8 /CS [/DeviceN [/Cyan /Spot] /DeviceCMYK {}]",
-        b" EI ",
-        &none,
-    );
+    // An array inside an array opens none, so the DeviceN array ends at
+    // its first `]`, and the dictionary at the `}` where a key should be,
+    // the data from there: `[/DeviceN /Cyan /Spot]` doesn't load, so 3
+    // components, 6 bytes, then the first `EI`.
+    let s = b"q BI /W 2 /H 1 /BPC 8 /CS [/DeviceN [/Cyan /Spot] /DeviceCMYK {}] ID  EI \nEI Q";
+    let (r, found) = image(s, &none);
+    assert_eq!((r, found), (2..72, &b"] ID  "[..]));
+    let ops: Vec<Tok> = toks_of(s, &none, LIM).into_iter().map(|(_, t)| t).collect();
+    assert_eq!(ops[2..], [Tok::Op(b"EI"), Tok::Op(b"Q")]);
+    assert_tiles(s, &none, LIM);
     // A name the resources have, by its components; one they don't is
     // none, as in PDFium: one bit of one component.
     let res = ResCx::new([(b"CS0".to_vec(), 3), (b"Sp#1".to_vec(), 1)]);
@@ -359,12 +416,11 @@ fn unfiltered_data_is_its_exact_size() {
     assert_image("/W 4.9 /H 1.0 /BPC 8 /CS /G", b" EI ", &none);
 }
 
-/// The copy of `content::tests::filtered_data_ends_at_its_marker`.
+/// The copy of `content::tests::filtered_data_ends_at_its_marker`, on the
+/// family's reading of an image's length (L8): neither `/L` nor `/Length`
+/// is read, as PDFium reads neither (the family's PDFium cases `flate-L`,
+/// `lzw-no-end-x`).
 #[test]
-#[ignore = "L8: `/F /Fl … /L 6` with data `x EI y` ends by `/L` in sheaf's lexer; the family \
-            reads no `/L`, its Flate data refused, and ends it at the first `EI` operator, no \
-            data kept (`assert_eq!(found, data, \"{dict}\")`); and so `/F /LZW /Length 6`, \
-            its data `x` where LZW decoding stops"]
 fn filtered_data_ends_at_its_marker() {
     let none = ResCx::none();
     assert_image("/F /AHx /W 2 /H 2 /BPC 8 /CS /G", b"0E EI 0>", &none);
@@ -385,9 +441,31 @@ fn filtered_data_ends_at_its_marker() {
         b"\xff\xd8\xff\xe0 EI \x00\xff\xd9",
         &none,
     );
-    // PDF 2.0's length, abbreviated or not.
-    assert_image("/F /Fl /W 9 /H 9 /BPC 8 /CS /G /L 6", b"x EI y", &none);
-    assert_image("/F /LZW /Length 6 /W 9 /H 9", b"x EI y", &none);
+    // PDF 2.0's length, abbreviated or not, isn't read: Flate data that
+    // doesn't decode finds no end, and LZW's decodes on to the content's
+    // end, so each image ends at its first `EI`, and what's after it is
+    // content. (PDFium keeps the Flate image's `x`, and no stream of the
+    // LZW one's, which reads on from its start to the same `EI`.)
+    for (dict, data) in [
+        ("/F /Fl /W 9 /H 9 /BPC 8 /CS /G /L 6", &b""[..]),
+        ("/F /LZW /Length 6 /W 9 /H 9", b"x"),
+    ] {
+        let s = format!("q BI {dict} ID x EI y\nEI Q").into_bytes();
+        let (r, found) = image(&s, &none);
+        assert_eq!(found, data, "{dict}");
+        let first_ei = s.windows(2).position(|w| w == b"EI").unwrap();
+        assert_eq!(r.end, first_ei + 2, "{dict}");
+        let ops: Vec<Tok> = toks_of(&s, &none, LIM)
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect();
+        assert_eq!(
+            ops[2..],
+            [Tok::Op(b"y"), Tok::Op(b"EI"), Tok::Op(b"Q")],
+            "{dict}"
+        );
+        assert_tiles(&s, &none, LIM);
+    }
     // With nothing to go by, the first `EI` between white-space.
     assert_image(
         "/F /CCF /DP <</K -1 /Columns 9>> /W 9 /H 9",
@@ -397,11 +475,10 @@ fn filtered_data_ends_at_its_marker() {
     assert_image("/F /Fl /W 9 /H 9 /BPC 8 /CS /G", b"", &none);
 }
 
-/// The copy of `content::tests::an_image_ends_at_the_next_ei_past_its_data`.
+/// The copy of `content::tests::an_image_ends_at_the_next_ei_past_its_data`,
+/// on the family's reading of a key that isn't a name (L9), which PDFium
+/// reads as it does (the family's PDFium case `number-in-key-place`).
 #[test]
-#[ignore = "L9: in `BI 7 /W 1 …`, sheaf's lexer passes over the `7` where a key should be; \
-            the family ends the dictionary there, and reads the data from \
-            after it (`assert_eq!(image(s, …).1, b\"x\")`, the third)"]
 fn an_image_ends_at_the_next_ei_past_its_data() {
     // Past the counted data, PDFium reads tokens to the next `EI`.
     let s = b"BI /W 1 /H 1 /BPC 8 /CS /G ID x 1 2 % EI\nEI Q";
@@ -411,40 +488,54 @@ fn an_image_ends_at_the_next_ei_past_its_data() {
     // And `EI` straight after the data.
     let s = b"BI /W 1 /H 1 /BPC 8 /CS /G ID xEI Q";
     assert_eq!(image(s, &ResCx::none()).1, b"x");
-    // A key that isn't a name is passed over.
+    // A key that isn't a name ends the dictionary: no size counts, so the
+    // image is read on to the next `EI`, all before it its data (of which
+    // PDFium keeps a stream of no bytes).
     let s = b"BI 7 /W 1 /H 1 /BPC 8 /CS /G ID x EI";
-    assert_eq!(image(s, &ResCx::none()).1, b"x");
+    assert_eq!(image(s, &ResCx::none()).1, b"/W 1 /H 1 /BPC 8 /CS /G ID x");
 }
 
-/// The copy of `content::tests::errors_say_where`.
+/// The copy of `content::tests::errors_say_where`, on the family's reading
+/// of what ends an array or a dictionary (L2) and of image data that
+/// doesn't end (L8): where sheaf's lexer found no end, PDFium finds one,
+/// and reads on (the family's PDFium cases `nested-array-dash`,
+/// `bad-dict-operand`, `array-dict-ended-by-bracket`, `ahx-no-end`,
+/// `a85-to-end`, `rl-no-end`); what doesn't end even so is the error.
 #[test]
-#[ignore = "L2: `[1 [2]` doesn't end to sheaf's lexer; to the family the inner `[` opens no \
-            array, and the first `]` ends it, no error (`assert_eq!(at(b\"[1 [2]\"), (0, \
-            Array))`); after it L2 twice (a dictionary ends at `>` or `]` where a key should \
-            be) and L8 three times (AHx, A85 and RL data with no end read on to the next `EI`)"]
 fn errors_say_where() {
     let lim = LIM;
     let at = |s: &[u8]| {
         let e = error(s, lim);
         (e.at, e.kind)
     };
+    let read = |s: &[u8]| tokens(s, &ResCx::none(), &lim.content.family()).all(|t| t.is_ok());
     use SyntaxErrorKind::*;
     assert_eq!(at(b"0 0 m (a(b)c"), (6, String));
     assert_eq!(at(b"q <414"), (2, HexString));
     assert_eq!(at(b"[1 2 ("), (5, String));
-    assert_eq!(at(b"[1 [2]"), (0, Array));
-    assert_eq!(at(b"/P << /A [1] >"), (3, Dict));
-    // A `]` doesn't close a dictionary: it's passed over.
-    assert_eq!(at(b"/P [ << /A 1 ] "), (5, Dict));
+    // An array inside an array opens none: its `]` ends the outer one.
+    assert!(read(b"[1 [2]"));
+    assert_eq!(at(b"[1 [2"), (0, Array));
+    // A `>` or a `]` where a key should be ends a dictionary, the `]` the
+    // array it's in too.
+    assert!(read(b"/P << /A [1] >"));
+    assert_eq!(at(b"/P << /A [1]"), (3, Dict));
+    assert!(read(b"/P [ << /A 1 ] "));
+    assert_eq!(at(b"/P [ << /A 1"), (5, Dict));
     assert_eq!(at(b"q BI /W 1 /H 1"), (2, InlineImage));
     assert_eq!(at(b"q BI /W 1 ID abc"), (2, InlineImage));
     assert_eq!(
         at(b"BI /W 9 /H 9 /BPC 8 /CS /G ID abc EI"),
         (0, InlineImage)
     );
-    assert_eq!(at(b"Q BI /F /AHx ID 0E EI"), (2, InlineImage));
-    assert_eq!(at(b"BI /F /A85 ID 9jqo EI"), (0, InlineImage));
-    assert_eq!(at(b"BI /F /RL ID \x05abc EI"), (0, InlineImage));
+    // Filtered data with no end reads on to the next `EI`, and with none,
+    // doesn't end.
+    assert!(read(b"Q BI /F /AHx ID 0E EI"));
+    assert_eq!(at(b"Q BI /F /AHx ID 0E"), (2, InlineImage));
+    assert!(read(b"BI /F /A85 ID 9jqo EI"));
+    assert_eq!(at(b"BI /F /A85 ID 9jqo"), (0, InlineImage));
+    assert!(read(b"BI /F /RL ID \x05abc EI"));
+    assert_eq!(at(b"BI /F /RL ID \x05abc"), (0, InlineImage));
     // The tokens before an error come first.
     let read: Vec<_> = tokens(b"q (a", &ResCx::none(), &lim.content.family()).collect();
     assert_eq!(read.len(), 2);
@@ -452,12 +543,15 @@ fn errors_say_where() {
     assert!(read[1].is_err());
 }
 
-/// The copy of `content::tests::the_caps_hold`.
+/// The copy of `content::tests::the_caps_hold`, on the family's reading of
+/// what nests (L2): an array inside an array opens none, so 512 or 513 `[`
+/// and as many `]` are an array and stray closers, and a `<<` where a key
+/// should be ends a dictionary, so 513 `<<` nest none either, as PDFium
+/// reads them (the family's PDFium cases `triple-array`,
+/// `bad-dict-operand`). Dictionaries nest: past 64 levels, PDFium's, it's
+/// an error, whatever the cap (L3), where PDFium reads what's deeper as no
+/// object (the family's `deep-65`, read otherwise than PDFium on purpose).
 #[test]
-#[ignore = "L2: 512 `[` then 512 `]` are one operand to sheaf's lexer; to the family an array \
-            in an array opens none, so the first `]` ends it and the rest are 511 stray closers \
-            (`assert_eq!(toks(&nested(depth)).len(), 1)`); and so neither 513 `[` nor 513 `<<` \
-            (a `<<` where a key should be ends a dictionary) is past the depth"]
 fn the_caps_hold() {
     let capped = |content: ContentLimits| Limits {
         content,
@@ -465,11 +559,15 @@ fn the_caps_hold() {
     };
     let depth = Limits::DEFAULT.content.depth;
     let nested = |n: usize| [b"[".repeat(n), b"]".repeat(n)].concat();
-    assert_eq!(toks(&nested(depth)).len(), 1);
-    let e = error(&nested(depth + 1), &Limits::DEFAULT);
-    assert_eq!((e.at, e.kind), (depth, SyntaxErrorKind::Depth));
-    let dicts = [b"<<".repeat(depth + 1), b">>".repeat(depth + 1)].concat();
-    assert_eq!(error(&dicts, &Limits::DEFAULT).kind, SyntaxErrorKind::Depth);
+    assert_eq!(toks(&nested(depth)).len(), depth);
+    assert_eq!(toks(&nested(depth + 1)).len(), depth + 1);
+    // `<<<<` is a dictionary that's none: 256 of them, `<<>>`, 512 `>>`.
+    let pairs = [b"<<".repeat(depth + 1), b">>".repeat(depth + 1)].concat();
+    assert_eq!(toks(&pairs).len(), 769);
+    let dicts = |n: usize| [b"<</A ".repeat(n), b"1".to_vec(), b">>".repeat(n)].concat();
+    assert_eq!(toks(&dicts(64)).len(), 1);
+    let e = error(&dicts(65), &Limits::DEFAULT);
+    assert_eq!((e.at, e.kind), (64 * 5, SyntaxErrorKind::Depth));
 
     let three = capped(ContentLimits {
         operands: 3,
@@ -537,11 +635,10 @@ fn content() -> impl Strategy<Value = Vec<u8>> {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(512))]
 
-    /// The copy of `content::tests::tokens_tile_any_content`.
+    /// The copy of `content::tests::tokens_tile_any_content`, 0x80 and
+    /// 0xFF white-space between tokens, as PDFium reads them (L1; the
+    /// family's PDFium cases `byte-80-before-re`, `byte-ff-before-re`).
     #[test]
-    #[ignore = "L1: a 0xFF or 0x80 between tokens is white-space to the family, and none to \
-                sheaf's lexer, so what's between them isn't blank (`assert!(blank(&s[at..\
-                r.start]), …)`; proptest's least case `\\xff\\xd9 `)"]
     fn tokens_tile_any_content(s in content()) {
         let res = ResCx::new([(b"N".to_vec(), 3)]);
         assert_tiles(&s, &res, LIM);
@@ -579,11 +676,11 @@ fn streams_lex_as_one() {
     assert!(std::ptr::eq(one.bytes(), first));
 }
 
-/// The copy of `content::tests::color_spaces_count_their_components`.
+/// The copy of `content::tests::color_spaces_count_their_components`, on
+/// the family's count of a DeviceN space with no tint transform (L10): it
+/// doesn't load, so it's 3, as PDFium counts it (pdf-color's PDFium case
+/// `device-n-no-function`; pdf-content-streams' `cs-device-n-no-function`).
 #[test]
-#[ignore = "L10: `/N2 [/DeviceN [/a /b] /DeviceRGB]` has no tint transform: sheaf counts its \
-            names, 2; the family 3, as for a space that doesn't load (`assert_eq!(res, \
-            ResCx::new(…))`)"]
 fn color_spaces_count_their_components() {
     let mut pdf = Pdf::with_version("1.7");
     let icc = pdf.add_object(Stream::new(dictionary! { "N" => 4 }, Vec::new()));
@@ -613,7 +710,7 @@ fn color_spaces_count_their_components() {
         (b"Cmyk", 4),
         (b"Gray", 1),
         (b"Idx", 1),
-        (b"N2", 2),
+        (b"N2", 3),
         (b"Lab", 3),
         (b"Odd", 3),
     ];
