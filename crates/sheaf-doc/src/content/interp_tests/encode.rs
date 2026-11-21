@@ -1,4 +1,4 @@
-//! Content written again ([`encode`]), pdf-gfx's through the door: each
+//! Content written again ([`encode`], pdf-gfx's over sheaf's sources): each
 //! fixture of [`fixture`], and random runs of their operators, draw as
 //! their encoding draws, event for event but for the operators
 //! themselves: each glyph and its box, each path, image and shading, the
@@ -12,13 +12,12 @@ use std::ops::ControlFlow;
 use proptest::prelude::*;
 
 use crate::content::fixture::{self, Fixture};
-use crate::content::{
-    Balance, Concat, Fonts, NameSet, Objects, ResCx, Tok, Unkept, balance, lex, names_used,
+use crate::content::interp::{
+    EncodedPage, Error, Event, GfxError, ImageOf, Kind, Mark, Matrix, Opts, Rect, Seg, Unwritable,
+    encode, interpret,
 };
-use crate::pdf::gfx::{
-    ClipPart, EncodedPage, Error, Event, ImageDrawn, ImageOf, Kind, Mark, Matrix, Opts, Rect, Seg,
-    Unwritable, UseId, encode, interpret,
-};
+use crate::content::{Balance, Concat, Fonts, NameSet, ResCx, Tok, balance, lex, names_used};
+use crate::pdf::gfx::{ClipPart, ImageDrawn, UseId};
 use crate::pdf::{Object, ObjectId, StreamExt};
 use crate::source::Limits;
 
@@ -35,10 +34,10 @@ pub(super) struct Seen {
 fn drawn(f: &Fixture, content: &[u8]) -> Result<Vec<Seen>, Error> {
     let mut seen = Vec::new();
     interpret(
-        Objects::new(&f.pdf, &Unkept::default()),
+        &f.pdf,
         &Concat::new(&[content]),
         f.resources(),
-        &Limits::DEFAULT.gfx(),
+        &Limits::DEFAULT,
         &Fonts::default(),
         Opts::default(),
         |event| {
@@ -231,14 +230,8 @@ fn facts(content: &[u8], res: &ResCx) -> (Balance, NameSet) {
 fn round_trip(f: &Fixture, content: &[u8], what: &str) -> EncodedPage {
     let lim = &Limits::DEFAULT;
     let concat = Concat::new(&[content]);
-    let encoded = encode(
-        Objects::new(&f.pdf, &Unkept::default()),
-        &concat,
-        f.resources(),
-        &lim.gfx(),
-        &Fonts::default(),
-    )
-    .unwrap_or_else(|e| panic!("{what}: {e}"));
+    let encoded = encode(&f.pdf, &concat, f.resources(), lim, &Fonts::default())
+        .unwrap_or_else(|e| panic!("{what}: {e}"));
     let again = f.encoded(&encoded);
     let before = drawn(f, content).unwrap();
     let after = drawn(&again, &encoded.content).unwrap();
@@ -313,10 +306,10 @@ fn every_fixture_draws_as_its_encoding() {
 fn encode_of(f: &Fixture) -> String {
     let content = f.content();
     let encoded = encode(
-        Objects::new(&f.pdf, &Unkept::default()),
+        &f.pdf,
         content.concat(),
         f.resources(),
-        &Limits::DEFAULT.gfx(),
+        &Limits::DEFAULT,
         &Fonts::default(),
     )
     .unwrap();
@@ -333,10 +326,10 @@ fn a_line_is_written_where_it_moves_to() {
     let written = |content: &[u8]| {
         let concat = Concat::new(&[content]);
         let encoded = encode(
-            Objects::new(&f.pdf, &Unkept::default()),
+            &f.pdf,
             &concat,
             f.resources(),
-            &Limits::DEFAULT.gfx(),
+            &Limits::DEFAULT,
             &Fonts::default(),
         );
         encoded.map(|e| String::from_utf8(e.content).unwrap())
@@ -368,7 +361,7 @@ fn a_line_is_written_where_it_moves_to() {
     let second = far.rfind("Td").unwrap();
     let line = written(far.as_bytes());
     assert!(
-        matches!(line, Err(Error::Unwritable { form: None, at, why: Unwritable::Line }) if at == second),
+        matches!(line, Err(Error::Gfx(GfxError::Unwritable { form: None, at, why: Unwritable::Line })) if at == second),
         "{line:?}"
     );
 }
@@ -383,10 +376,10 @@ fn an_inline_image_is_written_where_it_ends_whatever_follows() {
     let written = |content: &[u8]| {
         let concat = Concat::new(&[content]);
         encode(
-            Objects::new(&f.pdf, &Unkept::default()),
+            &f.pdf,
             &concat,
             f.resources(),
-            &Limits::DEFAULT.gfx(),
+            &Limits::DEFAULT,
             &Fonts::default(),
         )
     };
@@ -399,11 +392,11 @@ fn an_inline_image_is_written_where_it_ends_whatever_follows() {
     assert!(
         matches!(
             past,
-            Err(Error::Unwritable {
+            Err(Error::Gfx(GfxError::Unwritable {
                 form: None,
                 at: 2,
                 why: Unwritable::InlineLength
-            })
+            }))
         ),
         "{past:?}"
     );

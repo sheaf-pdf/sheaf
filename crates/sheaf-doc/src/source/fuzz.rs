@@ -335,7 +335,7 @@ fn with_fonts(page: &content::fixture::Fixture, parts: &[&[u8]]) -> content::fix
 /// [`interp`]'s body: `data` drawn on `page`, with `fonts`.
 #[cfg(any(test, feature = "fixtures"))]
 fn interp_on(page: &content::fixture::Fixture, fonts: &content::Fonts, data: &[u8]) -> usize {
-    use content::interp::{Error, encode};
+    use content::interp::{Error, GfxError, encode};
     let (first, second) = data.split_at(data.len() / 2);
     let content = Concat::new(&[first, second]);
     let Ok(drawn) = drawn_on(page, &content, fonts) else {
@@ -346,7 +346,7 @@ fn interp_on(page: &content::fixture::Fixture, fonts: &content::Fonts, data: &[u
         Ok(encoded) => encoded,
         // What can't be written to read back the same isn't: an operator,
         // or an inline image, the encoder refuses.
-        Err(Error::Unwritable { .. } | Error::CappedInlineImage { .. } | Error::PageStream(_)) => {
+        Err(Error::Gfx(GfxError::Unwritable { .. } | GfxError::CappedInlineImage { .. })) => {
             return drawn.events;
         }
         Err(e) => panic!("it's drawn, but isn't written again: {e}"),

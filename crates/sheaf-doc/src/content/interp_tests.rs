@@ -1,10 +1,9 @@
-//! The content interpreter's tests: pdf-gfx's ([`interpret`],
-//! [`encode`](crate::pdf::gfx::encode)), called through the door, its
-//! pages read through [`Objects`] and its caps sheaf's ([`Limits::gfx`]),
-//! and sheaf's rule for an object that doesn't read through
-//! [`content::interp`](crate::content::interp). They were sheaf's own
-//! interpreter's, and kept their names when M18 slice 23 moved them onto
-//! pdf-gfx's. Over pages built in code ([`fixture`]): each glyph where it
+//! The content interpreter's tests: what sheaf's [`interpret`] and
+//! [`encode`](crate::content::interp::encode) give, which is pdf-gfx's
+//! interpreter over sheaf's sources, under sheaf's caps
+//! ([`Limits::gfx`]), with sheaf's rule for an object that doesn't read.
+//! They were sheaf's own interpreter's, and kept their names when M18
+//! slice 23 moved them onto pdf-gfx's. Over pages built in code ([`fixture`]): each glyph where it
 //! was worked out by hand to be, to a thousandth of a point; forms drawn
 //! per use, and refused within themselves or too deep; each image, path,
 //! clip and shading where it was worked out to be, paths built as PDFium
@@ -17,10 +16,11 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::{ControlFlow, Range};
 
-use crate::pdf::gfx::{
-    Cap, ClipPart, Error, Event, Forms, ImageOf, Kind, Mark, MarkProps, Marks, Matrix, Opts, Point,
-    Quad, Rect, Refused, Seg, ShadingDrawn, Summary, UseId, Wants, interpret,
+use crate::content::interp::{
+    Cap, Error, Event, Forms, GfxError, ImageOf, Kind, Mark, MarkProps, Matrix, Opts, Rect,
+    Refused, Seg, Summary, Wants, interpret,
 };
+use crate::pdf::gfx::{ClipPart, Marks, Point, Quad, ShadingDrawn, UseId};
 use crate::pdf::{Document as Pdf, Object, ObjectId, Stream, StreamExt, dictionary};
 
 use crate::content::fixture::{self, Fixture};
@@ -63,10 +63,10 @@ fn run(
     let mut seen = Seen::default();
     let fonts = Fonts::default();
     let summary = interpret(
-        Objects::new(pdf, &Unkept::default()),
+        pdf,
         &Concat::new(&[content]),
         resources,
-        &lim.gfx(),
+        lim,
         &fonts,
         opts,
         |event| {
@@ -395,10 +395,10 @@ fn glyph_boxes_take_in_their_outlines() {
     let boxes = |fonts: &Fonts| {
         let mut glyphs = Vec::new();
         interpret(
-            Objects::new(&f.pdf, &Unkept::default()),
+            &f.pdf,
             content.concat(),
             f.resources(),
-            &Limits::DEFAULT.gfx(),
+            &Limits::DEFAULT,
             fonts,
             Opts::default(),
             |event| {
@@ -450,15 +450,15 @@ fn text_past_an_f32_is_refused_alike_with_programs_or_without() {
         let cm = format!("{scale} 0 0 {scale} 0 0 cm");
         let scaled = Concat::new(&[cm.as_bytes(), concat.bytes()]);
         let read = interpret(
-            Objects::new(&f.pdf, &Unkept::default()),
+            &f.pdf,
             &scaled,
             f.resources(),
-            &Limits::DEFAULT.gfx(),
+            &Limits::DEFAULT,
             fonts,
             Opts::default(),
             |_| ControlFlow::Continue(()),
         );
-        matches!(read, Err(Error::NotFinite))
+        matches!(read, Err(Error::Gfx(GfxError::NotFinite)))
     };
     let scales = [
         "1.0",
@@ -649,7 +649,7 @@ fn with(content: impl FnOnce(&mut ContentLimits)) -> Limits {
 
 fn limit(result: Result<(Seen, Summary), Error>) -> Option<Cap> {
     match result {
-        Err(Error::Limit(cap)) => Some(cap),
+        Err(Error::Gfx(GfxError::Limit(cap))) => Some(cap),
         Err(e) => panic!("{e}"),
         Ok(_) => None,
     }
@@ -798,10 +798,10 @@ fn decompressed_counts_each_font_s_program() {
         let concat = parts.concat();
         let glyphs = &mut 0;
         let summary = interpret(
-            Objects::new(&f.pdf, &Unkept::default()),
+            &f.pdf,
             &Concat::new(&[concat.bytes()]),
             f.resources(),
-            &Limits::DEFAULT.gfx(),
+            &Limits::DEFAULT,
             fonts,
             Opts::default(),
             |event| {
@@ -992,7 +992,10 @@ fn geometry_past_an_f32_fails() {
             &Limits::DEFAULT,
             Opts::default(),
         );
-        assert!(matches!(read, Err(Error::NotFinite)), "{content}: {read:?}");
+        assert!(
+            matches!(read, Err(Error::Gfx(GfxError::NotFinite))),
+            "{content}: {read:?}"
+        );
     }
     let near = format!("{wide} BT /F 1 Tf (aaaa) Tj ET 0 0 m 1000 1000 l S");
     let read = run(
@@ -1121,13 +1124,13 @@ fn gone() -> crate::pdf::Error {
     crate::pdf::Error::IO(std::io::Error::other("the source went away"))
 }
 
-/// The form an error says couldn't be read, as sheaf's interpreter's
-/// `XObject` error named it: a form whose stream doesn't decode, or an
-/// object that doesn't read.
+/// The form an error says couldn't be read: a form whose stream doesn't
+/// decode, pdf-gfx's error, or a damaged object content that draws forms
+/// isn't read through, sheaf's.
 fn unread_form(e: &Error) -> Option<ObjectId> {
     match e {
-        Error::FormStream { form, .. } => Some(*form),
-        Error::Unreadable(unreadable) => Some(unreadable.id),
+        Error::Gfx(GfxError::FormStream { form, .. }) => Some(*form),
+        Error::Damaged(id) => Some(*id),
         _ => None,
     }
 }
@@ -1171,8 +1174,35 @@ fn a_form_that_cant_be_read_stops_only_what_draws_it() {
         )
     };
     let e = drawn(Forms::Descend).unwrap_err();
-    assert!(unread_form(&e) == Some(fm1), "{e}");
+    assert!(matches!(e, Error::Damaged(id) if id == fm1), "{e}");
     assert_eq!(drawn(Forms::Skip).unwrap().operators, 6);
+}
+
+/// Content written again draws its forms, so a form that can't be read
+/// fails it by sheaf's rule, as it fails an interpretation that draws
+/// them; with the form readable it's written.
+#[test]
+fn a_form_that_cant_be_read_stops_content_written_again() {
+    let f = fixture::forms();
+    let resources = f.resources().and_then(Object::as_dict);
+    let xobjects = resources.and_then(|r| r.get(b"XObject")?.as_dict());
+    let fm1 = xobjects.and_then(|x| x.get(b"Fm1")?.as_reference());
+    let fm1 = fm1.expect("/Fm1");
+    let content = f.content();
+    let written = |source: &Unreadable<'_>| {
+        let (lim, fonts) = (Limits::DEFAULT, Fonts::default());
+        crate::content::interp::encode(source, content.concat(), f.resources(), &lim, &fonts)
+    };
+    let source = |id| Unreadable {
+        pdf: &f.pdf,
+        id,
+        error: damaged,
+        lent: false,
+    };
+    let e = written(&source(fm1)).unwrap_err();
+    assert!(matches!(e, Error::Damaged(id) if id == fm1), "{e}");
+    let none = ObjectId::new(9_999, 0);
+    assert!(!written(&source(none)).unwrap().forms.is_empty());
 }
 
 /// A font whose program the source's I/O fails to read stops the page,
@@ -1216,7 +1246,9 @@ fn a_font_whose_program_fails_by_io_stops_the_page() {
     };
     for forms in [Forms::Descend, Forms::Skip] {
         match read(gone, forms) {
-            Err(Error::Unreadable(u)) => assert_eq!((u.id, u.why), (program, Why::Source)),
+            Err(Error::Gfx(GfxError::Unreadable(u))) => {
+                assert_eq!((u.id, u.why), (program, Why::Source));
+            }
             other => panic!("{forms:?}: {other:?}"),
         }
         let damaged = read(damaged, forms).expect("read without its program");
@@ -1231,10 +1263,10 @@ fn the_visitor_can_stop_it() {
     let content = f.content();
     let mut texts = 0;
     let summary = interpret(
-        Objects::new(&f.pdf, &Unkept::default()),
+        &f.pdf,
         content.concat(),
         f.resources(),
-        &Limits::DEFAULT.gfx(),
+        &Limits::DEFAULT,
         &Fonts::default(),
         Opts::default(),
         |event| {
@@ -1274,7 +1306,7 @@ fn faults_say_where() {
     let lim = &Limits::DEFAULT;
     let opts = Opts::default();
     let lexed = |r: Result<(Seen, Summary), Error>| match r {
-        Err(Error::Content { form, error }) => (form, error.at),
+        Err(Error::Gfx(GfxError::Content { form, error })) => (form, error.at),
         other => panic!("{other:?}"),
     };
     assert_eq!(
@@ -1323,10 +1355,10 @@ fn a_smaller_interest_only_filters() {
     let handed = |f: &Fixture, content: &[u8], lim: &Limits, opts: Opts, wants: Wants| {
         let mut events = Vec::new();
         let done = interpret(
-            Objects::new(&f.pdf, &Unkept::default()),
+            &f.pdf,
             &Concat::new(&[content]),
             f.resources(),
-            &lim.gfx(),
+            lim,
             &Fonts::default(),
             opts,
             |event| {
@@ -1406,9 +1438,9 @@ fn a_smaller_interest_only_filters() {
     // within the caps or not, but the shading the clip cuts; and each
     // cap, within the tight ones.
     let expected = [
-        ("Err(NotFinite)", 4 * 2 * 2),
-        ("Err(Limit(Segments))", 2 * 2),
-        ("Err(Limit(Glyphs))", 2),
+        ("Err(Gfx(NotFinite))", 4 * 2 * 2),
+        ("Err(Gfx(Limit(Segments)))", 2 * 2),
+        ("Err(Gfx(Limit(Glyphs)))", 2),
     ];
     assert_eq!(failed, expected.map(|(e, n)| (e.to_string(), n)).into());
 }
@@ -1451,10 +1483,10 @@ fn matrices_where_text_is() {
     let content = b"2 0 0 2 0 0 cm BT /T3 10 Tf 50 Tz 3 Ts 0 1 -1 0 300 500 Tm (ab) Tj ET";
     let mut seen = Vec::new();
     interpret(
-        Objects::new(&f.pdf, &Unkept::default()),
+        &f.pdf,
         &Concat::new(&[content]),
         f.resources(),
-        &Limits::DEFAULT.gfx(),
+        &Limits::DEFAULT,
         &Fonts::default(),
         Opts::default(),
         |event| {
@@ -1481,10 +1513,10 @@ fn matrices_where_text_is() {
 fn each(f: &Fixture, opts: Opts, mut visit: impl FnMut(Event<'_>)) -> Summary {
     let content = f.content();
     interpret(
-        Objects::new(&f.pdf, &Unkept::default()),
+        &f.pdf,
         content.concat(),
         f.resources(),
-        &Limits::DEFAULT.gfx(),
+        &Limits::DEFAULT,
         &Fonts::default(),
         opts,
         |event| {
@@ -1787,10 +1819,10 @@ fn a_clip_within_a_rectangle_takes_its_place() {
         let mut seen = None;
         let opts = Opts::default();
         interpret(
-            Objects::new(&pdf, &Unkept::default()),
+            &pdf,
             &Concat::new(&[content]),
             None,
-            &Limits::DEFAULT.gfx(),
+            &Limits::DEFAULT,
             &Fonts::default(),
             opts,
             |event| {
@@ -1852,10 +1884,10 @@ fn paths_are_built_as_pdfium_builds_them() {
     let paths = |content: &[u8]| -> Vec<Vec<Seg>> {
         let mut paths = Vec::new();
         interpret(
-            Objects::new(&pdf, &Unkept::default()),
+            &pdf,
             &Concat::new(&[content]),
             None,
-            &Limits::DEFAULT.gfx(),
+            &Limits::DEFAULT,
             &Fonts::default(),
             Opts::default(),
             |event| {

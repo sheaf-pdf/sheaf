@@ -96,7 +96,9 @@ impl TextBag {
 /// A string with a code its font doesn't say the text of, or shown in no
 /// font the resources have, is its bytes' hash, and ends a word. A
 /// damaged object reads as none; one the source can't read for another
-/// reason (I/O, a password, a cap) fails it ([`Error::Unreadable`]).
+/// reason (I/O, a password, a cap) fails it, as pdf-gfx says
+/// ([`Error::Gfx`]); sheaf's rule for a damaged object ([`Error::Damaged`])
+/// is never a bag's.
 pub fn text_bag(
     objects: &impl ReadObjects,
     content: &Concat,

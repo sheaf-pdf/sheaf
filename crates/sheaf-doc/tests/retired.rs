@@ -1172,19 +1172,19 @@ const RETIRED_M18: &[(&str, u8)] = &[
     // The content interpreter is pdf-gfx's, its types used again under
     // the same names through `content::interp`, which keeps `interpret`
     // and `encode` of sheaf's own over the family's. What has no like
-    // there goes: why it stopped or didn't write a page again is the
-    // family's `Error` (its `Unwritable` among them), content written
-    // again its `EncodedPage`, the operators a visitor wants
-    // pdf-content-streams' `Operators`, forms judged on their own
-    // `Forms::Skip`, and where an operator is `At::operator()` and
-    // `At::op_range()`.
+    // there goes: why it stopped or didn't write a page again is
+    // `content::interp::Error`, the family's (`GfxError`, its
+    // `Unwritable` among them) or sheaf's rule for a damaged object,
+    // content written again its `EncodedPage`, the operators a visitor
+    // wants pdf-content-streams' `Operators`, and forms judged on their
+    // own `Forms::Skip`. (Where an operator is was `At`'s fields `tok`
+    // and `op`, now `At::operator()` and `At::op_range()`: a field is
+    // read through a value, never by a path, so no row can hold one.)
     ("content::interp::InterpError", 23),
     ("content::interp::EncodeError", 23),
     ("content::interp::Encoded", 23),
     ("content::interp::Ops", 23),
     ("content::interp::Forms::Report", 23),
-    ("content::interp::At::tok", 23),
-    ("content::interp::At::op", 23),
     // What only sheaf's interpreter read of the lexer's: an inline
     // image's `/L`, and a step's operands in order.
     ("content::lex::image_length", 23),

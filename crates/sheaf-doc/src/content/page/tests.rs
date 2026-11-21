@@ -634,7 +634,7 @@ fn each_source_error_is_its_reason() {
 fn what_an_object_that_doesn_t_read_stops_is_its_reason_s() {
     use std::ops::ControlFlow;
 
-    use crate::content::interp::{Error, Forms, Opts, interpret};
+    use crate::content::interp::{Error, Forms, GfxError, Opts, interpret};
     use crate::content::{Fonts, text_bag};
 
     let depth = Limits::DEFAULT.reader.max_depth;
@@ -664,15 +664,13 @@ fn what_an_object_that_doesn_t_read_stops_is_its_reason_s() {
         })
     };
     let failed = |read: Result<_, Error>| match read {
-        Err(Error::Unreadable(u)) => Some((u.id, u.why)),
+        Err(Error::Gfx(GfxError::Unreadable(u))) => Some((u.id, u.why)),
         _ => None,
     };
 
     let bad = b"/Bad gs 0 0 m 1 1 l S";
-    assert_eq!(
-        failed(run(bad, Forms::Descend)),
-        Some((id(1), Why::Damaged))
-    );
+    let read = run(bad, Forms::Descend);
+    assert!(matches!(read, Err(Error::Damaged(damaged)) if damaged == id(1)));
     assert!(run(bad, Forms::Skip).is_ok());
     let bag = text_bag(&pdf, &Concat::new(&[bad]), Some(&resources), &lim, &fonts);
     assert!(bag.is_ok());
@@ -683,5 +681,5 @@ fn what_an_object_that_doesn_t_read_stops_is_its_reason_s() {
         assert_eq!(why, Some(Why::Capped), "{forms:?}");
     }
     let bag = text_bag(&pdf, &Concat::new(&[deep]), Some(&resources), &lim, &fonts);
-    assert!(matches!(bag, Err(Error::Unreadable(u)) if u.why == Why::Capped));
+    assert!(matches!(bag, Err(Error::Gfx(GfxError::Unreadable(u))) if u.why == Why::Capped));
 }

@@ -18,8 +18,8 @@ use std::time::Instant;
 use crate::pdf::{Object, ObjectId, StreamExt};
 
 use super::interp::{
-    Cap, EncodedPage, Error, Event, ImageOf, Kind, Mark, MarkProps, Matrix, Opts, Rect, Refused,
-    Seg, State, Summary, Unwritable, encode, interpret,
+    Cap, EncodedPage, Error, Event, GfxError, ImageOf, Kind, Mark, MarkProps, Matrix, Opts, Rect,
+    Refused, Seg, State, Summary, Unwritable, encode, interpret,
 };
 use super::tests::blank;
 use super::*;
@@ -1301,24 +1301,30 @@ fn event_records(r: &mut EventRecords, event: &Event<'_>) {
     r.end();
 }
 
-/// The class of what stopped an interpretation, never its wording, which
-/// changes with the error's type: content that doesn't lex is `lex`, a
-/// form whose stream doesn't decode `xobject`, a cap `limit:<cap>`,
-/// geometry past an `f32` `not-finite`, an operator that can't be written
-/// again `unwritable:<why>`, an object that doesn't read
-/// `unreadable:<why>` (`damaged` where forms are drawn through one), a
-/// page stream that wasn't decoded `page-stream`, an inline image sized
-/// under a cap `capped-inline`. Anything else is `other`, a finding.
+/// The class of what stopped an interpretation, never its wording: a
+/// damaged object where forms are drawn, sheaf's rule, is `damaged`, and
+/// pdf-gfx's errors are named as it names them: content that doesn't lex
+/// or is past one of content's caps is `content`, a form whose stream
+/// doesn't decode `form-stream`, a cap `limit:<cap>`, geometry past an
+/// `f32` `not-finite`, an operator that can't be written again
+/// `unwritable:<why>`, an object that doesn't read for a reason that
+/// isn't the file's `unreadable:<why>`, a page stream that wasn't decoded
+/// `page-stream`, an inline image sized under a cap `capped-inline`.
+/// Anything else is `other`, a finding.
 fn interp_class(e: &Error) -> String {
+    let e = match e {
+        Error::Damaged(_) => return "damaged".into(),
+        Error::Gfx(e) => e,
+    };
     match e {
-        Error::Content { .. } => "lex".into(),
-        Error::FormStream { .. } => "xobject".into(),
-        Error::Limit(cap) => format!("limit:{}", cap_name(*cap)),
-        Error::NotFinite => "not-finite".into(),
-        Error::Unwritable { why, .. } => format!("unwritable:{}", unwritable_name(*why)),
-        Error::Unreadable(unreadable) => format!("unreadable:{}", why_name(unreadable.why)),
-        Error::PageStream(_) => "page-stream".into(),
-        Error::CappedInlineImage { .. } => "capped-inline".into(),
+        GfxError::Content { .. } => "content".into(),
+        GfxError::FormStream { .. } => "form-stream".into(),
+        GfxError::Limit(cap) => format!("limit:{}", cap_name(*cap)),
+        GfxError::NotFinite => "not-finite".into(),
+        GfxError::Unwritable { why, .. } => format!("unwritable:{}", unwritable_name(*why)),
+        GfxError::Unreadable(unreadable) => format!("unreadable:{}", why_name(unreadable.why)),
+        GfxError::PageStream(_) => "page-stream".into(),
+        GfxError::CappedInlineImage { .. } => "capped-inline".into(),
         _ => "other".into(),
     }
 }
@@ -1364,9 +1370,11 @@ fn why_name(why: Why) -> &'static str {
 /// encoder that stopped where the page's didn't as `encode:<class>`.
 fn encode_class(e: &Error) -> String {
     match e {
-        Error::Unwritable { .. } | Error::PageStream(_) | Error::CappedInlineImage { .. } => {
-            interp_class(e)
-        }
+        Error::Gfx(
+            GfxError::Unwritable { .. }
+            | GfxError::PageStream(_)
+            | GfxError::CappedInlineImage { .. },
+        ) => interp_class(e),
         _ => format!("encode:{}", interp_class(e)),
     }
 }

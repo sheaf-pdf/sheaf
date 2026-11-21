@@ -148,7 +148,7 @@ use std::time::Instant;
 
 use pdfium_render::prelude::*;
 use sheaf_doc::content::fixture::{self, Fixture};
-use sheaf_doc::content::interp::{Error, Glyph, Kind, Opts, Refused, encode, interpret};
+use sheaf_doc::content::interp::{Error, GfxError, Glyph, Kind, Opts, Refused, encode, interpret};
 use sheaf_doc::content::{
     Font, FontApprox, FontKind, FontProgram, Fonts, Objects, PageContent, Std14, Unkept,
 };
@@ -664,8 +664,8 @@ enum Unwritten {
     /// It can't be interpreted ([`Error`]).
     Interp(String),
     /// What it does can't be written so it reads back the same: an
-    /// operator ([`Error::Unwritable`]), or an inline image sized under a
-    /// cap ([`Error::CappedInlineImage`]).
+    /// operator ([`GfxError::Unwritable`]), or an inline image sized under a
+    /// cap ([`GfxError::CappedInlineImage`]).
     Unwritable(String),
 }
 
@@ -724,9 +724,9 @@ fn written_again(src: &Src) -> anyhow::Result<Option<Written>> {
             .and_then(|content| {
                 let resources = page.resources.as_deref();
                 encode(pdf, content.concat(), resources, lim, &fonts).map_err(|e| match e {
-                    Error::Unwritable { .. }
-                    | Error::CappedInlineImage { .. }
-                    | Error::PageStream(_) => Unwritten::Unwritable(e.to_string()),
+                    Error::Gfx(
+                        GfxError::Unwritable { .. } | GfxError::CappedInlineImage { .. },
+                    ) => Unwritten::Unwritable(e.to_string()),
                     e => Unwritten::Interp(e.to_string()),
                 })
             })
@@ -998,7 +998,7 @@ struct Interpreted {
     /// Pages whose content can't be read, which there's nothing of to
     /// interpret.
     unread: Vec<String>,
-    /// Pages past a cap ([`Error::Limit`]).
+    /// Pages past a cap ([`GfxError::Limit`]).
     limited: Vec<String>,
     /// Pages whose content, or a form's, doesn't lex, or that draw an
     /// XObject that can't be read.
@@ -1095,7 +1095,7 @@ fn interpreted(src: &Src) -> Interpreted {
         );
         let summary = match read {
             Ok(summary) => summary,
-            Err(Error::Limit(cap)) => {
+            Err(Error::Gfx(GfxError::Limit(cap))) => {
                 out.limited.push(format!("{at}: past the cap on {cap}"));
                 continue;
             }

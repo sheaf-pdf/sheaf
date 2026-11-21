@@ -303,7 +303,10 @@ fn content_that_doesnt_lex_is_an_error() {
     let lim = Limits::DEFAULT;
     let content = Concat::new(&[b"BT (Hello) Tj (open"]);
     let e = text_bag(&Pdf::new(), &content, None, &lim, &Fonts::for_text()).unwrap_err();
-    assert!(matches!(e, interp::Error::Content { form: None, error } if error.at == 14));
+    assert!(matches!(
+        e,
+        interp::Error::Gfx(interp::GfxError::Content { form: None, error }) if error.at == 14
+    ));
 }
 
 /// A form the content draws is judged on its own, and isn't drawn: its
