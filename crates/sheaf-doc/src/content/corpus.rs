@@ -1441,7 +1441,7 @@ fn event_records(r: &mut EventRecords, event: &Event<'_>) {
 
 /// The class of what stopped an interpretation, never its wording: a
 /// damaged object where forms are drawn, sheaf's rule, is `damaged`, and
-/// pdf-gfx's errors are named as it names them: content that doesn't lex
+/// pdf-gfx's errors are named as it names them: content whose tokens stop
 /// or is past one of content's caps is `content`, a form whose stream
 /// doesn't decode `form-stream`, a cap `limit:<cap>`, geometry past an
 /// `f32` `not-finite`, an operator that can't be written again

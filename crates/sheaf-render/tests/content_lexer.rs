@@ -317,7 +317,7 @@ struct Outcome {
 
 #[test]
 #[ignore = "every page of the 402-file pool, through PDFium"]
-fn lexer_boundaries_match_pdfium_page_objects() {
+fn token_boundaries_match_pdfium_page_objects() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };

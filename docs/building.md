@@ -37,6 +37,12 @@ lists them):
   the page written again, and whether that draws the same, a line a
   page): run before and after a change to the interpreter, or a move of
   the PDF layer's pin, and `diff` the two files.
+- `just content-dump <file>` writes what every corpus page's content,
+  and every form's it draws, reads as (its tokens, operators, balance,
+  resource names, marked ranges and the private names heard in it, and
+  for a page its blocks and what's cut and written, a line each): run
+  before and after a change to what reads content, or a move of the PDF
+  layer's pin, and `diff` the two files.
 
 Tests run under a memory cap where Linux has a user systemd
 (`scripts/test-capped.sh`; `SHEAF_UNCAPPED=1` turns it off).

@@ -918,7 +918,7 @@ fn gates(kind: Kind) {
 
     // Every page's content classified, as Remove Header/Footer and the
     // watermark pick their pages: each page's streams read, not kept,
-    // lexed and its pagination artifacts found, on a source parsed afresh
+    // its tokens read and its pagination artifacts found, on a source parsed afresh
     // each run, so nothing is remembered (slice 6). No baseline or gate.
     let (classify, _) = measure(RUNS, || {
         let store = Store::new();

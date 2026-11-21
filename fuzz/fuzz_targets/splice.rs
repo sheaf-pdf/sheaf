@@ -1,5 +1,5 @@
 //! Any bytes as a page's content in two streams: its marked ranges, names
-//! and blocks, and splices of its ranges, what each keeps lexing as the
+//! and blocks, and splices of its ranges, what each keeps reading as the
 //! tokens it kept.
 
 #![no_main]

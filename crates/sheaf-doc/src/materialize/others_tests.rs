@@ -387,6 +387,52 @@ fn the_author_s_are_left_unless_asked() {
     }
 }
 
+/// An inline image's color space written as `/I` names the resources'
+/// `/ColorSpace` entry `Indexed`, the name PDFium looks it up by once the
+/// abbreviation is replaced (pdf-content-streams' names). So a page whose
+/// only such image is in a watermark taken out is written without the
+/// entry, as without any name only what's cut used, and a page that draws
+/// such an image in its body keeps it.
+#[test]
+fn an_abbreviated_image_space_is_the_resources_indexed() {
+    let dir = scratch();
+    const IMAGE: &str = "BI /W 1 /H 1 /BPC 8 /CS /I ID x EI";
+    let mark = format!(
+        "/Artifact <</Type /Pagination /Subtype /Watermark>> BDC q 9 0 0 9 100 300 cm \
+         {IMAGE} Q EMC"
+    );
+    let body = "BT /F1 12 Tf 72 700 Td (body) Tj ET";
+    let first = format!("{body} {mark}");
+    let second = format!("{body} q 9 0 0 9 72 600 cm {IMAGE} Q {mark}");
+    let file = file_of(&[&[first.as_bytes()], &[second.as_bytes()]], |_, font| {
+        let indexed = vec![
+            Object::name("Indexed"),
+            Object::name("DeviceRGB"),
+            1.into(),
+            crate::pdf::literal("abcdef"),
+        ];
+        dictionary! {
+            "Font" => dictionary! { "F1" => font },
+            "ColorSpace" => dictionary! { "Indexed" => indexed },
+        }
+    });
+    let (_, mut doc) = opened(&dir, "a.pdf", &file);
+    let all: Vec<PageId> = doc.state().order().iter().copied().collect();
+    let asked = Op::RemoveWatermark {
+        z: None,
+        pages: fx::ids(&all),
+        include_authored: true,
+    };
+    doc.commit_ops(vec![asked], "remove").unwrap();
+    let pdf = Pdf::load_mem(&How::Rewritten.write(&doc)).unwrap();
+    let (one, two) = (pages(&pdf)[0], pages(&pdf)[1]);
+    assert!(!drawn(&pdf, one).contains("BI"), "{}", drawn(&pdf, one));
+    assert_eq!(bound(&pdf, one, "ColorSpace"), Vec::<String>::new());
+    assert_eq!(drawn(&pdf, two).matches("BI").count(), 1);
+    assert_eq!(bound(&pdf, two, "ColorSpace"), ["Indexed"]);
+    assert_eq!(bound(&pdf, two, "Font"), ["F1"]);
+}
+
 /// Acrobat's watermark that no splice takes out stays where the
 /// document's is drawn, and the save is made, a note counting it;
 /// RemoveWatermark says it stays, and a page whose content can't be read.

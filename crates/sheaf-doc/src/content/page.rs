@@ -35,8 +35,8 @@ pub trait ReadObjects {
     fn object(&self, id: ObjectId) -> crate::pdf::Result<&Object>;
 
     /// Object `id`, its references followed, handed to `read`; a source
-    /// reads it without keeping it: a page's streams, each read once to
-    /// lex.
+    /// reads it without keeping it: a page's streams, each read once for
+    /// its tokens.
     fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> crate::pdf::Result<R>;
 
     /// Object `id`, its references followed as [`object`] follows them:
