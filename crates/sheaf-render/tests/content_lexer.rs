@@ -13,6 +13,12 @@
 //! have, painted. Pages whose counts differ are listed, and fail it: on
 //! the pool, at slice 6, none did, over 23,628 pages.
 //!
+//! With `SHEAF_CONTENT_ARM=family` it counts the same kinds from
+//! pdf-content-streams' tokens instead, read as sheaf reads a page: its
+//! streams joined by `PageContent`, and its color spaces counted by the
+//! family's `ResCx::read` over sheaf's `Objects`. `lexer`, or unset, is
+//! sheaf's lexer.
+//!
 //! Ignored: it reads every page of 402 files with PDFium. It binds PDFium
 //! itself, since it reads page objects, which the engine doesn't show
 //! (`scripts/fetch-pdfium.sh`):
@@ -27,7 +33,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use pdfium_render::prelude::*;
-use sheaf_doc::content::{PageContent, ResCx, Tok, lex};
+use sheaf_doc::content::{Objects, PageContent, ResCx, Tok, Unkept, lex};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::pdf::{Dictionary, LazyPdf, Object, ObjectId};
 use sheaf_doc::source::{Limits, PageFacts};
@@ -129,15 +135,47 @@ fn filled(string: &[u8]) -> bool {
     }
 }
 
+/// Whether a string operand is one.
+fn string(o: &[u8]) -> bool {
+    o[0] == b'(' || (o[0] == b'<' && o.get(1) != Some(&b'<'))
+}
+
 /// Whether a `TJ` array holds a string.
 fn has_string(array: &[u8]) -> bool {
     let inner = &array[1..array.len().saturating_sub(1).max(1)];
     sheaf_doc::content::lex(inner, &ResCx::none(), &Limits::DEFAULT)
         .map_while(Result::ok)
         .any(|(_, t)| match t {
-            Tok::Operand(o) => o[0] == b'(' || (o[0] == b'<' && o.get(1) != Some(&b'<')),
+            Tok::Operand(o) => string(o),
             _ => false,
         })
+}
+
+/// Whether a `TJ` array holds a string, its elements read as
+/// pdf-content-streams reads tokens.
+fn family_has_string(array: &[u8]) -> bool {
+    use sheaf_doc::pdf::content as family;
+    let inner = &array[1..array.len().saturating_sub(1).max(1)];
+    let lim = Limits::DEFAULT.content.family();
+    family::tokens(inner, &family::ResCx::none(), &lim)
+        .map_while(Result::ok)
+        .any(|(_, t)| match t {
+            family::Tok::Operand(o) => string(o),
+            _ => false,
+        })
+}
+
+/// A token as the counting reads it, whoever read it.
+enum Token<'a> {
+    Op(&'a [u8]),
+    Operand(&'a [u8]),
+    Image,
+}
+
+/// How a reading decodes a name operand and finds a string in a `TJ`.
+struct Reading {
+    name: for<'a> fn(&'a [u8]) -> Option<std::borrow::Cow<'a, [u8]>>,
+    has_string: fn(&[u8]) -> bool,
 }
 
 /// What the lexer finds on a page, by what PDFium would make an object of.
@@ -150,6 +188,68 @@ fn lexed(
     let content =
         PageContent::read(pdf, &page.contents, &Limits::DEFAULT).map_err(|e| e.to_string())?;
     let res = ResCx::read(pdf, page.resources.as_deref());
+    let tokens = lex(content.concat().bytes(), &res, &Limits::DEFAULT).map(|token| {
+        let (_, token) = token.map_err(|e| content.fault(e).to_string())?;
+        Ok(match token {
+            Tok::Operand(o) => Token::Operand(o),
+            Tok::InlineImage(_) => Token::Image,
+            Tok::Op(op) => Token::Op(op),
+        })
+    });
+    let reading = Reading {
+        name: sheaf_doc::content::name,
+        has_string,
+    };
+    counted(pdf, page, subtypes, tokens, reading)
+}
+
+/// What pdf-content-streams' tokens find on a page, read as sheaf reads
+/// it: its streams joined by [`PageContent`], its color spaces counted by
+/// the family's `ResCx::read` over sheaf's [`Objects`], under sheaf's
+/// limits; by what PDFium would make an object of, as [`lexed`] counts.
+fn family_read(
+    pdf: &LazyPdf,
+    page: &PageFacts,
+    subtypes: &mut HashMap<ObjectId, Option<Vec<u8>>>,
+) -> Result<Kinds, String> {
+    use sheaf_doc::pdf::content as family;
+    let content =
+        PageContent::read(pdf, &page.contents, &Limits::DEFAULT).map_err(|e| e.to_string())?;
+    let lim = Limits::DEFAULT.content.family();
+    let unkept = Unkept::default();
+    let res = family::ResCx::read(Objects::new(pdf, &unkept), page.resources.as_deref(), &lim)
+        .map_err(|e| e.to_string())?;
+    let concat = content.concat();
+    let tokens = family::tokens(concat.bytes(), &res, &lim).map(|token| {
+        let (_, token) = token.map_err(|e| {
+            let pos = concat.pos(e.at);
+            let id = content.ids().get(pos.stream as usize).copied();
+            let id = id.unwrap_or(ObjectId::new(0, 0));
+            let (number, generation, kind) = (id.number, id.generation, e.kind);
+            format!("stream {number} {generation} R: {kind} at byte {}", pos.at)
+        })?;
+        Ok(match token {
+            family::Tok::Operand(o) => Token::Operand(o),
+            family::Tok::InlineImage(_) => Token::Image,
+            family::Tok::Op(op) => Token::Op(op),
+        })
+    });
+    let reading = Reading {
+        name: family::name,
+        has_string: family_has_string,
+    };
+    counted(pdf, page, subtypes, tokens, reading)
+}
+
+/// What `tokens`, a page's, read by `reading`, draw, by what PDFium would
+/// make an object of; the first error stops it.
+fn counted<'a>(
+    pdf: &LazyPdf,
+    page: &PageFacts,
+    subtypes: &mut HashMap<ObjectId, Option<Vec<u8>>>,
+    tokens: impl Iterator<Item = Result<Token<'a>, String>>,
+    reading: Reading,
+) -> Result<Kinds, String> {
     let xobjects = category(pdf, page, b"XObject");
     let shadings = category(pdf, page, b"Shading");
     let mut subtype = |name: &[u8]| -> Option<Vec<u8>> {
@@ -169,23 +269,22 @@ fn lexed(
     // What PDFium's objects depend on of the graphics state, at each `q`
     // level.
     let mut states = vec![State::default()];
-    for token in lex(content.concat().bytes(), &res, &Limits::DEFAULT) {
-        let (_, token) = token.map_err(|e| content.fault(e).to_string())?;
-        let op = match token {
-            Tok::Operand(o) => {
+    for token in tokens {
+        let op = match token? {
+            Token::Operand(o) => {
                 operands.push(o);
                 continue;
             }
-            Tok::InlineImage(_) => {
+            Token::Image => {
                 kinds.image += 1;
                 operands.clear();
                 continue;
             }
-            Tok::Op(op) => op,
+            Token::Op(op) => op,
         };
         let last = operands.last().copied();
         let state = *states.last().unwrap();
-        let name = || last.and_then(sheaf_doc::content::name);
+        let name = || last.and_then(reading.name);
         match op {
             b"q" => states.push(state),
             b"Q" if states.len() > 1 => {
@@ -194,7 +293,9 @@ fn lexed(
             b"Tf" => states.last_mut().unwrap().font = true,
             b"J" => states.last_mut().unwrap().round = last == Some(b"1"),
             b"Tj" | b"'" | b"\"" if state.font && last.is_some_and(filled) => kinds.text += 1,
-            b"TJ" if state.font && last.is_some_and(|a| a[0] == b'[' && has_string(a)) => {
+            b"TJ"
+                if state.font && last.is_some_and(|a| a[0] == b'[' && (reading.has_string)(a)) =>
+            {
                 kinds.text += 1
             }
             b"m" if operands.len() == 2 => path.point(true),
@@ -286,6 +387,10 @@ struct Outcome {
     skipped: Option<String>,
 }
 
+/// A reading of a page's tokens, counted: [`lexed`] or [`family_read`].
+type Read =
+    fn(&LazyPdf, &PageFacts, &mut HashMap<ObjectId, Option<Vec<u8>>>) -> Result<Kinds, String>;
+
 #[test]
 #[ignore = "every page of the 402-file pool, through PDFium"]
 fn lexer_boundaries_match_pdfium_page_objects() {
@@ -303,6 +408,11 @@ fn lexer_boundaries_match_pdfium_page_objects() {
         })
         .collect();
     let started = Instant::now();
+    let (arm, read): (&str, Read) = match std::env::var("SHEAF_CONTENT_ARM").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("lexer") => ("lexer", lexed),
+        Ok("family") => ("family", family_read),
+        arm => panic!("SHEAF_CONTENT_ARM is lexer or family, not {arm:?}"),
+    };
     // PDFium on one thread at a time; the lexer beside it.
     let pdfium = Mutex::new(pdfium());
     let outcomes = each_entry(&entries, |entry| {
@@ -338,7 +448,7 @@ fn lexer_boundaries_match_pdfium_page_objects() {
             let Some(shown) = shown else { continue };
             out.pages += 1;
             out.pdfium.add(shown);
-            match lexed(src.pdf(), page, &mut subtypes) {
+            match read(src.pdf(), page, &mut subtypes) {
                 Ok(kinds) => {
                     out.lexed.add(kinds);
                     let differ = kinds.differences(&shown);
@@ -366,11 +476,11 @@ fn lexer_boundaries_match_pdfium_page_objects() {
         eprintln!("skipped {skipped}");
     }
     for line in &differ {
-        eprintln!("differs: {line} (lexer, PDFium)");
+        eprintln!("differs: {line} ({arm}, PDFium)");
     }
     eprintln!(
-        "{pages} pages of {} files in {:?}: lexer {lexed:?}, PDFium {shown:?}; \
-         {} pages differ, {} the lexer can't read",
+        "{pages} pages of {} files in {:?}: {arm} {lexed:?}, PDFium {shown:?}; \
+         {} pages differ, {} the {arm} can't read",
         entries.len(),
         started.elapsed(),
         differ.len(),

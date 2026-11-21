@@ -12,6 +12,13 @@
 //! operators ([`Operators`]), what an interpretation's events are asked
 //! for by ([`super::gfx::Wants`]).
 //! `crate::content` re-exports them, and is where sheaf lexes content.
+//! Content's reading as the family has it is here too, for the tests
+//! that set it beside sheaf's lexer: its operations ([`operations`],
+//! [`ContentOperation`], [`Operand`], [`name`]) and their error
+//! ([`SyntaxError`], [`SyntaxErrorKind`]), a page's `q`/`Q` balance
+//! ([`balance`]), its marked ranges ([`marked`], [`MarkedNest`],
+//! [`Properties`]) and the resource names it uses ([`names_used`],
+//! [`kept`]).
 //!
 //! Also a minimal content-stream operation builder for test fixtures and
 //! examples ([`Content`]), with a test-only `Content::decode`.
@@ -21,9 +28,16 @@ use pdf_objects::Object;
 use super::{Error, Result};
 
 pub use pdf_content_streams::{
-    Blend, Color, Concat, ContentWriter, FillRule, GState, Join, Limits, LineCap, LineJoin, Need,
-    Operators, Paint, Pos, Res, ResBody, ResCx, ResId, ResKind, Reserved, ResourceNeeds, Rewrite,
-    SpanAcross, SpliceError, Spliced, TextMode, object, splice, splice_each, tokens, without_keys,
+    Balance, Blend, Color, Concat, ContentWriter, FillRule, GState, Join, Kept, Limits, LineCap,
+    LineJoin, Marked, MarkedEvent, MarkedNest, NameSet, Need, Operand, Operators, Paint, Pos,
+    Properties, Props, Res, ResBody, ResCx, ResId, ResKind, Reserved, ResourceNeeds, Rewrite,
+    SpanAcross, SpliceError, Spliced, TextMode, Tok, balance, kept, marked, name, names_used,
+    object, operations, splice, splice_each, tokens, without_keys,
+};
+/// Under names of their own, as the door has an [`Error`] and the
+/// fixtures' [`Operation`] already.
+pub use pdf_content_streams::{
+    Error as SyntaxError, ErrorKind as SyntaxErrorKind, Operation as ContentOperation,
 };
 
 #[cfg(test)]

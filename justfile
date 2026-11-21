@@ -417,7 +417,8 @@ tier-realize:
 tier-watermark:
     scripts/test-capped.sh cargo test -p sheaf-ops --test watermark -- --ignored --nocapture
 
-# The content lexer against PDFium over the pool sample.
+# The content lexer against PDFium over the pool sample;
+# SHEAF_CONTENT_ARM=family counts from pdf-content-streams' tokens.
 [group('corpus')]
 tier-lexer:
     scripts/test-capped.sh cargo test -p sheaf-render --test content_lexer -- --ignored --nocapture
@@ -507,7 +508,9 @@ events-dump out:
 # it before and after a change to what reads content, over the same
 # corpus, and `diff` the two files; SHEAF_CONTENT_DUMP_ONLY=<a corpus
 # path> prints that file's records in full. Two runs over the same code
-# write the same file.
+# write the same file. SHEAF_CONTENT_ARM=family reads columns 3 to 11 by
+# pdf-content-streams instead (12 to 14 are `-`), and adds two: how many
+# color spaces met a cap, and the inline images by their first filter.
 [doc("What every corpus page's and form's content reads as, a line each, written to a file: diff two runs across a change to what reads content")]
 [group('corpus')]
 content-dump out:
