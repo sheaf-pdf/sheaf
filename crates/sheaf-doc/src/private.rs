@@ -217,8 +217,9 @@ pub struct Found {
 /// tiling pattern. Content that can't be read whole is read a stream at a
 /// time, and what can't be read fails closed: content whose tokens don't
 /// read, content whose resources' color spaces don't (for a reason that
-/// isn't the file's damage, which reads as none), and a stream whose data
-/// can't be decoded are searched for `/SHEF_` as bytes, and a stream that
+/// isn't the file's damage, which reads as none), a property list written
+/// in content that reads as no dictionary, and a stream whose data can't
+/// be decoded are searched for `/SHEF_` as bytes, and a stream that
 /// decodes past the content limit is taken to hold some.
 pub fn found(pdf: &Pdf) -> Vec<Found> {
     let mut found = BTreeSet::new();
@@ -263,8 +264,8 @@ enum Said<'a> {
     Name(&'a [u8]),
     /// An annotation's `/NM`.
     Nm(&'a [u8]),
-    /// Content that can't be read, or whose resources can't be, holding
-    /// `/SHEF_`.
+    /// Content that can't be read, or whose resources can't be, or a
+    /// list in it that's no dictionary, holding `/SHEF_`.
     Unread,
 }
 
@@ -298,7 +299,7 @@ fn walk(pdf: &Pdf, f: &mut dyn FnMut(ObjectId, Said)) {
         let resources = dict.get(b"Resources");
         let res = content::res_cx(pdf, resources, &lim).ok();
         if let Ok(read) = PageContent::read(pdf, &streams, &lim) {
-            lexed(id, read.concat().bytes(), (res.as_ref(), &lim), f);
+            in_content(id, read.concat().bytes(), (res.as_ref(), &lim), f);
             continue;
         }
         // A stream that can't be decoded, or content past the limit, stops
@@ -306,7 +307,7 @@ fn walk(pdf: &Pdf, f: &mut dyn FnMut(ObjectId, Said)) {
         // searched as written, one past the limit can't be told.
         for &stream in &streams {
             match PageContent::read(pdf, &[stream], &lim) {
-                Ok(read) => lexed(id, read.concat().bytes(), (res.as_ref(), &lim), f),
+                Ok(read) => in_content(id, read.concat().bytes(), (res.as_ref(), &lim), f),
                 Err(ContentFault::TooLarge(_)) => f(id, Said::Unread),
                 Err(_) => {
                     let raw = pdf.get_object(stream).ok().and_then(Object::as_stream);
@@ -323,8 +324,9 @@ fn walk(pdf: &Pdf, f: &mut dyn FnMut(ObjectId, Said)) {
 /// read by pdf-content-streams' tokens with `res`, the color spaces of
 /// its resources ([`content::res_cx`]), and handed to `f`. Content that
 /// can't be read, its tokens or its resources (`res` None), is searched
-/// for `/SHEF_` as bytes.
-fn lexed(
+/// for `/SHEF_` as bytes, and so is a list written there that reads as no
+/// dictionary, whose keys can't be told.
+fn in_content(
     at: ObjectId,
     bytes: &[u8],
     (res, lim): (Option<&ResCx>, &Limits),
@@ -350,15 +352,20 @@ fn lexed(
         };
         if let Some(name) = content::name(operand) {
             f(at, Said::Name(&name));
-        } else if operand.starts_with(b"<<")
-            && let Some(list) = content::object(operand, &family)
-        {
-            object(at, &list, f);
+        } else if operand.starts_with(b"<<") {
+            // A list that ends early (a key that's no name, a value
+            // that's no object) is no dictionary, and its keys aren't
+            // read: it's searched as written.
+            match content::object(operand, &family) {
+                Some(list) => object(at, &list, f),
+                None if says_shef(operand) => f(at, Said::Unread),
+                None => {}
+            }
         }
     }
 }
 
-/// What [`lexed`] hands on of content `bytes`, read with `res` (None where
+/// What [`in_content`] hands on of content `bytes`, read with `res` (None where
 /// its resources don't read): each name and inline property list's key,
 /// in order, and None where it took the content to hold private data it
 /// couldn't read. The content dump's, which so reads content as [`walk`]
@@ -366,7 +373,7 @@ fn lexed(
 #[cfg(test)]
 pub(crate) fn heard(bytes: &[u8], res: Option<&ResCx>, lim: &Limits) -> Vec<Option<Vec<u8>>> {
     let mut heard = Vec::new();
-    lexed(ObjectId::new(0, 0), bytes, (res, lim), &mut |_, said| {
+    in_content(ObjectId::new(0, 0), bytes, (res, lim), &mut |_, said| {
         heard.push(match said {
             Said::Name(name) | Said::Nm(name) => Some(name.to_vec()),
             Said::Unread => None,
@@ -450,7 +457,7 @@ mod tests {
 
     /// What's found: keys and names anywhere, a sheaf mark's `/NM`, and in
     /// a page's content a name and an inline list's key; a string isn't a
-    /// name, and a stream not content isn't lexed.
+    /// name, and a stream not content isn't read as content.
     #[test]
     fn found_reads_dictionaries_names_and_content() {
         let mut pdf = Pdf::with_version("1.7");
@@ -490,7 +497,7 @@ mod tests {
         );
     }
 
-    /// Content that can't be lexed is found to hold private data when its
+    /// Content whose tokens don't read is found to hold private data when its
     /// bytes say `/SHEF_`, and not otherwise.
     #[test]
     fn content_that_cant_be_read_fails_closed() {
@@ -508,6 +515,51 @@ mod tests {
         let (page, said) = unread(b"BT (never ends /SHEF_Gen 9 Tf");
         assert_eq!(said, [want(page)]);
         assert_eq!(unread(b"BT (never ends /F1 9 Tf").1, []);
+    }
+
+    /// A property list written in content that reads as no dictionary (it
+    /// ends early, at a key that's no name or a value that's no object, or
+    /// has a key with no value) is found to hold private data when its
+    /// bytes say `/SHEF_`, and not otherwise; a key written after where
+    /// such a list ends is a name of the content, found as read.
+    #[test]
+    fn a_list_that_is_no_dictionary_fails_closed() {
+        let said = |data: &[u8]| {
+            let mut pdf = Pdf::with_version("1.7");
+            let content = pdf.add_object(Stream::new(dictionary! {}, data.to_vec()));
+            let page = pdf
+                .add_object(dictionary! { "Type" => Object::name("Page"), "Contents" => content });
+            let names: Vec<Vec<u8>> = (found(&pdf).into_iter())
+                .map(|found| {
+                    assert_eq!(found.at, page);
+                    found.name
+                })
+                .collect();
+            names
+        };
+        let (read, unread) = (vec![b"SHEF_Gen".to_vec()], vec![b"/SHEF_".to_vec()]);
+        assert_eq!(
+            said(b"/Artifact <</SHEF_Gen (g1)>> BDC 0 0 9 9 re f EMC"),
+            read
+        );
+        for list in [
+            &b"<</SHEF_Gen (g1) 1 2>>"[..],
+            b"<</SHEF_Gen (g1) /B Q>>",
+            b"<</SHEF_Gen (g1) /B>>",
+            b"<</SHEF_Gen (g1) /B ]>>",
+            b"<</B <</SHEF_Gen (g1) 5>> >>",
+        ] {
+            let content = [b"/Artifact ", list, b" BDC 0 0 9 9 re f EMC"].concat();
+            assert_eq!(said(&content), unread, "{}", String::from_utf8_lossy(list));
+        }
+        assert_eq!(
+            said(b"/Artifact <<1 /SHEF_Gen (g1)>> BDC 0 0 9 9 re f EMC"),
+            read
+        );
+        assert_eq!(
+            said(b"/Artifact <</Gen (g1) 1 2>> BDC 0 0 9 9 re f EMC"),
+            [] as [Vec<u8>; 0]
+        );
     }
 
     /// Content whose resources' color spaces don't read, for a reason that
