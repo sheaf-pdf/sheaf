@@ -1161,8 +1161,7 @@ const RETIRED_M18: &[(&str, u8)] = &[
     ("content::font::std14::Std14::encoding", 22),
     // A font a file draws in is pdf-fonts' `Font`, `content::Font`, read
     // from a source's objects as `content::Objects` gives them, under
-    // `Limits::fonts()`; what stops one being read is its `Error`,
-    // `content::FontError`. sheaf's own reader, its programs, CMaps,
+    // `Limits::fonts()`. sheaf's own reader, its programs, CMaps,
     // encodings and metrics went with them.
     ("content::font::Foreign", 22),
     ("content::font::TooLarge", 22),
@@ -1266,13 +1265,11 @@ const QUALIFIED_ONLY: &[&str] = &[
     // How many snapshots the policy may drop (`HistoryStats`), and the
     // locals that hold them.
     "droppable",
-    // The plugin API's `Ops` and the forms check's `Report`; a token, an
-    // operator and a command's arguments as other code names them: not
-    // what sheaf's content interpreter had (M18 slice 23).
+    // The plugin API's `Ops` and the forms check's `Report`, and a
+    // command's arguments as other code names them: not what sheaf's
+    // content interpreter had (M18 slice 23).
     "Ops",
     "Report",
-    "tok",
-    "op",
     "args",
     // The header and footer a document's state draws: not the view's.
     "header_footer",

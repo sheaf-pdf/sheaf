@@ -366,8 +366,10 @@ impl LazyPdf {
     /// reader. Its `/Length` is then the file's (a kept stream's is its
     /// data's), and its data is read by [`LazyPdf::object_unkept`]. A
     /// stream whose data doesn't read is handed over the same way, kept as
-    /// that error or not. Anything else is read and kept as `get` keeps
-    /// it.
+    /// that error or not. Anything else is read once and kept in the
+    /// reader's slot, where `get` finds it; the reading keeps neither it
+    /// nor its record, which what copies an object's bytes reads again
+    /// when it asks ([`LazyPdf::raw_span`]).
     pub fn peek(&self, id: ObjectId) -> Result<Option<Cow<'_, Object>>> {
         let Some(mut object) = self.peek_one(id)? else {
             return Ok(None);

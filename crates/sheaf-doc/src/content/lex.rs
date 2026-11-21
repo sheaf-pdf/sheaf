@@ -912,7 +912,7 @@ fn int(number: &[u8]) -> Option<u64> {
 
 /// Whether a word is a number, as PDFium tells one: digits, signs and
 /// points only.
-pub(crate) fn is_number(word: &[u8]) -> bool {
+fn is_number(word: &[u8]) -> bool {
     word.iter()
         .all(|c| matches!(c, b'0'..=b'9' | b'+' | b'-' | b'.'))
 }

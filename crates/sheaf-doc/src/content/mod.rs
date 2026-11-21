@@ -80,9 +80,8 @@ pub use blocks::{
     PaginationKind, SheafBlock, SheafBlockRef, isolates,
 };
 pub use font::{
-    Descendant, DrawFont, DrawText, Font, FontApprox, FontError, FontId, FontKind, FontMetrics,
-    FontProgram, FontScope, Fonts, Glyphless, Std14, Unencoded, VerticalMetrics, std14_of,
-    wrap_with,
+    Descendant, DrawFont, DrawText, Font, FontApprox, FontKind, FontMetrics, FontProgram, Fonts,
+    Glyphless, Std14, Unencoded, VerticalMetrics, std14_of, wrap_with,
 };
 pub use lex::{LexError, LexErrorKind, ResCx, Tok, lex, name, object};
 pub use marked::{Marked, PropertiesDict, Props, marked};

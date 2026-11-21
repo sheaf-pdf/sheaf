@@ -185,6 +185,20 @@ fn pdfium() -> MutexGuard<'static, Pdfium> {
     bound.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// A rectangle the interpreter gives as sheaf's, its sides as they are:
+/// what this tier compares with PDFium's in.
+fn as_rect(r: sheaf_doc::content::interp::Rect) -> Rect {
+    let sheaf_doc::content::interp::Rect { x0, y0, x1, y1 } = r;
+    Rect { x0, y0, x1, y1 }
+}
+
+/// A matrix the interpreter gives as sheaf's, its six numbers as they
+/// are.
+fn as_affine(m: sheaf_doc::content::interp::Matrix) -> Affine {
+    let sheaf_doc::content::interp::Matrix { a, b, c, d, e, f } = m;
+    Affine { a, b, c, d, e, f }
+}
+
 /// A glyph the interpreter placed.
 #[derive(Debug, Clone)]
 struct Placed {
@@ -229,7 +243,7 @@ fn placed(f: &Fixture) -> Vec<Placed> {
                 glyphs.extend(show.glyphs().map(|g| Placed {
                     code: g.code,
                     origin: (g.origin.x, g.origin.y),
-                    bounds: g.quad.bounds().into(),
+                    bounds: as_rect(g.quad.bounds()),
                     approx,
                     stock: show.stock,
                     exact: show.font.is_some_and(|f| exact(f, g.approx)),
@@ -1586,7 +1600,7 @@ fn showing(src: &Src, page: &PageFacts, fonts: &Fonts) -> Result<Showing, String
                     let Some(font) = show.font else {
                         return ControlFlow::Continue(());
                     };
-                    let trm = Affine::from(show.trm());
+                    let trm = as_affine(show.trm());
                     let metrics = font.metrics();
                     let id = std::ptr::from_ref(font) as usize;
                     let actual = (event.marks.iter())
@@ -1607,7 +1621,7 @@ fn showing(src: &Src, page: &PageFacts, fonts: &Fonts) -> Result<Showing, String
                     let next = streams.len();
                     let stream = *streams.entry(event.at.stream.cloned()).or_insert(next);
                     let along = trm.a.hypot(trm.b);
-                    let s = Affine::from(show.start);
+                    let s = as_affine(show.start);
                     let unscaled = (s.a, s.b, s.c, s.d) == (1.0, 0.0, 0.0, 1.0);
                     let program = program_of(src, font);
                     for g in show.glyphs() {
@@ -1624,7 +1638,7 @@ fn showing(src: &Src, page: &PageFacts, fonts: &Fonts) -> Result<Showing, String
                                 .or_insert_with(|| font_label(src, font, g.approx));
                             *out.approx.entry(label.clone()).or_default() += 1;
                         }
-                        let quad = Rect::from(g.quad.bounds());
+                        let quad = as_rect(g.quad.bounds());
                         let exact = class != Class::Approx && exact(font, g.approx);
                         let (bounds, off_cell, exact) = match vertical_cell(font, &g, show.size) {
                             Some(_) if unscaled && exact => (quad, 0.0, true),

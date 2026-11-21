@@ -13,9 +13,13 @@
 //! [`Streams`]: super::Streams
 
 pub use pdf_fonts::{
-    Descendant, Error, Font, FontApprox, FontId, FontKind, FontMetrics, FontProgram, FontScope,
-    Fonts, GlyphBox, Limits, Std14, VerticalMetrics,
+    Descendant, Font, FontApprox, FontKind, FontMetrics, FontProgram, Fonts, GlyphBox, Limits,
+    Std14, VerticalMetrics,
 };
+
+/// Why a font didn't read: asked by tests alone.
+#[cfg(test)]
+pub use pdf_fonts::Error;
 pub use pdf_gfx::LayoutFont;
 
 /// What a code of a standard encoding draws: asked by tests alone.

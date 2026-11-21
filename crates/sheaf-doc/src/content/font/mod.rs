@@ -29,8 +29,7 @@ pub use draw::DrawText;
 pub use glyphless::Glyphless;
 
 pub use crate::pdf::fonts::{
-    Descendant, Error as FontError, Font, FontApprox, FontId, FontKind, FontMetrics, FontProgram,
-    FontScope, Fonts, Std14, VerticalMetrics,
+    Descendant, Font, FontApprox, FontKind, FontMetrics, FontProgram, Fonts, Std14, VerticalMetrics,
 };
 
 use super::Res;
