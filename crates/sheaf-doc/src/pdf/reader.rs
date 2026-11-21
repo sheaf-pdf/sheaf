@@ -354,9 +354,11 @@ impl LazyPdf {
 
     /// Object `id`, its references followed: None where it isn't there
     /// (no entry in the cross-reference table, or none where its entry
-    /// points), and why where it's there and doesn't read, a chain of
-    /// references past the reader's depth among them
-    /// ([`Error::ReferenceLimit`]). What's kept is borrowed. A stream that
+    /// points), and why where it's there and doesn't read: a chain of
+    /// references past the reader's depth is the reader's cap
+    /// ([`Error::ReferenceLimit`]), and one that comes back to an object
+    /// of its own within that depth is the file's damage, the same under
+    /// any cap ([`Error::ReferenceCycle`]). What's kept is borrowed. A stream that
     /// isn't kept is read as the file has it, its dictionary alone, and
     /// handed over, kept nowhere: its data isn't read, and nothing of it
     /// stays, so asking for a stream's dictionary holds neither its bytes,
@@ -374,7 +376,7 @@ impl LazyPdf {
         while let Some(next) = object.as_reference() {
             chain += 1;
             if chain > self.limits.max_depth {
-                return Err(Error::ReferenceLimit);
+                return Err(self.chain_past_depth(id));
             }
             match self.peek_one(next)? {
                 Some(next) => object = next,
@@ -384,12 +386,38 @@ impl LazyPdf {
         Ok(Some(object))
     }
 
+    /// Why the chain of references from object `id` passes the reader's
+    /// depth: a loop where it comes back to an object of its own within
+    /// that depth, and the cap where it's only long. Asked once the chain
+    /// has passed it, so a chain within the depth pays nothing.
+    fn chain_past_depth(&self, id: ObjectId) -> Error {
+        let mut chain = vec![id];
+        while let Ok(Some(object)) = self.peek_one(chain[chain.len() - 1])
+            && let Some(next) = object.as_reference()
+            && chain.len() <= self.limits.max_depth
+        {
+            if chain.contains(&next) {
+                return Error::ReferenceCycle(next);
+            }
+            chain.push(next);
+        }
+        Error::ReferenceLimit
+    }
+
     /// [`LazyPdf::peek`], no reference followed. A stream the reading
     /// keeps as written, read for something else, is lent so; one kept as
     /// the error its data gave ([`LazyPdf::get`] keeps one) is as one not
     /// kept at all, by its dictionary: what a stream is lent as doesn't
     /// turn on whether something asked for its data first. Anything else
-    /// read here is kept as `get` would keep it, so it's read once.
+    /// read here is kept in its slot, the one place `get` and this look
+    /// first, so it's read once: by a read with no record
+    /// (`object_unrecorded`), since whether it's a stream is known only
+    /// once it's read, and a kept read (`read_kept`) would hash a
+    /// stream's data for a record before handing it over unkept. So the
+    /// reading holds no record of an object kept here, and no second copy
+    /// of it, where it holds both of one `get` read first; what needs the
+    /// record reads it then. One that fails to read is read again by
+    /// `get`, which keeps the error as it keeps any.
     fn peek_one(&self, id: ObjectId) -> Result<Option<Cow<'_, Object>>> {
         let Some(slot) = self.slot(id) else {
             return Ok(None);

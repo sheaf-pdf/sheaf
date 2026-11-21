@@ -59,7 +59,9 @@ pub trait ReadObjects {
 /// PDF layer's crates are told ([`Unreadable`]). The source's I/O is
 /// [`Why::Source`]; a password or decryption that fails, [`Why::Locked`];
 /// one of the reader's caps, [`Why::Capped`]; anything else, the file's,
-/// [`Why::Damaged`].
+/// [`Why::Damaged`]: a loop of references among them
+/// ([`ReferenceCycle`](crate::pdf::Error::ReferenceCycle)), which is the
+/// same under any cap, where a chain that is only long is the cap's.
 pub(crate) fn why(error: &crate::pdf::Error) -> Why {
     use crate::pdf::Error as E;
     match error {
@@ -245,14 +247,38 @@ impl ReadObjects for crate::pdf::Document {
         self.get_object(id).map(read)
     }
 
-    /// Object `id`, which a document in memory keeps, as every object.
+    /// Object `id`, which a document in memory keeps, as every object. A
+    /// chain of references that comes back to an object of its own is a
+    /// loop, the document's damage
+    /// ([`ReferenceCycle`](crate::pdf::Error::ReferenceCycle)), where one
+    /// that is only long is the limit's.
     fn peek(&self, id: ObjectId) -> crate::pdf::Result<Option<Cow<'_, Object>>> {
+        use crate::pdf::Error;
         match self.get_object(id) {
             Ok(object) => Ok(Some(Cow::Borrowed(object))),
-            Err(crate::pdf::Error::ObjectNotFound(_)) => Ok(None),
+            Err(Error::ObjectNotFound(_)) => Ok(None),
+            Err(Error::ReferenceLimit) => Err(match looped(self, id) {
+                Some(at) => Error::ReferenceCycle(at),
+                None => Error::ReferenceLimit,
+            }),
             Err(error) => Err(error),
         }
     }
+}
+
+/// Where the chain of references from object `id` of `document` comes
+/// back to an object of its own; None where it ends, however long. Asked
+/// once a chain has passed the document's limit, so one within it pays
+/// nothing.
+fn looped(document: &crate::pdf::Document, id: ObjectId) -> Option<ObjectId> {
+    let mut chain = vec![id];
+    while let Some(next) = (document.objects.get(&chain[chain.len() - 1]))?.as_reference() {
+        if chain.contains(&next) {
+            return Some(next);
+        }
+        chain.push(next);
+    }
+    None
 }
 
 /// Why a page's content can't be read.

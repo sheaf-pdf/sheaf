@@ -600,6 +600,70 @@ fn a_source_s_failure_keeps_its_reason() {
     );
 }
 
+/// A resource that is a loop of references, one object naming itself or
+/// two each other, is the file's damage, not the reader's cap: it reads
+/// as none where forms are judged on their own, so a text bag reads the
+/// page past it, as PDFium shows the page's text, and fails content
+/// that draws forms as any damaged object does; from a source read
+/// lazily and from a document in memory alike. A chain that is only
+/// long stays the cap's (`a_source_s_failure_keeps_its_reason`).
+#[test]
+fn a_loop_of_references_is_damage_not_a_cap() {
+    use std::ops::ControlFlow;
+
+    use crate::content::interp::{Error, Opts, interpret};
+    use crate::content::{Fonts, text_bag};
+
+    // 1: itself; 2 and 3: each other; 4: an ExtGState.
+    let objects = [
+        Object::from(id(1)),
+        Object::from(id(3)),
+        Object::from(id(2)),
+        Object::from(dictionary! { "LW" => 5i64 }),
+    ];
+    let lazy = source(&objects, b"Nothing");
+    let mut doc = Document::new();
+    for object in &objects {
+        doc.add_object(object.clone());
+    }
+    let resources = Object::from(dictionary! {
+        "ExtGState" => dictionary! { "One" => id(1), "Two" => id(2), "Good" => id(4) },
+    });
+    let (lim, fonts) = (Limits::DEFAULT, Fonts::for_text());
+
+    fn check<R: ReadObjects>(pdf: &R, resources: &Object, lim: &Limits, fonts: &Fonts) {
+        let looped = |n| match pdf.peek(id(n)) {
+            Err(e @ crate::pdf::Error::ReferenceCycle(_)) => why(&e),
+            other => panic!("{n}: {:?}", other.map(|o| o.is_some())),
+        };
+        assert_eq!(looped(1), Why::Damaged);
+        assert_eq!(looped(2), Why::Damaged);
+        assert!(matches!(pdf.peek(id(4)), Ok(Some(_))));
+        for name in ["One", "Two", "Good"] {
+            let content = format!("/{name} gs BT (hello) Tj ET");
+            let content = Concat::new(&[content.as_bytes()]);
+            let bag = text_bag(pdf, &content, Some(resources), lim, fonts);
+            let bag = bag.unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(bag.len(), 1, "{name}");
+            let drawn = interpret(
+                pdf,
+                &content,
+                Some(resources),
+                lim,
+                fonts,
+                Opts::default(),
+                |_| ControlFlow::Continue(()),
+            );
+            match name {
+                "Good" => assert!(drawn.is_ok()),
+                _ => assert!(matches!(drawn, Err(Error::Damaged(_))), "{name}: {drawn:?}"),
+            }
+        }
+    }
+    check(&lazy, &resources, &lim, &fonts);
+    check(&doc, &resources, &lim, &fonts);
+}
+
 /// Each reason a source's error gives is the one [`why`] says: its I/O
 /// the source's, a password or decryption that fails locked, the
 /// reader's caps capped, and anything else the file's damage.
@@ -614,6 +678,7 @@ fn each_source_error_is_its_reason() {
         (E::Limit(Limit::Depth), Why::Capped),
         (E::Limit(Limit::Decompressed), Why::Capped),
         (E::ReferenceLimit, Why::Capped),
+        (E::ReferenceCycle(ObjectId::new(1, 0)), Why::Damaged),
         (E::MissingXrefEntry, Why::Damaged),
         (E::ObjectIdMismatch, Why::Damaged),
         (E::IndirectObject { offset: 3 }, Why::Damaged),
