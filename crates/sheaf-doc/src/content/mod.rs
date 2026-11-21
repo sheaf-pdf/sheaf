@@ -22,7 +22,7 @@
 //! - [`balance`] and [`names_used`]: its `q`/`Q` balance and the resource
 //!   names it uses; [`kept`], the two of what's left once ranges are taken
 //!   out. pdf-content-streams', as are its marked ranges, which
-//!   [`PageBlocks`] keeps of its own ([`Marked`]).
+//!   [`PageBlocks`] keeps what it reads of ([`KeptRange`]).
 //! - [`splice`] and [`splice_each`]: its streams with ranges taken out,
 //!   byte for byte, when that's safe, and refused when it isn't; and
 //!   [`without_keys`], a marked range's property list written again
@@ -85,8 +85,8 @@ pub use crate::pdf::content::{
     tokens, without_keys,
 };
 pub use blocks::{
-    BlockAt, BlockId, ContentError, DrawnForms, GenId, Marked, Marker, PagOrigin, PageBlocks,
-    Pagination, PaginationKind, Props, SheafBlock, SheafBlockRef, isolates,
+    BlockAt, BlockId, ContentError, DrawnForms, GenId, KeptRange, Marker, PagOrigin, PageBlocks,
+    Pagination, PaginationKind, SheafBlock, SheafBlockRef, isolates,
 };
 pub use font::{
     Descendant, DrawFont, DrawText, Font, FontApprox, FontKind, FontMetrics, FontProgram, Fonts,

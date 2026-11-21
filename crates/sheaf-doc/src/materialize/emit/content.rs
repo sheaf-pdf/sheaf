@@ -124,8 +124,8 @@ use super::{Cx, Deferred, PdfVersion};
 use crate::content::sink::{self, Sink as _};
 use crate::content::{
     self, Balance, BlockAt, BlockId, Concat, ContentWriter, GenId, Marker, NameSet, PagOrigin,
-    PageBlocks, PageContent, Pagination, PaginationKind, Pos, Props, Res, ResBody, ResCx, ResId,
-    ResKind, Reserved, ResourceNeeds, Rewrite, SheafBlock, SpanAcross, SpliceError, Spliced,
+    PageBlocks, PageContent, Pagination, PaginationKind, Pos, Res, ResBody, ResCx, ResId, ResKind,
+    Reserved, ResourceNeeds, Rewrite, SheafBlock, SpanAcross, SpliceError, Spliced,
 };
 use crate::generate::{self, Art};
 use crate::geom::Geom;
@@ -812,10 +812,8 @@ fn rebuilt(
     let mut rewrites = Vec::new();
     let mut lists = 0;
     for span in marked_ranges(filters, blocks.as_deref()) {
-        let named = || {
-            (blocks.iter().flat_map(|b| b.marked.iter()))
-                .any(|m| m.span == span && matches!(m.props, Some(Props::Named(..))))
-        };
+        let named =
+            || (blocks.iter().flat_map(|b| b.marked.iter())).any(|m| m.span == span && m.named);
         if aside[span.start.stream as usize]
             || spliced.takes(concat, span)
             || (strip.lists && named())

@@ -23,7 +23,7 @@
 //!
 //! `crate::content` re-exports them but [`Limits`], [`Join`],
 //! [`Operators`] and the marked ranges, which only the door names: a page's
-//! blocks keep ranges of sheaf's own (`crate::content::Marked`).
+//! blocks keep what they read of a range (`crate::content::KeptRange`).
 //!
 //! Also a minimal content-stream operation builder for test fixtures and
 //! examples ([`Content`]).

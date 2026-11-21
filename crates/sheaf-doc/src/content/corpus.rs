@@ -287,7 +287,7 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
                         out.acrobat_refused.push(format!("{at}: {:?}", p.kind));
                     }
                     let range = blocks.marked.iter().find(|m| m.span == p.span);
-                    let inline = range.is_some_and(|m| matches!(m.props, Some(Props::Inline(_))));
+                    let inline = range.is_some_and(|m| m.list.is_some() && !m.named);
                     let made = match without_keys(concat, &res, cs, p.span, &[b"Type"]) {
                         Ok(_) => true,
                         Err(e) => {
@@ -1901,15 +1901,11 @@ fn marked_records(r: &mut Records, m: &crate::pdf::content::Marked) {
 
 /// The record of a marked range a page's blocks keep: its tag, its list,
 /// whether the list is named in the resources, and its span.
-fn kept_records(r: &mut Records, m: &Marked) {
+fn kept_records(r: &mut Records, m: &KeptRange) {
     r.begin("kept");
     r.bytes("tag", Some(&m.tag));
-    r.number(
-        "named",
-        u64::from(matches!(m.props, Some(Props::Named(..)))),
-    );
-    let list = m.props.as_ref().and_then(Props::dict);
-    r.object("list", list.cloned().map(Object::from).as_ref());
+    r.number("named", u64::from(m.named));
+    r.object("list", m.list.clone().map(Object::from).as_ref());
     r.span("span", m.span);
     r.end();
 }

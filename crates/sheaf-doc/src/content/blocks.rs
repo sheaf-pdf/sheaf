@@ -6,9 +6,9 @@
 //! a page's once, when first asked ([`Source::blocks`]), never at open.
 //! The content is read by pdf-content-streams' operations, its marked
 //! ranges and balance found as they're read ([`MarkedNest`],
-//! [`Balance`]); what's classified is sheaf's, and the ranges it keeps
-//! are of its own type ([`Marked`]), as a source keeps a page's blocks
-//! past the property lists the family's borrow.
+//! [`Balance`]); what's classified is sheaf's, and of the ranges it
+//! keeps it holds what it reads of them ([`KeptRange`]), as a source
+//! keeps a page's blocks past the property lists the family's borrow.
 //!
 //! [`Source::blocks`]: crate::source::Source::blocks
 
@@ -26,60 +26,46 @@ use super::page::{
 use super::{Operation, ResCx, SpliceError, SyntaxError, Tok, tokens};
 use crate::source::Limits;
 
-/// A marked range's property list, as a page's blocks keep it.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Props {
-    /// Written in the content: `/Tag << … >> BDC`.
-    Inline(Dictionary),
-    /// Named there, `/Tag /Name BDC`: the name, and the list the
-    /// resources have under it, if they have one.
-    Named(Vec<u8>, Option<Dictionary>),
-}
-
-impl Props {
-    /// The list itself, wherever it's written.
-    pub fn dict(&self) -> Option<&Dictionary> {
-        match self {
-            Props::Inline(dict) => Some(dict),
-            Props::Named(_, dict) => dict.as_ref(),
-        }
-    }
-}
-
-/// A marked range, as a page's blocks keep it ([`PageBlocks::marked`]):
-/// from its tag, before `BMC` or `BDC`, through its `EMC`. It's
-/// pdf-content-streams' range, its named list held by value, so it
-/// outlives the lists it was read with.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Marked {
+/// A marked range a page's blocks keep ([`PageBlocks::marked`]), an
+/// artifact's or one of sheaf's blocks': what sheaf reads of the range
+/// pdf-content-streams found, held by value, so it outlives the lists it
+/// was read with.
+#[derive(Clone, PartialEq)]
+pub struct KeptRange {
     pub tag: Vec<u8>,
-    /// None for `BMC`, or a `BDC` whose list is neither a dictionary nor
-    /// a name.
-    pub props: Option<Props>,
+    /// Its property list, written in the content or the one the
+    /// resources have under the name written there: None for `BMC`, a
+    /// name the resources have no list under, or what's neither a
+    /// dictionary nor a name.
+    pub list: Option<Dictionary>,
+    /// Whether its list is named, `/Tag /Name BDC`, so it's the
+    /// resources' and not the content's to write again.
+    pub named: bool,
+    /// From its tag, before `BMC` or `BDC`, through its `EMC`.
     pub span: SpanAcross,
-    /// The ranges it's inside: 0 at the top.
-    pub depth: u16,
 }
 
-impl Marked {
-    /// Its property list, wherever it's written.
-    fn list(&self) -> Option<&Dictionary> {
-        self.props.as_ref().and_then(Props::dict)
+impl KeptRange {
+    /// `found`, its list copied.
+    fn of(found: &family::Marked<'_>) -> KeptRange {
+        KeptRange {
+            tag: found.tag.clone(),
+            list: list(found).cloned(),
+            named: matches!(found.props, Some(family::Props::Named(..))),
+            span: found.span,
+        }
     }
 }
 
-impl From<&family::Marked<'_>> for Marked {
-    /// `found`, its list copied.
-    fn from(found: &family::Marked<'_>) -> Marked {
-        Marked {
-            tag: found.tag.clone(),
-            props: found.props.as_ref().map(|props| match props {
-                family::Props::Inline(dict) => Props::Inline(dict.clone()),
-                family::Props::Named(name, dict) => Props::Named(name.clone(), dict.cloned()),
-            }),
-            span: found.span,
-            depth: found.depth,
-        }
+impl fmt::Debug for KeptRange {
+    /// Without its list's entries, which may be a page's text.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KeptRange")
+            .field("tag", &String::from_utf8_lossy(&self.tag))
+            .field("list", &self.list.as_ref().map(Dictionary::len))
+            .field("named", &self.named)
+            .field("span", &self.span)
+            .finish()
     }
 }
 
@@ -303,7 +289,7 @@ pub struct PageBlocks {
     /// The artifact ranges, at any depth, and sheaf's marked blocks, in
     /// the order they open; not the structure's ranges, which a tagged
     /// page has one of for every run of text.
-    pub marked: Arc<[Marked]>,
+    pub marked: Arc<[KeptRange]>,
     pub pagination: Arc<[Pagination]>,
     /// sheaf's blocks: each stream marked `/SHEF_Block`, and each range
     /// whose list has `/SHEF_Gen` or `/SHEF_OcrBlock` in a stream that
@@ -480,7 +466,7 @@ impl PageBlocks {
         Ok(PageBlocks {
             marked: (marked.iter())
                 .filter(|m| m.tag == b"Artifact" || marked_block(list(m)).is_some())
-                .map(Marked::from)
+                .map(KeptRange::of)
                 .collect(),
             pagination,
             sheaf: sheaf.into(),
@@ -511,8 +497,8 @@ impl PageBlocks {
     /// by their property lists: None when none draws one.
     pub fn kind_of(&self, id: GenId) -> Option<PaginationKind> {
         (self.marked.iter())
-            .filter(|m| marked_block(m.list()) == Some(SheafBlock::Gen(id)))
-            .find_map(|m| pagination(&m.tag, m.list()))
+            .filter(|m| marked_block(m.list.as_ref()) == Some(SheafBlock::Gen(id)))
+            .find_map(|m| pagination(&m.tag, m.list.as_ref()))
     }
 }
 

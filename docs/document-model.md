@@ -679,9 +679,10 @@ on each side. `Content` is left as the fixtures' builder, and its
   marked content that doesn't balance, or whose ranges and lists come
   to more than 2²² values in a reading, is an error, which no page in
   the corpus or the pool has. A
-  page's blocks keep the ranges they need as sheaf's own
-  (`content::Marked`, the list held by value), since a source keeps
-  them past the lists they were read from. `content::balance` is the
+  page's blocks keep what they read of the ranges they need
+  (`content::KeptRange`: the tag, the list held by value, whether it's
+  named, and the span), since a source keeps them past the lists they
+  were read from. `content::balance` is the
   `q`/`Q` count: what's left open at the end (`net`) and the lowest it
   went (`min_prefix`). `content::names_used` gives the resource names
   the content uses (fonts, XObjects, graphics states, shadings, color

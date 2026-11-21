@@ -360,30 +360,20 @@ fn sheafs_blocks_are_found_by_their_markers() {
         ]
     );
     assert_eq!(&*blocks.isolation, &[ids[0], ids[2]]);
-    // The ranges it keeps, its artifacts and sheaf's, of its own type, each
-    // named list held by value.
-    let named =
-        |name: &[u8], list: &Dictionary| Some(Props::Named(name.to_vec(), Some(list.clone())));
-    let kept = |tag: &[u8], props, span| Marked {
+    // The ranges it keeps, its artifacts and sheaf's: what it reads of
+    // each, its named list held by value.
+    let kept = |tag: &[u8], list: &Dictionary, span| KeptRange {
         tag: tag.to_vec(),
-        props,
+        list: Some(list.clone()),
+        named: true,
         span,
-        depth: 0,
     };
     assert_eq!(
         &*blocks.marked,
         [
-            kept(
-                b"Artifact",
-                named(b"ShP0", &gen_list),
-                span((1, 4), (1, 39))
-            ),
-            kept(b"ShOCR", named(b"ShP1", &ocr_list), span((1, 40), (1, 60))),
-            kept(
-                b"Artifact",
-                named(b"ShP0", &gen_list),
-                span((3, 0), (3, 33))
-            ),
+            kept(b"Artifact", &gen_list, span((1, 4), (1, 39))),
+            kept(b"ShOCR", &ocr_list, span((1, 40), (1, 60))),
+            kept(b"Artifact", &gen_list, span((3, 0), (3, 33))),
         ]
     );
     // A stream's dictionary alone says what it is.
