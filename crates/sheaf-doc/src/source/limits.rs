@@ -1,5 +1,6 @@
 //! The caps every reader of a source runs under: one value for all of
-//! them.
+//! them, given to the PDF layer's crates in their own terms at one place
+//! each ([`ContentLimits::family`], [`Limits::fonts`], [`Limits::gfx`]).
 
 /// The caps on reading a source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,7 +80,8 @@ pub struct ContentLimits {
     /// a pattern), but a stream may hold runs of numbers no operator ends.
     pub operands: usize,
     /// How deep arrays and dictionaries nest (PDFium's cap), and marked
-    /// content.
+    /// content: where content is interpreted, every range open across a
+    /// form and what draws it.
     pub depth: usize,
     /// An inline image's data, in bytes.
     pub inline_image: usize,
@@ -90,7 +92,8 @@ pub struct ContentLimits {
     /// this depth.
     pub form_depth: usize,
     /// Graphics states `q` saved and `Q` hasn't restored, where content is
-    /// interpreted; elsewhere their balance is only counted. PDFium has no
+    /// interpreted, within each content stream (a form's apart from what
+    /// draws it); elsewhere their balance is only counted. PDFium has no
     /// cap, so this one only bounds the memory they take, far above any
     /// real page's.
     pub states: usize,
@@ -103,9 +106,9 @@ pub struct ContentLimits {
     /// so a form of whitespace or comments, which has few operators, still
     /// costs its length each time it's drawn.
     pub interpreted: usize,
-    /// Path segments: of a path being built, and of all those a page's
-    /// content paints or makes the clip, counted as `operators` are, which
-    /// bounds the memory a path and the clip take.
+    /// Path segments: of all those a page's content paints, counted as
+    /// `operators` are, and of the clip and the path being built together,
+    /// which bounds the memory a path and the clip take.
     pub segments: usize,
 }
 
