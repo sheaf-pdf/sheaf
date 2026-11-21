@@ -493,6 +493,26 @@ glyph-dump out:
 events-dump out:
     SHEAF_EVENTS_DUMP="{{ absolute_path(out) }}" scripts/test-capped.sh cargo test -p sheaf-doc --release --lib -- --ignored --nocapture --exact content::corpus::events_dump
 
+# What every page of the files glyph-dump reads, and every form XObject a
+# page draws (once a file), reads as content, a line each, written to
+# `out`, numbers and checksums only: `ok` or the class of what stopped its
+# tokens (`unread:stream`, `unread:too-large` or `unopened` where nothing
+# was read); its tokens, their ranges, its operators, its `q`/`Q`
+# balance, the color spaces it's read with, the resource names it uses,
+# its marked ranges, the names and dictionaries read from its operands,
+# and what the private names' walk hears of it; and for a page, its
+# blocks, field by field, and what's cut and written: each pagination
+# artifact's cuts, the bytes a splice of them makes, its list written
+# again, and the sets a strip takes out together. It asserts nothing: run
+# it before and after a change to what reads content, over the same
+# corpus, and `diff` the two files; SHEAF_CONTENT_DUMP_ONLY=<a corpus
+# path> prints that file's records in full. Two runs over the same code
+# write the same file.
+[doc("What every corpus page's and form's content reads as, a line each, written to a file: diff two runs across a change to what reads content")]
+[group('corpus')]
+content-dump out:
+    SHEAF_CONTENT_DUMP="{{ absolute_path(out) }}" scripts/test-capped.sh cargo test -p sheaf-doc --release --lib -- --ignored --nocapture --exact content::corpus::content_dump
+
 # ----- Gates ---------------------------------------------------------------
 
 # Wait until the machine is quiet: the 1-minute load under

@@ -347,6 +347,22 @@ fn lexed(
     }
 }
 
+/// What [`lexed`] hands on of content `bytes`, read with `res`: each name
+/// and inline property list's key, in order, and None where it took the
+/// content to hold private data it couldn't read. The content dump's,
+/// which so reads content as [`walk`] does.
+#[cfg(test)]
+pub(crate) fn heard(bytes: &[u8], res: &ResCx, lim: &Limits) -> Vec<Option<Vec<u8>>> {
+    let mut heard = Vec::new();
+    lexed(ObjectId::new(0, 0), bytes, (res, lim), &mut |_, said| {
+        heard.push(match said {
+            Said::Name(name) | Said::Nm(name) => Some(name.to_vec()),
+            Said::Unread => None,
+        });
+    });
+    heard
+}
+
 /// Whether `bytes` hold `/SHEF_`, the prefix of every name sheaf writes.
 fn says_shef(bytes: &[u8]) -> bool {
     bytes.windows(6).any(|w| w == b"/SHEF_")

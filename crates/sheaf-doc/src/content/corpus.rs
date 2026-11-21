@@ -597,6 +597,58 @@ impl Records {
         }
     }
 
+    /// A number that may be below 0.
+    fn signed(&mut self, name: &str, v: i64) {
+        self.sum.write(&v.to_le_bytes());
+        if let Some(full) = &mut self.full {
+            full.push_str(&format!(" {name}={v}"));
+        }
+    }
+
+    /// Bytes too many to print, their length first: where the records
+    /// are printed in full, their length and a checksum of them.
+    fn blob(&mut self, name: &str, v: &[u8]) {
+        self.sum.write(&(v.len() as u64).to_le_bytes());
+        self.sum.write(v);
+        if let Some(full) = &mut self.full {
+            let sum = sheaf_util::checksum_hex(v);
+            full.push_str(&format!(" {name}={}:{sum}", v.len()));
+        }
+    }
+
+    /// Part of a page's content: where it starts and ends, each a stream
+    /// and a byte in it.
+    fn span(&mut self, name: &str, span: SpanAcross) {
+        let (start, end) = (span.start, span.end);
+        for v in [start.stream, start.at, end.stream, end.at] {
+            self.sum.write(&u64::from(v).to_le_bytes());
+        }
+        if let Some(full) = &mut self.full {
+            let (s, e) = (start, end);
+            full.push_str(&format!(
+                " {name}={}.{}..{}.{}",
+                s.stream, s.at, e.stream, e.at
+            ));
+        }
+    }
+
+    /// An object as PDF writes it, which may not be there (0), or may be
+    /// there and not be written (2).
+    fn object(&mut self, name: &str, v: Option<&Object>) {
+        let written = v.map(|v| {
+            let mut out = Vec::new();
+            crate::pdf::write::write(&mut out, v).map(|()| out)
+        });
+        match written {
+            None => self.number(name, 0),
+            Some(Ok(bytes)) => {
+                self.number(name, 1);
+                self.bytes(name, Some(&bytes));
+            }
+            Some(Err(_)) => self.number(name, 2),
+        }
+    }
+
     fn approx(&mut self, approx: FontApprox) {
         self.number("approx.codes", u64::from(approx.codes));
         self.number("approx.widths", u64::from(approx.widths));
@@ -1784,4 +1836,774 @@ fn the_events_dump_holds_numbers_by_their_bits_but_a_zero_s_sign() {
     };
     assert_eq!(sum(0.0), sum(-0.0));
     assert_ne!(sum(1.0), sum(f32::from_bits(1.0_f32.to_bits() + 1)));
+}
+
+/// Where [`content_dump`] writes: a path. Unset, it reads nothing.
+/// `just content-dump <file>` sets it.
+const CONTENT: &str = "SHEAF_CONTENT_DUMP";
+
+/// A corpus path whose records [`content_dump`] prints in full to
+/// stderr, reading that file alone.
+const CONTENT_ONLY: &str = "SHEAF_CONTENT_DUMP_ONLY";
+
+/// How many columns a line of the content dump has.
+const CONTENT_COLUMNS: usize = 14;
+
+/// The content dump's line for a page, a form or a file that wasn't read
+/// as content: `class` says why.
+fn content_none(path: &str, page: &str, class: &str) -> String {
+    let dashes = ["-"; CONTENT_COLUMNS - 3].join("\t");
+    format!("{path}\t{page}\t{class}\t{dashes}")
+}
+
+/// The class of what stopped content's tokens, or its marked content,
+/// never its wording.
+fn lex_class(kind: LexErrorKind) -> &'static str {
+    match kind {
+        LexErrorKind::String => "string",
+        LexErrorKind::HexString => "hex-string",
+        LexErrorKind::Array => "array",
+        LexErrorKind::Dict => "dict",
+        LexErrorKind::InlineImage => "inline-image",
+        LexErrorKind::Depth => "depth",
+        LexErrorKind::Operands => "operands",
+        LexErrorKind::InlineImageSize => "image-size",
+        LexErrorKind::Marked => "marked",
+        LexErrorKind::Emc => "emc",
+    }
+}
+
+/// The class of why a page's content wasn't read, or its blocks weren't.
+fn fault_class(fault: &ContentFault) -> &'static str {
+    match fault {
+        ContentFault::Stream { .. } => "unread:stream",
+        ContentFault::TooLarge(_) => "unread:too-large",
+        ContentFault::Lex { error, .. } => lex_class(error.kind),
+    }
+}
+
+/// The color spaces a resources context names, each with its
+/// components, in the order of their names, read from what its `Debug`
+/// writes (`spaces: {[67, 83, 48]: 3, …}`), as neither sheaf's nor
+/// pdf-content-streams' lends them. Anything else written there panics.
+fn spaces_of(res: &impl std::fmt::Debug) -> Vec<(Vec<u8>, u32)> {
+    let debug = format!("{res:?}");
+    let field = "spaces: {";
+    let at = debug
+        .find(field)
+        .unwrap_or_else(|| panic!("no spaces in {debug}"));
+    let mut rest = &debug[at + field.len()..];
+    let mut spaces = Vec::new();
+    loop {
+        rest = rest.trim_start_matches([',', ' ']);
+        if rest.starts_with('}') {
+            break;
+        }
+        let wrong = || panic!("a space that isn't a name and a count in {debug}");
+        let Some(open) = rest.strip_prefix('[') else {
+            wrong()
+        };
+        let Some(close) = open.find(']') else { wrong() };
+        let name: Vec<u8> = (open[..close].split(", "))
+            .filter(|b| !b.is_empty())
+            .map(|b| b.parse().unwrap_or_else(|_| wrong()))
+            .collect();
+        let Some(count) = open[close + 1..].strip_prefix(": ") else {
+            wrong()
+        };
+        let end = (count.find(|c: char| !c.is_ascii_digit())).unwrap_or(count.len());
+        spaces.push((name, count[..end].parse().unwrap_or_else(|_| wrong())));
+        rest = &count[end..];
+    }
+    spaces.sort();
+    spaces
+}
+
+/// A marked range's list: none, written in the content, or named, with
+/// the list the resources have under the name.
+fn props_records(r: &mut Records, props: Option<&Props>) {
+    match props {
+        None => r.number("props", 0),
+        Some(Props::Inline(list)) => {
+            r.number("props", 1);
+            r.object("list", Some(&Object::from(list.clone())));
+        }
+        Some(Props::Named(name, list)) => {
+            r.number("props", 2);
+            r.bytes("named", Some(name));
+            r.object("list", list.clone().map(Object::from).as_ref());
+        }
+    }
+}
+
+/// A marked range's record: its tag, its list, its span and its depth.
+fn marked_records(r: &mut Records, m: &Marked) {
+    r.begin("marked");
+    r.bytes("tag", Some(&m.tag));
+    props_records(r, m.props.as_ref());
+    r.span("span", m.span);
+    r.number("depth", u64::from(m.depth));
+    r.end();
+}
+
+/// The dump's number for why a splice was refused.
+fn refusal(e: &SpliceError) -> u64 {
+    match e {
+        SpliceError::Read(_) => 1,
+        SpliceError::OutOfRange(_) => 2,
+        SpliceError::Overlap(_) => 3,
+        SpliceError::Unsafe(_) => 4,
+        SpliceError::List(_) => 5,
+        SpliceError::Capped(_) => 6,
+        SpliceError::Reads { .. } => 7,
+        _ => 255,
+    }
+}
+
+/// What a splice made: refused, and why; made with no stream changed; or
+/// made, and every stream's bytes.
+fn spliced_records(r: &mut Records, made: Result<Option<Vec<Cow<'_, [u8]>>>, SpliceError>) {
+    match made {
+        Err(e) => {
+            r.number("made", 0);
+            r.number("refused", refusal(&e));
+        }
+        Ok(None) => {
+            r.number("made", 1);
+            r.number("changed", 0);
+        }
+        Ok(Some(streams)) => {
+            r.number("made", 1);
+            r.number("changed", 1);
+            r.number("streams", streams.len() as u64);
+            for stream in &streams {
+                r.blob("stream", stream);
+            }
+        }
+    }
+}
+
+/// What the content dump reads of one page's content, or one form's: its
+/// columns 3 to 12, and what reading on needs of it.
+struct ContentRead {
+    columns: String,
+    res: ResCx,
+    /// The resource names it uses, where its tokens read.
+    names: Option<NameSet>,
+}
+
+/// The content dump's columns 3 to 12 for `content`, drawn with
+/// `resources` from `objects`' objects, as sheaf reads it:
+/// 3. `ok`, or the class of what stopped its tokens ([`lex_class`]);
+/// 4. how many tokens; 5. a checksum of each token's kind and range, an
+///    inline image's data's range, and where the tokens stopped;
+/// 6. how many operators, an inline image one;
+/// 7. its `q`/`Q` balance, `net,min`, or `-`;
+/// 8. the color spaces it's read with, how many and a checksum of each
+///    name and its components ([`spaces_of`]);
+/// 9. the resource names it uses, how many and a checksum of each
+///    category and name, or `-`;
+/// 10. its marked ranges, how many and a checksum of each ([`marked_records`]),
+///     or `err:` and the class of what stopped them;
+/// 11. the operands sheaf reads as more than bytes, how many and a
+///     checksum of each: a name, decoded, and a dictionary, read as an
+///     object and written, or that it isn't one;
+/// 12. what the private names' walk hears of it ([`crate::private::heard`]):
+///     how many and a checksum of each name, and `,unread` where it took
+///     the content to hold some it couldn't read.
+///
+/// Its records in full go to stderr under `at`, where `full`.
+fn content_columns<R: ReadObjects>(
+    objects: &R,
+    content: &Concat,
+    resources: Option<&Object>,
+    (at, full): (&str, bool),
+) -> ContentRead {
+    let res = ResCx::read(objects, resources);
+    let s = content.bytes();
+    let (mut tokens, mut operands) = (Records::new(full), Records::new(full));
+    let (mut count, mut operators, mut read) = (0usize, 0usize, 0usize);
+    let mut class = "ok";
+    for token in lex(s, &res, LIM) {
+        let (r, tok) = match token {
+            Ok(token) => token,
+            Err(e) => {
+                class = lex_class(e.kind);
+                tokens.begin("stopped");
+                tokens.number("at", e.at as u64);
+                tokens.bytes("class", Some(class.as_bytes()));
+                tokens.end();
+                break;
+            }
+        };
+        count += 1;
+        tokens.begin(match tok {
+            Tok::Op(_) => "op",
+            Tok::Operand(_) => "operand",
+            Tok::InlineImage(_) => "image",
+        });
+        tokens.number("start", r.start as u64);
+        tokens.number("end", r.end as u64);
+        match tok {
+            Tok::Op(_) => operators += 1,
+            Tok::InlineImage(data) => {
+                operators += 1;
+                tokens.number("data_start", data.start as u64);
+                tokens.number("data_end", data.end as u64);
+            }
+            Tok::Operand(operand) => {
+                if let Some(decoded) = name(operand) {
+                    read += 1;
+                    operands.begin("name");
+                    operands.bytes("name", Some(&decoded));
+                    operands.end();
+                } else if operand.starts_with(b"<<") {
+                    read += 1;
+                    operands.begin("dict");
+                    operands.object("object", object(operand, LIM.content.depth).as_ref());
+                    operands.end();
+                }
+            }
+        }
+        tokens.end();
+    }
+    let tokens = tokens.finish(&format!("{at}: tokens"));
+    let counted = match balance(content, &res, LIM) {
+        Ok(b) => format!("{},{}", b.net, b.min_prefix),
+        Err(_) => "-".into(),
+    };
+    let mut r = Records::new(full);
+    let spaces = spaces_of(&res);
+    for (space, n) in &spaces {
+        r.begin("space");
+        r.bytes("name", Some(space));
+        r.number("components", u64::from(*n));
+        r.end();
+    }
+    let spaces = format!("{}:{}", spaces.len(), r.finish(&format!("{at}: spaces")));
+    let names = names_used(content, &res, LIM, &[]).ok();
+    let used = match &names {
+        Some(names) => {
+            let mut r = Records::new(full);
+            for (kind, name) in names.iter() {
+                r.begin("name");
+                r.bytes("kind", Some(kind.key()));
+                r.bytes("name", Some(name));
+                r.end();
+            }
+            format!("{}:{}", names.len(), r.finish(&format!("{at}: names")))
+        }
+        None => "-".into(),
+    };
+    let lists = PropertiesDict::read(objects, resources);
+    let ranges = match marked(content, &lists, &res, LIM) {
+        Ok(found) => {
+            let mut r = Records::new(full);
+            for m in &found {
+                marked_records(&mut r, m);
+            }
+            format!("{}:{}", found.len(), r.finish(&format!("{at}: marked")))
+        }
+        Err(e) => format!("err:{}", lex_class(e.kind)),
+    };
+    let operands = format!("{read}:{}", operands.finish(&format!("{at}: operands")));
+    let heard = crate::private::heard(s, &res, LIM);
+    let mut r = Records::new(full);
+    for said in &heard {
+        match said {
+            Some(name) => {
+                r.begin("name");
+                r.bytes("name", Some(name));
+            }
+            None => r.begin("unread"),
+        }
+        r.end();
+    }
+    let unread = match heard.iter().any(Option::is_none) {
+        true => ",unread",
+        false => "",
+    };
+    let heard = format!(
+        "{}:{}{unread}",
+        heard.len(),
+        r.finish(&format!("{at}: heard"))
+    );
+    ContentRead {
+        columns: format!(
+            "{class}\t{count}\t{tokens}\t{operators}\t{counted}\t{spaces}\t{used}\t{ranges}\t\
+             {operands}\t{heard}"
+        ),
+        res,
+        names,
+    }
+}
+
+/// The content dump's number for who drew a pagination artifact.
+fn origin_number(origin: PagOrigin) -> u64 {
+    match origin {
+        PagOrigin::Sheaf => 0,
+        PagOrigin::Acrobat => 1,
+        PagOrigin::Authored => 2,
+    }
+}
+
+/// The content dump's column 13 for a page: its blocks, field by field
+/// (each marked range kept, each pagination artifact's kind, origin,
+/// generator and span, each of sheaf's blocks and where it is, the
+/// streams that isolate, whether a stream is marked as sheaf's, the
+/// balance, and whether a form drawn has an artifact in it), how many
+/// ranges and artifacts and a checksum of them; or `err:` and the class
+/// of the fault that stopped them.
+fn blocks_column(blocks: &Result<PageBlocks, ContentFault>, (at, full): (&str, bool)) -> String {
+    let b = match blocks {
+        Ok(b) => b,
+        Err(fault) => return format!("err:{}", fault_class(fault)),
+    };
+    let mut r = Records::new(full);
+    for m in b.marked.iter() {
+        marked_records(&mut r, m);
+    }
+    for p in b.pagination.iter() {
+        r.begin("pagination");
+        r.bytes("kind", Some(p.kind.name()));
+        r.number("origin", origin_number(p.origin));
+        r.maybe("generator", p.generator.map(|g| g.0));
+        r.span("span", p.span);
+        r.end();
+    }
+    for s in b.sheaf.iter() {
+        r.begin("sheaf");
+        let (block, id) = match s.block {
+            SheafBlock::Gen(g) => (0, g.0),
+            SheafBlock::Ocr(b) => (1, b.0),
+            SheafBlock::Flat(b) => (2, b.0),
+        };
+        r.number("block", block);
+        r.number("id", id);
+        match s.at {
+            BlockAt::Stream(id) => {
+                r.number("at", 0);
+                r.number("stream", u64::from(id.number));
+                r.number("generation", u64::from(id.generation));
+            }
+            BlockAt::Marked(span) => {
+                r.number("at", 1);
+                r.span("span", span);
+            }
+        }
+        r.end();
+    }
+    for id in b.isolation.iter() {
+        r.begin("isolation");
+        r.number("stream", u64::from(id.number));
+        r.number("generation", u64::from(id.generation));
+        r.end();
+    }
+    r.begin("page");
+    r.number("sheaf_marked", u64::from(b.sheaf_marked));
+    r.signed("net", b.balance.net.into());
+    r.signed("min_prefix", b.balance.min_prefix.into());
+    r.number("nested_in_forms", u64::from(b.nested_in_forms));
+    r.end();
+    let sum = r.finish(&format!("{at}: blocks"));
+    format!("{},{}:{sum}", b.marked.len(), b.pagination.len())
+}
+
+/// The content dump's column 14 for a page, `content` read with `res`
+/// from `objects`' objects: what's cut and written, as a strip, a filter
+/// and a save make it. Whether a splice of nothing is made and gives
+/// each stream's own bytes, read apart; for each pagination artifact of
+/// `blocks`, its cuts ([`Pagination::cuts`]), what a splice of them makes
+/// ([`spliced_records`]), and its list written again without `/Type`
+/// ([`without_keys`]) and what that makes; and for each of the three
+/// sets a strip selects ([`PageBlocks::selected`]), what a splice of
+/// them together makes. How many artifacts' cuts are made of how many,
+/// and a checksum of the lot.
+fn written_column<R: ReadObjects>(
+    objects: &R,
+    content: &PageContent,
+    res: &ResCx,
+    blocks: Option<&PageBlocks>,
+    (at, full): (&str, bool),
+) -> String {
+    let concat = content.concat();
+    let cs = &LIM.content.family();
+    let mut r = Records::new(full);
+    r.begin("nothing");
+    match splice(concat, res.family(), cs, &[]) {
+        Ok(streams) => {
+            r.number("made", 1);
+            r.number("streams", streams.len() as u64);
+            for (n, (stream, &id)) in streams.iter().zip(content.ids()).enumerate() {
+                let own = objects.read(id, |o| {
+                    let stream = o.as_stream()?;
+                    stream.decompressed_content().ok()
+                });
+                let own = own.ok().flatten();
+                r.number("own", u64::from(own.as_deref() == Some(&**stream)));
+                r.number(
+                    "joined",
+                    u64::from(own.as_deref() == Some(concat.stream(n))),
+                );
+            }
+        }
+        Err(e) => {
+            r.number("made", 0);
+            r.number("refused", refusal(&e));
+        }
+    }
+    r.end();
+    let (mut made, mut artifacts) = (0, 0);
+    for p in blocks.iter().flat_map(|b| b.pagination.iter()) {
+        artifacts += 1;
+        r.begin("artifact");
+        r.span("span", p.span);
+        match p.cuts(concat, res, LIM) {
+            Ok(cuts) => {
+                r.number("cuts", cuts.len() as u64);
+                for &cut in &cuts {
+                    r.span("cut", cut);
+                }
+                let spliced = splice(concat, res.family(), cs, &cuts);
+                made += usize::from(spliced.is_ok());
+                spliced_records(&mut r, spliced.map(Some));
+            }
+            Err(e) => r.bytes("stopped", Some(lex_class(e.kind).as_bytes())),
+        }
+        match without_keys(concat, res.family(), cs, p.span, &[b"Type"]) {
+            Ok(Some(rewrite)) => {
+                r.number("rewrite", 2);
+                let nothing = Spliced::default();
+                spliced_records(
+                    &mut r,
+                    nothing.streams(concat, res.family(), cs, &[rewrite]),
+                );
+            }
+            Ok(None) => r.number("rewrite", 1),
+            Err(e) => {
+                r.number("rewrite", 0);
+                r.number("refused", refusal(&e));
+            }
+        }
+        r.end();
+    }
+    let origins = BTreeSet::from(PagOrigin::REPLACED);
+    let sets = [
+        BTreeSet::from([PaginationKind::Header, PaginationKind::Footer]),
+        BTreeSet::from([PaginationKind::Watermark]),
+        BTreeSet::from([PaginationKind::Background]),
+    ];
+    for (b, kinds) in blocks
+        .iter()
+        .flat_map(|b| sets.iter().map(move |kinds| (b, kinds)))
+    {
+        r.begin("selected");
+        for kind in kinds {
+            r.bytes("kind", Some(kind.name()));
+        }
+        let cuts: Result<Vec<Vec<SpanAcross>>, LexError> = (b.selected(kinds, &origins))
+            .map(|p| p.cuts(concat, res, LIM))
+            .collect();
+        match cuts {
+            Ok(cuts) => {
+                let cuts: Vec<SpanAcross> = cuts.into_iter().flatten().collect();
+                r.number("cuts", cuts.len() as u64);
+                spliced_records(&mut r, splice(concat, res.family(), cs, &cuts).map(Some));
+            }
+            Err(e) => r.bytes("stopped", Some(lex_class(e.kind).as_bytes())),
+        }
+        r.end();
+    }
+    format!("{made}/{artifacts}:{}", r.finish(&format!("{at}: written")))
+}
+
+/// The content dump's lines for a file of `bytes`, at `path`: a line a
+/// page, `{path}\t{page}\t` and its columns 3 to 12 ([`content_columns`]),
+/// 13 ([`blocks_column`]) and 14 ([`written_column`]); and after it a
+/// line for each form XObject the page draws that no page before it
+/// drew, found as [`read_file`] finds them, its page `{page} form {n}
+/// {generation}`, its columns 3 to 12 read with its own resources or its
+/// page's, and 13 and 14 `-`. A page, or a form, that isn't read is
+/// [`content_none`]'s line, its class `unread:stream` or
+/// `unread:too-large`; a file that doesn't open is one, its page `-` and
+/// its class `unopened`.
+fn content_lines(path: &str, bytes: Vec<u8>, full: bool) -> Vec<String> {
+    let kind = BlobKind::file(Path::new(path), None);
+    let Ok(src) = Store::new().open(bytes.into(), kind) else {
+        return vec![content_none(path, "-", "unopened")];
+    };
+    let known = DrawnForms::default();
+    let mut seen = HashSet::new();
+    let mut lines = Vec::new();
+    for (i, page) in src.pages().iter().enumerate() {
+        let n = (i + 1).to_string();
+        let at = format!("{path} page {n}");
+        let content = match PageContent::read(src.pdf(), &page.contents, LIM) {
+            Ok(content) => content,
+            Err(fault) => {
+                lines.push(content_none(path, &n, fault_class(&fault)));
+                continue;
+            }
+        };
+        let resources = page.resources.as_deref();
+        let concat = content.concat();
+        let read = content_columns(src.pdf(), concat, resources, (&at, full));
+        let blocks = PageBlocks::of(src.pdf(), &content, resources, LIM, &known);
+        let kept = blocks_column(&blocks, (&at, full));
+        let written = written_column(
+            src.pdf(),
+            &content,
+            &read.res,
+            blocks.as_ref().ok(),
+            (&at, full),
+        );
+        lines.push(format!("{path}\t{n}\t{}\t{kept}\t{written}", read.columns));
+        let names = read
+            .names
+            .iter()
+            .flat_map(|names| names.of(ResKind::XObject));
+        for name in names {
+            let Some(id) = xobject(&src, resources, name) else {
+                continue;
+            };
+            if !seen.insert(id) {
+                continue;
+            }
+            let form = src.pdf().get_object(id).ok().and_then(Object::as_stream);
+            let Some(form) =
+                form.filter(|f| f.dict.get(b"Subtype").and_then(Object::as_name) == Some(b"Form"))
+            else {
+                continue;
+            };
+            let label = format!("{n} form {} {}", id.number, id.generation);
+            let data = match form.decompressed_content_with_limit(LIM.content.decompressed) {
+                Ok(data) => data,
+                Err(crate::pdf::Error::Limit(crate::pdf::Limit::Decompressed)) => {
+                    lines.push(content_none(path, &label, "unread:too-large"));
+                    continue;
+                }
+                Err(_) => {
+                    lines.push(content_none(path, &label, "unread:stream"));
+                    continue;
+                }
+            };
+            let own = form.dict.get(b"Resources").or(resources);
+            let at = format!("{path} page {label}");
+            let one = Concat::new(&[&data]);
+            let read = content_columns(src.pdf(), &one, own, (&at, full));
+            lines.push(format!("{path}\t{label}\t{}\t-\t-", read.columns));
+        }
+    }
+    lines
+}
+
+/// The content dump's lines for the file at `path` of the corpus
+/// ([`content_lines`]).
+fn content_file(corpus: &Corpus, path: &str, full: bool) -> Vec<String> {
+    match std::fs::read(corpus.root.join(path)) {
+        Ok(bytes) => content_lines(path, bytes, full),
+        Err(_) => vec![content_none(path, "-", "unopened")],
+    }
+}
+
+/// What every page of the corpus's files reads as content, and every
+/// form XObject a page draws, once a file, to set beside itself after a
+/// change to what reads content: a line each ([`content_lines`]),
+/// numbers and checksums only, the files in the order of their paths
+/// ([`dump_picks`]: the glyph dump's), written to the path in
+/// [`CONTENT`]. Two runs over the same code write the same file. With
+/// [`CONTENT_ONLY`] it reads the one file named, and prints each record
+/// in full to stderr.
+#[test]
+#[ignore = "a dump of what the corpus's content reads as, written to $SHEAF_CONTENT_DUMP"]
+fn content_dump() {
+    let to = std::env::var_os(CONTENT);
+    let only = std::env::var(CONTENT_ONLY).ok();
+    if to.is_none() && only.is_none() {
+        eprintln!("skipped: neither {CONTENT} nor {CONTENT_ONLY} is set");
+        return;
+    }
+    let Some(corpus) = Corpus::or_skip() else {
+        return;
+    };
+    let started = Instant::now();
+    let full = only.is_some();
+    let lines = each_dumped(
+        &corpus,
+        (only.as_deref(), CONTENT_ONLY),
+        |path| content_file(&corpus, path, full),
+        |path, said| {
+            eprintln!("{path} panicked: {said}");
+            content_none(path, "-", "panicked")
+        },
+    );
+    let column = |line: &String, n: usize| line.split('\t').nth(n).map(str::to_owned);
+    let forms = (lines.iter())
+        .filter(|line| column(line, 1).is_some_and(|page| page.contains(" form ")))
+        .count();
+    let not_ok = (lines.iter())
+        .filter(|line| column(line, 2).as_deref() != Some("ok"))
+        .count();
+    eprintln!(
+        "{} lines, {} pages and {forms} forms, {not_ok} not ok, in {:.0} s",
+        lines.len(),
+        lines.len() - forms,
+        started.elapsed().as_secs_f64()
+    );
+    written(&lines, full, to);
+}
+
+/// A file of one page drawing `content`, with resources that name a
+/// color space of three components (`/CS3`), a form (`/X0`) that draws a
+/// marked range of its own, and a footer's property list (`/P0`).
+fn content_fixture(content: &[u8]) -> Vec<u8> {
+    use crate::pdf::{Document, Stream, dictionary};
+    let mut pdf = Document::with_version("1.7");
+    let form = pdf.add_object(Stream::new(
+        dictionary! {
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
+            "BBox" => vec![0.into(), 0.into(), 9.into(), 9.into()],
+        },
+        b"/Span <</MCID 0>> BDC 0 0 1 1 re f EMC".to_vec(),
+    ));
+    let content = pdf.add_object(Stream::new(dictionary! {}, content.to_vec()));
+    let footer = dictionary! {
+        "Type" => Object::name("Pagination"),
+        "Subtype" => Object::name("Footer"),
+    };
+    let pages = pdf.new_object_id();
+    let page = pdf.add_object(dictionary! {
+        "Type" => Object::name("Page"),
+        "Parent" => pages,
+        "MediaBox" => vec![0.into(), 0.into(), 99.into(), 99.into()],
+        "Contents" => content,
+        "Resources" => dictionary! {
+            "ColorSpace" => dictionary! { "CS3" => Object::name("DeviceRGB") },
+            "XObject" => dictionary! { "X0" => form },
+            "Properties" => dictionary! { "P0" => footer },
+        },
+    });
+    pdf.objects.insert(
+        pages,
+        Object::from(dictionary! {
+            "Type" => Object::name("Pages"),
+            "Kids" => vec![page.into()],
+            "Count" => 1,
+        }),
+    );
+    let catalog = pdf.add_object(dictionary! {
+        "Type" => Object::name("Catalog"),
+        "Pages" => pages,
+    });
+    pdf.trailer.set("Root", catalog);
+    let mut out = Vec::new();
+    pdf.save_to(&mut out).expect("writing the fixture");
+    out
+}
+
+/// The content dump's columns on two pages, each read the same twice and
+/// the same where its records are printed in full: one with two
+/// pagination artifacts, a header's list written in the content and a
+/// footer's named, an inline image sized by a named color space, and a
+/// form drawn, which has a line of its own; and one whose tokens stop at
+/// a string that doesn't end, which the private names' walk hears as
+/// unread, since it says `/SHEF_`.
+#[test]
+fn the_content_dump_says_what_content_reads_as() {
+    let lines = |content: &[u8]| {
+        let file = content_fixture(content);
+        let lines = content_lines("fixture.pdf", file.clone(), false);
+        assert_eq!(content_lines("fixture.pdf", file.clone(), false), lines);
+        assert_eq!(content_lines("fixture.pdf", file, true), lines);
+        lines
+    };
+    // Each column, a checksum's place written `#` where it's one.
+    let columns = |line: &str| -> Vec<String> {
+        let line: Vec<&str> = line.split('\t').collect();
+        assert_eq!(line.len(), CONTENT_COLUMNS, "{line:?}");
+        let sum = |s: &str| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit());
+        (line.iter())
+            .map(|column| match column.split_once(':') {
+                Some((count, rest)) if sum(rest.trim_end_matches(",unread")) => {
+                    let unread = rest.ends_with(",unread");
+                    format!("{count}:#{}", if unread { ",unread" } else { "" })
+                }
+                _ if sum(column) => "#".into(),
+                _ => column.to_string(),
+            })
+            .collect()
+    };
+    let page =
+        b"q /Artifact <</Type /Pagination /Subtype /Header>> BDC Q q 0 g 0 0 9 9 re f Q EMC\n\
+        /Artifact /P0 BDC BT /F1 9 Tf (f) Tj ET EMC\n\
+        q BI /W 2 /H 1 /BPC 8 /CS /CS3 ID abcdef EI Q /X0 Do";
+    let read = lines(page);
+    assert_eq!(read.len(), 2, "{read:#?}");
+    // 32 tokens, 19 operators, the image among them; one space; a font,
+    // a list, a form and the image's space used; two ranges; five names
+    // and the header's list read from operands; and the walk hears the
+    // names and the list's keys and names, nine.
+    assert_eq!(
+        columns(&read[0]),
+        [
+            "fixture.pdf",
+            "1",
+            "ok",
+            "32",
+            "#",
+            "19",
+            "0,0",
+            "1:#",
+            "4:#",
+            "2:#",
+            "6:#",
+            "9:#",
+            "2,2:#",
+            "1/2:#",
+        ]
+    );
+    // The form, read with its page's resources, having none of its own.
+    let form = columns(&read[1]);
+    assert!(
+        form[1].starts_with("1 form ") && form[1].ends_with(" 0"),
+        "{form:?}"
+    );
+    assert_eq!(
+        form[2..],
+        [
+            "ok", "10", "#", "4", "0,0", "1:#", "0:#", "1:#", "2:#", "2:#", "-", "-"
+        ]
+    );
+    let read = lines(b"BT /SHEF_Gen 9 Tf (never ends");
+    assert_eq!(read.len(), 1, "{read:#?}");
+    assert_eq!(
+        columns(&read[0])[2..],
+        [
+            "string",
+            "4",
+            "#",
+            "2",
+            "-",
+            "1:#",
+            "-",
+            "err:string",
+            "1:#",
+            "2:#,unread",
+            "err:string",
+            "0/0:#",
+        ]
+    );
+}
+
+/// The color spaces a resources context names are read from what it
+/// writes, sheaf's and pdf-content-streams' alike, in the order of their
+/// names, an empty name among them.
+#[test]
+fn the_content_dump_reads_a_resources_context_s_spaces() {
+    let res = ResCx::new([(b"CS3".to_vec(), 3), (b"A".to_vec(), 1), (Vec::new(), 4)]);
+    let want = [(Vec::new(), 4), (b"A".to_vec(), 1), (b"CS3".to_vec(), 3)];
+    assert_eq!(spaces_of(&res), want);
+    assert_eq!(spaces_of(res.family()), want);
+    assert_eq!(spaces_of(&ResCx::none()), []);
 }
