@@ -58,7 +58,7 @@ use crate::history::FixedCount;
 use crate::model::Document;
 use crate::pdf::content::{Color, Res, ResBody};
 use crate::pdf::fonts::{Descendant, FontKind, FontProgram};
-use crate::pdf::forms::{self, Appearance, Cap, Error, FieldFont, Limits, Quadding, Unmade};
+use crate::pdf::forms::{self, Appearance, Error, FieldFont, Limits, Quadding, Unmade};
 use crate::pdf::gfx::{BoxBorderStyle, DefaultAppearance};
 use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, Resolve, Value as PdfValue};
 use crate::source::Source;
@@ -272,42 +272,6 @@ pub(crate) fn sample(own: &str, flags: u32, max_len: Option<u32>) -> String {
     }
 }
 
-/// Why an appearance wasn't made, as the dump says it: never a character
-/// of the text.
-fn unmade_name(why: &Unmade) -> String {
-    match why {
-        Unmade::Unencodable(_) => "unencodable".into(),
-        Unmade::NoBox => "no-box".into(),
-        Unmade::NotFinite => "not-finite".into(),
-        Unmade::Limit(cap) => format!("limit:{}", cap_name(*cap)),
-        Unmade::NotText => "not-text".into(),
-        Unmade::FontNotBindable => "font-not-bindable".into(),
-        Unmade::Unreadable(u) => format!("unreadable:{:?}", u.why),
-        _ => "other".into(),
-    }
-}
-
-fn cap_name(cap: Cap) -> String {
-    match cap {
-        Cap::Fields => "fields".into(),
-        Cap::Items => "items".into(),
-        Cap::Annots(cap) => format!("annots:{cap:?}"),
-        Cap::Text => "text".into(),
-        Cap::CombCells => "comb-cells".into(),
-        Cap::FontBudget => "font-budget".into(),
-        _ => "other".into(),
-    }
-}
-
-/// Why the family couldn't read a form or a font, as the dump says it.
-fn error_name(e: &Error) -> String {
-    match e {
-        Error::Limit(cap) => format!("limit:{}", cap_name(*cap)),
-        Error::Unreadable(u) => format!("unreadable:{:?}", u.why),
-        _ => "other".into(),
-    }
-}
-
 fn kind_name(kind: FontKind) -> &'static str {
     match kind {
         FontKind::Type1 => "Type1",
@@ -382,7 +346,7 @@ where
     let font = match form.field_font(objects, name, &LIMITS, &mut ()) {
         Ok(font) => font,
         Err(e) => {
-            said.insert(0, ("font", format!("error:{}", error_name(&e))));
+            said.insert(0, ("font", format!("error:{}", appearance::error_kind(&e))));
             return (said, Err(e));
         }
     };
@@ -489,7 +453,7 @@ fn made_name(made: &Result<Appearance, Unmade>) -> String {
                 needs.join("+")
             )
         }
-        Err(why) => format!("unmade:{}", unmade_name(why)),
+        Err(why) => format!("unmade:{}", appearance::unmade_kind(why)),
     }
 }
 
@@ -516,7 +480,7 @@ fn versus(ours: &Result<Appearance, Unmade>, theirs: &Result<Appearance, Unmade>
                 false => differ.join(","),
             }
         }
-        (Err(a), Err(b)) if unmade_name(a) == unmade_name(b) => "=".into(),
+        (Err(a), Err(b)) if appearance::unmade_kind(a) == appearance::unmade_kind(b) => "=".into(),
         (Err(_), Err(_)) => "unmade".into(),
         _ => "made".into(),
     }
@@ -613,7 +577,7 @@ fn lines_of(path: &str, store: &Arc<Store>, src: &Src) -> Vec<String> {
     let (family, said) = match family {
         Ok(Some(f)) => (Some(Family::of(f)), "read".to_string()),
         Ok(None) => (None, "none".to_string()),
-        Err(e) => (None, format!("error:{}", error_name(&e))),
+        Err(e) => (None, format!("error:{}", appearance::error_kind(&e))),
     };
     let doc = opened(store, src, path);
     let st = doc.as_ref().map(Document::state);
@@ -690,7 +654,10 @@ fn lines_of(path: &str, store: &Arc<Store>, src: &Src) -> Vec<String> {
                     Ok(read) => read,
                     Err(why) => {
                         counts.differ += 1;
-                        line.field("family", &format!("unmade:{}", unmade_name(&why)));
+                        line.field(
+                            "family",
+                            &format!("unmade:{}", appearance::unmade_kind(&why)),
+                        );
                         break 'family None;
                     }
                 };

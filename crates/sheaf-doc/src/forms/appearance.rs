@@ -23,7 +23,7 @@ use crate::model::{DocState, FieldNode, Widget};
 use crate::pdf::content::{Color, Res, ResBody, ResId};
 use crate::pdf::fonts::Std14;
 use crate::pdf::forms::{
-    Appearance, Error, FieldFlags, FieldFont, Limits, Quadding, TextField, Unmade, WidgetLook,
+    Appearance, Cap, Error, FieldFlags, FieldFont, Limits, Quadding, TextField, Unmade, WidgetLook,
 };
 use crate::pdf::gfx::{BoxBorder, BoxBorderStyle, DefaultAppearance};
 use crate::pdf::{Dictionary, Object, ObjectId, Resolve, Why};
@@ -31,7 +31,7 @@ use crate::source::{FieldFontRead, Source};
 use crate::store::BlobId;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// What one text widget's appearance is made from: owned plain data out of
 /// the model, as [`text_look`] gives it, and what [`make`] makes it of.
@@ -415,6 +415,44 @@ pub fn make(look: &TextLook, font: &FieldFont, font_res: Res) -> Result<Appearan
     widget.border =
         BoxBorder::new(look.border.width, box_style(look.border.style)).with_dash(&look.dash);
     crate::pdf::forms::text(&field, &widget, &da, font_res, &font.layout(), &limits)
+}
+
+/// Which kind of reason `why` is that an appearance wasn't made, as a
+/// warning or a dump says it: never a character of the text.
+pub fn unmade_kind(why: &Unmade) -> String {
+    match why {
+        Unmade::Unencodable(_) => "unencodable".into(),
+        Unmade::NoBox => "no-box".into(),
+        Unmade::NotFinite => "not-finite".into(),
+        Unmade::Limit(cap) => format!("limit:{}", cap_kind(*cap)),
+        Unmade::NotText => "not-text".into(),
+        Unmade::FontNotBindable => "font-not-bindable".into(),
+        Unmade::Unreadable(u) => format!("unreadable:{:?}", u.why),
+        _ => "other".into(),
+    }
+}
+
+/// Which kind of reason `e` is that a form or a font couldn't be read, as
+/// [`unmade_kind`] says it.
+pub fn error_kind(e: &Error) -> String {
+    match e {
+        Error::Limit(cap) => format!("limit:{}", cap_kind(*cap)),
+        Error::Unreadable(u) => format!("unreadable:{:?}", u.why),
+        _ => "other".into(),
+    }
+}
+
+/// A cap of pdf-forms', by name.
+fn cap_kind(cap: Cap) -> String {
+    match cap {
+        Cap::Fields => "fields".into(),
+        Cap::Items => "items".into(),
+        Cap::Annots(cap) => format!("annots:{cap:?}"),
+        Cap::Text => "text".into(),
+        Cap::CombCells => "comb-cells".into(),
+        Cap::FontBudget => "font-budget".into(),
+        _ => "other".into(),
+    }
 }
 
 /// sheaf's border style as pdf-gfx's.

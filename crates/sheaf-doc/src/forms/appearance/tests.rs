@@ -62,7 +62,7 @@ fn made_in(src: &Source, look: &TextLook) -> Result<Appearance, Unmade> {
 }
 
 /// The bytes the content's one `Tj` shows.
-fn shown(content: &[u8]) -> Vec<u8> {
+pub(crate) fn shown(content: &[u8]) -> Vec<u8> {
     let (ops, _) = read_back::operations(content, None).expect("content that reads");
     let mut shows = ops.iter().filter(|(_, op)| *op == b"Tj");
     let (operands, _) = shows.next().expect("a Tj");
