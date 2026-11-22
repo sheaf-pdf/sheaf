@@ -9,10 +9,10 @@
 //! digest) with their companions (`is_ours`), so none of them reaches
 //! another reader. Every other annotation (a stale mark of sheaf's too)
 //! is read by pdf-annots, one dictionary at a time, under
-//! PDFium's rules and sheaf's caps
-//! ([`crate::source::annots::read`]; M18 slice 24), and listed ([`ForeignAnnot`]) and converted to the mark editing it makes
-//! ([`import::convert_page`](crate::import::convert_page)) from what it
-//! read. What's never listed (a widget, a pop-up, media), by the subtype
+//! PDFium's rules and sheaf's caps (`source::annots::read`; M18 slice
+//! 24), and listed ([`ForeignAnnot`]) and converted to the mark editing it
+//! makes ([`import::convert_page`](crate::import::convert_page)) from what
+//! it read. What's never listed (a widget, a pop-up, media), by the subtype
 //! it's written with, isn't read; one pdf-annots refuses is passed over
 //! alone, and said in the log. What the family's reading has no place for
 //! is read from its dictionary, as PDFium reads it: a review state on a
@@ -457,7 +457,7 @@ fn is_listed_subtype(s: &[u8]) -> bool {
 /// is converted with, each mark with what it holds: its page stamp's page
 /// or its attachment's file. sheaf's marks and their companions are found
 /// on the entry as written (by its `/SHEF_Annot` and digest); every other
-/// annotation is read by `pdf-annots` ([`crate::source::annots::read`]),
+/// annotation is read by `pdf-annots` (`source::annots::read`),
 /// listed and converted from what it read. One it can't read is passed
 /// over, and said in the log.
 pub fn annots_in<P: Objects + ReadObjects + ?Sized>(

@@ -4,8 +4,8 @@
 //! into, a PDF annotation dictionary first.
 //!
 //! Each dictionary is read by `pdf-annots` under PDFium's rules
-//! ([`crate::source::annots::read`], M18 slice 24), and the mark made
-//! from what it read ([`convert_page`]). What stays sheaf's own read of the dictionary: its
+//! (`source::annots::read`, M18 slice 24), and the mark made from what
+//! it read ([`convert_page`]). What stays sheaf's own read of the dictionary: its
 //! names in threads ([`thread_name`], and `/IRT` by its target's name or,
 //! as XFDF gives it, a string: [`irt_name`]); the dates, kept as written;
 //! a dimension's `/Measure`; an attachment's embedded file; and whether a
@@ -98,7 +98,7 @@ pub enum NotAMark {
     Unsupported(String),
     /// What doesn't read as an annotation, with why: a string still
     /// encrypted, or past one of `pdf-annots`' caps
-    /// ([`crate::source::annots::limits`]).
+    /// (`source::annots::limits`).
     Unread(String),
     /// Part of another, which became a mark with it: the crossed-out
     /// text of a replacement.
@@ -161,7 +161,7 @@ pub fn convert_page<P: Objects + ?Sized>(
 }
 
 /// `dict` as a mark that reads upright turned `turn`: read by
-/// `pdf-annots` ([`crate::source::annots::read`]) and made a mark as
+/// `pdf-annots` (`source::annots::read`) and made a mark as
 /// [`convert_page`] makes each.
 pub fn convert<P: Objects + ReadObjects + ?Sized>(
     pdf: &P,

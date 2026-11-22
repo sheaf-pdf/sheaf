@@ -12,8 +12,8 @@
 //! box a form is placed on) turns into the family's here too, the same
 //! numbers: every conversion between the two geometries, either way, is
 //! one of this file's `From`s, or for the types that are another crate's
-//! (a box, a point, sides in an array) one of [`family_box`], [`sides`],
-//! [`family_point`] and [`layout_point`].
+//! (a box, a point, sides in an array) one of `family_box`, `sides`,
+//! `family_point` and `layout_point`.
 
 use sheaf_edit::{PageSize, Rotation};
 
