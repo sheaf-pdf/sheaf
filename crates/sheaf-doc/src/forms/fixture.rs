@@ -14,7 +14,8 @@
 //! reads what it writes as `forms::read` reads a file. lopdf can't write a
 //! hybrid-reference file, so [`hybrid_reference`] writes one by hand.
 //! [`every_fact`] is a file with one of each fact a file opens with, and
-//! [`outline_tree`] gives a form bookmarks.
+//! [`outline_tree`] gives a form bookmarks. [`nj_helv`] and [`pa_arial`]
+//! are the state forms' `/DR` fonts, for [`Form::dr_font`].
 
 // Built for other crates' tests under the `fixtures` feature, outside
 // `cfg(test)`: its pages' content is encoded from operations.
@@ -254,6 +255,20 @@ impl Form {
             let ap = self.text_appearance(rect, value);
             self.dict(w).set("AP", dictionary! { "N" => ap });
         }
+    }
+
+    /// `font` as an object of its own, named `name` in `/DR /Font` (in
+    /// place of a font of that name there).
+    pub fn dr_font(&mut self, name: &str, font: Dictionary) -> ObjectId {
+        let id = self.pdf.add_object(font);
+        let acroform = self.acroform;
+        let fonts = (self.dict(acroform).get_mut(b"DR"))
+            .and_then(|dr| dr.as_dict_mut())
+            .and_then(|dr| dr.get_mut(b"Font"))
+            .and_then(|fonts| fonts.as_dict_mut())
+            .expect("the fixture's /DR /Font");
+        fonts.set(name, id);
+        id
     }
 
     /// `/Fields`.
@@ -1030,6 +1045,57 @@ pub fn tst_info(imprint: &[u8]) -> Vec<u8> {
     }
     .to_der()
     .unwrap()
+}
+
+/// Text the state forms' fonts below each have a code a character for:
+/// PDFDocEncoding's in [`nj_helv`], MacRoman's (and the `/Differences`'
+/// Euro) in [`pa_arial`].
+pub const STATE_TEXT: &str = "é € — “ ”";
+
+/// The NJ-style `/Helv`: Helvetica, its `/Differences` PDFDocEncoding's
+/// layout over no base encoding, as the corpus's California 540 has it
+/// (from 128 on, and the two codes [`STATE_TEXT`] shows past it).
+pub fn nj_helv() -> Dictionary {
+    let mut differences = vec![Object::from(24)];
+    let names = "breve caron circumflex dotaccent hungarumlaut ogonek ring tilde";
+    differences.extend(names.split(' ').map(Object::name));
+    differences.extend([Object::from(39), Object::name("quotesingle")]);
+    differences.extend([Object::from(96), Object::name("grave"), Object::from(128)]);
+    let names = "bullet dagger daggerdbl ellipsis emdash endash florin fraction \
+                 guilsinglleft guilsinglright minus perthousand quotedblbase quotedblleft \
+                 quotedblright quoteleft quoteright quotesinglbase trademark fi fl Lslash OE \
+                 Scaron Ydieresis Zcaron dotlessi lslash oe scaron zcaron";
+    differences.extend(names.split_whitespace().map(Object::name));
+    differences.extend([Object::from(160), Object::name("Euro")]);
+    differences.extend([Object::from(233), Object::name("eacute")]);
+    dictionary! {
+        "Type" => Object::name("Font"), "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"), "Name" => Object::name("Helv"),
+        "Encoding" => dictionary! {
+            "Type" => Object::name("Encoding"), "Differences" => differences,
+        },
+    }
+}
+
+/// The PA-40-style `/Arial`: TrueType Arial under MacRoman, its
+/// `/Differences` `[65 /A 219 /Euro]`, as the corpus's safedocs 0007134
+/// has it (not embedded here).
+pub fn pa_arial() -> Dictionary {
+    let differences = vec![
+        Object::from(65),
+        Object::name("A"),
+        Object::from(219),
+        Object::name("Euro"),
+    ];
+    dictionary! {
+        "Type" => Object::name("Font"), "Subtype" => Object::name("TrueType"),
+        "BaseFont" => Object::name("Arial"),
+        "Encoding" => dictionary! {
+            "Type" => Object::name("Encoding"),
+            "BaseEncoding" => Object::name("MacRomanEncoding"),
+            "Differences" => differences,
+        },
+    }
 }
 
 /// Rows down a page, 30 pt apart.

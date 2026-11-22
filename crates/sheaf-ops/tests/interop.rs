@@ -51,9 +51,15 @@
 //! reads of the same output of the document's table base, and an
 //! encrypted one not at all without it.
 //!
+//! From M10 slice 6 a text field's appearance sheaf makes, in each case
+//! the pixel checks (`tests/fields.rs`) hold to PDFium's own, passes `qpdf
+//! --check`, and poppler's `pdftoppm` draws it with its ink where it draws
+//! PDFium's.
+//!
 //! qpdf is `$SHEAF_QPDF`, else `qpdf` on the PATH; pdf.js is `node` on the
-//! PATH with `$SHEAF_PDFJS`, pdfjs-dist's `legacy/build/pdf.mjs`. A test
-//! whose tools are missing says so and passes. Run with
+//! PATH with `$SHEAF_PDFJS`, pdfjs-dist's `legacy/build/pdf.mjs`; pdftoppm
+//! is `$SHEAF_PDFTOPPM`, else `pdftoppm` on the PATH. A test whose tools
+//! are missing says so and passes. Run with
 //! `cargo test -p sheaf-ops --test interop -- --ignored --nocapture`.
 
 use std::ffi::OsStr;
@@ -79,7 +85,9 @@ use sheaf_edit::{
 };
 
 mod common;
+use common::fields;
 use common::{note, open, planned, qpdf, qpdf_linearized, saved, scratch};
+use sheaf_image::raster::{PixelFormat, Raster};
 
 /// pdf.js's `pdf.mjs`, to run with node, or None when there's no node or
 /// no pdf.js, saying so.
@@ -1522,5 +1530,103 @@ fn a_clean_copy_reads_in_pdfjs() {
         let want = format!("{merged}\nbegin Artifact\ntext \"MINE\"\nend");
         assert_eq!(read, want, "pdf.js, clean");
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// pdftoppm (poppler), `$SHEAF_PDFTOPPM` or `pdftoppm` on the PATH, or
+/// None when there's none, saying so.
+fn pdftoppm() -> Option<PathBuf> {
+    let program =
+        std::env::var_os("SHEAF_PDFTOPPM").map_or_else(|| "pdftoppm".into(), PathBuf::from);
+    let found = Command::new(&program)
+        .arg("-v")
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !found {
+        println!(
+            "skipped pdftoppm: none at {} (set SHEAF_PDFTOPPM)",
+            program.display()
+        );
+    }
+    found.then_some(program)
+}
+
+/// Page 1 of the file at `path` as pdftoppm draws it, at the pixel checks'
+/// scale (144 dpi is two pixels a point), RGBA.
+fn poppler_drew(pdftoppm: &Path, path: &Path) -> Raster {
+    let prefix = path.with_extension("poppler");
+    let dpi = (72 * fields::SCALE).to_string();
+    run(Command::new(pdftoppm)
+        .args(["-r", &dpi, "-f", "1", "-l", "1", "-singlefile"])
+        .arg(path)
+        .arg(&prefix))
+    .unwrap_or_else(|e| panic!("pdftoppm, {}: {e}", path.display()));
+    let ppm = std::fs::read(prefix.with_extension("poppler.ppm")).unwrap();
+    // P6, its width, its height and 255, each after one white-space byte.
+    let mut words = ppm.splitn(5, |b| b.is_ascii_whitespace());
+    let mut word = || {
+        std::str::from_utf8(words.next().unwrap())
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(word(), "P6");
+    let [width, height]: [u32; 2] = [word(), word()].map(|w| w.parse().unwrap());
+    assert_eq!(word(), "255");
+    let rgb = words.next().unwrap();
+    assert_eq!(rgb.len(), (width * height * 3) as usize);
+    let data = rgb
+        .chunks(3)
+        .flat_map(|p| [p[0], p[1], p[2], 255])
+        .collect();
+    Raster {
+        width,
+        height,
+        format: PixelFormat::Rgba,
+        data,
+    }
+}
+
+/// From M10 slice 6 a text field's appearance sheaf makes, for each pair
+/// the pixel checks (`tests/fields.rs`) hold PDFium's own to, passes `qpdf
+/// --check`, and pdftoppm draws it where it draws PDFium's: its ink inside
+/// the widget's box, in the box PDFium's ink is in, and nothing outside.
+#[test]
+#[ignore = "needs qpdf and pdftoppm"]
+fn text_field_appearances_pass_qpdf_and_poppler_draws_them_where_pdfium_s() {
+    let (Some(qpdf), Some(pdftoppm)) = (qpdf(), pdftoppm()) else {
+        return;
+    };
+    let dir = scratch("fields-interop");
+    let mut failed = Vec::new();
+    let pairs = fields::held_pairs();
+    for (ours_case, theirs_case) in &pairs {
+        let (name, px) = (ours_case.file_name(), ours_case.pixels());
+        let saved = fields::ours(ours_case).saved;
+        let copy = fields::theirs(theirs_case);
+        let [ours, pdfium] = [("sheaf", &saved), ("pdfium", &copy)].map(|(what, bytes)| {
+            let path = dir.join(format!("{name}.{what}.pdf"));
+            std::fs::write(&path, bytes).unwrap();
+            path
+        });
+        if let Err(e) = run(Command::new(&qpdf).arg("--check").arg(&ours)) {
+            failed.push(format!("{name}: qpdf --check: {e}"));
+        }
+        let [drawn, theirs] = [&ours, &pdfium].map(|p| poppler_drew(&pdftoppm, p));
+        let [inked, pdfium_inked] = [&drawn, &theirs].map(|r| fields::ink_box(r, px));
+        let outside = fields::ink(&drawn, px, false);
+        let differ = fields::differing_in(&drawn, &theirs, px);
+        println!("{name}\tink {inked:?}, PDFium's {pdfium_inked:?}\t{differ} px differ");
+        if inked.is_none() || inked != pdfium_inked || outside != 0 {
+            failed.push(format!(
+                "{name}: ink {inked:?} ({outside} px outside), PDFium's {pdfium_inked:?}"
+            ));
+        }
+    }
+    println!(
+        "qpdf --check and pdftoppm: {} outputs, {} fail",
+        pairs.len(),
+        failed.len()
+    );
+    assert!(failed.is_empty(), "{failed:#?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

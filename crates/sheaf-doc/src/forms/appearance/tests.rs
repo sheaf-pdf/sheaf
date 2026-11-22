@@ -10,7 +10,7 @@ use std::sync::Arc;
 use super::*;
 use crate::forms::corpus::Corpus;
 use crate::forms::field::flags;
-use crate::forms::fixture::{Form, Rect, row};
+use crate::forms::fixture::{Form, Rect, STATE_TEXT, nj_helv, pa_arial, row};
 use crate::materialize::tests::{add, insert, open};
 use crate::model::Document;
 use crate::pdf::content::read_back;
@@ -279,55 +279,9 @@ fn an_irs_field_is_drawn_in_its_navy() {
     assert!(navy > 100, "the f1040's navy fields: {navy}");
 }
 
-/// The NJ-style `/Helv`: Helvetica, its `/Differences` PDFDocEncoding's
-/// layout over no base encoding, as the corpus's California 540 has it
-/// (from 128 on, and the two codes the text below shows past it).
-fn nj_helv() -> Dictionary {
-    let mut differences = vec![Object::from(24)];
-    let names = "breve caron circumflex dotaccent hungarumlaut ogonek ring tilde";
-    differences.extend(names.split(' ').map(Object::name));
-    differences.extend([Object::from(39), Object::name("quotesingle")]);
-    differences.extend([Object::from(96), Object::name("grave"), Object::from(128)]);
-    let names = "bullet dagger daggerdbl ellipsis emdash endash florin fraction \
-                 guilsinglleft guilsinglright minus perthousand quotedblbase quotedblleft \
-                 quotedblright quoteleft quoteright quotesinglbase trademark fi fl Lslash OE \
-                 Scaron Ydieresis Zcaron dotlessi lslash oe scaron zcaron";
-    differences.extend(names.split_whitespace().map(Object::name));
-    differences.extend([Object::from(160), Object::name("Euro")]);
-    differences.extend([Object::from(233), Object::name("eacute")]);
-    dictionary! {
-        "Type" => Object::name("Font"), "Subtype" => Object::name("Type1"),
-        "BaseFont" => Object::name("Helvetica"), "Name" => Object::name("Helv"),
-        "Encoding" => dictionary! {
-            "Type" => Object::name("Encoding"), "Differences" => differences,
-        },
-    }
-}
-
-/// The PA-40-style `/Arial`: TrueType Arial under MacRoman, its
-/// `/Differences` `[65 /A 219 /Euro]`, as the corpus's safedocs 0007134
-/// has it (not embedded here).
-fn pa_arial() -> Dictionary {
-    let differences = vec![
-        Object::from(65),
-        Object::name("A"),
-        Object::from(219),
-        Object::name("Euro"),
-    ];
-    dictionary! {
-        "Type" => Object::name("Font"), "Subtype" => Object::name("TrueType"),
-        "BaseFont" => Object::name("Arial"),
-        "Encoding" => dictionary! {
-            "Type" => Object::name("Encoding"),
-            "BaseEncoding" => Object::name("MacRomanEncoding"),
-            "Differences" => differences,
-        },
-    }
-}
-
-/// "é € — “ ”" in each, one code a character: PDFDocEncoding's in the
-/// `/Helv`, MacRoman's (and the `/Differences`' Euro) in the `/Arial`.
-const STATE_TEXT: &str = "é € — “ ”";
+/// "é € — “ ”" in each state font, one code a character:
+/// PDFDocEncoding's in the `/Helv`, MacRoman's (and the `/Differences`'
+/// Euro) in the `/Arial`.
 const HELV_CODES: &[u8] = b"\xe9 \xa0 \x84 \x8d \x8e";
 const ARIAL_CODES: &[u8] = b"\x8e \xdb \xd1 \xd2 \xd3";
 
@@ -347,16 +301,8 @@ fn state_look(name: &str) -> TextLook {
 #[test]
 fn the_state_forms_text_is_a_code_a_character() {
     let mut f = Form::new(1);
-    let helv = f.pdf.add_object(nj_helv());
-    let arial = f.pdf.add_object(pa_arial());
-    let acroform = f.acroform;
-    let fonts = (f.dict(acroform).get_mut(b"DR"))
-        .and_then(|dr| dr.as_dict_mut())
-        .and_then(|dr| dr.get_mut(b"Font"))
-        .and_then(|fonts| fonts.as_dict_mut())
-        .expect("the fixture's /DR /Font");
-    fonts.set("Helv", helv);
-    fonts.set("Arial", arial);
+    f.dr_font("Helv", nj_helv());
+    f.dr_font("Arial", pa_arial());
     let src = f.source();
     for (name, codes) in [("Helv", HELV_CODES), ("Arial", ARIAL_CODES)] {
         let made = made_in(&src, &state_look(name)).unwrap();

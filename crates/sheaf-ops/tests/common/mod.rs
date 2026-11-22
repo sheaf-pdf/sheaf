@@ -8,12 +8,15 @@
 //! And what the corpus tiers give a file: a note, a header and footer with
 //! Bates numbers, and a recognized word. And qpdf, for the tests that ask
 //! it what it makes of a file, and the pool's sample, for the tiers that
-//! take it.
+//! take it. And text fields drawn by sheaf and by PDFium, for the pixel
+//! checks and the other renderers ([`fields`]).
 
 #![allow(dead_code)]
 // The tests' scratch files go in the temp directory, which clippy.toml
 // bans outside tests; each test that includes this is a crate of its own.
 #![allow(clippy::disallowed_methods)]
+
+pub mod fields;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
