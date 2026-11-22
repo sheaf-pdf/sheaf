@@ -1223,6 +1223,24 @@ const RETIRED_M18: &[(&str, u8)] = &[
     // (`pdf::annots::SynthesizedAp`), and its form is made from its parts
     // (`content::sink::form`), as any appearance's is.
     ("annot::Appearance", 24),
+    // Another tool's annotation is read by pdf-annots (`pdf::annots::read`)
+    // and made a mark from what it read (`import::convert_page`): sheaf's
+    // own readers of its keys went, a stamp's form is `import::normal_form`
+    // and a dimension is the family's `/IT`. The `/Subtype` a data format
+    // names a comment by, as written, is `exchange::subtype`.
+    ("import::numbers", 24),
+    ("import::floats", 24),
+    ("import::points", 24),
+    ("import::quads", 24),
+    ("import::bounds", 24),
+    ("import::ink", 24),
+    ("import::border_width", 24),
+    ("import::border_style", 24),
+    ("import::color_of", 24),
+    ("import::default_appearance", 24),
+    ("import::measured", 24),
+    ("import::appearance", 24),
+    ("import::subtype", 24),
 ];
 
 /// The ledgers, with the words a hit names its slice by.
@@ -1285,6 +1303,22 @@ const QUALIFIED_ONLY: &[&str] = &[
     // An appearance as a form field's maker gives one (pdf-forms'): not
     // the type a mark's had (M18 slice 24).
     "Appearance",
+    // Words other code names its own things by (a mark's appearance, a
+    // box's bounds, a path's points, a stroke of ink, a value measured,
+    // `exchange::subtype`, the family's `subtype()`): not the readers of
+    // an annotation's keys `import` had (M18 slice 24).
+    "appearance",
+    "border_style",
+    "bounds",
+    "color_of",
+    "default_appearance",
+    "floats",
+    "ink",
+    "measured",
+    "numbers",
+    "points",
+    "quads",
+    "subtype",
     // A sink's `resource`, a glyph's `advance` and a file's font's
     // `encoding`: not what sheaf's own font trait and standard 14 had
     // (M18 slice 22).

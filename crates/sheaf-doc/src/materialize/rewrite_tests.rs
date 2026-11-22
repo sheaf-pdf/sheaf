@@ -1336,7 +1336,7 @@ fn made_ours_takes_its_place(how: How) {
     let list = page_annots(&out);
     let subtypes: Vec<String> = list
         .iter()
-        .map(|(_, d)| crate::import::subtype(d))
+        .map(|(_, d)| crate::exchange::subtype(d))
         .collect();
     // Theirs are gone; ours (a Caret with its own StrikeOut) are
     // there instead, and Pat's reply.
@@ -1348,7 +1348,7 @@ fn made_ours_takes_its_place(how: How) {
     assert_eq!(subtypes.iter().filter(|s| *s == "StrikeOut").count(), 1);
     let (sq_obj, sq) = list
         .iter()
-        .find(|(_, d)| crate::import::subtype(d) == "Square")
+        .find(|(_, d)| crate::exchange::subtype(d) == "Square")
         .unwrap();
     assert!(sq.has(b"SHEF_Annot"));
     assert_eq!(crate::file::thread_name(sq), "sq");

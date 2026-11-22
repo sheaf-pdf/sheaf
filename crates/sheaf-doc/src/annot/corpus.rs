@@ -12,17 +12,15 @@ use std::time::Instant;
 
 use crate::annot::{Annot, Box2, Pt, emission};
 use crate::attachments::Objects;
+use crate::content::Unkept;
 use crate::content::corpus::{each_dumped, written};
 use crate::content::sink::{self, Sink};
 use crate::content::{Res, Reserved};
-use crate::file::{ForeignAnnot, Found, InFile, annots_in, is_ours};
+use crate::file::{ForeignAnnot, Found, InFile, is_ours, walk};
 use crate::forms::corpus::Corpus;
 use crate::geom::{Affine, Rect};
-use crate::import::family::{Get, ReadAnnot, limits, read};
 use crate::import::{NotAMark, convert_page};
-use crate::pdf::annots::SynthesizedAp;
-use crate::pdf::annots::{AppearanceEntry, Rules, page_annots_with, stream_placement_matrix};
-use crate::pdf::gfx;
+use crate::pdf::annots::{self, SynthesizedAp};
 use crate::pdf::{Dictionary, Object, ObjectId, Value};
 use crate::serialize::built::{Held, StampForm};
 use crate::source::ObjRef;
@@ -36,17 +34,6 @@ const DUMP: &str = "SHEAF_ANNOTS_DUMP";
 /// A corpus path whose records [`annots_dump`] prints in full to stderr,
 /// reading that file alone: to set two runs beside each other.
 const DUMP_ONLY: &str = "SHEAF_ANNOTS_DUMP_ONLY";
-
-/// Set to `1`, [`annots_dump`] reads each annotation through `pdf-annots`
-/// (M18 slice 24): the open's walk with each other tool's annotation read
-/// by the family and converted from what it read
-/// ([`crate::file::family`], [`crate::import::family`]), and a flatten's
-/// line from what the family reads of it ([`family_flatten_fields`]), the
-/// lines the same as without it where the two read alike. Beside them,
-/// each page's annotations as the family's own walk of the page reads them
-/// ([`page_annots_with`]) set beside sheaf's walk's, and each annotation
-/// the family refused, a line each in `<the dump>.family.tsv`.
-const FAMILY: &str = "SHEAF_ANNOTS_DUMP_FAMILY";
 
 /// One of the dump's lines: where it is, what it says of it, and its
 /// fields, `name=value` each, tab apart. Where the records are printed
@@ -260,6 +247,7 @@ fn not_a_mark(why: &NotAMark) -> String {
         NotAMark::NotComment => "-:not-comment".to_string(),
         NotAMark::Unsupported(sub) => format!("-:unsupported:{}", escaped(sub)),
         NotAMark::Part => "-:part".to_string(),
+        NotAMark::Unread(why) => format!("-:unread:{}", escaped(why)),
     }
 }
 
@@ -368,161 +356,6 @@ fn flatten_fields(
     }
 }
 
-/// What a flatten reads of annotation `dict` of `pdf`, object `id`, as
-/// the family reads it ([`flatten_fields`]'s line): its flags and the
-/// state it shows from the family's `/F`, `/AP` and `/AS`, the form it
-/// shows by its value and by its state by sheaf's rule over the family's
-/// [`AppearanceEntry`] (with none named, another tool's comment shows the
-/// state its `/V` names, or its parent's, else `/Off`; a widget, none;
-/// an empty `/AS` names none), each with the box, matrix and placement
-/// [`stream_placement_matrix`] gives on `rect` (on a unit box where there
-/// is no rect, its placement then `-`), or `.frame=-` where it gives none.
-fn family_flatten_fields<P: Objects + ?Sized>(
-    line: &mut Line,
-    pdf: &P,
-    dict: &Dictionary,
-    id: Option<ObjectId>,
-    rect: Option<Box2>,
-) {
-    let a = match read(pdf, dict, id) {
-        Ok(a) => a,
-        Err(why) => {
-            line.field("shows", &format!("refused:{}", escaped(&why.to_string())));
-            return;
-        }
-    };
-    line.field("flags", &a.flags().bits().to_string());
-    let aps = a.appearances();
-    let state = (aps.and_then(|ap| ap.state.as_deref())).filter(|s| !s.is_empty());
-    match state {
-        Some(state) => line.field("state", &name_of(state)),
-        None => line.field("state", "-"),
-    }
-    // A value named, or written as a string, as PDFium reads either; an
-    // empty one is none.
-    let named = |o: &Object| -> Option<Vec<u8>> {
-        let (_, o) = pdf.dereference(o).ok()?;
-        let bytes = match o.value() {
-            Value::Name(n) => n.as_bytes(),
-            Value::String(s, _) => s.as_bytes()?,
-            _ => return None,
-        };
-        (!bytes.is_empty()).then(|| bytes.to_vec())
-    };
-    let value = || -> Option<Vec<u8>> {
-        if let Some(v) = dict.get(b"V").and_then(named) {
-            return Some(v);
-        }
-        let (_, parent) = pdf.dereference(dict.get(b"Parent")?).ok()?;
-        parent.as_dict()?.get(b"V").and_then(named)
-    };
-    let normal = aps.and_then(|ap| ap.normal.as_ref());
-    let by_value = match normal {
-        None => None,
-        Some(AppearanceEntry::Single(id)) => Some(*id),
-        Some(entry @ AppearanceEntry::States(states)) => {
-            let chosen = match state {
-                Some(state) => state.to_vec(),
-                None => match value() {
-                    Some(v) if states.iter().any(|(k, _)| **k == *v) => v,
-                    _ => b"Off".to_vec(),
-                },
-            };
-            entry.resolve(Some(&chosen), true)
-        }
-    };
-    let by_state = match normal {
-        None => None,
-        Some(AppearanceEntry::Single(id)) => Some(*id),
-        Some(entry) => state.and_then(|state| entry.resolve(Some(state), true)),
-    };
-    for (tag, form) in [("by_value", by_value), ("by_state", by_state)] {
-        if tag == "by_state" && by_state == by_value {
-            line.field(tag, "same");
-            continue;
-        }
-        line.field(tag, &id_of(form));
-        let Some(id) = form else {
-            continue;
-        };
-        let on = match rect {
-            Some(r) => gfx::Rect {
-                x0: r.x,
-                y0: r.y,
-                x1: r.x + r.w,
-                y1: r.y + r.h,
-            },
-            None => gfx::Rect {
-                x0: 0.0,
-                y0: 0.0,
-                x1: 1.0,
-                y1: 1.0,
-            },
-        };
-        let placed = stream_placement_matrix(Get(pdf), id, on, &limits());
-        let Ok(Some((bbox, matrix, onto))) = placed else {
-            line.field(&format!("{tag}.frame"), "-");
-            continue;
-        };
-        line.bits(&format!("{tag}.bbox"), &rect_bits(Rect::from(bbox)));
-        line.matrix(&format!("{tag}.matrix"), Affine::from(matrix));
-        match rect {
-            Some(_) => line.matrix(&format!("{tag}.onto"), Affine::from(onto)),
-            None => line.field(&format!("{tag}.onto"), "-"),
-        }
-    }
-}
-
-/// Page `page` of `pdf`, `/Annots` `entries`, as the family's own walk
-/// of a page reads it ([`page_annots_with`]) beside sheaf's walk, a line
-/// at `at`: whether it yields an annotation in each slot sheaf's walk
-/// finds a dictionary in, and in no other, or why it read none.
-fn family_page_line<P: Objects + ?Sized>(
-    at: &str,
-    pdf: &P,
-    page: ObjectId,
-    entries: &[Object],
-) -> String {
-    let sheaf: Vec<usize> = (entries.iter().enumerate())
-        .filter(|(_, e)| {
-            (pdf.dereference(e).ok()).is_some_and(|(_, o)| matches!(o.value(), Value::Dict(_)))
-        })
-        .map(|(i, _)| i)
-        .collect();
-    let slots = |s: &[usize]| {
-        let s: Vec<String> = s.iter().map(usize::to_string).collect();
-        s.join(",")
-    };
-    let Ok(dict) = pdf.get_dictionary(page) else {
-        return format!("{at}\tfamily-page\tpage=unread");
-    };
-    match page_annots_with(
-        Get(pdf),
-        dict,
-        Some(page),
-        Rules::Pdfium,
-        &limits(),
-        &mut (),
-    ) {
-        Ok(list) => {
-            let family: Vec<usize> = list.iter().filter_map(ReadAnnot::index).collect();
-            match family == sheaf {
-                true => format!("{at}\tfamily-page\tslots=same\tcount={}", sheaf.len()),
-                false => format!(
-                    "{at}\tfamily-page\tslots=differ\tsheaf={}\tfamily={}",
-                    slots(&sheaf),
-                    slots(&family)
-                ),
-            }
-        }
-        Err(why) => format!(
-            "{at}\tfamily-page\terror={}\tsheaf={}",
-            escaped(&why.to_string()),
-            slots(&sheaf)
-        ),
-    }
-}
-
 /// What a slot sheaf passes over is, as written: whether it names
 /// anything, a dictionary, its `/Subtype` and how many numbers its
 /// `/Rect` has.
@@ -565,23 +398,16 @@ fn slots<P: Objects + ?Sized>(pdf: &P, page: ObjectId) -> Vec<Object> {
 
 /// The dump's lines for file `path`, open as `src`: one for the file, and
 /// for each slot of each page's `/Annots`, three: what the open reads of
-/// it (`read`: `mark`, its `part`, another tool's `foreign`, or `passed`),
-/// what a flatten reads of it (`flatten`) and what a save writes of the
-/// mark it is (`make`). With `family`, each other tool's annotation is
-/// read through `pdf-annots` ([`FAMILY`]): one it refuses is `refused`,
-/// with why and what it is as written, and each page with annotations
-/// has a line more, `family-page`, after its slots.
-fn lines_of(path: &str, src: &Src, full: bool, family: bool) -> Vec<String> {
+/// it (`read`: `mark`, its `part`, another tool's `foreign`, `passed`, or
+/// `refused`, with why, where `pdf-annots` couldn't read it), what a
+/// flatten reads of it (`flatten`) and what a save writes of the mark it
+/// is (`make`).
+fn lines_of(path: &str, src: &Src, full: bool) -> Vec<String> {
     let pdf = src.pdf();
     let pages = src.pages();
     let turned = pages.iter().map(|p| (p.id, p.geom.rotate));
-    let (found, refused) = match family {
-        true => {
-            let walked = crate::file::family::annots_in(pdf, turned);
-            (walked.found, walked.refused)
-        }
-        false => (annots_in(pdf, turned), HashMap::new()),
-    };
+    let walked = walk(pdf, turned);
+    let (found, refused) = (walked.found, walked.refused);
     let mut lines = Vec::new();
     let mut counts: [usize; 4] = [0; 4];
     for (index, page) in pages.iter().enumerate() {
@@ -604,25 +430,11 @@ fn lines_of(path: &str, src: &Src, full: bool, family: bool) -> Vec<String> {
                 (id, object.as_dict().expect("listed, so a dictionary"))
             })
             .collect();
-        let converted = match family {
-            true => {
-                let read: Vec<ReadAnnot<'_>> = (dicts.iter())
-                    .map(|&(id, d)| read(pdf, d, id).expect("listed, so it reads"))
-                    .collect();
-                let pairs: Vec<(&Dictionary, &ReadAnnot<'_>)> =
-                    dicts.iter().map(|(_, d)| *d).zip(&read).collect();
-                crate::import::family::convert_page(
-                    pdf,
-                    &pairs,
-                    page.geom.rotate,
-                    Default::default(),
-                )
-            }
-            false => {
-                let dicts: Vec<&Dictionary> = dicts.iter().map(|(_, d)| *d).collect();
-                convert_page(pdf, &dicts, page.geom.rotate, Default::default())
-            }
-        };
+        let unkept = Unkept::default();
+        let read: Vec<annots::Annot<'_>> = (dicts.iter())
+            .map(|&(id, d)| annots::read(pdf, &unkept, d, id).expect("listed, so it reads"))
+            .collect();
+        let converted = convert_page(pdf, &read, page.geom.rotate, Default::default());
         let converted: HashMap<usize, &Result<Annot, NotAMark>> =
             comments.iter().copied().zip(&converted).collect();
         let count = entries
@@ -642,15 +454,8 @@ fn lines_of(path: &str, src: &Src, full: bool, family: bool) -> Vec<String> {
             let mut make = None;
             // What a flatten reads of the dictionary in this slot, on
             // `rect`.
-            let flattened = |flatten: &mut Line, entry: &Object, rect: Option<Box2>| match family {
-                true => match pdf.dereference(entry).ok() {
-                    Some((id, o)) => match o.as_dict() {
-                        Some(dict) => family_flatten_fields(flatten, pdf, dict, id, rect),
-                        None => flatten.field("shows", "-"),
-                    },
-                    None => flatten.field("shows", "-"),
-                },
-                false => flatten_fields(flatten, src, (index, slot), entry, rect),
+            let flattened = |flatten: &mut Line, entry: &Object, rect: Option<Box2>| {
+                flatten_fields(flatten, src, (index, slot), entry, rect)
             };
             match (listed.get(&slot).map(|a| &a.found), entry) {
                 (Some(Found::Mark { annot, held }), _) => {
@@ -717,10 +522,6 @@ fn lines_of(path: &str, src: &Src, full: bool, family: bool) -> Vec<String> {
             flatten.finish(&mut lines);
             make_line(&at, make, full, &mut lines);
         }
-        if family && !entries.is_empty() {
-            let at = format!("{path}\t{}\t-\t{}", index + 1, id_of(Some(page.id)));
-            lines.push(family_page_line(&at, pdf, page.id, &entries));
-        }
     }
     let [marks, foreign, passed, converted] = counts;
     let mut head = Line::new(&format!("{path}\t-\t-\t-"), "file", full);
@@ -738,7 +539,7 @@ fn lines_of(path: &str, src: &Src, full: bool, family: bool) -> Vec<String> {
 
 /// The dump's lines for the file at `path` of the corpus ([`lines_of`]):
 /// one line, `unopened` and why, for a file that doesn't open.
-fn dump_file(corpus: &Corpus, path: &str, full: bool, family: bool) -> Vec<String> {
+fn dump_file(corpus: &Corpus, path: &str, full: bool) -> Vec<String> {
     let none = |why: String| vec![format!("{path}\t-\t-\t-\tunopened: {why}")];
     let bytes = match std::fs::read(corpus.root.join(path)) {
         Ok(bytes) => bytes,
@@ -746,7 +547,7 @@ fn dump_file(corpus: &Corpus, path: &str, full: bool, family: bool) -> Vec<Strin
     };
     let kind = BlobKind::file(Path::new(path), None);
     match Store::new().open(bytes.into(), kind) {
-        Ok(src) => lines_of(path, &src, full, family),
+        Ok(src) => lines_of(path, &src, full),
         Err(e) => none(format!("{e:#}").replace(['\n', '\t'], " ")),
     }
 }
@@ -771,32 +572,18 @@ fn annots_dump() {
     };
     let started = Instant::now();
     let full = only.is_some();
-    let family = std::env::var(FAMILY).is_ok_and(|v| v == "1");
     let lines = each_dumped(
         &corpus,
         (only.as_deref(), DUMP_ONLY),
-        |path| dump_file(&corpus, path, full, family),
+        |path| dump_file(&corpus, path, full),
         |path, said| format!("{path}\t-\t-\t-\tpanicked: {said}"),
     );
-    // The family's own lines go beside the dump, so that it holds the same
-    // lines with the family as without.
-    let (beside, lines): (Vec<String>, Vec<String>) = (lines.into_iter()).partition(|l| {
-        l.split('\t')
-            .nth(4)
-            .is_some_and(|w| w.starts_with("family-"))
-    });
     let mut said: std::collections::BTreeMap<&str, usize> = Default::default();
-    for line in lines.iter().chain(&beside) {
+    for line in &lines {
         let mut columns = line.split('\t').skip(4);
         let what = columns.next().unwrap_or_default();
         let what = match what {
             "read" => columns.next().unwrap_or_default(),
-            "family-page" => columns
-                .next()
-                .unwrap_or_default()
-                .split('=')
-                .next()
-                .unwrap_or_default(),
             "make" if line.ends_with("\tmark=-") => "make -",
             what if what.starts_with("unopened") => "unopened",
             what if what.starts_with("panicked") => "panicked",
@@ -809,31 +596,6 @@ fn annots_dump() {
         lines.len(),
         started.elapsed().as_secs_f64()
     );
-    if family {
-        let mut pages: std::collections::BTreeMap<&str, usize> = Default::default();
-        let mut why: std::collections::BTreeMap<&str, usize> = Default::default();
-        for line in &beside {
-            let field = line.split('\t').nth(5).unwrap_or_default();
-            *pages
-                .entry(field.split_once('=').map_or(field, |(k, v)| match k {
-                    "slots" => v,
-                    _ => k,
-                }))
-                .or_default() += 1;
-        }
-        for line in &lines {
-            if let Some(w) = line.split('\t').find_map(|f| f.strip_prefix("why=")) {
-                *why.entry(w).or_default() += 1;
-            }
-        }
-        eprintln!("family: pages {pages:?}; refused {why:?}");
-        let beside_to = to.as_ref().map(|to| {
-            let mut to = to.clone();
-            to.push(".family.tsv");
-            to
-        });
-        written(&beside, false, beside_to);
-    }
     written(&lines, full, to);
 }
 
@@ -980,17 +742,9 @@ mod tests {
     #[test]
     fn the_annots_dump_says_what_each_slot_is() {
         let src = file();
-        let lines = lines_of("f.pdf", &src, false, false);
-        assert_eq!(lines, lines_of("f.pdf", &src, false, false));
-        assert_eq!(lines, lines_of("f.pdf", &src, true, false));
-        // Read through the family, every slot reads alike, and the page's
-        // own walk finds the slots sheaf's does.
-        let (beside, family): (Vec<String>, Vec<String>) = (lines_of("f.pdf", &src, false, true))
-            .into_iter()
-            .partition(|l| l.contains("\tfamily-page\t"));
-        assert_eq!(family, lines);
-        assert_eq!(beside.len(), 1, "{beside:?}");
-        assert!(beside[0].ends_with("\tslots=same\tcount=8"), "{beside:?}");
+        let lines = lines_of("f.pdf", &src, false);
+        assert_eq!(lines, lines_of("f.pdf", &src, false));
+        assert_eq!(lines, lines_of("f.pdf", &src, true));
         assert_eq!(lines.len(), 1 + 9 * 3, "{}", lines.join("\n"));
         assert_eq!(
             lines[0],
