@@ -297,7 +297,7 @@ pub(crate) fn insert(
     bring_in(lw, from, name, &shown, bring)
 }
 
-/// Shows `pages` from pages `with` of `from` (0-based, ascending), in
+/// Has `pages` show pages `with` of `from` (0-based, ascending), in
 /// place: as many as both have keep their ids, and so their bookmarks and
 /// marks, in PageSpace; extra pages are deleted, extra replacements
 /// inserted after the last page replaced. What showed on the pages from

@@ -17,6 +17,16 @@
 //! [`Canvas`](super::gfx::Canvas) ([`SynthesizedAp::drawn`]). A mark's
 //! appearance reaches the writer as one, whoever drew it, and the writer
 //! makes its form from those parts (`crate::content::sink::form`).
+//!
+//! **What stays sheaf's.** The walk of a page's `/Annots` and which of its
+//! entries are sheaf's own marks (`crate::file`), so none of those reaches
+//! the family's reader; the mark another tool's annotation becomes
+//! (`crate::import`); a mark's dictionary, its layout, and the drawing of
+//! the kinds whose look in the family isn't sheaf's (`crate::annot`); and
+//! which state a flatten draws where none is named (`source::showing`).
+//! The family's reading of a page's every entry (`page_annots`), which
+//! ends the page at one entry's error, and its flatten of a page
+//! dictionary (`plan_flatten`) aren't used.
 
 use super::gfx::{Matrix, Rect};
 use crate::content::{Objects, ReadObjects, Unkept};

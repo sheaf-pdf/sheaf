@@ -1,9 +1,18 @@
 //! The geometry the screen paints marks from and the writer draws them
-//! by ([`caret_points`], [`attachment_icon`], [`cloud_curves`]), recorded
-//! bit for bit for the marks of every kind and the edges of each (M18
-//! slice 24): set beside itself once what makes it moves, so not a bit of
-//! what the screen paints moves with it.
+//! by ([`caret_points`], [`attachment_icon`], [`cloud_curves`]), held to
+//! what it was when sheaf made it itself (M18 slice 24): pdf-annots' shapes
+//! give it now, through those three, and the screen paints from them, so
+//! not a bit may move. Each input below is a line of
+//! `geometry_golden.txt`: the function, the case, and the xxh3-128 of the
+//! line the record has for it (its input's and its output's every `f32` by
+//! its bits). The golden was written once, from the record sheaf's own
+//! geometry made before the family's took over, and is what it's held to
+//! since: a line that differs is a bit of what the screen paints that
+//! moved, to find, not a golden to write again.
+//! `SHEAF_GEOMETRY_OUT=<file>` writes the whole record, to set beside one
+//! made before a change. `SHEAF_GOLDEN_UPDATE=1` writes the golden.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use super::{
@@ -220,18 +229,75 @@ fn record() -> String {
     out
 }
 
-/// What the screen's geometry gives for every input above, written to
-/// `$SHEAF_GEOMETRY_OUT`: the same file before and after a change to what
-/// makes it, or something the screen paints moved.
+const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/annot/geometry_golden.txt");
+
+/// Each of the record's lines as the golden holds it: its function, its
+/// case, and the digest of the whole line.
+fn digests(record: &str) -> Vec<String> {
+    (record.lines())
+        .map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            let (function, case) = (fields.next(), fields.next());
+            format!(
+                "{}\t{}\t{:032x}",
+                function.unwrap_or_default(),
+                case.unwrap_or_default(),
+                sheaf_util::checksum(line.as_bytes())
+            )
+        })
+        .collect()
+}
+
+/// What the screen's geometry gives for every input above is what it gave
+/// when sheaf made it itself, line for line.
 #[test]
-#[ignore = "the screen's geometry, written to $SHEAF_GEOMETRY_OUT"]
-fn the_screen_s_geometry_is_recorded() {
-    let Some(to) = std::env::var_os("SHEAF_GEOMETRY_OUT") else {
-        eprintln!("skipped: SHEAF_GEOMETRY_OUT is unset");
-        return;
-    };
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "recorded on Linux: an ellipse's outline goes through the platform's cosf and \
+              sinf, whose last bit may differ elsewhere"
+)]
+fn the_screen_s_geometry_is_what_was_recorded() {
     let text = record();
     assert_eq!(text, record(), "the same twice");
-    eprintln!("{} lines", text.lines().count());
-    std::fs::write(&to, text).unwrap_or_else(|e| panic!("{}: {e}", to.display()));
+    if let Some(to) = std::env::var_os("SHEAF_GEOMETRY_OUT") {
+        std::fs::write(&to, &text).unwrap_or_else(|e| panic!("{}: {e}", to.display()));
+    }
+    let got = digests(&text);
+    let cases: BTreeSet<(&str, &str)> = (got.iter())
+        .map(|l| {
+            let mut fields = l.split('\t');
+            (
+                fields.next().unwrap_or_default(),
+                fields.next().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(cases.len(), got.len(), "a case's name is its own");
+    if std::env::var_os("SHEAF_GOLDEN_UPDATE").is_some_and(|v| v == "1") {
+        let golden: String = got.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(GOLDEN, golden).expect("the golden written");
+        return;
+    }
+    let want = std::fs::read_to_string(GOLDEN)
+        .unwrap_or_else(|e| panic!("{GOLDEN}: {e}; SHEAF_GOLDEN_UPDATE=1 writes it"));
+    let want: Vec<&str> = want.lines().collect();
+    let mut differs = String::new();
+    for (i, (line, recorded)) in got.iter().zip(text.lines()).enumerate() {
+        let held = want.get(i).copied().unwrap_or("(no line)");
+        if held != line {
+            let _ = writeln!(
+                differs,
+                "line {}:\n  held {held}\n  got  {line}\n  {recorded}",
+                i + 1
+            );
+        }
+    }
+    for held in want.iter().skip(got.len()) {
+        let _ = writeln!(differs, "held, and not made: {held}");
+    }
+    assert!(
+        differs.is_empty(),
+        "the screen's geometry differs from {GOLDEN}: a bit it paints moved, to find (the \
+         golden isn't written again):\n{differs}"
+    );
 }

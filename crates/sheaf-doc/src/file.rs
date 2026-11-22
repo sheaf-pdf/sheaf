@@ -1,6 +1,25 @@
 //! Direct access to a PDF file's object graph. This is the
 //! serialization backend (see docs/document-model.md), not the editing
 //! model; the viewer never touches it.
+//!
+//! **A file's annotations as the open lists them** ([`annots_in`]). The
+//! walk of each page's `/Annots` is sheaf's: every entry followed, its
+//! slot its place in the array, and sheaf's own marks found on the entry
+//! as written (`sheaf_mark`: its `/SHEF_Annot`, fresh by its staleness
+//! digest) with their companions (`is_ours`), so none of them reaches
+//! another reader. Every other annotation (a stale mark of sheaf's too)
+//! is read by pdf-annots, one dictionary at a time, under
+//! PDFium's rules and sheaf's caps ([`annots::read`]; M18 slice 24), and
+//! listed ([`ForeignAnnot`]) and converted to the mark editing it makes
+//! ([`import::convert_page`](crate::import::convert_page)) from what it
+//! read. What's never listed (a widget, a pop-up, media), by the subtype
+//! it's written with, isn't read; one pdf-annots refuses is passed over
+//! alone, and said in the log. What the family's reading has no place for
+//! is read from its dictionary, as PDFium reads it: a review state on a
+//! subtype that isn't a note, the author of an annotation that isn't
+//! markup, `/IRT` written in place, and the dates, kept as written. A name
+//! for one without `/NM` ([`anon_name`]) and a thread's names
+//! ([`thread_name`]) are sheaf's.
 
 use std::path::Path;
 

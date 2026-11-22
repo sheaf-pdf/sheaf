@@ -1,5 +1,5 @@
-//! Markup annotations: the model and their PDF serialization (dictionary +
-//! appearance stream).
+//! Markup annotations: the model, and the dictionary and appearance sheaf
+//! writes of each mark.
 //!
 //! A mark's geometry is in PageSpace (M10.5 §5): its page's default user
 //! space, points, y up, before `/Rotate`, the space `/Rect` and
@@ -21,19 +21,33 @@
 //! (another version, or a kind from a newer sheaf) isn't ours to rewrite:
 //! it's kept and shown like another tool's (see `file::is_ours`). Every
 //! mark also writes a full appearance, so other viewers, and other sheaf
-//! builds, draw it. pdf-annots draws the marks whose look it has as
-//! sheaf's (a highlight; a square, a page border, a polygon, a polyline;
-//! ink) and those it learned from sheaf (a caret, an attachment's icon, a
-//! cloudy border), from the geometry sheaf lays out, in place: their
-//! shapes are its, and the screen paints them from it too
-//! ([`caret_points`], [`attachment_icon`], [`cloud_curves`] are adapters
-//! over its geometry). The rest are drawn with the content toolkit's
-//! writer, their text in the standard 14 fonts; a character those lack
-//! draws `?`, which [`Annot::unencodable`] tells without drawing anything.
-//! Each is held as pdf-annots holds an appearance it draws, the parts of
+//! builds, draw it.
+//!
+//! **What's sheaf's, and what's pdf-annots'** (M18 slice 24). The model,
+//! its geometry and layout, a mark's dictionary (built key by key here:
+//! its bytes are what the staleness digest and the goldens hold), the
+//! payload, a replacement's companion and the `sheaf:` names are sheaf's.
+//! An appearance is held as pdf-annots holds one it draws, the parts of
 //! its form ([`SynthesizedAp`]), which the writer makes into one
-//! ([`sink::form`](crate::content::sink::form)); either way its `/BBox` is
-//! the mark's `/Rect`, drawn where the mark is, at the identity.
+//! ([`sink::form`](crate::content::sink::form)); whoever drew it, its
+//! `/BBox` is the mark's `/Rect`, drawn where the mark is, at the identity.
+//! pdf-annots draws the marks whose look it has as sheaf's (a highlight;
+//! a square, a page border, a polygon and a polyline, not cloudy; ink) and
+//! those it learned from sheaf (an insertion's and a replacement's caret,
+//! an attachment's icon, a cloudy square, ellipse or polygon), in place
+//! ([`ApRect::InPlace`]), from the geometry sheaf lays out: their shapes
+//! are its, and the screen paints them from it too ([`caret_points`],
+//! [`attachment_icon`], [`cloud_curves`] are adapters over its geometry).
+//! sheaf draws the rest on pdf-gfx's [`Canvas`], over the content
+//! toolkit's writer, from the layout the screen paints, since the family's
+//! look for them isn't sheaf's: the underline, strikeout and squiggly, the
+//! note, the line and the dimension, free text and the callout, a plain
+//! ellipse, and sheaf's own tools (the tape, the connector, the stamps).
+//! Their text is in the standard 14 fonts; a character those lack draws
+//! `?`, which [`Annot::unencodable`] tells without drawing anything.
+//! Another tool's annotation is read by pdf-annots and made a mark by
+//! [`import`](crate::import).
+//!
 //! A save writes marks as [`emission`] makes them, through the emitter.
 //! What a PDF sheaf builds in memory holds of them (the comments a data
 //! file exports, a flattened mark's page) is written through

@@ -519,18 +519,20 @@ content-dump out:
 # and writes it, written to `out`, numbers and checksums only: a line a
 # file, and for each slot of a page's `/Annots`, three. What the open
 # reads of it (`read`): one of sheaf's marks (its JSON), a mark's
-# companion (`part`), another tool's annotation (`foreign`: every field
-# it's listed by, texts as checksums, and the mark it converts to, as a
-# checksum of its JSON, or why it doesn't), or one passed over (`passed`:
-# what the entry is). What a flatten reads of it (`flatten`): its flags,
-# the state it shows, and the form it shows by its value and by its state
-# alone, each with its box, its matrix and the matrix that places it. And
-# what a save writes of the mark it is (`make`): its dictionary, its
-# appearance's box, the resources it binds and its content, and each
-# companion's. It asserts nothing: run it before and after a change to
-# what reads, flattens or draws annotations, over the same corpus, and
-# `diff` the two files; SHEAF_ANNOTS_DUMP_ONLY=<a corpus path> prints that
-# file's records in full. Two runs over the same code write the same file.
+# companion (`part`), another tool's annotation as pdf-annots reads it
+# (`foreign`: every field it's listed by, texts as checksums, and the mark
+# it converts to, as a checksum of its JSON, or why it doesn't), one
+# pdf-annots refused (`refused`: why), or one passed over (`passed`: what
+# the entry is). What a flatten reads of it through pdf-annots
+# (`flatten`): its flags, the state it shows, and the form it shows by its
+# value and by its state alone, each with its box, its matrix and the
+# matrix that places it. And what a save writes of the mark it is
+# (`make`): its dictionary, its appearance's box, the resources it binds
+# and its content, and each companion's. It asserts nothing: run it
+# before and after a change to what reads, flattens or draws annotations,
+# or a move of the PDF layer's pin, over the same corpus, and `diff` the
+# two files; SHEAF_ANNOTS_DUMP_ONLY=<a corpus path> prints that file's
+# records in full. Two runs over the same code write the same file.
 [doc("Every corpus annotation as sheaf reads, flattens and writes it, a line each, written to a file: diff two runs across a change to annotations")]
 [group('corpus')]
 annots-dump out:

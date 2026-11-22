@@ -16,13 +16,18 @@
 //! appearance its state (`/AS`) names, and one with states and none named
 //! draws nothing (M10 bug 10); another tool's comment with none named draws
 //! what PDFium, the page view's engine, shows: the state its `/V` names,
-//! else its `/Off`, else nothing, never its first. One whose appearance
-//! can't be had draws nothing. Each goes as
-//! a delete takes it: a mark or a comment with its thread, a widget from its
-//! field, which goes with its last (the cascades). A page a flatten draws
-//! on must be read, its content drawn around ([`EditError::Content`]).
-//! Annotations the records don't hold (a printer's mark, media) stay as the
-//! page has them.
+//! else its `/Off`, else nothing, never its first. Both rules are sheaf's,
+//! over the family's reading of the appearances, which picks a state only
+//! where one is named. One whose appearance can't be had draws nothing; a
+//! widget pdf-annots refuses draws nothing too, and another tool's comment
+//! it refuses stays as the page has it (the open, reading it the same way,
+//! lists none such). pdf-annots' own flatten of a page (`plan_flatten`)
+//! isn't used: a flatten here is an edit of the model, which a save draws.
+//! Each goes as a delete takes it: a mark or a comment with its thread, a
+//! widget from its field, which goes with its last (the cascades). A page
+//! a flatten draws on must be read, its content drawn around
+//! ([`EditError::Content`]). Annotations the records don't hold (a
+//! printer's mark, media) stay as the page has them.
 
 use std::collections::HashSet;
 use std::sync::Arc;

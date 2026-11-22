@@ -1256,6 +1256,11 @@ const RETIRED_M18: &[(&str, u8)] = &[
     ("source::appearance::Shows::form", 24),
     ("source::appearance::frame", 24),
     ("source::appearance::unkept", 24),
+    // A form a flatten draws is placed on its annotation's box by the
+    // family's placement, read with the annotation (`Showing::placed`,
+    // which `tx::flatten::on_rect` asks), not by a frame sheaf read of
+    // the form itself.
+    ("tx::flatten::placed", 24),
 ];
 
 /// The ledgers, with the words a hit names its slice by.
@@ -1334,6 +1339,10 @@ const QUALIFIED_ONLY: &[&str] = &[
     "points",
     "quads",
     "subtype",
+    // What places a form, a page or a glyph elsewhere (`Showing::placed`,
+    // sheaf-render's page matrix, tests' helpers): not the flatten's own,
+    // which placed a form by the frame sheaf read of it (M18 slice 24).
+    "placed",
     // A sink's `resource`, a glyph's `advance` and a file's font's
     // `encoding`: not what sheaf's own font trait and standard 14 had
     // (M18 slice 22).

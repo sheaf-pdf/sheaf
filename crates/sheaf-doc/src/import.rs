@@ -9,7 +9,12 @@
 //! names in threads ([`thread_name`], and `/IRT` by its target's name or,
 //! as XFDF gives it, a string: [`irt_name`]); the dates, kept as written;
 //! a dimension's `/Measure`; an attachment's embedded file; and whether a
-//! stamp has a `/Name` at all.
+//! stamp has a `/Name` at all (one without is named none, as PDFium reads
+//! it, where the family gives ISO 32000's default for its icon). Which
+//! mark each annotation becomes is sheaf's: the family says what it is,
+//! and this says what sheaf holds it as (a dimension by the family's
+//! `/IT`, a page stamp by its form, a reply or a replacement by its
+//! thread), each color rounded to a byte as sheaf writes it.
 //!
 //! The mark keeps the annotation's `/NM` ([`Annot::name`]), so replies to
 //! it still find it, and a save puts the mark where the annotation was.
