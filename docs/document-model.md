@@ -835,9 +835,13 @@ lint ledger) keeps them out of everything but tests.
   same text in two subsets with different codes gives equal bags. Slice
   10's removal check compares them. From M11's slice 3 `text_bag` reads
   content as the content interpreter does (The content interpreter,
-  below), each form judged on its own (`Forms::Report`), its fonts a
-  source's `Fonts` made for text (`Fonts::for_text`: no program read),
-  each read once within the page's budget. The bags are the old walk's
+  below; pdf-gfx's from M18 slice 23), each form judged on its own
+  (`Forms::Skip`: not drawn, though an XObject's dictionary is read to
+  tell a form from an image), its fonts a source's `Fonts` made for text
+  (`Fonts::for_text`: no program read), each read once within the page's
+  budget. A damaged object reads as none there; one the source can't
+  read for another reason (I/O, a password, a cap) fails the bag, and
+  the removal check counts that content unreadable. The bags are the old walk's
   on every stream the removal check reads, but for the hash of an empty
   string shown in no font, which stands for no text, and CJK text where
   the old walk hashed: a Type0 font with no `/ToUnicode` over a
@@ -897,17 +901,82 @@ op that reads no page's content (under 1 ms).
 
 M11's slice 3 landed early, on its own between M10.5 and M10's return
 (2026-10-23), since M11's redaction, M13's content editing, M14's
-optimize and M17's tagged documents all build on it. `content::interp`
-reads content as PDFium interprets it (`CPDF_StreamContentParser`), so
-where it says a glyph is, PDFium draws it. It lexes through the toolkit,
-never lopdf's `Content`.
+optimize and M17's tagged documents all build on it. From M18 slice 23
+the interpreter is pdf-gfx's (`pdf::gfx`, through the door), which
+began as a copy of sheaf's and generalized it (the whole graphics
+state, what it reads past told to a sink, a text page of its own);
+sheaf's own (`content/interp/`, 6,120 lines) went then. It reads
+content as PDFium interprets it (`CPDF_StreamContentParser`), so
+where it says a glyph is, PDFium draws it, from pdf-content-streams'
+tokens and its `ResCx` (sheaf's lexer, which blocks, marked ranges and
+splices still read, is slice 17's).
 
-- **What it reads, and hands on.** `interpret(objects, &Concat,
-  resources, &Limits, &Fonts, Opts, visit)` hands each event to a
+- **`content::interp`, where sheaf meets the family.** It re-exports the
+  door's names (`Event`, `Kind`, `State`, `Summary`, `Error`, `Opts`,
+  `Forms`, `Wants`, `EncodedPage` and the rest) and has two functions of
+  sheaf's own over pdf-gfx's `interpret_with` and `encode_with`:
+  `interpret(objects, &Concat, resources, &Limits, &Fonts, Opts, visit)`
+  and `encode(objects, &Concat, resources, &Limits, &Fonts)`. Each reads
+  any of sheaf's sources (`ReadObjects`, as `content::Objects` lends
+  them, below), what the source doesn't keep held for that call alone
+  (What a page interpreted keeps, below), under sheaf's caps as
+  `Limits::gfx` gives them (Bounded, below), with sheaf's rule for an
+  object that doesn't read: no sink
+  where each form is judged on its own (`&mut ()`, so pdf-gfx makes none
+  of the lookups only a sink wants), and `FailClosed` where forms are
+  drawn and in `encode` (Failing closed, below). sheaf's callers call
+  these, never pdf-gfx's own (only the interpreter's tests do, where
+  they test the family), so the rule can't be left out at one call.
+- **What a page interpreted keeps: nothing it didn't.** pdf-gfx borrows
+  each object it reads for the whole run (a form's resources, an
+  XObject's dictionary), so the provider lends for as long as the run.
+  `ReadObjects::peek` gives what the source keeps borrowed and the rest
+  read for the asker (`Cow`): a lazy source keeps every object `get`
+  reads but a stream, whose dictionary it reads as written, its data
+  unread, and hands over without keeping (pdf-structure's
+  `Reading::object_unrecorded`: no record, so the data isn't hashed for
+  a copy's check either). `content::Objects` holds what it's handed in
+  an `Unkept` of the call's, read once each, and the call drops it. So
+  interpreting every page of an open document keeps none of their image
+  or form XObjects' dictionaries, nor their fonts' streams': on the
+  scanned 7k (an image a page) interpreting every page keeps no object
+  and adds 0.9 MB, in 34 ms (the gate's row, each page's content read
+  too). Kept, the dictionaries were 9.2 MB there; and sheaf's own
+  interpreter, which read every XObject again with its data, took 172
+  ms, most of it hashing each image's data for a record nobody used.
+- **The provider's reasons.** `ReadObjects::peek` lends an object, its
+  references followed: none where there's no such object, the error
+  where it's there and doesn't read. `content::Objects` gives the family
+  that error's reason (`Unreadable`, `Why`): the source's I/O is
+  `Source`; a password or decryption that fails, `Locked`; one of the
+  reader's caps (a chain of references past `max_depth`, an object past
+  one of its `ReadLimits`), `Capped`; anything else, the file's, `Damaged`:
+  a loop of references among them (`ReferenceCycle`), which is the same
+  under any cap, where a chain that is only long is the cap's.
+  A stream that decodes past its limit is `Limit`. An unknown filter
+  isn't told from a damaged stream (`Filter`): sheaf's decoding gives
+  both as one error, and pdf-gfx reads the two alike. Until slice 23
+  every failure was `Damaged`.
+- **Failing closed.** pdf-gfx reads a `Damaged` object as none and tells
+  its sink (`Fault::Damaged`); any other reason stops the run
+  (`GfxError::Unreadable`), a text bag's too. Where forms are drawn, sheaf's
+  sink keeps the first damaged object it's told of and fails the run for
+  it, by an error of sheaf's own (`content::interp::Error::Damaged`; what
+  pdf-gfx stops for is `Error::Gfx`, so the two are told apart by the
+  variant), after the events pdf-gfx handed: a page drawn through an object sheaf can't read isn't one to
+  take text out of (M11's redaction). sheaf's own interpreter failed
+  only for a form that couldn't be read, and read a damaged ExtGState
+  or property list as none. A font's objects are read by
+  pdf-fonts from the provider, which tells no sink, so a damaged font is
+  still none. Where each form is judged on its own a damaged object is
+  none, as before. No corpus page has an object told damaged or stopped
+  by a reason (all 54,009, slice 23's dumps).
+- **What it reads, and hands on.** `interpret` hands each event to a
   visitor in order, with the state before it and the marked ranges it's
   in (`Event { at, state, marks, kind }`):
   - every operator, inline images among them (`Kind::Op`; `At`: where,
-    and the operands as written);
+    and the operation as written: `operator()`, `name()`,
+    `op_range()`, its operands, an inline image's data);
   - each string shown (`Text(TextShow)`), its glyphs laid out when asked
     (`Glyph`: bytes, code, CID, origin, advance, quad, pen, what's
     guessed, and `tm()`, the absolute `Tm` that starts a string there);
@@ -916,8 +985,9 @@ never lopdf's `Content`.
     offsets that reach it) or refusal (`FormRefused`);
   - each path painted or made the clip, in PageSpace (`Path`, `Seg`),
     its bounds as far as a stroke paints (half the line width, √2 times
-    that at square caps, the miter limit's at a join or curve, 0.5 pt
-    for a zero width, as PDFium draws it);
+    that at square caps, the miter limit's at a join or curve but in a
+    path of one point, which PDFium paints no join at, 0.5 pt for a zero
+    width, as PDFium draws it);
   - each image, an XObject or inline (`ImageDrawn`: the unit square
     through the CTM, and its stencil, soft mask, stencil mask and `/OC`,
     read without decoding its data); each shading `sh` paints
@@ -932,20 +1002,23 @@ never lopdf's `Content`.
   data once, what the fonts it picks decompress to, and what drawing
   their programs' glyphs costs), path segments,
   form uses and refusals, and the deepest forms, `q` and marked content
-  went. With `Forms::Report` no form is drawn and no XObject read, a `Do`
-  being an operator like another, as where each is judged on its own
-  (the removal check's `text_bag`). `Opts.wants` (`Wants { ops, text,
+  went. With `Forms::Skip` no form is decoded or drawn, its `Do` being
+  an operator like another, as where each is judged on its own (the
+  removal check's `text_bag`); an XObject's dictionary is still read, so
+  an image the content draws is handed as under `Forms::Descend` and one
+  PDFium doesn't draw is `Ignored`. `Opts.wants` (`Wants { ops, text,
   paths }`, everything by default) says what the visitor reads: only the
-  operators `ops` holds (`Ops`, a set over those the interpreter knows,
-  one bit for the rest) are handed as `Op`, and strings and paths only
+  operators `ops` holds (`Operators`, pdf-content-streams' set) are
+  handed as `Op`, and strings and paths only
   where it wants them, so what nobody reads isn't built. What
   interpreting works out is the same whatever the interest: the layout,
   each cap and its count, geometry an `f32` can't hold, the clip and the
   `Summary`; forms, images, shadings and marked content are always
-  handed. Each operator's name is decoded once (`Op`) and dispatched by
-  one match.
+  handed. Each operator is pdf-content-streams' `Operator`, decoded once
+  by its tokens.
 - **State as PDFium keeps it.** `State` holds the CTM, the line's width,
-  cap, join and miter limit, the clip, and `TextState` (font and size,
+  cap, join, miter limit and dash, the colors and their spaces, alpha,
+  blend mode, soft mask and overprint, the clip, and `TextState` (font and size,
   `Tc`, `Tw`, `Tz`, `TL`, `Ts`, `Tr`, the text matrix, where the line
   starts and the pen, and whether a width guessed earlier on the line
   moved it). What PDFium does its own way, so does this: an operand that
@@ -962,21 +1035,23 @@ never lopdf's `Content`.
   user space and placed by the CTM at the painting operator, with
   PDFium's reading of path operators after an `m`; a resource category a
   form's resources lack is looked up in the page's (`FindResourceHolder`);
-  and a form starts in PDFium's `AddForm` state, `Tz`, `TL`, `Ts` and
-  the text matrix reset.
+  and a form starts in PDFium's `AddForm` state: the state of what draws
+  it, colors and the rest, with `Tz`, `TL`, `Ts` and the text matrix
+  reset.
 - **Fonts give glyph boxes.** A file's font is pdf-fonts' `Font`
   (`content::Font`, from M18 slice 22; sheaf's own reader, `Foreign`,
   went then, and pdf-fonts began as a copy of it). It reads a source
   through `content::Objects`, any `ReadObjects` as the PDF layer's
   `Resolve` and `Streams`: `peek` lends an object, its references
-  followed, a stream's dictionary without its data read or kept, and a
-  stream is decoded by sheaf's own decoding within the limit, never
-  kept, so a font's program, CMaps and CharProcs don't stay in a lazy
-  reader's slots; the limits are `Limits::fonts`. The interpreter of
-  slice 23 takes the same provider and the same `Fonts`. `Font::read`
+  followed, a stream's dictionary without its data read, neither kept by
+  the source (held by the call's `Unkept`, above), and a stream is
+  decoded by sheaf's own decoding within the limit, never kept, so a
+  font's program, CMaps and CharProcs don't stay in a lazy reader; the
+  limits are `Limits::fonts`. The interpreter takes
+  the same provider and the same `Fonts` (from slice 23). `Font::read`
   reads a file's font as
   PDFium does, failing only past the budget it decompresses within
-  (`FontError::TooLarge`): its kind (Type1, MMType1, TrueType, Type3, or Type0 over
+  (pdf-fonts' `Error::TooLarge`): its kind (Type1, MMType1, TrueType, Type3, or Type0 over
   CIDFontType0 or 2); its codes (`codes`, split as PDFium's
   `CPDF_CMap::GetNextChar` splits them: by an embedded CMap's codespace,
   a byte each by one range but two where it's of two bytes, by more each
@@ -1084,44 +1159,96 @@ never lopdf's `Content`.
   nothing, a stray `EMC` is passed over, a range left open ends where
   its content does, and a form's `EMC`s can't end what its drawer
   opened.
-- **Bounded.** `ContentLimits` gains `form_depth` (40); `states`, the
-  `q`s saved at once (65,536: PDFium has no cap, so this one bounds
-  memory only); `operators` and `glyphs` (2²⁴ each), `interpreted`, the
-  bytes of content lexed (2³⁰), and `segments`, path segments (2²³: of
-  a path being built, and of all painted or made the clip, which bounds
-  what paths and the clip hold), each counted across every form use, so
-  a form drawn many times costs each time, one of whitespace too. The
-  lexer's `operands` cap is the operand stack, `depth` caps marked
-  nesting (`Cap::Marked`), and forms and fonts decompress within what
-  the page's streams leave of `decompressed`. Text in a clipping mode
+- **Bounded.** pdf-gfx's caps (`pdf::gfx::Limits`) are sheaf's, given
+  once by `source::Limits::gfx`: `ContentLimits`' `form_depth` (40);
+  `states`, the `q`s saved at once (65,536: PDFium has no cap, so this
+  one bounds memory only); `operators` and `glyphs` (2²⁴ each),
+  `interpreted`, the bytes of content lexed (2³⁰), and `segments`, path
+  segments (2²³: of all painted, and of the clip and the path being
+  built together, which bounds what paths and the clip hold), each but
+  `states` counted across every form use, so a form drawn many times
+  costs each time, one of whitespace too; marked nesting (`marked`,
+  `Cap::Marked`) as content's `depth` (512); the lexer's caps as
+  `ContentLimits::family` gives them (`operands` is the operand stack)
+  and fonts' as `Limits::fonts`; and forms and fonts decompress within
+  what the page's streams leave of `decompressed`. pdf-gfx counts some
+  of them its own way: `states` within each content stream (a form's
+  `q`s apart from what draws it), `marked` every range open across a
+  form and what draws it, and content longer than `decompressed` is past
+  it before it's read. Text in a clipping mode
   past the 1,024 objects PDFium's clip takes keeps no glyphs. Past a cap
-  is `InterpError::Limit(Cap)`, never a partial answer; a form that
-  can't be read is `InterpError::XObject`; and geometry an `f32` can't
+  is `GfxError::Limit(Cap)`, never a partial answer; content that doesn't
+  lex, or past the lexer's caps (arrays and dictionaries nested past the
+  64 levels PDFium builds among them, whatever `depth` says), is
+  `GfxError::Content`, a form whose stream doesn't decode
+  `GfxError::FormStream`, an object a reason stops `GfxError::Unreadable`
+  (Failing closed, above); and geometry an `f32` can't
   hold (a CTM, a form's matrix, the line, a glyph's box by a bound
   worked from its font's extent, its outlines' reach included, a path,
-  an image's corners, a shading) is `InterpError::NotFinite`. It never
+  an image's corners, a shading) is `Error::NotFinite`. It never
   panics or recurses past `form_depth`. The most any page of the corpus
   comes to: 1,217,210 operators (13.8× under the cap), 41,050 glyphs,
-  17,864,912 bytes lexed, 17,945,356 bytes decompressed with its fonts'
+  17,864,912 bytes lexed, 17,980,634 bytes decompressed with its fonts'
   programs (6.7% of `decompressed`), 995,739 path segments (`segments`
   stays 2²³, 8.4× that), 745 form uses, forms 10 deep, 67 states saved,
   marked content 9 deep.
-- **Written again** (`interp::encode`, giving `Encoded { content, forms
-  }`): the page's operators as one stream, and once each the content of
-  every form it draws, as written (`ContentWriter::operation`), but
-  `Td`, `TD` and `T*` as a `Tm` of the text matrix and a `Td` from its
-  origin to the line they move to, `'` as those and a `Tj`, and `"` as
-  `Tw`, `Tc`, those and a `Tj`. A `Td` that moves nothing stays as
-  written, since any operator ends PDFium's reading of path operators
-  after an `m`. Numbers so worked out are written as the state holds
-  them (`object::real`), so positions come out to the bit, and no line
-  depends on the leading or an earlier line: a line can be taken out
-  without moving the lines after it. Strings on one line still follow
-  each other, so where glyphs are taken out of one, the next on its line
-  needs a `Tm` and an absolute `Td` of its own (M11 slice 5). What can't read back the
-  same is refused (`EncodeError::Unwritable`): a line that isn't finite,
-  and an inline image whose `/L` isn't its data's length
-  (`lex::image_length`), whose end would move with what follows it.
+- **Written again** (`interp::encode`, pdf-gfx's `encode_with`, giving
+  `EncodedPage { content, forms }`): the page's operators as one stream,
+  and once each the content of every form it draws, as written
+  (`ContentWriter::operation`), but `Td`, `TD` and `T*` as a `Tm` of the
+  text matrix and a `Td` from its origin to the line they move to, `'`
+  as those and a `Tj`, and `"` as `Tw`, `Tc`, those and a `Tj` (`Tw`
+  and `Tc` only where its operands are numbers). A `Td` that moves
+  nothing stays as written, since any operator ends PDFium's reading of
+  path operators after an `m`. Numbers so worked out are written as the
+  state holds them (pdf-objects' `serialize::real`), so positions come
+  out to the bit, and no line depends on the leading or an earlier line:
+  a line can be taken out without moving the lines after it. Strings on
+  one line still follow each other, so where glyphs are taken out of
+  one, the next on its line needs a `Tm` and an absolute `Td` of its own
+  (M11 slice 5). What can't read back the same is refused
+  (`Error::Unwritable`): a line that isn't finite (`Line`), an inline
+  image whose `/L` isn't its data's length, whose end would move with
+  what follows it (`InlineLength`), one PDFium makes no stream of or
+  whose end moves once written (`InlineStream`, found by reading what's
+  written back), and a `BI` that begins no image (`LoneBi`); so are
+  content with an inline image sized under a color space's cap
+  (`Error::CappedInlineImage`) and a page whose streams didn't all
+  decode (`Error::PageStream`). Since slice 23 no corpus page is written
+  otherwise than sheaf's own encoder wrote it, byte for byte, and none
+  it wrote is refused.
+- **What reads otherwise than sheaf's own did** (M18 slice 23, each asked
+  of PDFium, its page objects, text page or pixels; the corpus read by
+  both, page for page, by `just glyph-dump` and `just events-dump`).
+  Where PDFium sided with the family it stands: a raw CR in a literal
+  string is code 13, and a CRLF two codes, as PDFium's `ReadString`
+  keeps them, where sheaf's lexer read LF (one corpus page: a glyph and
+  the pen after it); a stroked path of one point reaches half the width
+  by its cap, not the miter limit, since PDFium paints no join there (8
+  pages, 15 paths); a font that reads but PDFium doesn't load (a Type 0
+  with no CIDFont) leaves the font as it was at `Tf` and none at `gs`,
+  where sheaf's picked it; an inline image PDFium makes no stream of (a
+  filter it has no decoder for) draws no image; `/ActualText` is decoded
+  as PDFium's text page decodes it (a language escape dropped, bad UTF-8
+  after its byte order mark passed over). None of the last three
+  changes what a corpus page reads as. Nor does content PDFium reads
+  past, which sheaf's lexer refused and a text bag now reads as
+  PDFium's text page shows it: a dictionary that doesn't end is dropped
+  with what it holds, or ends at a key that's no name or a value that's
+  no object, the rest read on as content; an array inside an array opens
+  none; 0x80 and 0xFF are white-space; a string shows its first 32,767
+  bytes and a name `Tj` shows its first 254. (sheaf's lexer, which
+  blocks, marked ranges and splices are still read by, refuses the
+  unended ones.) One goes the other way: arrays and dictionaries nested
+  past the 64 levels PDFium builds fail, where PDFium reads on and
+  sheaf's own read them to its depth. Where PDFium sided with sheaf's,
+  the family changed: `Tj`, `'` and `"` of a name show its bytes, as
+  PDFium's `GetString` reads them. Two more changed in the family or in
+  sheaf's use of it, not readings PDFium rules: a clip's segments are
+  counted as it's built, where pdf-gfx walked the clip at every path
+  operator (100,000 clips took two minutes); and `Forms::Skip` reads an
+  XObject's dictionary, to tell a form from an image, where sheaf's own
+  mode for forms judged on their own read none.
 - **Tests and the corpus.** `content::fixture` (in other crates' tests
   through the `fixtures` feature) builds a page for each operator, font
   kind, nesting of forms, kind of image, clip and marked range, each
@@ -1130,7 +1257,9 @@ never lopdf's `Content`.
   written again pixel for pixel as before; their standard 14 fonts have
   `/Widths`, so PDFium lays them out the same on every OS; fonts over
   predefined CMaps (`fixture::predefined`) and over hand-built TrueType,
-  CFF, Type 1 and CIDFont programs (`fixture::programs`) among them. The
+  CFF, Type 1 and CIDFont programs (`fixture::programs`) among them.
+  sheaf's interpreter's tests run on pdf-gfx through sheaf's sources and
+  caps (`content::interp_tests`, from slice 23). The
   `interp` fuzz target draws two streams on `fixture::fuzz_page`, with
   the fonts' CMap, a CharProc, `/W`, `/W2`, `/FontMatrix` and a font
   program from the input where it gives them, and fonts over predefined
@@ -1140,7 +1269,7 @@ never lopdf's `Content`.
   `SHEAF_INTERP_ONLY` narrows them) read every form, the pool sample,
   every scan and conformance's 540 files that claim PDF/UA
   (`Corpus::conformance`), 54,009 pages: every page interpreted within
-  the caps, with no panic, failure or box not finite (10 s); 117,492,223
+  the caps, with no panic, failure or box not finite (6 s); 117,492,223
   glyphs matched to PDFium's characters, none past a thousandth of a
   point: at the origin, and equal to the loose box on every side where
   the outline is known and nothing guessed (90,676,967), else within it
@@ -1153,8 +1282,9 @@ never lopdf's `Content`.
   fails (4 minutes); and every page written again rendering as before,
   but 2 within 16 px and 24 drawn, pixel for pixel, as PDFium draws the
   file loaded again (its caches warm for both), none left unwritten (50
-  minutes).
-- **Its callers.** `text_bag` reads content through it (`Forms::Report`;
+  minutes). Every one of those counts was the same on pdf-gfx's
+  interpreter as on sheaf's own.
+- **Its callers.** `text_bag` reads content through it (`Forms::Skip`;
   an interest of the strings shown and the operators that end a word;
   fonts made for text). Its bags were proven equal to the old walk's on
   every stream the removal check reads (pages, forms, tiling patterns,
@@ -1162,7 +1292,8 @@ never lopdf's `Content`.
   files and the 7k fixtures, but for the hash of an empty string shown
   in no font, which stands for no text; the predefined CMaps then turned
   69 files' hashes into CJK text, no asserted corpus count moving (a
-  string with a CID 0 in it stays hashed). With the
+  string with a CID 0 in it stays hashed). On pdf-gfx's interpreter
+  every corpus page's bag is as it was. With the
   wrap-up's speed step it's 5% faster than the old walk was on the heavy
   7k's streams, 2% slower on the synthetic's, and 31% on the scanned's
   (about a millisecond over its 7,000 pages). M11's slice 5 is the first caller

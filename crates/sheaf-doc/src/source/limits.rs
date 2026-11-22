@@ -1,5 +1,6 @@
 //! The caps every reader of a source runs under: one value for all of
-//! them.
+//! them, given to the PDF layer's crates in their own terms at one place
+//! each ([`ContentLimits::family`], [`Limits::fonts`], [`Limits::gfx`]).
 
 /// The caps on reading a source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,7 +80,8 @@ pub struct ContentLimits {
     /// a pattern), but a stream may hold runs of numbers no operator ends.
     pub operands: usize,
     /// How deep arrays and dictionaries nest (PDFium's cap), and marked
-    /// content.
+    /// content: where content is interpreted, every range open across a
+    /// form and what draws it.
     pub depth: usize,
     /// An inline image's data, in bytes.
     pub inline_image: usize,
@@ -90,7 +92,8 @@ pub struct ContentLimits {
     /// this depth.
     pub form_depth: usize,
     /// Graphics states `q` saved and `Q` hasn't restored, where content is
-    /// interpreted; elsewhere their balance is only counted. PDFium has no
+    /// interpreted, within each content stream (a form's apart from what
+    /// draws it); elsewhere their balance is only counted. PDFium has no
     /// cap, so this one only bounds the memory they take, far above any
     /// real page's.
     pub states: usize,
@@ -103,9 +106,9 @@ pub struct ContentLimits {
     /// so a form of whitespace or comments, which has few operators, still
     /// costs its length each time it's drawn.
     pub interpreted: usize,
-    /// Path segments: of a path being built, and of all those a page's
-    /// content paints or makes the clip, counted as `operators` are, which
-    /// bounds the memory a path and the clip take.
+    /// Path segments: of all those a page's content paints, counted as
+    /// `operators` are, and of the clip and the path being built together,
+    /// which bounds the memory a path and the clip take.
     pub segments: usize,
 }
 
@@ -138,6 +141,35 @@ impl Limits {
         let mut limits = crate::pdf::fonts::Limits::DEFAULT;
         limits.content = self.content.family();
         limits.cmaps = self.content.depth;
+        limits
+    }
+
+    /// These caps as pdf-gfx interprets and writes content again under
+    /// them: its defaults, with content's as [`ContentLimits::family`]
+    /// gives them and fonts' as [`Limits::fonts`] does; how deep forms are
+    /// drawn, the states saved, the operators, glyphs, path segments and
+    /// bytes interpreted, and what's decompressed, as content's caps have
+    /// them; and marked content's nesting as content's `depth`, the cap
+    /// sheaf has always held it to. pdf-gfx counts some of them its own
+    /// way: the states one content stream saves, not every stream open;
+    /// every marked range open, a form's with its page's; a path's
+    /// segments with the clip's. And content's `depth` holds less than it
+    /// says: pdf-content-streams fails arrays and dictionaries nested
+    /// past the 64 levels PDFium builds, whatever the cap (512). Every
+    /// interpretation through pdf-gfx takes its limits from here.
+    pub fn gfx(&self) -> crate::pdf::gfx::Limits {
+        let c = &self.content;
+        let mut limits = crate::pdf::gfx::Limits::DEFAULT;
+        limits.content = c.family();
+        limits.fonts = self.fonts();
+        limits.form_depth = c.form_depth;
+        limits.states = c.states;
+        limits.operators = c.operators;
+        limits.glyphs = c.glyphs;
+        limits.segments = c.segments;
+        limits.marked = c.depth;
+        limits.interpreted = c.interpreted;
+        limits.decompressed = c.decompressed;
         limits
     }
 
@@ -176,4 +208,93 @@ impl Limits {
             segments: 1 << 23,
         },
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An interpretation's caps are the family's defaults with each of
+    /// sheaf's content caps in its place, every field of sheaf's taken
+    /// once: what each one of sheaf's is changed to, `gfx()` gives, and no
+    /// other field of the family's moves with it.
+    #[test]
+    fn an_interpretation_s_limits_are_the_family_s_with_sheaf_s_caps() {
+        let family = crate::pdf::gfx::Limits::DEFAULT;
+        let lim = Limits::DEFAULT;
+        let gfx = lim.gfx();
+        assert_eq!(gfx.content, lim.content.family());
+        assert_eq!(gfx.fonts, lim.fonts());
+        let ours = |g: &crate::pdf::gfx::Limits| {
+            [
+                g.form_depth,
+                g.states,
+                g.operators,
+                g.glyphs,
+                g.segments,
+                g.marked,
+                g.interpreted,
+                g.decompressed,
+            ]
+        };
+        let c = &lim.content;
+        assert_eq!(
+            ours(&gfx),
+            [
+                c.form_depth,
+                c.states,
+                c.operators,
+                c.glyphs,
+                c.segments,
+                c.depth,
+                c.interpreted,
+                c.decompressed,
+            ]
+        );
+        // Sheaf's numbers aren't the family's, so each above is sheaf's.
+        let unlike = (ours(&family).into_iter().zip(ours(&gfx))).filter(|(f, g)| f != g);
+        assert_eq!(unlike.count(), 7, "all but form_depth, 40 in both");
+        assert_eq!(family.form_depth, c.form_depth);
+
+        // Each of sheaf's caps moves its own field and no other.
+        type Set = fn(&mut ContentLimits, usize);
+        let sets: [(&str, Set); 11] = [
+            ("decompressed", |c, n| c.decompressed = n),
+            ("operands", |c, n| c.operands = n),
+            ("depth", |c, n| c.depth = n),
+            ("inline_image", |c, n| c.inline_image = n),
+            ("form_depth", |c, n| c.form_depth = n),
+            ("states", |c, n| c.states = n),
+            ("operators", |c, n| c.operators = n),
+            ("glyphs", |c, n| c.glyphs = n),
+            ("interpreted", |c, n| c.interpreted = n),
+            ("segments", |c, n| c.segments = n),
+            ("none", |_, _| {}),
+        ];
+        for (name, set) in sets {
+            let mut moved = Limits::DEFAULT;
+            set(&mut moved.content, 7);
+            let g = moved.gfx();
+            assert_eq!(g.content, moved.content.family(), "{name}");
+            assert_eq!(g.fonts, moved.fonts(), "{name}");
+            let c = &moved.content;
+            let want = [
+                c.form_depth,
+                c.states,
+                c.operators,
+                c.glyphs,
+                c.segments,
+                c.depth,
+                c.interpreted,
+                c.decompressed,
+            ];
+            assert_eq!(ours(&g), want, "{name}");
+        }
+        // What sheaf has no cap of is the family's.
+        let mut reader = Limits::DEFAULT;
+        reader.reader.max_depth = 3;
+        reader.forms.depth = 3;
+        reader.page_tree.depth = 3;
+        assert_eq!(reader.gfx(), gfx);
+    }
 }

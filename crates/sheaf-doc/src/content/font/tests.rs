@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::pdf::{Dictionary, Document as Pdf, Object, Stream, StreamExt, Value, dictionary};
 
 use super::*;
-use crate::content::Objects;
+use crate::content::{Objects, Unkept};
 use crate::content::{ResBody, ResId};
 use crate::pdf::fonts::{Encoding, GlyphBox};
 use crate::serialize::built::ResObjects;
@@ -296,7 +296,14 @@ fn type1_over(program: Vec<u8>) -> Font {
     };
     let mut budget = Limits::DEFAULT.content.decompressed;
     let lim = Limits::DEFAULT.fonts();
-    Font::read(Objects(&pdf), &font, &lim, &mut budget, &mut ()).expect("within the budget")
+    Font::read(
+        Objects::new(&pdf, &Unkept::default()),
+        &font,
+        &lim,
+        &mut budget,
+        &mut (),
+    )
+    .expect("within the budget")
 }
 
 /// [`fixture::type1_program`](crate::content::fixture::type1_program)

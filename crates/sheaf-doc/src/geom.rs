@@ -2,6 +2,11 @@
 //! page, so the layout's size for a page is the size the engine renders,
 //! and the one conversion between the page's default user space
 //! (PageSpace, §5) and the page as it's shown.
+//!
+//! The content interpreter's events carry the PDF layer's geometry
+//! (`content::interp`'s `Rect` and `Matrix`, pdf-gfx's), which nothing
+//! sheaf ships turns into these yet: the code that first does adds the
+//! conversion here.
 
 use sheaf_edit::{PageSize, Rotation};
 

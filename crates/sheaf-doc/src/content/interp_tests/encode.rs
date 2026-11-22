@@ -1,21 +1,24 @@
-//! Content written again ([`encode`]): each fixture of [`fixture`], and
-//! random runs of their operators, draw as their encoding draws, event
-//! for event but for the operators themselves: each glyph and its box,
-//! each path, image and shading, the clip each is drawn in, the marked
-//! ranges each is in, and each form drawn, refused, begun and ended, to
-//! the bit. The encoding lexes, and its `q`s and `Q`s and the resource
-//! names it uses are the content's.
+//! Content written again ([`encode`], pdf-gfx's over sheaf's sources): each
+//! fixture of [`fixture`], and random runs of their operators, draw as
+//! their encoding draws, event for event but for the operators
+//! themselves: each glyph and its box, each path, image and shading, the
+//! clip each is drawn in, the marked ranges each is in, and each form
+//! drawn, refused, begun and ended, to the bit. The encoding lexes, and
+//! its `q`s and `Q`s and the resource names it uses are the content's.
 
 use std::cell::RefCell;
 use std::ops::ControlFlow;
 
 use proptest::prelude::*;
 
-use super::*;
 use crate::content::fixture::{self, Fixture};
-use crate::content::{Balance, NameSet, balance, lex, names_used};
-use crate::geom::{Affine, Rect};
-use crate::pdf::StreamExt;
+use crate::content::interp::{
+    EncodedPage, Error, Event, GfxError, ImageOf, Kind, Mark, Matrix, Opts, Rect, Seg, Unwritable,
+    encode, interpret,
+};
+use crate::content::{Balance, Concat, Fonts, NameSet, ResCx, Tok, balance, lex, names_used};
+use crate::pdf::gfx::{ClipPart, ImageDrawn, UseId};
+use crate::pdf::{Object, ObjectId, StreamExt};
 use crate::source::Limits;
 
 /// An event as the round trip compares it: what it is, but for its
@@ -28,7 +31,7 @@ pub(super) struct Seen {
 
 /// What `content` draws on `f`'s page, with its resources: each event but
 /// the operators, as the round trip compares them.
-fn drawn(f: &Fixture, content: &[u8]) -> Result<Vec<Seen>, InterpError> {
+fn drawn(f: &Fixture, content: &[u8]) -> Result<Vec<Seen>, Error> {
     let mut seen = Vec::new();
     interpret(
         &f.pdf,
@@ -60,7 +63,12 @@ pub(super) fn described(event: &Event<'_>) -> Seen {
             let text = &event.state.text;
             affine(&mut n, text.matrix);
             n.extend([text.line.x, text.line.y, text.pen.x, text.pen.y]);
-            format!("op {:?} at {:?}", event.at.tok, event.at.op)
+            format!(
+                "op {:?} {:?} at {:?}",
+                event.at.operator(),
+                String::from_utf8_lossy(event.at.name()),
+                event.at.op_range()
+            )
         }
         Kind::Text(show) => {
             let text = &event.state.text;
@@ -101,6 +109,7 @@ pub(super) fn described(event: &Event<'_>) -> Seen {
             let of = match &image.of {
                 ImageOf::XObject(id) => format!("{id:?}"),
                 ImageOf::Inline { data } => format!("{:?}", &event.at.content()[data.clone()]),
+                other => format!("{other:?}"),
             };
             let ImageDrawn {
                 stencil,
@@ -120,6 +129,7 @@ pub(super) fn described(event: &Event<'_>) -> Seen {
         Kind::MarkedBegin(m) => format!("begins {}", mark(m)),
         Kind::MarkedEnd(m) => format!("ends {}", mark(m)),
         Kind::MarkedPoint(m) => format!("point {}", mark(m)),
+        other => format!("{other:?}"),
     };
     affine(&mut n, event.state.ctm);
     let clip: Vec<String> = (event.state.clip.parts())
@@ -135,6 +145,7 @@ pub(super) fn described(event: &Event<'_>) -> Seen {
                     n.extend(glyphs.iter().flat_map(|q| q.0).flat_map(|p| [p.x, p.y]));
                     format!("{} glyphs", glyphs.len())
                 }
+                other => format!("{other:?}"),
             }
         })
         .collect();
@@ -158,7 +169,7 @@ fn mark(m: &Mark) -> String {
     )
 }
 
-fn affine(n: &mut Vec<f32>, m: Affine) {
+fn affine(n: &mut Vec<f32>, m: Matrix) {
     n.extend([m.a, m.b, m.c, m.d, m.e, m.f]);
 }
 
@@ -216,7 +227,7 @@ fn facts(content: &[u8], res: &ResCx) -> (Balance, NameSet) {
 
 /// `content`, drawn on `f`'s page, draws as its encoding, which lexes, and
 /// whose forms' do; each balances as it did and uses the names it did.
-fn round_trip(f: &Fixture, content: &[u8], what: &str) -> Encoded {
+fn round_trip(f: &Fixture, content: &[u8], what: &str) -> EncodedPage {
     let lim = &Limits::DEFAULT;
     let concat = Concat::new(&[content]);
     let encoded = encode(&f.pdf, &concat, f.resources(), lim, &Fonts::default())
@@ -350,7 +361,7 @@ fn a_line_is_written_where_it_moves_to() {
     let second = far.rfind("Td").unwrap();
     let line = written(far.as_bytes());
     assert!(
-        matches!(line, Err(EncodeError::Unwritable { form: None, at, why: Unwritable::Line }) if at == second),
+        matches!(line, Err(Error::Gfx(GfxError::Unwritable { form: None, at, why: Unwritable::Line })) if at == second),
         "{line:?}"
     );
 }
@@ -381,11 +392,11 @@ fn an_inline_image_is_written_where_it_ends_whatever_follows() {
     assert!(
         matches!(
             past,
-            Err(EncodeError::Unwritable {
+            Err(Error::Gfx(GfxError::Unwritable {
                 form: None,
                 at: 2,
                 why: Unwritable::InlineLength
-            })
+            }))
         ),
         "{past:?}"
     );

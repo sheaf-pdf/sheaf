@@ -1,6 +1,7 @@
 //! A source's objects as the PDF layer's crates read them ([`Objects`]):
-//! what's lent and what isn't kept, how a stream decodes and why it
-//! doesn't, and a font read through it.
+//! what's lent and what isn't kept, how a stream decodes, why an object
+//! or a stream doesn't read and what that stops, and a font read through
+//! it.
 
 use std::sync::Arc;
 
@@ -91,17 +92,19 @@ fn marker(object: &Object) -> Option<i64> {
     object.as_stream()?.dict.get(b"Marker")?.as_integer()
 }
 
-/// A source lends a stream's dictionary and keeps nothing of the stream;
-/// its data comes decoded, as sheaf decodes it, and still nothing is
-/// kept.
+/// A source lends a stream's dictionary and keeps nothing of the stream,
+/// not even the dictionary, which what it's lent to holds; its data comes
+/// decoded, as sheaf decodes it, and still nothing is kept.
 #[test]
 fn a_stream_s_dictionary_is_lent_and_its_data_isn_t_kept() {
     let pdf = lazy();
-    let objects = Objects(&pdf);
+    let unkept = Unkept::default();
+    let objects = Objects::new(&pdf, &unkept);
 
     let lent = objects.resolve(id(3)).expect("stream 3");
     assert_eq!(marker(lent), Some(7));
-    assert!(!pdf.is_kept(id(3)), "peeking kept the stream");
+    assert!(!pdf.is_read(id(3)), "peeking kept the stream");
+    assert!(matches!(pdf.peek(id(3)), Ok(Some(Cow::Owned(_)))));
 
     let decoded = objects.decoded(id(3), 1 << 20).unwrap();
     assert_eq!(&*decoded, PROGRAM);
@@ -113,10 +116,11 @@ fn a_stream_s_dictionary_is_lent_and_its_data_isn_t_kept() {
         .decompressed_content_with_limit(1 << 20)
         .unwrap();
     assert_eq!(&*decoded, sheaf_s);
-    assert!(!pdf.is_kept(id(3)), "decoding kept the stream");
+    assert!(!pdf.is_read(id(3)), "decoding kept the stream");
 
-    // The same object every time it's asked for.
+    // The same object every time it's asked for, read once.
     assert!(std::ptr::eq(lent, objects.resolve(id(3)).unwrap()));
+    assert!(!pdf.is_read(id(3)));
 }
 
 /// What isn't a stream is read and kept as ever, and a stream already
@@ -124,7 +128,8 @@ fn a_stream_s_dictionary_is_lent_and_its_data_isn_t_kept() {
 #[test]
 fn what_s_kept_is_lent_as_kept() {
     let pdf = lazy();
-    let objects = Objects(&pdf);
+    let unkept = Unkept::default();
+    let objects = Objects::new(&pdf, &unkept);
 
     let plain = objects.resolve(id(7)).expect("dictionary 7");
     assert!(plain.as_dict().is_some_and(|d| d.has(b"Plain")));
@@ -144,12 +149,13 @@ fn what_s_kept_is_lent_as_kept() {
 #[test]
 fn a_chain_of_references_is_followed() {
     let pdf = lazy();
-    let objects = Objects(&pdf);
+    let unkept = Unkept::default();
+    let objects = Objects::new(&pdf, &unkept);
     for chained in [4, 5] {
         assert_eq!(marker(objects.resolve(id(chained)).unwrap()), Some(7));
         assert_eq!(&*objects.decoded(id(chained), 1 << 20).unwrap(), PROGRAM);
     }
-    assert!(!pdf.is_kept(id(3)));
+    assert!(!pdf.is_read(id(3)));
 
     let mut doc = Document::new();
     let stream = doc.add_object(Stream::new(
@@ -158,7 +164,8 @@ fn a_chain_of_references_is_followed() {
     ));
     let first = doc.add_object(Object::from(stream));
     let second = doc.add_object(Object::from(first));
-    let objects = Objects(&doc);
+    let unkept = Unkept::default();
+    let objects = Objects::new(&doc, &unkept);
     for at in [stream, first, second] {
         assert_eq!(marker(objects.resolve(at).unwrap()), Some(7));
         assert_eq!(&*objects.decoded(at, 1 << 20).unwrap(), PROGRAM);
@@ -171,7 +178,8 @@ fn a_chain_of_references_is_followed() {
 #[test]
 fn why_a_stream_doesn_t_decode() {
     let pdf = lazy();
-    let objects = Objects(&pdf);
+    let unkept = Unkept::default();
+    let objects = Objects::new(&pdf, &unkept);
     let why = |at: u32, limit: usize| objects.decoded(id(at), limit).map_err(|e| (e.id, e.why));
 
     assert_eq!(why(3, PROGRAM.len()).as_deref(), Ok(PROGRAM));
@@ -189,7 +197,8 @@ fn why_a_stream_doesn_t_decode() {
     );
 
     let doc = Document::new();
-    let objects = Objects(&doc);
+    let unkept = Unkept::default();
+    let objects = Objects::new(&doc, &unkept);
     assert!(objects.resolve(id(1)).is_none());
     assert_eq!(
         objects.decoded(id(1), 1 << 20).map_err(|e| e.why),
@@ -202,7 +211,8 @@ fn why_a_stream_doesn_t_decode() {
 #[test]
 fn a_font_is_read_through_a_source_that_keeps_none_of_its_streams() {
     let pdf = lazy();
-    let objects = Objects(&pdf);
+    let unkept = Unkept::default();
+    let objects = Objects::new(&pdf, &unkept);
     let dict = objects.resolve(id(8)).and_then(Object::as_dict).unwrap();
     let limits = Limits::DEFAULT.fonts();
     let mut budget = 1 << 20;
@@ -210,7 +220,7 @@ fn a_font_is_read_through_a_source_that_keeps_none_of_its_streams() {
     assert_eq!(font.code_text(0x41).as_deref(), Some("sheaf"));
     assert_eq!(font.text(b"AA").as_deref(), Some("sheafsheaf"));
     assert_eq!(budget, (1 << 20) - TO_UNICODE.len());
-    assert!(!pdf.is_kept(id(9)), "reading the font kept its /ToUnicode");
+    assert!(!pdf.is_read(id(9)), "reading the font kept its /ToUnicode");
 
     // Past its budget, the font is too large: the limit is told as one.
     let mut budget = TO_UNICODE.len() - 1;
@@ -275,7 +285,14 @@ fn a_cmap_chain_is_cut_at_content_s_depth() {
             "DescendantFonts" => vec![Object::from(descendant)],
         };
         let limits = lim.fonts();
-        let font = Font::read(Objects(&doc), &font, &limits, &mut (1 << 20), &mut ()).unwrap();
+        let font = Font::read(
+            Objects::new(&doc, &Unkept::default()),
+            &font,
+            &limits,
+            &mut (1 << 20),
+            &mut (),
+        )
+        .unwrap();
         font.approx().codes
     };
     assert!(!guessed(depth), "a chain of {depth} CMaps is read whole");
@@ -283,10 +300,10 @@ fn a_cmap_chain_is_cut_at_content_s_depth() {
 }
 
 /// A stream whose data doesn't read (here an encrypted one whose last
-/// block doesn't decrypt) is lent as a stream and decodes as damaged,
-/// the same before anything asked for its data as after
-/// [`LazyPdf::get`] kept the failure: what a font makes of such a stream
-/// doesn't turn on what touched the object first.
+/// block doesn't decrypt) is lent as a stream and decodes as locked, its
+/// decryption having failed ([`why`]), the same before anything asked
+/// for its data as after [`LazyPdf::get`] kept the failure: what a font
+/// makes of such a stream doesn't turn on what touched the object first.
 #[test]
 fn a_stream_whose_data_doesn_t_read_is_lent_the_same_kept_or_not() {
     use crate::pdf::test_crypt::{CipherKind, TestEncryption};
@@ -337,7 +354,8 @@ fn a_stream_whose_data_doesn_t_read_is_lent_the_same_kept_or_not() {
         .expect("no last byte fails the stream's padding");
 
     let lent = |pdf: &LazyPdf| {
-        let objects = Objects(pdf);
+        let unkept = Unkept::default();
+        let objects = Objects::new(pdf, &unkept);
         (
             objects.resolve(stream).and_then(marker),
             (objects.decoded(stream, 1 << 20))
@@ -346,71 +364,387 @@ fn a_stream_whose_data_doesn_t_read_is_lent_the_same_kept_or_not() {
         )
     };
     let fresh = open(broken.clone());
-    assert_eq!(lent(&fresh), (Some(7), Err(Why::Damaged)));
+    assert_eq!(lent(&fresh), (Some(7), Err(Why::Locked)));
     assert!(!fresh.is_kept(stream));
 
     let kept = open(broken);
     assert!(kept.get(stream).is_err());
     assert!(kept.is_kept(stream), "the failure is kept");
-    assert_eq!(lent(&kept), (Some(7), Err(Why::Damaged)));
+    assert_eq!(lent(&kept), (Some(7), Err(Why::Locked)));
 }
 
-/// A page interpreted from a source keeps none of its fonts' streams:
-/// each font's program, CMap and map of CIDs is read as the font is,
-/// through [`Objects`], and the source holds no slot for one afterwards,
-/// though every font's program was read and its glyphs laid out.
+/// A page interpreted from a source keeps none of its streams, nor their
+/// dictionaries: each font's program, CMap and map of CIDs is read as the
+/// font is, and each XObject drawn (images, a stencil mask, a form) as
+/// it's drawn, through [`Objects`], what isn't kept held for the
+/// interpretation alone ([`Unkept`]); so the source has read and kept
+/// none of them afterwards, though every font's program was read, its
+/// glyphs laid out and every image drawn, and interpreted again, the page
+/// gives the same.
 #[test]
-fn a_page_interpreted_keeps_no_font_s_stream() {
+fn a_page_interpreted_keeps_none_of_its_streams() {
     use std::ops::ControlFlow;
 
     use crate::content::fixture;
-    use crate::content::interp::{Kind, Opts, interpret};
+    use crate::content::interp::{ImageOf, Kind, Opts, interpret};
     use crate::content::{FontProgram, Fonts};
 
-    let mut built = fixture::programs();
-    let page = built.pdf.page_iter().next().expect("one page");
-    let content: Vec<ObjectId> = contents(built.page());
-    // Every stream of the file but the page's content is a font's.
-    let streams: Vec<ObjectId> = (built.pdf.objects.iter())
-        .filter(|(id, object)| object.as_stream().is_some() && !content.contains(id))
-        .map(|(id, _)| *id)
-        .collect();
-    assert_eq!(streams.len(), 3, "a TrueType, a CFF and a Type 1 program");
+    // Each fixture, how many streams it has but its content, and how
+    // many image XObjects it draws: three fonts' programs (a TrueType, a
+    // CFF and a Type 1); and eight XObjects, five of them drawn as images
+    // (one in a form), one a stencil `/Mask`, one a soft mask that isn't
+    // read, and a PostScript XObject that isn't drawn.
+    for (mut built, count, images) in [(fixture::programs(), 3, 0), (fixture::images(), 8, 5)] {
+        let page = built.pdf.page_iter().next().expect("one page");
+        let content: Vec<ObjectId> = contents(built.page());
+        // Every stream of the file but the page's content is a font's or
+        // an XObject's.
+        let streams: Vec<ObjectId> = (built.pdf.objects.iter())
+            .filter(|(id, object)| object.as_stream().is_some() && !content.contains(id))
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(streams.len(), count, "fonts' programs, or XObjects");
 
-    let lim = &Limits::DEFAULT;
-    let pdf = LazyPdf::open(Arc::<[u8]>::from(built.bytes()), None, &lim.reader).unwrap();
-    let dict = pdf.get_dictionary(page).expect("the page");
-    let resources = dict.get(b"Resources");
-    let read = PageContent::read(&pdf, &contents(dict), lim).expect("its content");
+        let lim = &Limits::DEFAULT;
+        let pdf = LazyPdf::open(Arc::<[u8]>::from(built.bytes()), None, &lim.reader).unwrap();
+        let dict = pdf.get_dictionary(page).expect("the page");
+        let resources = dict.get(b"Resources");
+        let read = PageContent::read(&pdf, &contents(dict), lim).expect("its content");
 
-    let (mut glyphs, mut programs) = (0, 0);
-    let fonts = Fonts::default();
-    let done = interpret(
-        &pdf,
-        read.concat(),
-        resources,
-        lim,
-        &fonts,
-        Opts::default(),
-        |event| {
-            if let Kind::Text(show) = event.kind {
-                glyphs += show.glyphs().count();
-                let read = show.font.map(|font| font.program());
-                programs += usize::from(read == Some(FontProgram::Read));
-            }
-            ControlFlow::Continue(())
-        },
-    );
-    done.expect("the page is interpreted");
-    assert!(glyphs > 20, "{glyphs} glyphs");
-    assert!(
-        programs >= 6,
-        "{programs} strings in a font whose program read"
-    );
-    for id in &streams {
-        assert!(!pdf.is_kept(*id), "{id:?}, a font's stream, was kept");
+        let fonts = Fonts::default();
+        let interpreted = || {
+            let (mut glyphs, mut programs, mut drawn) = (0, 0, Vec::new());
+            let done = interpret(
+                &pdf,
+                read.concat(),
+                resources,
+                lim,
+                &fonts,
+                Opts::default(),
+                |event| {
+                    match event.kind {
+                        Kind::Text(show) => {
+                            glyphs += show.glyphs().count();
+                            let read = show.font.map(|font| font.program());
+                            programs += usize::from(read == Some(FontProgram::Read));
+                        }
+                        Kind::Image(image) => {
+                            drawn.push((image.of.clone(), image.mask, image.stencil))
+                        }
+                        _ => {}
+                    }
+                    ControlFlow::Continue(())
+                },
+            );
+            done.expect("the page is interpreted");
+            (glyphs, programs, drawn)
+        };
+        let (glyphs, programs, drawn) = interpreted();
+        let xobjects = drawn
+            .iter()
+            .filter(|(of, ..)| matches!(of, ImageOf::XObject(_)))
+            .count();
+        assert_eq!(xobjects, images, "image XObjects drawn");
+        if images == 0 {
+            assert!(glyphs > 20, "{glyphs} glyphs");
+            assert!(
+                programs >= 6,
+                "{programs} strings in a font whose program read"
+            );
+        }
+        for id in &streams {
+            assert!(!pdf.is_read(*id), "{id:?}, a stream, was kept");
+        }
+        assert_eq!(
+            interpreted(),
+            (glyphs, programs, drawn),
+            "interpreted again"
+        );
+        for id in &streams {
+            assert!(!pdf.is_read(*id), "{id:?}, a stream, was kept");
+        }
+        // One asked for as an object is kept, so the check above can see one.
+        pdf.get(streams[0]).expect("a stream");
+        assert!(pdf.is_read(streams[0]));
     }
-    // One asked for as an object is kept, so the check above can see one.
-    pdf.get(streams[0]).expect("a program");
-    assert!(pdf.is_kept(streams[0]));
+}
+
+/// What isn't kept is held once for each id it's asked by, however many
+/// are held, each where it was first held for as long as the holder
+/// lives: what's lent for an interpretation doesn't move under it.
+#[test]
+fn what_isn_t_kept_is_held_once_each_and_doesn_t_move() {
+    let unkept = Unkept::default();
+    let n = 1000;
+    let held: Vec<&Object> = (0..n)
+        .map(|i| unkept.hold(id(i + 1), Object::from(i64::from(i))))
+        .collect();
+    for (i, object) in held.iter().enumerate() {
+        let again = unkept.get(id(i as u32 + 1)).expect("held");
+        assert!(std::ptr::eq(*object, again), "{i} moved");
+        assert_eq!(again.as_integer(), Some(i as i64));
+    }
+    // Held again, an id gives the one held first.
+    let first = unkept.hold(id(1), Object::from(-1i64));
+    assert!(std::ptr::eq(first, held[0]));
+    assert_eq!(first.as_integer(), Some(0));
+    assert!(unkept.get(id(n + 1)).is_none());
+}
+
+/// A file with `objects` (each written as it's given, numbered from 1)
+/// and a catalog, as a source reads it, each dictionary that has the key
+/// `broken` made what no parser reads, its length kept.
+fn source(objects: &[Object], broken: &[u8]) -> LazyPdf {
+    let mut doc = Document::new();
+    for object in objects {
+        doc.add_object(object.clone());
+    }
+    let pages = doc.add_object(dictionary! {
+        "Type" => Object::name("Pages"),
+        "Kids" => Vec::<Object>::new(),
+        "Count" => 0i64,
+    });
+    let catalog = doc.add_object(dictionary! {
+        "Type" => Object::name("Catalog"),
+        "Pages" => pages,
+    });
+    doc.trailer.set("Root", catalog);
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).unwrap();
+    let key = [b"/".as_slice(), broken].concat();
+    let mut from = 0;
+    while let Some(at) = (bytes[from..].windows(key.len())).position(|w| w == key) {
+        let at = from + at;
+        let open = (bytes[..at].windows(2))
+            .rposition(|w| w == b"<<")
+            .expect("its dictionary");
+        bytes[open..open + 2].copy_from_slice(b"]]");
+        from = at + key.len();
+    }
+    LazyPdf::open(Arc::<[u8]>::from(bytes), None, &Limits::DEFAULT.reader).unwrap()
+}
+
+/// An object that doesn't read keeps its reason: one that isn't there is
+/// none, one that doesn't parse is damaged, and a chain of references
+/// past the reader's depth is capped, while a chain within it is
+/// followed; what lends an object (`peek`) says the same as what the PDF
+/// layer's crates are told. A stream decodes past its limit as
+/// [`Why::Limit`], a filter that fails as damaged, what isn't a stream as
+/// damaged, and the chain as capped.
+#[test]
+fn a_source_s_failure_keeps_its_reason() {
+    let depth = Limits::DEFAULT.reader.max_depth;
+    // 1: a dictionary, 2: one to break, 3..: a chain past the depth,
+    // then two streams.
+    let mut objects = vec![
+        Object::from(dictionary! { "Marker" => 7i64 }),
+        Object::from(dictionary! { "Broken" => 1i64 }),
+    ];
+    let chain = depth + 2;
+    for n in 0..chain {
+        objects.push(Object::from(ObjectId::new(4 + n as u32, 0)));
+    }
+    objects.push(Object::from(dictionary! { "End" => 1i64 }));
+    let plain = ObjectId::new(objects.len() as u32 + 1, 0);
+    objects.push(Object::from(Stream::new(
+        dictionary! {},
+        b"0123456789".to_vec(),
+    )));
+    let filtered = ObjectId::new(objects.len() as u32 + 1, 0);
+    let mut bad = Stream::new(dictionary! {}, b"not flate".to_vec());
+    bad.dict.set("Filter", Object::name("FlateDecode"));
+    objects.push(Object::from(bad));
+    let pdf = source(&objects, b"Broken");
+    let unkept = Unkept::default();
+    let objects = Objects::new(&pdf, &unkept);
+    let reason = |id: ObjectId| {
+        let told = (objects.try_resolve(id))
+            .map(|o| o.is_some())
+            .map_err(|e| e.why);
+        let lent = (pdf.peek(id)).map(|o| o.is_some()).map_err(|e| why(&e));
+        assert_eq!(told, lent, "{id:?}");
+        told
+    };
+
+    assert_eq!(reason(id(1)), Ok(true));
+    assert_eq!(reason(id(9999)), Ok(false));
+    assert_eq!(reason(id(2)), Err(Why::Damaged));
+    assert_eq!(reason(id(3)), Err(Why::Capped));
+    assert!(matches!(
+        pdf.peek(id(3)),
+        Err(crate::pdf::Error::ReferenceLimit)
+    ));
+    // Within the depth, the chain is followed.
+    assert_eq!(reason(id(3 + chain as u32 - 2)), Ok(true));
+    assert_eq!(objects.resolve(id(3)), None);
+    assert_eq!(objects.resolve(id(2)), None);
+
+    let decoded = |id, limit| {
+        (objects.decoded(id, limit))
+            .map(|d| d.len())
+            .map_err(|e| e.why)
+    };
+    assert_eq!(decoded(plain, 100), Ok(10));
+    assert_eq!(decoded(plain, 4), Err(Why::Limit));
+    assert_eq!(decoded(filtered, 100), Err(Why::Damaged));
+    assert_eq!(decoded(id(1), 100), Err(Why::Damaged));
+    assert_eq!(decoded(id(3), 100), Err(Why::Capped));
+
+    // A document in memory: what isn't there is none.
+    let doc = Document::new();
+    assert_eq!(
+        Objects::new(&doc, &Unkept::default())
+            .try_resolve(id(1))
+            .map(|o| o.is_some()),
+        Ok(false)
+    );
+}
+
+/// A resource that is a loop of references, one object naming itself or
+/// two each other, is the file's damage, not the reader's cap: it reads
+/// as none where forms are judged on their own, so a text bag reads the
+/// page past it, as PDFium shows the page's text, and fails content
+/// that draws forms as any damaged object does; from a source read
+/// lazily and from a document in memory alike. A chain that is only
+/// long stays the cap's (`a_source_s_failure_keeps_its_reason`).
+#[test]
+fn a_loop_of_references_is_damage_not_a_cap() {
+    use std::ops::ControlFlow;
+
+    use crate::content::interp::{Error, Opts, interpret};
+    use crate::content::{Fonts, text_bag};
+
+    // 1: itself; 2 and 3: each other; 4: an ExtGState.
+    let objects = [
+        Object::from(id(1)),
+        Object::from(id(3)),
+        Object::from(id(2)),
+        Object::from(dictionary! { "LW" => 5i64 }),
+    ];
+    let lazy = source(&objects, b"Nothing");
+    let mut doc = Document::new();
+    for object in &objects {
+        doc.add_object(object.clone());
+    }
+    let resources = Object::from(dictionary! {
+        "ExtGState" => dictionary! { "One" => id(1), "Two" => id(2), "Good" => id(4) },
+    });
+    let (lim, fonts) = (Limits::DEFAULT, Fonts::for_text());
+
+    fn check<R: ReadObjects>(pdf: &R, resources: &Object, lim: &Limits, fonts: &Fonts) {
+        let looped = |n| match pdf.peek(id(n)) {
+            Err(e @ crate::pdf::Error::ReferenceCycle(_)) => why(&e),
+            other => panic!("{n}: {:?}", other.map(|o| o.is_some())),
+        };
+        assert_eq!(looped(1), Why::Damaged);
+        assert_eq!(looped(2), Why::Damaged);
+        assert!(matches!(pdf.peek(id(4)), Ok(Some(_))));
+        for name in ["One", "Two", "Good"] {
+            let content = format!("/{name} gs BT (hello) Tj ET");
+            let content = Concat::new(&[content.as_bytes()]);
+            let bag = text_bag(pdf, &content, Some(resources), lim, fonts);
+            let bag = bag.unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(bag.len(), 1, "{name}");
+            let drawn = interpret(
+                pdf,
+                &content,
+                Some(resources),
+                lim,
+                fonts,
+                Opts::default(),
+                |_| ControlFlow::Continue(()),
+            );
+            match name {
+                "Good" => assert!(drawn.is_ok()),
+                _ => assert!(matches!(drawn, Err(Error::Damaged(_))), "{name}: {drawn:?}"),
+            }
+        }
+    }
+    check(&lazy, &resources, &lim, &fonts);
+    check(&doc, &resources, &lim, &fonts);
+}
+
+/// Each reason a source's error gives is the one [`why`] says: its I/O
+/// the source's, a password or decryption that fails locked, the
+/// reader's caps capped, and anything else the file's damage.
+#[test]
+fn each_source_error_is_its_reason() {
+    use crate::pdf::{DecryptionError, Error as E, Limit};
+    let io = || E::IO(std::io::Error::other("gone"));
+    let cases = [
+        (io(), Why::Source),
+        (E::InvalidPassword, Why::Locked),
+        (E::Decryption(DecryptionError::Padding), Why::Locked),
+        (E::Limit(Limit::Depth), Why::Capped),
+        (E::Limit(Limit::Decompressed), Why::Capped),
+        (E::ReferenceLimit, Why::Capped),
+        (E::ReferenceCycle(ObjectId::new(1, 0)), Why::Damaged),
+        (E::MissingXrefEntry, Why::Damaged),
+        (E::ObjectIdMismatch, Why::Damaged),
+        (E::IndirectObject { offset: 3 }, Why::Damaged),
+        (E::InvalidStream("bad".into()), Why::Damaged),
+        (E::Syntax("bad".into()), Why::Damaged),
+    ];
+    for (error, reason) in cases {
+        assert_eq!(why(&error), reason, "{error}");
+    }
+}
+
+/// What an object that doesn't read stops is its reason's, through
+/// [`interpret`](crate::content::interp::interpret): an ExtGState that
+/// doesn't parse fails a page drawn with its forms, as damaged, and is
+/// none where forms are judged on their own (a text bag among them); one
+/// behind a chain past the reader's depth fails either, as capped.
+#[test]
+fn what_an_object_that_doesn_t_read_stops_is_its_reason_s() {
+    use std::ops::ControlFlow;
+
+    use crate::content::interp::{Error, Forms, GfxError, Opts, interpret};
+    use crate::content::{Fonts, text_bag};
+
+    let depth = Limits::DEFAULT.reader.max_depth;
+    let mut objects = vec![Object::from(dictionary! { "Broken" => 1i64, "LW" => 3i64 })];
+    let chain = depth + 2;
+    for n in 0..chain {
+        objects.push(Object::from(ObjectId::new(3 + n as u32, 0)));
+    }
+    objects.push(Object::from(dictionary! { "LW" => 5i64 }));
+    let pdf = source(&objects, b"Broken");
+    let resources = Object::from(dictionary! {
+        "ExtGState" => dictionary! {
+            "Bad" => id(1),
+            "Deep" => id(2),
+        },
+    });
+    let (lim, fonts) = (Limits::DEFAULT, Fonts::for_text());
+    let run = |content: &[u8], forms| {
+        let opts = Opts {
+            forms,
+            ..Opts::default()
+        };
+        let content = Concat::new(&[content]);
+        let resources = Some(&resources);
+        interpret(&pdf, &content, resources, &lim, &fonts, opts, |_| {
+            ControlFlow::Continue(())
+        })
+    };
+    let failed = |read: Result<_, Error>| match read {
+        Err(Error::Gfx(GfxError::Unreadable(u))) => Some((u.id, u.why)),
+        _ => None,
+    };
+
+    let bad = b"/Bad gs 0 0 m 1 1 l S";
+    let read = run(bad, Forms::Descend);
+    assert!(matches!(read, Err(Error::Damaged(damaged)) if damaged == id(1)));
+    assert!(run(bad, Forms::Skip).is_ok());
+    let bag = text_bag(&pdf, &Concat::new(&[bad]), Some(&resources), &lim, &fonts);
+    assert!(bag.is_ok());
+
+    let deep = b"/Deep gs";
+    for forms in [Forms::Descend, Forms::Skip] {
+        let why = failed(run(deep, forms)).map(|(_, why)| why);
+        assert_eq!(why, Some(Why::Capped), "{forms:?}");
+    }
+    let bag = text_bag(&pdf, &Concat::new(&[deep]), Some(&resources), &lim, &fonts);
+    assert!(matches!(bag, Err(Error::Gfx(GfxError::Unreadable(u))) if u.why == Why::Capped));
 }

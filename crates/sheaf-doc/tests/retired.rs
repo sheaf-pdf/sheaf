@@ -1161,14 +1161,33 @@ const RETIRED_M18: &[(&str, u8)] = &[
     ("content::font::std14::Std14::encoding", 22),
     // A font a file draws in is pdf-fonts' `Font`, `content::Font`, read
     // from a source's objects as `content::Objects` gives them, under
-    // `Limits::fonts()`; what stops one being read is its `Error`,
-    // `content::FontError`. sheaf's own reader, its programs, CMaps,
+    // `Limits::fonts()`. sheaf's own reader, its programs, CMaps,
     // encodings and metrics went with them.
     ("content::font::Foreign", 22),
     ("content::font::TooLarge", 22),
     // A program for a test of the reader's own, which pdf-fonts holds
     // now with a fixture of its own.
     ("content::fixture::composite_bomb_program", 22),
+    // The content interpreter is pdf-gfx's, its types used again under
+    // the same names through `content::interp`, which keeps `interpret`
+    // and `encode` of sheaf's own over the family's. What has no like
+    // there goes: why it stopped or didn't write a page again is
+    // `content::interp::Error`, the family's (`GfxError`, its
+    // `Unwritable` among them) or sheaf's rule for a damaged object,
+    // content written again its `EncodedPage`, the operators a visitor
+    // wants pdf-content-streams' `Operators`, and forms judged on their
+    // own `Forms::Skip`. (Where an operator is was `At`'s fields `tok`
+    // and `op`, now `At::operator()` and `At::op_range()`: a field is
+    // read through a value, never by a path, so no row can hold one.)
+    ("content::interp::InterpError", 23),
+    ("content::interp::EncodeError", 23),
+    ("content::interp::Encoded", 23),
+    ("content::interp::Ops", 23),
+    ("content::interp::Forms::Report", 23),
+    // What only sheaf's interpreter read of the lexer's: an inline
+    // image's `/L`, and a step's operands in order.
+    ("content::lex::image_length", 23),
+    ("content::lex::Step::args", 23),
 ];
 
 /// The ledgers, with the words a hit names its slice by.
@@ -1246,6 +1265,12 @@ const QUALIFIED_ONLY: &[&str] = &[
     // How many snapshots the policy may drop (`HistoryStats`), and the
     // locals that hold them.
     "droppable",
+    // The plugin API's `Ops` and the forms check's `Report`, and a
+    // command's arguments as other code names them: not what sheaf's
+    // content interpreter had (M18 slice 23).
+    "Ops",
+    "Report",
+    "args",
     // The header and footer a document's state draws: not the view's.
     "header_footer",
     "Mode",

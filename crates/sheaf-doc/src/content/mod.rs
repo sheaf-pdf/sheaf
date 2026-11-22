@@ -30,10 +30,12 @@
 //! - [`interp`]: what it draws, an operator at a time, in the graphics
 //!   and text state it's drawn in: each glyph and where it is, each
 //!   path, image and shading, the clip and the marked content each is
-//!   in, and each form it draws, interpreted where it's drawn (M11 slice
-//!   3); content written again from what it draws ([`interp::encode`]);
-//!   and [`fixture`], pages built to test it, for other crates' tests
-//!   too.
+//!   in, and each form it draws, interpreted where it's drawn; content
+//!   written again from what it draws ([`interp::encode`]). The
+//!   interpreter is pdf-gfx's (M18 slice 23; sheaf's own from M11 slice
+//!   3), read from sheaf's sources ([`Objects`]) under sheaf's caps, an
+//!   object that doesn't read stopping it as its reason says; and
+//!   [`fixture`], pages built to test it, for other crates' tests too.
 //! - [`ContentWriter`]: content written, its resources ([`Res`]) named at
 //!   the end ([`Reserved`], [`ResourceNeeds`]): pdf-content-streams', as
 //!   are the types its calls take. Text goes in through [`DrawText`], in a
@@ -51,6 +53,8 @@ mod corpus;
 pub mod fixture;
 mod font;
 pub mod interp;
+#[cfg(test)]
+mod interp_tests;
 mod lex;
 mod marked;
 mod names;
@@ -76,15 +80,14 @@ pub use blocks::{
     PaginationKind, SheafBlock, SheafBlockRef, isolates,
 };
 pub use font::{
-    Descendant, DrawFont, DrawText, Font, FontApprox, FontError, FontId, FontKind, FontMetrics,
-    FontProgram, FontScope, Fonts, Glyphless, Std14, Unencoded, VerticalMetrics, std14_of,
-    wrap_with,
+    Descendant, DrawFont, DrawText, Font, FontApprox, FontKind, FontMetrics, FontProgram, Fonts,
+    Glyphless, Std14, Unencoded, VerticalMetrics, std14_of, wrap_with,
 };
 pub use lex::{LexError, LexErrorKind, ResCx, Tok, lex, name, object};
 pub use marked::{Marked, PropertiesDict, Props, marked};
 pub use names::{Kept, NameSet, kept, names_used};
 pub use page::{
-    Concat, ContentFault, Objects, PageContent, Pos, ReadObjects, SpanAcross, contents,
+    Concat, ContentFault, Objects, PageContent, Pos, ReadObjects, SpanAcross, Unkept, contents,
 };
 pub use place::place_form;
 pub use text_bag::{TextBag, text_bag};

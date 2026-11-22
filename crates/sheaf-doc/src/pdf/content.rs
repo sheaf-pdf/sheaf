@@ -8,7 +8,9 @@
 //! resources ([`Limits`], [`ResCx`]), and its splice ([`splice`],
 //! [`splice_each`], [`without_keys`]), which sheaf splices through, with
 //! content's tokens and an operand as it reads them ([`tokens`],
-//! [`object`]), as its splice reads content and a list.
+//! [`object`]), as its splice reads content and a list; and a set of
+//! operators ([`Operators`]), what an interpretation's events are asked
+//! for by ([`super::gfx::Wants`]).
 //! `crate::content` re-exports them, and is where sheaf lexes content.
 //!
 //! Also a minimal content-stream operation builder for test fixtures and
@@ -20,8 +22,8 @@ use super::{Error, Result};
 
 pub use pdf_content_streams::{
     Blend, Color, Concat, ContentWriter, FillRule, GState, Join, Limits, LineCap, LineJoin, Need,
-    Paint, Pos, Res, ResBody, ResCx, ResId, ResKind, Reserved, ResourceNeeds, Rewrite, SpanAcross,
-    SpliceError, Spliced, TextMode, object, splice, splice_each, tokens, without_keys,
+    Operators, Paint, Pos, Res, ResBody, ResCx, ResId, ResKind, Reserved, ResourceNeeds, Rewrite,
+    SpanAcross, SpliceError, Spliced, TextMode, object, splice, splice_each, tokens, without_keys,
 };
 
 #[cfg(test)]

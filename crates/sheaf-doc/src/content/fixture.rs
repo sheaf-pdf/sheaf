@@ -22,8 +22,8 @@ use crate::pdf::{
 };
 use image::{Rgb, RgbImage};
 
-use super::interp::Encoded;
-use super::{Font, Glyphless, Objects, PageContent, contents};
+use super::interp::EncodedPage;
+use super::{Font, Glyphless, Objects, PageContent, Unkept, contents};
 use crate::source::Limits;
 
 /// A one-page PDF.
@@ -60,7 +60,7 @@ impl Fixture {
     /// `encoded` has them ([`encode`](super::interp::encode)): its page's
     /// `/Contents` one stream, and each form's stream its content,
     /// unfiltered.
-    pub fn encoded(&self, encoded: &Encoded) -> Fixture {
+    pub fn encoded(&self, encoded: &EncodedPage) -> Fixture {
         let mut pdf = self.pdf.clone();
         let content = pdf.add_object(Stream::new(dictionary! {}, encoded.content.clone()));
         let page = pdf.page_iter().next().expect("one page");
@@ -223,7 +223,7 @@ pub fn standard_14(subtype: &str, name: &str) -> Dictionary {
     };
     let none = Pdf::new();
     let read = Font::read(
-        Objects(&none),
+        Objects::new(&none, &Unkept::default()),
         &font,
         &Limits::DEFAULT.fonts(),
         &mut 0,

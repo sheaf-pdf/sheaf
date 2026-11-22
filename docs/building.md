@@ -32,6 +32,11 @@ lists them):
 - `just glyph-dump <file>` writes what every corpus page shows (its
   glyphs and its text, a line a page): run before and after a change to
   what reads fonts or interprets a page, and `diff` the two files.
+- `just events-dump <file>` writes what every corpus page's
+  interpretation does (its summary, a checksum of every event and of
+  the page written again, and whether that draws the same, a line a
+  page): run before and after a change to the interpreter, or a move of
+  the PDF layer's pin, and `diff` the two files.
 
 Tests run under a memory cap where Linux has a user systemd
 (`scripts/test-capped.sh`; `SHEAF_UNCAPPED=1` turns it off).

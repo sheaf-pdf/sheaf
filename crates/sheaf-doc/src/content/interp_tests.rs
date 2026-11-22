@@ -1,28 +1,38 @@
-//! The interpreter over pages built in code ([`fixture`]): each glyph
-//! where it was worked out by hand to be, to a thousandth of a point;
-//! forms drawn per use, and refused within themselves or too deep; each
-//! image, path, clip and shading where it was worked out to be, paths
-//! built as PDFium builds them; marked content read as PDFium reads it;
-//! each cap on its work held to; operands read as PDFium reads them.
+//! The content interpreter's tests: what sheaf's [`interpret`] and
+//! [`encode`](crate::content::interp::encode) give, which is pdf-gfx's
+//! interpreter over sheaf's sources, under sheaf's caps
+//! ([`Limits::gfx`]), with sheaf's rule for an object that doesn't read.
+//! They were sheaf's own interpreter's, and kept their names when M18
+//! slice 23 moved them onto pdf-gfx's. Over pages built in code ([`fixture`]): each glyph where it
+//! was worked out by hand to be, to a thousandth of a point; forms drawn
+//! per use, and refused within themselves or too deep; each image, path,
+//! clip and shading where it was worked out to be, paths built as PDFium
+//! builds them; marked content read as PDFium reads it; each cap on its
+//! work held to; operands read as PDFium reads them.
 
+mod encode;
+
+use std::borrow::Cow;
+use std::collections::HashSet;
 use std::ops::{ControlFlow, Range};
 
-use crate::pdf::{Document as Pdf, Object, Stream, StreamExt, dictionary};
-use proptest::prelude::*;
+use crate::content::interp::{
+    Cap, Error, Event, Forms, GfxError, ImageOf, Kind, Mark, MarkProps, Matrix, Opts, Rect,
+    Refused, Seg, Summary, Wants, interpret,
+};
+use crate::pdf::gfx::{ClipPart, Marks, Point, Quad, ShadingDrawn, UseId};
+use crate::pdf::{Document as Pdf, Object, ObjectId, Stream, StreamExt, dictionary};
 
-use super::state::number;
-use super::*;
-use crate::annot::Pt;
 use crate::content::fixture::{self, Fixture};
-use crate::content::{FillRule, Font, Objects, Paint};
-use crate::geom::{Affine, Rect};
+use crate::content::{Concat, FillRule, Font, Fonts, Objects, Paint, ReadObjects, Unkept};
+use crate::pdf::content::Operators;
 use crate::source::{ContentLimits, Limits};
 
 /// A glyph as a test sees it.
 #[derive(Debug, Clone)]
 struct Shown {
     code: u32,
-    origin: Pt,
+    origin: Point,
     quad: Quad,
     invisible: bool,
     stock: bool,
@@ -37,7 +47,7 @@ struct Seen {
     glyphs: Vec<Shown>,
     /// Strings shown in no font.
     fontless: Vec<Vec<u8>>,
-    begun: Vec<(ObjectId, UseId, Affine, Option<Rect>)>,
+    begun: Vec<(ObjectId, UseId, Matrix, Option<Rect>)>,
     ended: usize,
     refused: Vec<(ObjectId, Refused)>,
     ops: usize,
@@ -49,7 +59,7 @@ fn run(
     resources: Option<&Object>,
     lim: &Limits,
     opts: Opts,
-) -> Result<(Seen, Summary), InterpError> {
+) -> Result<(Seen, Summary), Error> {
     let mut seen = Seen::default();
     let fonts = Fonts::default();
     let summary = interpret(
@@ -82,7 +92,7 @@ fn run(
     Ok((seen, summary))
 }
 
-fn run_fixture(f: &Fixture, lim: &Limits) -> Result<(Seen, Summary), InterpError> {
+fn run_fixture(f: &Fixture, lim: &Limits) -> Result<(Seen, Summary), Error> {
     let content = f.content();
     run(
         &f.pdf,
@@ -448,7 +458,7 @@ fn text_past_an_f32_is_refused_alike_with_programs_or_without() {
             Opts::default(),
             |_| ControlFlow::Continue(()),
         );
-        matches!(read, Err(InterpError::NotFinite))
+        matches!(read, Err(Error::Gfx(GfxError::NotFinite)))
     };
     let scales = [
         "1.0",
@@ -564,15 +574,15 @@ fn forms_are_drawn_per_use() {
         (first.depth(), summary.deepest_form, summary.uses),
         (2, 2, 3)
     );
-    let translate = |e: f32, f: f32| Affine {
+    let translate = |e: f32, f: f32| Matrix {
         e,
         f,
-        ..Affine::IDENTITY
+        ..Matrix::IDENTITY
     };
     assert_eq!(*m1, translate(110.0, 320.0));
     assert_eq!(
         *m2,
-        Affine {
+        Matrix {
             a: 2.0,
             d: 2.0,
             ..translate(110.0, 320.0)
@@ -580,7 +590,7 @@ fn forms_are_drawn_per_use() {
     );
     assert_eq!(
         *m3,
-        Affine {
+        Matrix {
             a: 2.0,
             d: 2.0,
             ..translate(160.0, 320.0)
@@ -637,9 +647,9 @@ fn with(content: impl FnOnce(&mut ContentLimits)) -> Limits {
     lim
 }
 
-fn limit(result: Result<(Seen, Summary), InterpError>) -> Option<Cap> {
+fn limit(result: Result<(Seen, Summary), Error>) -> Option<Cap> {
     match result {
-        Err(InterpError::Limit(cap)) => Some(cap),
+        Err(Error::Gfx(GfxError::Limit(cap))) => Some(cap),
         Err(e) => panic!("{e}"),
         Ok(_) => None,
     }
@@ -765,7 +775,7 @@ fn decompressed_counts_each_font_s_program() {
         let font = f.pdf.get_dictionary(font.as_reference().unwrap()).unwrap();
         let mut budget = usize::MAX;
         let read = Font::read(
-            Objects(&f.pdf),
+            Objects::new(&f.pdf, &Unkept::default()),
             font,
             &Limits::DEFAULT.fonts(),
             &mut budget,
@@ -983,7 +993,7 @@ fn geometry_past_an_f32_fails() {
             Opts::default(),
         );
         assert!(
-            matches!(read, Err(InterpError::NotFinite)),
+            matches!(read, Err(Error::Gfx(GfxError::NotFinite))),
             "{content}: {read:?}"
         );
     }
@@ -1059,7 +1069,7 @@ fn reported_forms_are_not_drawn() {
     let f = fixture::forms();
     let content = f.content();
     let opts = Opts {
-        forms: Forms::Report,
+        forms: Forms::Skip,
         ..Opts::default()
     };
     let (seen, summary) = run(
@@ -1074,16 +1084,20 @@ fn reported_forms_are_not_drawn() {
     assert_eq!((seen.ops, summary.operators, summary.uses), (6, 6, 0));
 }
 
-/// A fixture's objects, but for one that can't be read.
+/// A fixture's objects, but for one that can't be read: reading it gives
+/// `error`, and where `lent` it's lent all the same, as a source lends a
+/// stream's dictionary without reading its data.
 struct Unreadable<'a> {
     pdf: &'a Pdf,
     id: ObjectId,
+    error: fn() -> crate::pdf::Error,
+    lent: bool,
 }
 
 impl ReadObjects for Unreadable<'_> {
     fn object(&self, id: ObjectId) -> crate::pdf::Result<&Object> {
         match id == self.id {
-            true => Err(crate::pdf::Error::InvalidStream("unreadable".into())),
+            true => Err((self.error)()),
             false => self.pdf.get_object(id),
         }
     }
@@ -1092,13 +1106,39 @@ impl ReadObjects for Unreadable<'_> {
         self.object(id).map(read)
     }
 
-    fn peek(&self, id: ObjectId) -> Option<&Object> {
-        self.object(id).ok()
+    fn peek(&self, id: ObjectId) -> crate::pdf::Result<Option<Cow<'_, Object>>> {
+        match id == self.id && !self.lent {
+            true => Err((self.error)()),
+            false => ReadObjects::peek(self.pdf, id),
+        }
+    }
+}
+
+/// What an object the file has damaged gives a source.
+fn damaged() -> crate::pdf::Error {
+    crate::pdf::Error::InvalidStream("unreadable".into())
+}
+
+/// What an object the source's I/O fails to read gives it.
+fn gone() -> crate::pdf::Error {
+    crate::pdf::Error::IO(std::io::Error::other("the source went away"))
+}
+
+/// The form an error says couldn't be read: a form whose stream doesn't
+/// decode, pdf-gfx's error, or a damaged object content that draws forms
+/// isn't read through, sheaf's.
+fn unread_form(e: &Error) -> Option<ObjectId> {
+    match e {
+        Error::Gfx(GfxError::FormStream { form, .. }) => Some(*form),
+        Error::Damaged(id) => Some(*id),
+        _ => None,
     }
 }
 
 /// A form that can't be read stops what draws it, but not where XObjects
-/// are judged on their own, which reads none.
+/// are judged on their own, which reads none: sheaf's rule
+/// ([`content::interp::interpret`](crate::content::interp::interpret)),
+/// where pdf-gfx reads a damaged object as none.
 #[test]
 fn a_form_that_cant_be_read_stops_only_what_draws_it() {
     let f = fixture::forms();
@@ -1113,6 +1153,8 @@ fn a_form_that_cant_be_read_stops_only_what_draws_it() {
     let broken = Unreadable {
         pdf: &f.pdf,
         id: fm1,
+        error: damaged,
+        lent: false,
     };
     let content = f.content();
     let drawn = |forms| {
@@ -1121,7 +1163,7 @@ fn a_form_that_cant_be_read_stops_only_what_draws_it() {
             ..Opts::default()
         };
         let (lim, fonts) = (Limits::DEFAULT, Fonts::default());
-        interpret(
+        crate::content::interp::interpret(
             &broken,
             content.concat(),
             f.resources(),
@@ -1132,11 +1174,86 @@ fn a_form_that_cant_be_read_stops_only_what_draws_it() {
         )
     };
     let e = drawn(Forms::Descend).unwrap_err();
-    assert!(
-        matches!(e, InterpError::XObject { xobject, .. } if xobject == fm1),
-        "{e}"
-    );
-    assert_eq!(drawn(Forms::Report).unwrap().operators, 6);
+    assert!(matches!(e, Error::Damaged(id) if id == fm1), "{e}");
+    assert_eq!(drawn(Forms::Skip).unwrap().operators, 6);
+}
+
+/// Content written again draws its forms, so a form that can't be read
+/// fails it by sheaf's rule, as it fails an interpretation that draws
+/// them; with the form readable it's written.
+#[test]
+fn a_form_that_cant_be_read_stops_content_written_again() {
+    let f = fixture::forms();
+    let resources = f.resources().and_then(Object::as_dict);
+    let xobjects = resources.and_then(|r| r.get(b"XObject")?.as_dict());
+    let fm1 = xobjects.and_then(|x| x.get(b"Fm1")?.as_reference());
+    let fm1 = fm1.expect("/Fm1");
+    let content = f.content();
+    let written = |source: &Unreadable<'_>| {
+        let (lim, fonts) = (Limits::DEFAULT, Fonts::default());
+        crate::content::interp::encode(source, content.concat(), f.resources(), &lim, &fonts)
+    };
+    let source = |id| Unreadable {
+        pdf: &f.pdf,
+        id,
+        error: damaged,
+        lent: false,
+    };
+    let e = written(&source(fm1)).unwrap_err();
+    assert!(matches!(e, Error::Damaged(id) if id == fm1), "{e}");
+    let none = ObjectId::new(9_999, 0);
+    assert!(!written(&source(none)).unwrap().forms.is_empty());
+}
+
+/// A font whose program the source's I/O fails to read stops the page,
+/// its forms drawn or not, where sheaf's own interpreter read the font
+/// without its program: the reason isn't the file's, and another read may
+/// give the program. A program the file has damaged is read as none, as
+/// before, whatever is drawn: pdf-fonts reads a font's objects itself,
+/// and tells no sink.
+#[test]
+fn a_font_whose_program_fails_by_io_stops_the_page() {
+    use crate::pdf::Why;
+
+    let f = fixture::programs();
+    let fonts = f.resources().and_then(|r| r.as_dict()?.get(b"Font"));
+    let font = fonts.and_then(|f| f.as_dict()?.get(b"PT")?.as_reference());
+    let get = |id: ObjectId, key: &[u8]| f.pdf.get_dictionary(id).ok()?.get(key)?.as_reference();
+    let descriptor = font.and_then(|font| get(font, b"FontDescriptor"));
+    let program = descriptor.and_then(|d| get(d, b"FontFile2"));
+    let program = program.expect("/PT's program");
+    let content = f.content();
+    let read = |error, forms| {
+        let source = Unreadable {
+            pdf: &f.pdf,
+            id: program,
+            error,
+            lent: true,
+        };
+        let opts = Opts {
+            forms,
+            ..Opts::default()
+        };
+        crate::content::interp::interpret(
+            &source,
+            content.concat(),
+            f.resources(),
+            &Limits::DEFAULT,
+            &Fonts::default(),
+            opts,
+            |_| ControlFlow::Continue(()),
+        )
+    };
+    for forms in [Forms::Descend, Forms::Skip] {
+        match read(gone, forms) {
+            Err(Error::Gfx(GfxError::Unreadable(u))) => {
+                assert_eq!((u.id, u.why), (program, Why::Source));
+            }
+            other => panic!("{forms:?}: {other:?}"),
+        }
+        let damaged = read(damaged, forms).expect("read without its program");
+        assert!(damaged.glyphs > 0, "{forms:?}");
+    }
 }
 
 /// The visitor can stop it: the summary says so.
@@ -1188,8 +1305,8 @@ fn faults_say_where() {
     .into();
     let lim = &Limits::DEFAULT;
     let opts = Opts::default();
-    let lexed = |r: Result<(Seen, Summary), InterpError>| match r {
-        Err(InterpError::Lex { form, error }) => (form, error.at),
+    let lexed = |r: Result<(Seen, Summary), Error>| match r {
+        Err(Error::Gfx(GfxError::Content { form, error })) => (form, error.at),
         other => panic!("{other:?}"),
     };
     assert_eq!(
@@ -1199,111 +1316,8 @@ fn faults_say_where() {
     let in_form = run(&pdf, b"/B Do", Some(&resources), lim, opts);
     assert_eq!(lexed(in_form), (Some(broken), 3));
     match run(&pdf, b"/U Do", Some(&resources), lim, opts) {
-        Err(InterpError::XObject { xobject, .. }) => assert_eq!(xobject, unreadable),
+        Err(e) if unread_form(&e).is_some() => assert_eq!(unread_form(&e), Some(unreadable)),
         other => panic!("{other:?}"),
-    }
-}
-
-/// Each operator the interpreter reads is told by its name, and no two
-/// by one but `f` and `F`; any other name, one an operator's name starts
-/// or one that starts with an operator's, and the empty one, are none.
-/// In a set of operators, each is its own, and the others are one.
-#[test]
-fn each_operator_decodes_to_its_op() {
-    let ops = [
-        (&b"m"[..], Op::Move),
-        (b"l", Op::Line),
-        (b"c", Op::Curve),
-        (b"v", Op::CurveFromPen),
-        (b"y", Op::CurveToEnd),
-        (b"h", Op::ClosePath),
-        (b"re", Op::Rect),
-        (b"W", Op::Clip(FillRule::NonZero)),
-        (b"W*", Op::Clip(FillRule::EvenOdd)),
-        (b"f", Op::Paint(Paint::Fill)),
-        (b"F", Op::Paint(Paint::Fill)),
-        (b"f*", Op::Paint(Paint::FillEvenOdd)),
-        (b"S", Op::Paint(Paint::Stroke)),
-        (b"s", Op::Paint(Paint::CloseStroke)),
-        (b"B", Op::Paint(Paint::FillStroke)),
-        (b"B*", Op::Paint(Paint::FillStrokeEvenOdd)),
-        (b"b", Op::Paint(Paint::CloseFillStroke)),
-        (b"b*", Op::Paint(Paint::CloseFillStrokeEvenOdd)),
-        (b"n", Op::Paint(Paint::None)),
-        (b"cm", Op::Transform),
-        (b"w", Op::LineWidth),
-        (b"J", Op::LineCap),
-        (b"j", Op::LineJoin),
-        (b"M", Op::MiterLimit),
-        (b"q", Op::Save),
-        (b"Q", Op::Restore),
-        (b"gs", Op::ExtGState),
-        (b"BT", Op::BeginText),
-        (b"ET", Op::EndText),
-        (b"Tm", Op::TextMatrix),
-        (b"Td", Op::MoveLine),
-        (b"TD", Op::MoveLineLeading),
-        (b"T*", Op::NextLine),
-        (b"Tc", Op::CharSpace),
-        (b"Tw", Op::WordSpace),
-        (b"Tz", Op::Scale),
-        (b"TL", Op::Leading),
-        (b"Ts", Op::Rise),
-        (b"Tr", Op::RenderMode),
-        (b"Tf", Op::Font),
-        (b"Tj", Op::Show),
-        (b"TJ", Op::ShowArray),
-        (b"'", Op::NextLineShow),
-        (b"\"", Op::NextLineShowSpaced),
-        (b"Do", Op::Draw),
-        (b"sh", Op::Shade),
-        (b"BMC", Op::BeginMarked),
-        (b"BDC", Op::BeginMarkedProps),
-        (b"EMC", Op::EndMarked),
-        (b"MP", Op::Point),
-        (b"DP", Op::PointProps),
-    ];
-    let shown = |name: &[u8]| String::from_utf8_lossy(name).into_owned();
-    for (name, op) in ops {
-        assert_eq!(Op::of(name), op, "{}", shown(name));
-        let named: Vec<&[u8]> = (ops.iter())
-            .filter(|(_, other)| *other == op)
-            .map(|(n, _)| *n)
-            .collect();
-        match op {
-            Op::Paint(Paint::Fill) => assert_eq!(named, [b"f", b"F"]),
-            _ => assert_eq!(named, [name], "{}", shown(name)),
-        }
-    }
-    for name in [
-        &b""[..],
-        b"T",
-        b"Tjx",
-        b"BTx",
-        b"W**",
-        b"E",
-        b"EM",
-        b"BI",
-        b"EI",
-        b"d",
-        b"g",
-        b"rg",
-        b"cs",
-        b"d0",
-        b"BX",
-        b"tj",
-        b"bt",
-        b"Do ",
-    ] {
-        assert_eq!(Op::of(name), Op::Other, "{}", shown(name));
-        assert_eq!(Ops::of(&[name]), Ops::of(&[b"g"]), "{}", shown(name));
-    }
-    for (name, op) in ops {
-        let set = Ops::of(&[name]);
-        for (_, other) in ops {
-            assert_eq!(set.has(other), other == op, "{} {other:?}", shown(name));
-        }
-        assert!(!set.has(Op::Other) && Ops::of(&[b"g"]).has(Op::Other));
     }
 }
 
@@ -1328,11 +1342,11 @@ fn a_smaller_interest_only_filters() {
             ..Wants::NONE
         },
         Wants {
-            ops: Ops::ALL,
+            ops: Operators::ALL,
             ..Wants::NONE
         },
         Wants {
-            ops: Ops::of(&[b"q", b"Q", b"Do", b"rg"]),
+            ops: Operators::of(&[b"q", b"Q", b"Do", b"rg"]),
             ..Wants::NONE
         },
         Wants::NONE,
@@ -1348,14 +1362,13 @@ fn a_smaller_interest_only_filters() {
             &Fonts::default(),
             opts,
             |event| {
-                let wanted = match (&event.kind, &event.at.tok) {
-                    (Kind::Op, Tok::Op(name)) => wants.ops.has(Op::of(name)),
-                    (Kind::Op, _) => wants.ops.has(Op::Other),
-                    (Kind::Text(_), _) => wants.text,
-                    (Kind::Path(_), _) => wants.paths,
+                let wanted = match &event.kind {
+                    Kind::Op => wants.ops.contains(event.at.operator()),
+                    Kind::Text(_) => wants.text,
+                    Kind::Path(_) => wants.paths,
                     _ => true,
                 };
-                events.push((wanted, encode_tests::described(&event)));
+                events.push((wanted, encode::described(&event)));
                 ControlFlow::Continue(())
             },
         );
@@ -1397,7 +1410,7 @@ fn a_smaller_interest_only_filters() {
     let mut failed = std::collections::BTreeMap::new();
     for (f, content, lim) in cases {
         let what = String::from_utf8_lossy(&content);
-        for forms in [Forms::Descend, Forms::Report] {
+        for forms in [Forms::Descend, Forms::Skip] {
             let all = Opts {
                 forms,
                 ..Opts::default()
@@ -1413,7 +1426,7 @@ fn a_smaller_interest_only_filters() {
                     .collect();
                 assert!(fewer.iter().all(|(w, _)| *w), "{what}");
                 let fewer: Vec<_> = fewer.into_iter().map(|(_, e)| e).collect();
-                encode_tests::assert_alike(&filtered, &fewer, &what);
+                encode::assert_alike(&filtered, &fewer, &what);
             }
             let (_, done) = handed(f, &content, lim, all, Wants::ALL);
             if done.starts_with("Err") {
@@ -1425,9 +1438,9 @@ fn a_smaller_interest_only_filters() {
     // within the caps or not, but the shading the clip cuts; and each
     // cap, within the tight ones.
     let expected = [
-        ("Err(NotFinite)", 4 * 2 * 2),
-        ("Err(Limit(Segments))", 2 * 2),
-        ("Err(Limit(Glyphs))", 2),
+        ("Err(Gfx(NotFinite))", 4 * 2 * 2),
+        ("Err(Gfx(Limit(Segments)))", 2 * 2),
+        ("Err(Gfx(Limit(Glyphs)))", 2),
     ];
     assert_eq!(failed, expected.map(|(e, n)| (e.to_string(), n)).into());
 }
@@ -1437,27 +1450,6 @@ fn a_smaller_interest_only_filters() {
 /// isn't finite changes nothing.
 #[test]
 fn operands_read_as_pdfium_reads_them() {
-    for (word, n) in [
-        (&b"1.2.3"[..], 1.2),
-        (b"--5.0", -5.0),
-        (b"+-.5", -0.5),
-        (b"5.", 5.0),
-        (b".", 0.0),
-        (b"-", 0.0),
-        (b"007", 7.0),
-        (b"4294967295", 4_294_967_295.0),
-        (b"4294967296", 0.0),
-        (b"+2147483648", 0.0),
-        (b"-2147483648", -2_147_483_648.0),
-        (b"5-3", 5.0),
-        (b"--5", 0.0),
-        (b"/Name", 0.0),
-        (b"(5)", 0.0),
-    ] {
-        assert_eq!(number(word), n, "{}", String::from_utf8_lossy(word));
-    }
-    assert!(number(&[b"9".repeat(40), b".0".to_vec()].concat()).is_infinite());
-
     let f = fixture::operators();
     let at = |content: &[u8]| -> Vec<Shown> {
         let content = [b"/T3 10 Tf BT ".as_slice(), content, b" (a) Tj ET"].concat();
@@ -1508,13 +1500,13 @@ fn matrices_where_text_is() {
         },
     )
     .unwrap();
-    let m = |a, b, c, d, e, f| Affine { a, b, c, d, e, f };
+    let m = |a, b, c, d, e, f| Matrix { a, b, c, d, e, f };
     let [(trm, tms)] = &seen[..] else {
         panic!("{seen:?}")
     };
     assert_eq!(*trm, m(0.0, 10.0, -20.0, 0.0, 594.0, 1000.0));
     let tm = m(0.0, 1.0, -1.0, 0.0, 300.0, 500.0);
-    assert_eq!(*tms, [tm, Affine { f: 505.0, ..tm }]);
+    assert_eq!(*tms, [tm, Matrix { f: 505.0, ..tm }]);
 }
 
 /// Each event `f`'s page gives, in order, handed to `visit`.
@@ -1548,8 +1540,8 @@ fn assert_rect(r: Rect, [x0, y0, x1, y1]: [f32; 4], what: &str) {
     );
 }
 
-fn pt(x: f32, y: f32) -> Pt {
-    Pt { x, y }
+fn pt(x: f32, y: f32) -> Point {
+    Point { x, y }
 }
 
 /// The corners of the box `x, y, w, h`, in a quad's order.
@@ -1560,9 +1552,12 @@ fn corners(x: f32, y: f32, w: f32, h: f32) -> [(f32, f32); 4] {
 /// Each image of [`fixture::images`] is the unit square through its CTM,
 /// in a form too; each inline image's data is where it's written, by
 /// each rule that finds its end; what's said of each is read; and the
-/// PostScript XObject is reported, not drawn. Where XObjects are judged
-/// on their own ([`Forms::Report`]), none is read, and only the inline
-/// images are drawn.
+/// PostScript XObject is reported, not drawn. Where forms are judged on
+/// their own ([`Forms::Skip`]), none is entered, but each XObject's
+/// dictionary is read to tell a form from an image (pdf-gfx's reading,
+/// where sheaf's own interpreter read none): the page's stream draws its
+/// images as before, inline and XObject, and ignores the PostScript one,
+/// and the form's image isn't drawn.
 #[test]
 fn each_image_is_its_unit_square_through_the_ctm() {
     let f = fixture::images();
@@ -1573,7 +1568,8 @@ fn each_image_is_its_unit_square_through_the_ctm() {
     each(&f, Opts::default(), |event| match event.kind {
         Kind::Image(image) => {
             if let ImageOf::Inline { data } = &image.of {
-                assert_eq!(event.at.tok, Tok::InlineImage(data.clone()));
+                let at = event.at.inline_image().map(|image| image.data());
+                assert_eq!(at, Some(data.clone()));
             }
             images.push((image, event.at.stream.cloned()));
         }
@@ -1648,17 +1644,20 @@ fn each_image_is_its_unit_square_through_the_ctm() {
     assert_eq!(ignored, [xobject(b"PS")]);
 
     let opts = Opts {
-        forms: Forms::Report,
+        forms: Forms::Skip,
         ..Opts::default()
     };
     let mut reported = Vec::new();
+    let mut passed_over = Vec::new();
     each(&f, opts, |event| match event.kind {
         Kind::Image(image) => reported.push(image.of),
-        Kind::Ignored(id) => panic!("{id:?} read"),
+        Kind::Ignored(id) => passed_over.push(id),
+        Kind::FormBegin(shown) => panic!("{:?} entered", shown.form),
         _ => {}
     });
-    assert_eq!(reported.len(), 8);
-    assert!((reported.iter()).all(|of| matches!(of, ImageOf::Inline { .. })));
+    let drawn: Vec<ImageOf> = images[..12].iter().map(|(i, _)| i.of.clone()).collect();
+    assert_eq!(reported, drawn);
+    assert_eq!(passed_over, [xobject(b"PS")]);
 }
 
 /// A path as a test sees it: its segments, paint and bounds, and the
@@ -1762,6 +1761,7 @@ fn clips_cut_what_is_drawn_after_them() {
         .map(|p| match p {
             ClipPart::Path { rule, .. } => Some(*rule),
             ClipPart::Text { .. } => None,
+            other => panic!("{other:?}"),
         })
         .collect();
     // The rectangle holds the triangle, which takes its place.
@@ -1963,8 +1963,8 @@ fn marked_content_is_read_as_pdfium_reads_it() {
         }
         Kind::MarkedEnd(m) => {
             log.push(format!("end {}", tag(m)));
-            let empty = event.at.tok == Tok::Op(b"");
-            ends.push((event.at.op.clone(), event.at.content().len(), empty));
+            let empty = event.at.name() == b"";
+            ends.push((event.at.op_range(), event.at.content().len(), empty));
         }
         Kind::MarkedPoint(m) => {
             log.push(format!("point {}", tag(m)));
@@ -2007,7 +2007,7 @@ fn marked_content_is_read_as_pdfium_reads_it() {
     assert_eq!(marks[2].oc, properties.get(b"MC0").unwrap().as_reference());
     assert!(form_oc.is_some() && form_oc != marks[2].oc);
     assert_eq!(marks[3].stream.as_ref().map(UseId::depth), Some(1));
-    assert!(matches!(&marks[7].props, Some(Props::Named(name, Some(_))) if name == b"P1"));
+    assert!(matches!(&marks[7].props, Some(MarkProps::Named(name, Some(_))) if name == b"P1"));
     assert_eq!(marks[6].props, None);
     // Where each range opens: its tag, its list and its operator.
     #[rustfmt::skip]
@@ -2022,46 +2022,4 @@ fn marked_content_is_read_as_pdfium_reads_it() {
     #[rustfmt::skip]
     assert_eq!(at_end, [false, false, false, true, false, false, true]);
     assert_eq!(ends[6].1, page_len);
-}
-
-/// A spacing, `Tc` or `Tw`: 0 of either sign as often as not.
-fn spacing() -> impl Strategy<Value = f32> {
-    prop_oneof![Just(0.0f32), Just(-0.0f32), -50.0f32..50.0]
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(512))]
-
-    /// A font whose codes are bytes is laid out without its codes split
-    /// ([`text::bytes_end`]) to the bit where its codes are laid out one
-    /// at a time ([`text::laid_end`]): with any widths, at any size,
-    /// spaced or not, `Tc` and `Tw` 0 of either sign, which the first
-    /// leaves out, from where an operator's text starts or on from a
-    /// string before it.
-    #[test]
-    fn byte_codes_end_where_laid_out(
-        widths in prop::collection::vec(-2000i64..3000, 256),
-        size in prop_oneof![Just(0.0f32), Just(-0.0f32), -100.0f32..100.0, Just(3e38f32)],
-        word in spacing(),
-        char in spacing(),
-        from in prop_oneof![Just(0.0f32), -1000.0f32..1000.0],
-        s in prop::collection::vec(prop_oneof![Just(b' '), any::<u8>()], 0..64),
-    ) {
-        let pdf = Pdf::with_version("1.7");
-        let font = dictionary! {
-            "Type" => Object::name("Font"), "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("ABCDEF+Some"),
-            "FirstChar" => 0, "LastChar" => 255,
-            "Widths" => widths.iter().map(|&w| w.into()).collect::<Vec<Object>>(),
-        };
-        let mut budget = 0;
-        let font = Font::read(Objects(&pdf), &font, &Limits::DEFAULT.fonts(), &mut budget, &mut ()).unwrap();
-        let byte_widths = font.byte_widths().expect("a simple font's codes are bytes");
-        prop_assert!((0..256u32).all(|c| byte_widths[c as usize] == font.width(c)));
-        let mut state = State::default();
-        (state.text.size, state.text.word_space, state.text.char_space) = (size, word, char);
-        let fast = text::bytes_end(byte_widths, &state.text, &s, from);
-        let (laid, glyphs) = text::laid_end(&font, &state.text, &s, from);
-        prop_assert!(fast.to_bits() == laid.to_bits() || fast.is_nan() && laid.is_nan(), "{fast} {laid}");
-        prop_assert_eq!(glyphs, s.len());
-    }
 }

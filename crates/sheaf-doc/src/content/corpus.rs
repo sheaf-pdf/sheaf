@@ -9,17 +9,23 @@
 //! each list of theirs written in the content can be written again without
 //! a key, as Clean Copy writes sheaf's without what marks it.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::time::Instant;
 
 use crate::pdf::{Object, ObjectId, StreamExt};
 
-use super::interp::{Kind, Opts, interpret};
+use super::interp::{
+    Cap, EncodedPage, Error, Event, GfxError, ImageOf, Kind, Mark, MarkProps, Matrix, Opts, Rect,
+    Refused, Seg, State, Summary, Unwritable, encode, interpret,
+};
 use super::tests::blank;
 use super::*;
 use crate::forms::corpus::{Corpus, Entry, each_entry};
+use crate::pdf::Why;
+use crate::pdf::gfx::{ActiveColorSpace, BlendState, RenderingIntent, SoftMask, SoftMaskKind};
 use crate::source::Limits;
 use crate::store::{BlobKind, Store};
 
@@ -615,6 +621,97 @@ impl Records {
     }
 }
 
+/// A string shown's record: its font, what kind it is and what was read
+/// of its program, whether there is one, what of it is guessed, whether
+/// it's vertical, whether it's the stock one, and the string.
+fn show_records(records: &mut Records, font: Option<&Font>, stock: bool, string: &[u8]) {
+    records.begin("show");
+    let id = font.and_then(Font::id);
+    records.maybe("font", id.map(|id| u64::from(id.number)));
+    records.maybe("generation", id.map(|id| u64::from(id.generation)));
+    records.maybe("kind", font.map(|f| kind_number(f.kind())));
+    records.maybe("program", font.map(|f| program_number(f.program())));
+    records.number("has_font", u64::from(font.is_some()));
+    records.approx(font.map(Font::approx).unwrap_or_default());
+    records.number("vertical", u64::from(font.is_some_and(Font::is_vertical)));
+    records.number("stock", u64::from(stock));
+    records.bytes("string", Some(string));
+    records.end();
+}
+
+/// A glyph's record: its code and CID, its quad's corners, its origin and
+/// advance, what of it is guessed, whether it's invisible, and its text.
+struct GlyphRecord<'g> {
+    code: u32,
+    cid: Option<u32>,
+    quad: [f32; 8],
+    origin: [f32; 2],
+    advance: f32,
+    approx: FontApprox,
+    invisible: bool,
+    text: Option<&'g str>,
+}
+
+fn glyph_records(records: &mut Records, g: GlyphRecord<'_>) {
+    records.begin("glyph");
+    records.number("code", u64::from(g.code));
+    records.maybe("cid", g.cid.map(u64::from));
+    records.bits("quad", &g.quad);
+    records.bits("origin", &g.origin);
+    records.bits("advance", &[g.advance]);
+    records.approx(g.approx);
+    records.number("invisible", u64::from(g.invisible));
+    records.bytes("text", g.text.map(str::as_bytes));
+    records.end();
+}
+
+/// The glyph dump's records of what `content`, drawn with `resources`
+/// from `objects`' objects in `fonts`, shows, forms drawn: each string,
+/// and each glyph, counted in `glyphs`.
+fn shown<R: ReadObjects>(
+    objects: &R,
+    content: &Concat,
+    resources: Option<&Object>,
+    fonts: &Fonts,
+    records: &mut Records,
+    glyphs: &mut usize,
+) -> Result<(), String> {
+    let read = interpret(
+        objects,
+        content,
+        resources,
+        LIM,
+        fonts,
+        Opts::default(),
+        |event| {
+            let Kind::Text(show) = event.kind else {
+                return ControlFlow::Continue(());
+            };
+            show_records(records, show.font, show.stock, show.string);
+            for g in show.glyphs() {
+                *glyphs += 1;
+                let [a, b, c, d] = g.quad.0;
+                let text = g.text();
+                glyph_records(
+                    records,
+                    GlyphRecord {
+                        code: g.code,
+                        cid: g.cid,
+                        quad: [a.x, a.y, b.x, b.y, c.x, c.y, d.x, d.y],
+                        origin: [g.origin.x, g.origin.y],
+                        advance: g.advance,
+                        approx: g.approx,
+                        invisible: g.invisible,
+                        text: text.as_deref(),
+                    },
+                );
+            }
+            ControlFlow::Continue(())
+        },
+    );
+    read.map(drop).map_err(|e| e.to_string())
+}
+
 /// `bag`'s words and hashes, each with its count, as records.
 fn bag_records(records: &mut Records, bag: &TextBag) {
     for (word, n) in bag.words() {
@@ -666,48 +763,13 @@ fn dump_file(corpus: &Corpus, path: &str, full: bool) -> Vec<String> {
         // Every string shown, its forms' among them, and each glyph.
         let mut glyphs = 0usize;
         let mut records = Records::new(full);
-        let read = interpret(
+        let read = shown(
             src.pdf(),
             concat,
             resources,
-            LIM,
             &fonts,
-            Opts::default(),
-            |event| {
-                let Kind::Text(show) = event.kind else {
-                    return ControlFlow::Continue(());
-                };
-                records.begin("show");
-                let id = show.font.and_then(Font::id);
-                records.maybe("font", id.map(|id| u64::from(id.number)));
-                records.maybe("generation", id.map(|id| u64::from(id.generation)));
-                records.maybe("kind", show.font.map(|f| kind_number(f.kind())));
-                records.maybe("program", show.font.map(|f| program_number(f.program())));
-                records.number("has_font", u64::from(show.font.is_some()));
-                records.approx(show.font.map(Font::approx).unwrap_or_default());
-                records.number(
-                    "vertical",
-                    u64::from(show.font.is_some_and(Font::is_vertical)),
-                );
-                records.number("stock", u64::from(show.stock));
-                records.bytes("string", Some(show.string));
-                records.end();
-                for g in show.glyphs() {
-                    glyphs += 1;
-                    records.begin("glyph");
-                    records.number("code", u64::from(g.code));
-                    records.maybe("cid", g.cid.map(u64::from));
-                    let [a, b, c, d] = g.quad.0;
-                    records.bits("quad", &[a.x, a.y, b.x, b.y, c.x, c.y, d.x, d.y]);
-                    records.bits("origin", &[g.origin.x, g.origin.y]);
-                    records.bits("advance", &[g.advance]);
-                    records.approx(g.approx);
-                    records.number("invisible", u64::from(g.invisible));
-                    records.bytes("text", g.text().as_deref().map(str::as_bytes));
-                    records.end();
-                }
-                ControlFlow::Continue(())
-            },
+            &mut records,
+            &mut glyphs,
         );
         if let Err(e) = read {
             why.push(format!("interpreting: {e}"));
@@ -716,8 +778,11 @@ fn dump_file(corpus: &Corpus, path: &str, full: bool) -> Vec<String> {
 
         // Its text bag, and those of the forms its content draws, each
         // judged on its own, as the removal check reads them.
+        let bag = |content: &Concat, resources: Option<&Object>| {
+            text_bag(src.pdf(), content, resources, LIM, &for_text).map_err(|e| e.to_string())
+        };
         let mut records = Records::new(full);
-        match text_bag(src.pdf(), concat, resources, LIM, &for_text) {
+        match bag(concat, resources) {
             Ok(bag) => bag_records(&mut records, &bag),
             Err(e) => why.push(format!("text bag: {e}")),
         }
@@ -741,8 +806,7 @@ fn dump_file(corpus: &Corpus, path: &str, full: bool) -> Vec<String> {
                 .map_err(|e| e.to_string())
                 .and_then(|data| {
                     let own = form.dict.get(b"Resources").or(resources);
-                    text_bag(src.pdf(), &Concat::new(&[&data]), own, LIM, &for_text)
-                        .map_err(|e| e.to_string())
+                    bag(&Concat::new(&[&data]), own)
                 });
             records.number("read", u64::from(bag.is_ok()));
             records.end();
@@ -788,35 +852,14 @@ fn glyphs_and_text_dump() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let mut picks = dump_picks(&corpus);
-    let mut sets: BTreeMap<&str, usize> = BTreeMap::new();
-    for set in picks.values() {
-        *sets.entry(set).or_default() += 1;
-    }
-    eprintln!("{} files: {sets:?}", picks.len());
-    if let Some(only) = &only {
-        picks.retain(|path, _| path == only);
-        assert_eq!(picks.len(), 1, "{DUMP_ONLY} names no file the dump reads");
-    }
-    let entries: Vec<Entry> = (picks.keys())
-        .map(|path| Entry {
-            path: path.clone(),
-            ..Entry::default()
-        })
-        .collect();
     let started = Instant::now();
     let full = only.is_some();
-    let read = each_entry(&entries, |entry| {
-        let read = || dump_file(&corpus, &entry.path, full);
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)).unwrap_or_else(|panic| {
-            let said = (panic.downcast_ref::<&str>().map(|s| s.to_string()))
-                .or_else(|| panic.downcast_ref::<String>().cloned());
-            let said = said.unwrap_or_else(|| "a panic".into());
-            let said = said.replace(['\n', '\t'], " ");
-            vec![format!("{}\t-\t0\t-\t-\tpanicked: {said}", entry.path)]
-        })
-    });
-    let lines: Vec<String> = read.into_iter().flatten().collect();
+    let lines = each_dumped(
+        &corpus,
+        (only.as_deref(), DUMP_ONLY),
+        |path| dump_file(&corpus, path, full),
+        |path, said| format!("{path}\t-\t0\t-\t-\tpanicked: {said}"),
+    );
     let glyphs: usize = (lines.iter())
         .filter_map(|line| line.split('\t').nth(2)?.parse::<usize>().ok())
         .sum();
@@ -826,8 +869,53 @@ fn glyphs_and_text_dump() {
         lines.len(),
         started.elapsed().as_secs_f64()
     );
+    written(&lines, full, to);
+}
+
+/// The lines of every file the dumps read ([`dump_picks`]), or of the
+/// one `only.0` names (`only.1` the variable that named it), each file
+/// read by `read` on its own, in the order of their paths. A file whose
+/// reading panics is the one line `panicked` makes of its path and what
+/// the panic said.
+fn each_dumped(
+    corpus: &Corpus,
+    only: (Option<&str>, &str),
+    read: impl Fn(&str) -> Vec<String> + Sync,
+    panicked: impl Fn(&str, String) -> String + Sync,
+) -> Vec<String> {
+    let mut picks = dump_picks(corpus);
+    let mut sets: BTreeMap<&str, usize> = BTreeMap::new();
+    for set in picks.values() {
+        *sets.entry(set).or_default() += 1;
+    }
+    eprintln!("{} files: {sets:?}", picks.len());
+    if let (Some(only), var) = only {
+        picks.retain(|path, _| path == only);
+        assert_eq!(picks.len(), 1, "{var} names no file the dump reads");
+    }
+    let entries: Vec<Entry> = (picks.keys())
+        .map(|path| Entry {
+            path: path.clone(),
+            ..Entry::default()
+        })
+        .collect();
+    let read = each_entry(&entries, |entry| {
+        let read = || read(&entry.path);
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)).unwrap_or_else(|panic| {
+            let said = (panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                .or_else(|| panic.downcast_ref::<String>().cloned());
+            let said = said.unwrap_or_else(|| "a panic".into());
+            vec![panicked(&entry.path, said.replace(['\n', '\t'], " "))]
+        })
+    });
+    read.into_iter().flatten().collect()
+}
+
+/// A dump's `lines`, printed to stderr where its records were (`full`),
+/// and written to `to`, where it's set.
+fn written(lines: &[String], full: bool, to: Option<std::ffi::OsString>) {
     if full {
-        for line in &lines {
+        for line in lines {
             eprintln!("{line}");
         }
     }
@@ -836,4 +924,864 @@ fn glyphs_and_text_dump() {
         text.push('\n');
         std::fs::write(&to, text).unwrap_or_else(|e| panic!("{}: {e}", to.display()));
     }
+}
+
+/// Where [`events_dump`] writes: a path. Unset, it reads nothing.
+/// `just events-dump <file>` sets it.
+const EVENTS: &str = "SHEAF_EVENTS_DUMP";
+
+/// A corpus path whose records [`events_dump`] prints in full to stderr,
+/// reading that file alone.
+const EVENTS_ONLY: &str = "SHEAF_EVENTS_DUMP_ONLY";
+
+/// The records of the events dump: each value written goes into the
+/// checksum of every event, and, but in an operator's record and the
+/// leading ([`EventRecords::undrawn`]), into the checksum of what's
+/// drawn, which a page written again must keep, as the `interp` fuzz
+/// target holds it; where the records are printed in full, onto a line
+/// with its name. A show's string and its font, which the glyph dump
+/// has, go into what's drawn alone ([`EventRecords::drawn_only`]).
+struct EventRecords {
+    all: sheaf_util::Checksum,
+    drawn: sheaf_util::Checksum,
+    /// Whether what's being written goes into the checksum of every event
+    /// alone: an operator's record, or the leading.
+    op: bool,
+    full: Option<String>,
+}
+
+impl EventRecords {
+    fn new(full: bool) -> EventRecords {
+        EventRecords {
+            all: sheaf_util::Checksum::new(),
+            drawn: sheaf_util::Checksum::new(),
+            op: false,
+            full: full.then(String::new),
+        }
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.all.write(bytes);
+        if !self.op {
+            self.drawn.write(bytes);
+        }
+    }
+
+    fn name(&mut self, name: &str, v: impl std::fmt::Display) {
+        if let Some(full) = &mut self.full {
+            full.push_str(&format!(" {name}={v}"));
+        }
+    }
+
+    /// A record of kind `what` begins: an operator's where `op`.
+    fn begin(&mut self, what: &str, op: bool) {
+        self.op = op;
+        self.write(what.as_bytes());
+        self.write(&[0]);
+        if let Some(full) = &mut self.full {
+            full.push_str(what);
+        }
+    }
+
+    fn number(&mut self, name: &str, v: u64) {
+        self.write(&v.to_le_bytes());
+        self.name(name, v);
+    }
+
+    /// A number that may not be there.
+    fn maybe(&mut self, name: &str, v: Option<u64>) {
+        self.write(&[u8::from(v.is_some())]);
+        self.write(&v.unwrap_or(0).to_le_bytes());
+        match v {
+            Some(v) => self.name(name, v),
+            None => self.name(name, "-"),
+        }
+    }
+
+    /// An object's id that may not be there.
+    fn id(&mut self, name: &str, id: Option<ObjectId>) {
+        self.write(&[u8::from(id.is_some())]);
+        let (n, g) = id.map_or((0, 0), |id| (id.number, id.generation));
+        self.write(&n.to_le_bytes());
+        self.write(&g.to_le_bytes());
+        if self.full.is_some() {
+            let v = id.map_or("-".into(), |_| format!("{n}.{g}"));
+            self.name(name, v);
+        }
+    }
+
+    /// Numbers by their bits, a 0 of either sign the same.
+    fn reals(&mut self, name: &str, vs: &[f32]) {
+        for v in vs {
+            self.write(&(v + 0.0).to_bits().to_le_bytes());
+        }
+        if self.full.is_some() {
+            let vs: Vec<String> = (vs.iter())
+                .map(|v| format!("{:08x}({v})", (v + 0.0).to_bits()))
+                .collect();
+            self.name(name, vs.join(","));
+        }
+    }
+
+    /// Numbers that may not be there.
+    fn maybe_reals(&mut self, name: &str, vs: Option<&[f32]>) {
+        self.write(&[u8::from(vs.is_some())]);
+        match vs {
+            Some(vs) => self.reals(name, vs),
+            None => self.name(name, "-"),
+        }
+    }
+
+    /// Bytes that may not be there, their length first.
+    fn bytes(&mut self, name: &str, v: Option<&[u8]>) {
+        self.write(&[u8::from(v.is_some())]);
+        let bytes = v.unwrap_or(&[]);
+        self.write(&(bytes.len() as u64).to_le_bytes());
+        self.write(bytes);
+        if self.full.is_some() {
+            self.name(name, v.map_or("-".into(), |v| format!("<{}>", hex(v))));
+        }
+    }
+
+    /// What `write` writes goes into the checksum of every event alone:
+    /// state the page written again needn't keep, nothing it draws
+    /// reading it.
+    fn undrawn(&mut self, write: impl FnOnce(&mut EventRecords)) {
+        let op = std::mem::replace(&mut self.op, true);
+        write(self);
+        self.op = op;
+    }
+
+    /// What goes into the checksum of what's drawn alone: a show's string
+    /// and its font, which the glyph dump has.
+    fn drawn_only(&mut self, string: &[u8], font: Option<ObjectId>) {
+        let (n, g) = font.map_or((0, 0), |id| (id.number, id.generation));
+        for bytes in [&(string.len() as u64).to_le_bytes(), string] {
+            self.drawn.write(bytes);
+        }
+        self.drawn.write(&[u8::from(font.is_some())]);
+        self.drawn.write(&n.to_le_bytes());
+        self.drawn.write(&g.to_le_bytes());
+        if self.full.is_some() {
+            self.name("string", format!("<{}>", hex(string)));
+            self.name("font", font.map_or("-".into(), |_| format!("{n}.{g}")));
+        }
+    }
+
+    /// The record ends.
+    fn end(&mut self) {
+        if let Some(full) = &mut self.full {
+            full.push('\n');
+        }
+    }
+
+    /// The checksums of every record and of what's drawn; the records in
+    /// full go to stderr under `title`.
+    fn finish(self, title: &str) -> (u128, u128) {
+        if let Some(full) = self.full {
+            eprint!("== {title}\n{full}");
+        }
+        (self.all.finish(), self.drawn.finish())
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn matrix(m: Matrix) -> [f32; 6] {
+    [m.a, m.b, m.c, m.d, m.e, m.f]
+}
+
+fn rect(r: Rect) -> [f32; 4] {
+    [r.x0, r.y0, r.x1, r.y1]
+}
+
+/// The dump's numbers for what the events carry: each numbered by the
+/// dump, never by a type's `Debug`, so the same reading is the same
+/// record whatever types hold it.
+fn paint_number(paint: Paint) -> u64 {
+    match paint {
+        Paint::Fill => 0,
+        Paint::FillEvenOdd => 1,
+        Paint::Stroke => 2,
+        Paint::CloseStroke => 3,
+        Paint::FillStroke => 4,
+        Paint::FillStrokeEvenOdd => 5,
+        Paint::CloseFillStroke => 6,
+        Paint::CloseFillStrokeEvenOdd => 7,
+        Paint::None => 8,
+    }
+}
+
+fn rule_number(rule: FillRule) -> u64 {
+    match rule {
+        FillRule::NonZero => 0,
+        FillRule::EvenOdd => 1,
+    }
+}
+
+fn cap_number(cap: LineCap) -> u64 {
+    match cap {
+        LineCap::Butt => 0,
+        LineCap::Round => 1,
+        LineCap::Square => 2,
+    }
+}
+
+fn join_number(join: LineJoin) -> u64 {
+    match join {
+        LineJoin::Miter => 0,
+        LineJoin::Round => 1,
+        LineJoin::Bevel => 2,
+    }
+}
+
+fn mode_number(mode: TextMode) -> u64 {
+    match mode {
+        TextMode::Fill => 0,
+        TextMode::Stroke => 1,
+        TextMode::FillStroke => 2,
+        TextMode::Invisible => 3,
+        TextMode::FillClip => 4,
+        TextMode::StrokeClip => 5,
+        TextMode::FillStrokeClip => 6,
+        TextMode::Clip => 7,
+    }
+}
+
+/// A mark's record: its tag, whether it has a property list and how it's
+/// written, its MCID, `/ActualText` and optional content.
+fn mark_records(r: &mut EventRecords, mark: &Mark) {
+    r.bytes("tag", Some(&mark.tag));
+    let props = match &mark.props {
+        None => 0,
+        Some(MarkProps::Inline(_)) => 1,
+        Some(MarkProps::Named(_, None)) => 2,
+        Some(MarkProps::Named(_, Some(_))) => 3,
+    };
+    r.number("props", props);
+    r.maybe("mcid", mark.mcid.map(u64::from));
+    r.bytes(
+        "actual_text",
+        mark.actual_text.as_deref().map(str::as_bytes),
+    );
+    r.id("oc", mark.oc);
+}
+
+/// A color space's record: which it is, and its name where it's a
+/// resource's.
+fn space_records(r: &mut EventRecords, name: &'static str, space: &ActiveColorSpace) {
+    let number = match space {
+        ActiveColorSpace::DeviceGray => 0,
+        ActiveColorSpace::DeviceRgb => 1,
+        ActiveColorSpace::DeviceCmyk => 2,
+        ActiveColorSpace::Pattern => 3,
+        ActiveColorSpace::Named(_) => 4,
+        _ => 5,
+    };
+    r.number(name, number);
+    r.bytes(name, space.resource_name());
+}
+
+fn blend_number(blend: Blend) -> u64 {
+    match blend {
+        Blend::Normal => 0,
+        Blend::Multiply => 1,
+        Blend::Screen => 2,
+        Blend::Overlay => 3,
+        Blend::Darken => 4,
+        Blend::Lighten => 5,
+        Blend::ColorDodge => 6,
+        Blend::ColorBurn => 7,
+        Blend::HardLight => 8,
+        Blend::SoftLight => 9,
+        Blend::Difference => 10,
+        Blend::Exclusion => 11,
+        Blend::Hue => 12,
+        Blend::Saturation => 13,
+        Blend::Color => 14,
+        Blend::Luminosity => 15,
+    }
+}
+
+/// The state an event is in, every field of pdf-gfx's [`State`] but one:
+/// the CTM; the line's width, cap, join, miter limit and dash; the
+/// rendering intent and the flatness; each color's space, components and
+/// pattern; each alpha, whether it's a shape's, and the text knockout;
+/// the blend mode and the soft mask; the overprints and their mode; the
+/// clip's bounds; and the text state: the font's being the stock one, its
+/// size, the spacing, scale, leading, rise and mode, the text matrix,
+/// where the line starts, the pen, and whether a width before it was
+/// guessed. All but the leading are what's drawn. The one left out is
+/// which font is picked, a place among the run's fonts in the order it
+/// picked them, which says nothing of the font: the glyph dump has each
+/// font's glyphs.
+fn state_records(r: &mut EventRecords, state: &State) {
+    r.reals("ctm", &matrix(state.ctm));
+    r.reals("line_width", &[state.line_width]);
+    r.number("cap", cap_number(state.line_cap));
+    r.number("join", join_number(state.line_join));
+    r.reals("miter", &[state.miter_limit]);
+    r.number("dash_len", state.dash.array.len() as u64);
+    r.reals("dash", &state.dash.array);
+    r.reals("dash_phase", &[state.dash.phase]);
+    let intent = match &state.rendering_intent {
+        RenderingIntent::AbsoluteColorimetric => (0, None),
+        RenderingIntent::RelativeColorimetric => (1, None),
+        RenderingIntent::Saturation => (2, None),
+        RenderingIntent::Perceptual => (3, None),
+        RenderingIntent::Other(name) => (4, Some(&name[..])),
+        _ => (5, None),
+    };
+    r.number("intent", intent.0);
+    r.bytes("intent", intent.1);
+    r.reals("flatness", &[state.flatness]);
+    space_records(r, "stroke_space", &state.stroke_color_space);
+    space_records(r, "fill_space", &state.fill_color_space);
+    for (name, color) in [
+        ("stroke_color", &state.stroke_color),
+        ("fill_color", &state.fill_color),
+    ] {
+        r.number("components", color.as_slice().len() as u64);
+        r.reals(name, color.as_slice());
+    }
+    r.bytes("stroke_pattern", state.stroke_pattern.as_deref());
+    r.bytes("fill_pattern", state.fill_pattern.as_deref());
+    r.reals("alpha", &[state.stroke_alpha, state.fill_alpha]);
+    r.number("alpha_is_shape", u64::from(state.alpha_is_shape));
+    r.number("text_knockout", u64::from(state.text_knockout));
+    let blend = match &state.blend_mode {
+        BlendState::Mode(blend) => (blend_number(*blend), None),
+        BlendState::Compatible => (16, None),
+        BlendState::Other(name) => (17, Some(&name[..])),
+        _ => (18, None),
+    };
+    r.number("blend", blend.0);
+    r.bytes("blend", blend.1);
+    match state.soft_mask {
+        SoftMask::None => r.number("soft_mask", 0),
+        SoftMask::Mask { kind, group } => {
+            r.number("soft_mask", 1);
+            let kind = kind.map(|kind| match kind {
+                SoftMaskKind::Alpha => 0,
+                SoftMaskKind::Luminosity => 1,
+                _ => 2,
+            });
+            r.maybe("soft_mask_kind", kind);
+            r.id("soft_mask_group", group);
+        }
+        _ => r.number("soft_mask", 2),
+    }
+    r.number("stroke_overprint", u64::from(state.stroke_overprint));
+    r.number("fill_overprint", u64::from(state.fill_overprint));
+    let mode = u32::from_le_bytes(state.overprint_mode.to_le_bytes());
+    r.number("overprint_mode", u64::from(mode));
+    r.maybe_reals(
+        "clip",
+        state.clip_bounds().map(rect).as_ref().map(|r| &r[..]),
+    );
+    let text = &state.text;
+    r.number("stock", u64::from(text.stock));
+    r.reals("size", &[text.size]);
+    r.reals("spacing", &[text.char_space, text.word_space]);
+    r.reals("scale", &[text.scale]);
+    // `TD` sets the leading, and the encoding writes it, and every
+    // operator that reads the leading, as ones that don't.
+    r.undrawn(|r| r.reals("leading", &[text.leading]));
+    r.reals("rise", &[text.rise]);
+    r.number("mode", mode_number(text.mode));
+    r.reals("matrix", &matrix(text.matrix));
+    r.reals("line", &[text.line.x, text.line.y]);
+    r.reals("pen", &[text.pen.x, text.pen.y]);
+    r.number("guessed", u64::from(text.guessed));
+}
+
+/// `event`'s record, by fields it names: what it is, the state it's in,
+/// and the marked ranges it's in, innermost first. An operator's is its
+/// name and where it is, from its first operand and itself; a show's its
+/// own fields, its string and glyphs being the glyph dump's. A kind of
+/// event the dump has no record for is one of its own (`other`).
+fn event_records(r: &mut EventRecords, event: &Event<'_>) {
+    match &event.kind {
+        Kind::Op => {
+            r.begin("op", true);
+            r.bytes("name", Some(event.at.name()));
+            let range = event.at.range();
+            r.number("from", range.start as u64);
+            let op = event.at.op_range();
+            r.number("start", op.start as u64);
+            r.number("end", op.end as u64);
+        }
+        Kind::Text(show) => {
+            r.begin("text", false);
+            r.reals("size", &[show.size]);
+            r.number("mode", mode_number(show.mode));
+            r.reals("start", &matrix(show.start));
+            r.reals("offset", &[show.offset]);
+            r.number("stock", u64::from(show.stock));
+            r.drawn_only(show.string, show.font.and_then(Font::id));
+        }
+        Kind::FormBegin(form) | Kind::FormEnd(form) => {
+            let begins = matches!(event.kind, Kind::FormBegin(_));
+            r.begin(if begins { "form-begin" } else { "form-end" }, false);
+            r.id("form", Some(form.form));
+            r.reals("matrix", &matrix(form.matrix));
+            r.maybe_reals("bbox", form.bbox.map(rect).as_ref().map(|r| &r[..]));
+            r.id("oc", form.oc);
+        }
+        Kind::FormRefused { form, why } => {
+            r.begin("form-refused", false);
+            r.id("form", Some(*form));
+            let why = match why {
+                Refused::Cycle => 0,
+                Refused::Depth => 1,
+                _ => 255,
+            };
+            r.number("why", why);
+        }
+        Kind::Path(path) => {
+            r.begin("path", false);
+            r.number("segments", path.segments.len() as u64);
+            for seg in path.segments {
+                match *seg {
+                    Seg::Move(p) => r.reals("m", &[p.x, p.y]),
+                    Seg::Line(p) => r.reals("l", &[p.x, p.y]),
+                    Seg::Curve(a, b, p) => r.reals("c", &[a.x, a.y, b.x, b.y, p.x, p.y]),
+                    Seg::Close => r.number("h", 0),
+                }
+            }
+            r.number("paint", paint_number(path.paint));
+            r.maybe("clip", path.clip.map(rule_number));
+            r.reals("bounds", &rect(path.bounds));
+        }
+        Kind::Image(image) => {
+            r.begin("image", false);
+            let [a, b, c, d] = image.quad.0;
+            r.reals("quad", &[a.x, a.y, b.x, b.y, c.x, c.y, d.x, d.y]);
+            let (inline, xobject) = match image.of {
+                ImageOf::XObject(id) => (false, Some(id)),
+                ImageOf::Inline { .. } => (true, None),
+                _ => (true, Some(ObjectId::new(0, u16::MAX))),
+            };
+            r.number("inline", u64::from(inline));
+            r.id("xobject", xobject);
+            r.number("stencil", u64::from(image.stencil));
+            r.id("smask", image.smask);
+            r.id("mask", image.mask);
+            r.id("oc", image.oc);
+        }
+        Kind::Shading(shading) => {
+            r.begin("shading", false);
+            r.id("shading", shading.shading);
+            r.maybe_reals("bounds", shading.bounds.map(rect).as_ref().map(|r| &r[..]));
+        }
+        Kind::Ignored(id) => {
+            r.begin("ignored", false);
+            r.id("xobject", Some(*id));
+        }
+        Kind::MarkedBegin(mark) | Kind::MarkedEnd(mark) | Kind::MarkedPoint(mark) => {
+            let what = match event.kind {
+                Kind::MarkedBegin(_) => "marked-begin",
+                Kind::MarkedEnd(_) => "marked-end",
+                _ => "marked-point",
+            };
+            r.begin(what, false);
+            mark_records(r, mark);
+        }
+        _ => r.begin("other", false),
+    }
+    state_records(r, event.state);
+    for mark in event.marks.iter() {
+        r.begin("in", r.op);
+        mark_records(r, mark);
+    }
+    r.end();
+}
+
+/// The class of what stopped an interpretation, never its wording: a
+/// damaged object where forms are drawn, sheaf's rule, is `damaged`, and
+/// pdf-gfx's errors are named as it names them: content that doesn't lex
+/// or is past one of content's caps is `content`, a form whose stream
+/// doesn't decode `form-stream`, a cap `limit:<cap>`, geometry past an
+/// `f32` `not-finite`, an operator that can't be written again
+/// `unwritable:<why>`, an object that doesn't read for a reason that
+/// isn't the file's `unreadable:<why>`, a page stream that wasn't decoded
+/// `page-stream`, an inline image sized under a cap `capped-inline`.
+/// Anything else is `other`, a finding.
+fn interp_class(e: &Error) -> String {
+    let e = match e {
+        Error::Damaged(_) => return "damaged".into(),
+        Error::Gfx(e) => e,
+    };
+    match e {
+        GfxError::Content { .. } => "content".into(),
+        GfxError::FormStream { .. } => "form-stream".into(),
+        GfxError::Limit(cap) => format!("limit:{}", cap_name(*cap)),
+        GfxError::NotFinite => "not-finite".into(),
+        GfxError::Unwritable { why, .. } => format!("unwritable:{}", unwritable_name(*why)),
+        GfxError::Unreadable(unreadable) => format!("unreadable:{}", why_name(unreadable.why)),
+        GfxError::PageStream(_) => "page-stream".into(),
+        GfxError::CappedInlineImage { .. } => "capped-inline".into(),
+        _ => "other".into(),
+    }
+}
+
+fn cap_name(cap: Cap) -> &'static str {
+    match cap {
+        Cap::Operators => "operators",
+        Cap::Glyphs => "glyphs",
+        Cap::Interpreted => "interpreted",
+        Cap::Segments => "segments",
+        Cap::States => "states",
+        Cap::Marked => "marked",
+        Cap::Decompressed => "decompressed",
+        _ => "other",
+    }
+}
+
+fn unwritable_name(why: Unwritable) -> &'static str {
+    match why {
+        Unwritable::Line => "line",
+        Unwritable::InlineLength => "inline-length",
+        Unwritable::InlineStream => "inline-stream",
+        Unwritable::LoneBi => "lone-bi",
+        _ => "other",
+    }
+}
+
+fn why_name(why: Why) -> &'static str {
+    match why {
+        Why::Damaged => "damaged",
+        Why::Capped => "capped",
+        Why::Locked => "locked",
+        Why::Source => "source",
+        Why::Limit => "limit",
+        Why::Filter => "filter",
+        Why::Detached => "detached",
+        _ => "other",
+    }
+}
+
+/// The class of why a page wasn't written again: the encoder's own
+/// refusals as [`interp_class`] names them, and an interpretation in the
+/// encoder that stopped where the page's didn't as `encode:<class>`.
+fn encode_class(e: &Error) -> String {
+    match e {
+        Error::Gfx(
+            GfxError::Unwritable { .. }
+            | GfxError::PageStream(_)
+            | GfxError::CappedInlineImage { .. },
+        ) => interp_class(e),
+        _ => format!("encode:{}", interp_class(e)),
+    }
+}
+
+/// A summary's fields, in its order, tab-separated.
+fn summary_columns(s: &Summary) -> String {
+    let Summary {
+        operators,
+        glyphs,
+        interpreted,
+        decompressed,
+        segments,
+        uses,
+        refused,
+        deepest_form,
+        deepest_q,
+        deepest_marked,
+        stopped,
+        ..
+    } = *s;
+    let fields = [
+        operators,
+        glyphs,
+        interpreted,
+        decompressed,
+        segments,
+        uses,
+        refused,
+        deepest_form,
+        deepest_q,
+        deepest_marked,
+        usize::from(stopped),
+    ];
+    fields.map(|n| n.to_string()).join("\t")
+}
+
+/// How many columns a [`Summary`] takes.
+const SUMMARY_COLUMNS: usize = 11;
+
+/// A source's objects with each form a page's content draws written again
+/// in its place, its stream's data what [`encode`] wrote, unfiltered, as
+/// [`Fixture::encoded`](super::fixture::Fixture::encoded) writes them.
+struct Rewritten<'a, O> {
+    old: &'a O,
+    forms: HashMap<ObjectId, Object>,
+}
+
+impl<'a, O: ReadObjects> Rewritten<'a, O> {
+    /// `old`'s objects with each of `forms` written again in its place:
+    /// an encoding's forms, each its id and data.
+    fn new(old: &'a O, forms: &[(ObjectId, Vec<u8>)]) -> Rewritten<'a, O> {
+        let forms = (forms.iter())
+            .filter_map(|(id, data)| {
+                let mut form = ReadObjects::read(old, *id, Object::clone).ok()?;
+                form.as_stream_mut()?.set_plain_content(data.clone());
+                Some((*id, form))
+            })
+            .collect();
+        Rewritten { old, forms }
+    }
+}
+
+impl<O: ReadObjects> ReadObjects for Rewritten<'_, O> {
+    fn object(&self, id: ObjectId) -> crate::pdf::Result<&Object> {
+        match self.forms.get(&id) {
+            Some(form) => Ok(form),
+            None => ReadObjects::object(self.old, id),
+        }
+    }
+
+    fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> crate::pdf::Result<R> {
+        match self.forms.get(&id) {
+            Some(form) => Ok(read(form)),
+            None => ReadObjects::read(self.old, id, read),
+        }
+    }
+
+    fn peek(&self, id: ObjectId) -> crate::pdf::Result<Option<Cow<'_, Object>>> {
+        match self.forms.get(&id) {
+            Some(form) => Ok(Some(Cow::Borrowed(form))),
+            None => ReadObjects::peek(self.old, id),
+        }
+    }
+}
+
+/// The events dump's line for a page, or a file, that wasn't interpreted:
+/// `class` says why.
+fn events_none(path: &str, page: &str, class: &str) -> String {
+    let dashes = ["-"; SUMMARY_COLUMNS + 2].join("\t");
+    format!("{path}\t{page}\t{dashes}\t{class}\t-")
+}
+
+/// `content`, drawn with `resources` from `objects`' objects, its forms
+/// drawn and every event wanted, each event's record written to
+/// `records` ([`event_records`]).
+fn recorded<R: ReadObjects>(
+    objects: &R,
+    content: &Concat,
+    resources: Option<&Object>,
+    fonts: &Fonts,
+    records: &mut EventRecords,
+) -> Result<Summary, Error> {
+    interpret(
+        objects,
+        content,
+        resources,
+        LIM,
+        fonts,
+        Opts::default(),
+        |event| {
+            event_records(records, &event);
+            ControlFlow::Continue(())
+        },
+    )
+}
+
+/// Whether `encoded`, content of `objects` written again, interpreted
+/// again with each form written again in its place ([`Rewritten`]),
+/// draws what the content did, `drawn` being the checksum of what that
+/// drew ([`EventRecords::finish`]): every event but its operators, to the
+/// bit, as the `interp` fuzz target holds it. Its records in full go to
+/// stderr under `title`.
+fn drawn_again<R: ReadObjects>(
+    objects: &R,
+    encoded: &EncodedPage,
+    resources: Option<&Object>,
+    fonts: &Fonts,
+    drawn: u128,
+    (title, full): (&str, bool),
+) -> bool {
+    let again = Rewritten::new(objects, &encoded.forms);
+    let mut records = EventRecords::new(full);
+    let content = Concat::new(&[&encoded.content]);
+    let read = recorded(&again, &content, resources, fonts, &mut records);
+    let (_, redrawn) = records.finish(title);
+    read.is_ok() && redrawn == drawn
+}
+
+/// The events dump's columns for one page's `content`, drawn with
+/// `resources` from `objects`' objects in `fonts`, after its file and its
+/// number: its interpretation's [`Summary`] field by field, the checksum
+/// of every event ([`event_records`]), the checksum of the page written
+/// again ([`encode`]: its content, then each form's id and bytes), `ok` or
+/// the class of what failed, whether the page written again, interpreted
+/// again, draws what it drew ([`drawn_again`]: `same`, `differs`, or `-`
+/// where it isn't written again). Its records in full go to stderr under
+/// `at`, where `full`.
+fn page_events<R: ReadObjects>(
+    objects: &R,
+    content: &Concat,
+    resources: Option<&Object>,
+    fonts: &Fonts,
+    (at, full): (&str, bool),
+) -> String {
+    let mut records = EventRecords::new(full);
+    let read = recorded(objects, content, resources, fonts, &mut records);
+    let (events, drawn) = records.finish(&format!("{at}: events"));
+    let summary = match &read {
+        Ok(summary) => summary_columns(summary),
+        Err(_) => ["-"; SUMMARY_COLUMNS].join("\t"),
+    };
+    let (encoding, why, redrawn) = match read {
+        Err(e) => ("-".to_string(), interp_class(&e), "-"),
+        Ok(_) => match encode(objects, content, resources, LIM, fonts) {
+            Err(e) => ("-".to_string(), encode_class(&e), "-"),
+            Ok(encoded) => {
+                let mut sum = sheaf_util::Checksum::new();
+                sum.write(&(encoded.content.len() as u64).to_le_bytes());
+                sum.write(&encoded.content);
+                for (id, data) in &encoded.forms {
+                    sum.write(&id.number.to_le_bytes());
+                    sum.write(&id.generation.to_le_bytes());
+                    sum.write(&(data.len() as u64).to_le_bytes());
+                    sum.write(data);
+                }
+                let title = format!("{at}: written again");
+                let same = drawn_again(objects, &encoded, resources, fonts, drawn, (&title, full));
+                let same = if same { "same" } else { "differs" };
+                (format!("{:032x}", sum.finish()), "ok".to_string(), same)
+            }
+        },
+    };
+    format!("{summary}\t{events:032x}\t{encoding}\t{why}\t{redrawn}")
+}
+
+/// The events dump's lines for the file at `path` of the corpus, one a
+/// page: the file, the page, and its columns ([`page_events`]), each page
+/// interpreted in fonts whose programs are read ([`Fonts::default`]). A
+/// file that doesn't open is one line, its page `-`.
+fn events_file(corpus: &Corpus, path: &str, full: bool) -> Vec<String> {
+    let Ok(bytes) = std::fs::read(corpus.root.join(path)) else {
+        return vec![events_none(path, "-", "unopened")];
+    };
+    let kind = BlobKind::file(Path::new(path), None);
+    let Ok(src) = Store::new().open(bytes.into(), kind) else {
+        return vec![events_none(path, "-", "unopened")];
+    };
+    let fonts = Fonts::default();
+    let mut lines = Vec::new();
+    for (i, page) in src.pages().iter().enumerate() {
+        let at = format!("{path} page {}", i + 1);
+        let n = (i + 1).to_string();
+        let Ok(content) = PageContent::read(src.pdf(), &page.contents, LIM) else {
+            lines.push(events_none(path, &n, "unread"));
+            continue;
+        };
+        let resources = page.resources.as_deref();
+        let concat = content.concat();
+        let columns = page_events(src.pdf(), concat, resources, &fonts, (&at, full));
+        lines.push(format!("{path}\t{n}\t{columns}"));
+    }
+    lines
+}
+
+/// What every page of the corpus's files does as it's interpreted, to set
+/// beside itself after a change to the interpreter: a line a page
+/// ([`events_file`]), the files in the order of their paths
+/// ([`dump_picks`]: the glyph dump's), written to the path in [`EVENTS`].
+/// Two runs over the same code write the same file. With [`EVENTS_ONLY`]
+/// it reads the one file named, and prints each record in full to
+/// stderr, those of each page written again after its own.
+#[test]
+#[ignore = "a dump of what the corpus's pages do as they're interpreted, written to $SHEAF_EVENTS_DUMP"]
+fn events_dump() {
+    let to = std::env::var_os(EVENTS);
+    let only = std::env::var(EVENTS_ONLY).ok();
+    if to.is_none() && only.is_none() {
+        eprintln!("skipped: neither {EVENTS} nor {EVENTS_ONLY} is set");
+        return;
+    }
+    let Some(corpus) = Corpus::or_skip() else {
+        return;
+    };
+    let started = Instant::now();
+    let full = only.is_some();
+    let lines = each_dumped(
+        &corpus,
+        (only.as_deref(), EVENTS_ONLY),
+        |path| events_file(&corpus, path, full),
+        |path, said| {
+            eprintln!("{path} panicked: {said}");
+            events_none(path, "-", "panicked")
+        },
+    );
+    let column =
+        |line: &String, from_end: usize| line.rsplit('\t').nth(from_end).map(str::to_owned);
+    let count = |from_end: usize, is: &str| {
+        (lines.iter())
+            .filter(|line| column(line, from_end).as_deref() == Some(is))
+            .count()
+    };
+    let not_ok = lines.len() - count(1, "ok");
+    eprintln!(
+        "{} lines, {not_ok} not ok, {} written again and drawn the same, {} drawn otherwise, in {:.0} s",
+        lines.len(),
+        count(0, "same"),
+        count(0, "differs"),
+        started.elapsed().as_secs_f64()
+    );
+    written(&lines, full, to);
+}
+
+/// Every fixture page's events line says it was read, written again and,
+/// written again, drawn the same, and says the same twice; and what's
+/// written again is interpreted again, not taken on trust: an operator
+/// more that draws nothing leaves it drawn the same, a line more drawn in
+/// the content, or in a form written again, draws otherwise.
+#[test]
+fn each_fixture_s_events_are_drawn_the_same_written_again() {
+    let fonts = Fonts::default();
+    for (name, f) in fixture::every() {
+        let content = f.content();
+        let at = (name, false);
+        let line = page_events(&f.pdf, content.concat(), f.resources(), &fonts, at);
+        let last: Vec<&str> = line.rsplit('\t').take(2).collect();
+        assert_eq!(last, ["same", "ok"], "{name}: {line}");
+        let again = page_events(&f.pdf, content.concat(), f.resources(), &fonts, at);
+        assert_eq!(again, line, "{name}");
+    }
+    let drawn_with = |f: &fixture::Fixture, more: &[u8], in_form: bool| {
+        let (content, resources) = (f.content(), f.resources());
+        let mut records = EventRecords::new(false);
+        let read = recorded(&f.pdf, content.concat(), resources, &fonts, &mut records);
+        read.expect("drawn");
+        let (_, drawn) = records.finish("");
+        let mut encoded = encode(&f.pdf, content.concat(), resources, LIM, &fonts);
+        let encoded = encoded.as_mut().expect("written again");
+        match in_form {
+            false => encoded.content.extend_from_slice(more),
+            true => encoded.forms[0].1.extend_from_slice(more),
+        }
+        drawn_again(&f.pdf, encoded, resources, &fonts, drawn, ("", false))
+    };
+    let (operators, forms) = (fixture::operators(), fixture::forms());
+    assert!(drawn_with(&operators, b"", false));
+    assert!(drawn_with(&operators, b"\nq Q", false));
+    assert!(!drawn_with(&operators, b"\n0 0 m 1 1 l S", false));
+    assert!(drawn_with(&forms, b"", true));
+    assert!(!drawn_with(&forms, b"\n0 0 m 1 1 l S", true));
+}
+
+/// The events dump holds numbers by their bits, but for a 0's sign.
+#[test]
+fn the_events_dump_holds_numbers_by_their_bits_but_a_zero_s_sign() {
+    let sum = |v: f32| {
+        let mut records = EventRecords::new(false);
+        records.reals("v", &[v]);
+        records.finish("")
+    };
+    assert_eq!(sum(0.0), sum(-0.0));
+    assert_ne!(sum(1.0), sum(f32::from_bits(1.0_f32.to_bits() + 1)));
 }

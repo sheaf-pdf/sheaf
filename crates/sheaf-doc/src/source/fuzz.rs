@@ -335,7 +335,7 @@ fn with_fonts(page: &content::fixture::Fixture, parts: &[&[u8]]) -> content::fix
 /// [`interp`]'s body: `data` drawn on `page`, with `fonts`.
 #[cfg(any(test, feature = "fixtures"))]
 fn interp_on(page: &content::fixture::Fixture, fonts: &content::Fonts, data: &[u8]) -> usize {
-    use content::interp::{EncodeError, encode};
+    use content::interp::{Error, GfxError, encode};
     let (first, second) = data.split_at(data.len() / 2);
     let content = Concat::new(&[first, second]);
     let Ok(drawn) = drawn_on(page, &content, fonts) else {
@@ -344,8 +344,11 @@ fn interp_on(page: &content::fixture::Fixture, fonts: &content::Fonts, data: &[u
     let lim = &Limits::DEFAULT;
     let encoded = match encode(&page.pdf, &content, page.resources(), lim, fonts) {
         Ok(encoded) => encoded,
-        // What can't be written to read back the same isn't.
-        Err(EncodeError::Unwritable { .. }) => return drawn.events,
+        // What can't be written to read back the same isn't: an operator,
+        // or an inline image, the encoder refuses.
+        Err(Error::Gfx(GfxError::Unwritable { .. } | GfxError::CappedInlineImage { .. })) => {
+            return drawn.events;
+        }
         Err(e) => panic!("it's drawn, but isn't written again: {e}"),
     };
     let again = page.encoded(&encoded);
@@ -382,7 +385,7 @@ fn drawn_on(
     page: &content::fixture::Fixture,
     content: &Concat,
     fonts: &content::Fonts,
-) -> Result<Drawn, content::interp::InterpError> {
+) -> Result<Drawn, content::interp::Error> {
     use std::hash::{DefaultHasher, Hash, Hasher};
 
     use content::interp::{Kind, Opts, Seg, interpret};
@@ -394,7 +397,7 @@ fn drawn_on(
             (v + 0.0).to_bits().hash(&mut placed);
         }
     };
-    let rect = |r: crate::geom::Rect| [r.x0, r.y0, r.x1, r.y1];
+    let rect = |r: content::interp::Rect| [r.x0, r.y0, r.x1, r.y1];
     let lim = &Limits::DEFAULT;
     interpret(
         &page.pdf,
@@ -1638,7 +1641,7 @@ mod tests {
             let mut budget = Limits::DEFAULT.content.decompressed;
             let tt = read
                 .get(
-                    content::Objects(&page.pdf),
+                    content::Objects::new(&page.pdf, &content::Unkept::default()),
                     tt,
                     &Limits::DEFAULT.fonts(),
                     &mut budget,

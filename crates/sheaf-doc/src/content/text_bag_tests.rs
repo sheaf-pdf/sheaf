@@ -13,6 +13,17 @@ fn bag(pdf: &Pdf, resources: &Object, content: &[u8]) -> TextBag {
     text_bag(pdf, &content, Some(resources), &lim, &Fonts::for_text()).unwrap()
 }
 
+/// A Type0 font's `/DescendantFonts`: one CIDFont by `name`, with no
+/// program, without which PDFium loads no Type0 font and shows nothing in
+/// it.
+fn descendant(name: &str) -> Vec<Object> {
+    vec![Object::from(dictionary! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("CIDFontType2"),
+        "BaseFont" => Object::name(name),
+    })]
+}
+
 /// A bag of `text`'s words.
 fn words(text: &str) -> TextBag {
     let mut bag = TextBag::default();
@@ -71,6 +82,7 @@ fn the_same_text_in_two_subsets_gives_equal_bags() {
         "Subtype" => Object::name("Type0"),
         "BaseFont" => Object::name("GHIJKL+Arial"),
         "Encoding" => Object::name("Identity-H"),
+        "DescendantFonts" => descendant("GHIJKL+Arial"),
         "ToUnicode" => cmap,
     });
     let resources: Object = dictionary! {
@@ -272,6 +284,7 @@ fn codespace_ranges_split_mixed_codes() {
         "Subtype" => Object::name("Type0"),
         "BaseFont" => Object::name("MSGothic"),
         "Encoding" => Object::name("90ms-RKSJ-H"),
+        "DescendantFonts" => descendant("MSGothic"),
         "ToUnicode" => cmap,
     });
     let resources: Object = dictionary! { "Font" => dictionary! { "J" => font } }.into();
@@ -290,10 +303,13 @@ fn content_that_doesnt_lex_is_an_error() {
     let lim = Limits::DEFAULT;
     let content = Concat::new(&[b"BT (Hello) Tj (open"]);
     let e = text_bag(&Pdf::new(), &content, None, &lim, &Fonts::for_text()).unwrap_err();
-    assert!(matches!(e, interp::InterpError::Lex { form: None, error } if error.at == 14));
+    assert!(matches!(
+        e,
+        interp::Error::Gfx(interp::GfxError::Content { form: None, error }) if error.at == 14
+    ));
 }
 
-/// A form the content draws is judged on its own, and isn't read: its
+/// A form the content draws is judged on its own, and isn't drawn: its
 /// words aren't the content's. An ExtGState's `/Font` picks the font, as
 /// in PDFium, which takes one given by reference for a name it hasn't
 /// got: its text is drawn in the stock Helvetica, and is its bytes' hash.
@@ -331,5 +347,93 @@ fn forms_are_their_own_and_gs_picks_the_font() {
     assert_eq!(
         bag(&pdf, &resources, b"BT /T 9 Tf (one) Tj /G gs (two) Tj ET"),
         want
+    );
+}
+
+/// A page with Times-Roman as `/T`, and the bag of `content` shown in it
+/// after `BT /T 10 Tf 100 700 Td `, or why there's none.
+fn shown(content: &[u8]) -> Result<TextBag, interp::Error> {
+    let mut pdf = Pdf::with_version("1.7");
+    let font = pdf.add_object(dictionary! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Times-Roman"),
+    });
+    let resources: Object = dictionary! { "Font" => dictionary! { "T" => font } }.into();
+    let content = [b"BT /T 10 Tf 100 700 Td ".as_slice(), content].concat();
+    let content = Concat::new(&[&content]);
+    let lim = Limits::DEFAULT;
+    text_bag(&pdf, &content, Some(&resources), &lim, &Fonts::for_text())
+}
+
+/// Content PDFium reads past is read as PDFium reads it, each case asked
+/// of PDFium (chromium/8152, its text page): a dictionary that doesn't
+/// end is dropped with what it holds to the end of the content, or ends
+/// at a key that's no name or a value that's no object, what follows
+/// read on as content; an array inside an array outside any dictionary
+/// opens none, so the outer one ends at the first `]`, and `TJ` shows
+/// nothing of an array with what's no string or number in it; 0x80 and
+/// 0xFF are white-space; a string shows its first 32,767 bytes, and a
+/// name `Tj` shows its first 254. sheaf's own lexer, which blocks, marked
+/// ranges and splices still read content by, refuses the unended
+/// dictionaries and arrays among these.
+#[test]
+fn content_pdfium_reads_past_is_read_as_pdfium_reads_it() {
+    let cases: [(&[u8], &str); 10] = [
+        (b"<< (a) Tj ET", ""),
+        (b"(a) Tj << (b) Tj ET", "a"),
+        (b"<< /K 1 > (a) Tj ET", "a"),
+        (b"/Span << /MCID 1 BDC (a) Tj EMC ET", "a"),
+        (b"[[ (a) ] TJ ET", "a"),
+        (b"[(a) [(b)] (a)] TJ ET", ""),
+        (b"[ [] (a) ] TJ ET", ""),
+        (b"(a) \x80 Tj ET", "a"),
+        (b"(a) \xff Tj ET", "a"),
+        (b"<< BT (a) Tj >> (b) Tj ET", "ab"),
+    ];
+    for (content, text) in cases {
+        let at = String::from_utf8_lossy(content);
+        let bag = shown(content).unwrap_or_else(|e| panic!("{at}: {e}"));
+        assert_eq!(bag, words(text), "{at}");
+    }
+    let long = |open: &str, n: usize, close: &str| {
+        let content = format!("{open}{}{close} Tj ET", "a".repeat(n));
+        shown(content.as_bytes()).unwrap()
+    };
+    assert_eq!(long("(", 32_767, ")"), words(&"a".repeat(32_767)));
+    assert_eq!(long("(", 32_768, ")"), words(&"a".repeat(32_767)));
+    let hex = format!("{}>", "61".repeat(32_768));
+    assert_eq!(long("<", 0, &hex), long("(", 32_767, ")"));
+    assert_eq!(long("/", 254, ""), words(&"a".repeat(254)));
+    assert_eq!(long("/", 255, ""), words(&"a".repeat(254)));
+    // Arrays inside arrays open none, however many.
+    let nested = format!("{} (a) ] TJ ET", "[".repeat(513));
+    assert_eq!(shown(nested.as_bytes()).unwrap(), words("a"));
+}
+
+/// Dictionaries nested past the 64 levels PDFium builds fail a bag,
+/// whatever content's depth cap says (512): pdf-content-streams reads to
+/// PDFium's depth and fails past it, where PDFium reads on and shows the
+/// text, as sheaf's own interpreter did to 512. A bag that fails is
+/// content the removal check counts unreadable, so it fails closed.
+#[test]
+fn dictionaries_nested_past_pdfium_s_depth_fail_a_bag() {
+    let nested = |depth: usize| {
+        let content = format!(
+            "/S {}1{} BDC (a) Tj EMC ET",
+            "<< /K ".repeat(depth),
+            " >>".repeat(depth)
+        );
+        shown(content.as_bytes())
+    };
+    const { assert!(Limits::DEFAULT.content.depth > 65) };
+    assert_eq!(nested(64).unwrap(), words("a"));
+    let e = nested(65).unwrap_err();
+    assert!(
+        matches!(
+            e,
+            interp::Error::Gfx(interp::GfxError::Content { form: None, .. })
+        ),
+        "{e}"
     );
 }
