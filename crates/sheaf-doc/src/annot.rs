@@ -24,6 +24,9 @@
 //! builds, draw it. Appearances are drawn with the content toolkit's
 //! writer, their text in the standard 14 fonts; a character those lack
 //! draws `?`, which [`Annot::unencodable`] tells without drawing anything.
+//! Each is held as pdf-annots holds an appearance it draws, the parts of
+//! its form ([`SynthesizedAp`]), which the writer makes into one
+//! ([`sink::form`](crate::content::sink::form)).
 //! A save writes marks as [`emission`] makes them, through the emitter.
 //! What a PDF sheaf builds in memory holds of them (the comments a data
 //! file exports, a flattened mark's page) is written through
@@ -35,17 +38,18 @@
 
 use std::sync::Arc;
 
-use crate::pdf::{Dictionary, Object, Stream, StreamExt, Value, dictionary, literal};
+use crate::pdf::annots::SynthesizedAp;
+use crate::pdf::gfx::{self, Canvas};
+use crate::pdf::{Dictionary, Object, Value, dictionary, literal};
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use sheaf_edit::Rotation;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::attachments::{Objects, resolve};
-use crate::content::sink::Sink;
 use crate::content::{
     Blend, Color, ContentWriter, DrawFont, DrawText, FillRule, GState, LineCap, LineJoin, Paint,
-    Reserved, ResourceNeeds, Std14, place_form,
+    Reserved, Std14, place_form,
 };
 use crate::geom::{Affine, Geom, Rect};
 use crate::model::{FormRef, PinnedAp};
@@ -1164,11 +1168,13 @@ pub struct Emitted {
     /// Its annotation dictionary, `/SHEF_Annot` set: with no `/AP`, `/P`
     /// or `/IRT`, which the writer gives it.
     pub main: Dictionary,
-    pub appearance: Appearance,
+    /// Its appearance, drawn: the parts of its form, which the writer
+    /// makes ([`sink::form`](crate::content::sink::form)).
+    pub appearance: SynthesizedAp,
     /// What it writes beside itself, each with its appearance: a
     /// replacement's StrikeOut, its `/NM` set. The writer gives each
     /// `/AP`, `/IRT` to the main annotation and `/RT /Group`.
-    pub companions: Vec<(Dictionary, Appearance)>,
+    pub companions: Vec<(Dictionary, SynthesizedAp)>,
 }
 
 /// Mark `a` as the writer makes it, drawing and embedding what `held`
@@ -1233,7 +1239,7 @@ pub fn companion(a: &Annot) -> Option<Annot> {
 /// what a flattened mark's layer draws again ([`PinnedAp`]).
 ///
 /// [`PinnedAp`]: crate::model::PinnedAp
-pub(crate) fn appearance(a: &Annot, stamp: Option<StampForm>) -> Appearance {
+pub(crate) fn appearance(a: &Annot, stamp: Option<StampForm>) -> SynthesizedAp {
     annotation(a, stamp).1
 }
 
@@ -1662,53 +1668,12 @@ fn draw_runs(w: &mut ContentWriter, runs: &[Run], color: Color, at: impl Fn(Pt) 
     w.end_text();
 }
 
-/// A mark's appearance, drawn: its box in user space, its content, and
-/// the resources that draws with.
-pub struct Appearance {
-    bbox: [f32; 4],
-    content: Vec<u8>,
-    needs: ResourceNeeds,
-}
-
-impl Appearance {
-    /// It as a form, compressed, its resources written through `sink`,
-    /// once a file each.
-    pub fn form(self, sink: &mut dyn Sink) -> Stream {
-        let mut form = Stream::new(self.form_dict(sink), self.content);
-        form.compress();
-        form
-    }
-
-    /// Its form's dictionary, the resources it draws with written through
-    /// `sink`, once a file each: what [`form`](Self::form) holds its
-    /// content with.
-    pub(crate) fn form_dict(&self, sink: &mut dyn Sink) -> Dictionary {
-        let mut resources = Dictionary::new();
-        crate::content::sink::bind(sink, &self.needs, &mut resources);
-        dictionary! {
-            "Type" => Object::name("XObject"),
-            "Subtype" => Object::name("Form"),
-            "BBox" => pdf_rect(self.bbox),
-            "Resources" => resources,
-        }
-    }
-
-    /// Its `/BBox`, in user space: the mark's `/Rect`.
-    pub(crate) fn bbox(&self) -> Rect {
-        let [x0, y0, x1, y1] = self.bbox;
-        Rect::new(x0, y0, x1, y1)
-    }
-
-    /// Its content, drawn.
-    pub(crate) fn into_content(self) -> Vec<u8> {
-        self.content
-    }
-}
-
 /// The main annotation dictionary (without `/AP`, `/P` or `/SHEF_Annot`)
 /// and its appearance. A page stamp's draws `stamp`, its page as a form,
-/// when it has one.
-fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
+/// when it has one. The appearance is sheaf's drawing, held as the
+/// family holds one it draws ([`SynthesizedAp::drawn`]): its `/BBox` is
+/// the mark's `/Rect`, in user space, at the identity.
+fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp) {
     // Laid out as it reads, then drawn in user space through `user`, so
     // it's upright whatever the page's /Rotate.
     let shown = a.upright();
@@ -2232,15 +2197,14 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
             }
         });
     }
-    let (content, needs) = w.finish(&Reserved::default());
-    (
-        dict,
-        Appearance {
-            bbox: [llx, lly, urx, ury],
-            content,
-            needs,
-        },
-    )
+    let bbox = gfx::Rect {
+        x0: llx,
+        y0: lly,
+        x1: urx,
+        y1: ury,
+    };
+    let drawn = SynthesizedAp::drawn(bbox, gfx::Matrix::IDENTITY, Canvas::from_writer(w));
+    (dict, drawn)
 }
 
 /// How thick the line of an underline, strikeout or squiggly is: a
@@ -2783,6 +2747,7 @@ mod corpus;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pdf::StreamExt;
     use crate::serialize::built::{Written, to_pdf, to_pdf_in};
 
     /// A text stamp is as wide as its widest line in Helvetica-Bold, by

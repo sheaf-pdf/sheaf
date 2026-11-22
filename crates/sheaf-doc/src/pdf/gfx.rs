@@ -7,7 +7,8 @@
 //! written again so no line depends on another ([`encode_with`],
 //! [`EncodedPage`]). The events carry the family's geometry ([`Rect`],
 //! [`Matrix`]; a point and a quad are fields' types nothing of sheaf's
-//! names yet).
+//! names yet). And content drawn on a [`Canvas`], over pdf-content-streams'
+//! writer: an annotation's appearance (M18 slice 24, [`super::annots`]).
 //!
 //! A page is read from a source's objects through [`Resolve`] and
 //! [`Streams`]; `crate::content::Objects` is any of sheaf's sources as
@@ -17,8 +18,8 @@
 //! [`Streams`]: super::Streams
 
 pub use pdf_gfx::{
-    Cap, EncodedPage, Error, Event, Fault, Forms, Glyph, ImageOf, Kind, Limits, Mark, MarkProps,
-    Matrix, Opts, Rect, Refused, Seg, State, Summary, Unwritable, Wants, encode_with,
+    Canvas, Cap, EncodedPage, Error, Event, Fault, Forms, Glyph, ImageOf, Kind, Limits, Mark,
+    MarkProps, Matrix, Opts, Rect, Refused, Seg, State, Summary, Unwritable, Wants, encode_with,
     interpret_with,
 };
 

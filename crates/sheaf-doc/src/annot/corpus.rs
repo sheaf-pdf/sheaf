@@ -10,15 +10,16 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
-use crate::annot::{Annot, Appearance, Box2, Pt, emission};
+use crate::annot::{Annot, Box2, Pt, emission};
 use crate::attachments::Objects;
 use crate::content::corpus::{each_dumped, written};
-use crate::content::sink::Sink;
+use crate::content::sink::{self, Sink};
 use crate::content::{Res, Reserved};
 use crate::file::{ForeignAnnot, Found, InFile, annots_in, is_ours};
 use crate::forms::corpus::Corpus;
 use crate::geom::{Affine, Rect};
 use crate::import::{NotAMark, convert_page};
+use crate::pdf::annots::SynthesizedAp;
 use crate::pdf::{Dictionary, Object, ObjectId, Value};
 use crate::serialize::built::{Held, StampForm};
 use crate::source::ObjRef;
@@ -182,15 +183,15 @@ impl Sink for Asked {
 /// says: the dictionary written, the appearance's box, its content and
 /// the resources its form binds, each `category/name/id`, under names
 /// that start with `prefix`.
-fn made(line: &mut Line, prefix: &str, dict: &Dictionary, ap: Appearance) {
+fn made(line: &mut Line, prefix: &str, dict: &Dictionary, ap: SynthesizedAp) {
     let mut out = Vec::new();
     match crate::pdf::write::write(&mut out, &Object::from(dict.clone())) {
         Ok(()) => line.bytes(&format!("{prefix}dict"), &out),
         Err(_) => line.field(&format!("{prefix}dict"), "unwritable"),
     }
-    line.bits(&format!("{prefix}bbox"), &rect_bits(ap.bbox()));
+    line.bits(&format!("{prefix}bbox"), &rect_bits(Rect::from(ap.bbox)));
     let mut asked = Asked::default();
-    let form = ap.form_dict(&mut asked);
+    let form = sink::form_dict(&mut asked, ap.bbox, ap.matrix, &ap.needs);
     let resources = form.get(b"Resources").and_then(Object::as_dict);
     let mut needs = Vec::new();
     for (i, id) in asked.0.iter().enumerate() {
@@ -206,7 +207,7 @@ fn made(line: &mut Line, prefix: &str, dict: &Dictionary, ap: Appearance) {
         needs.push(format!("{bound}/{id:032x}"));
     }
     line.field(&format!("{prefix}needs"), &needs.join(","));
-    line.bytes(&format!("{prefix}content"), &ap.into_content());
+    line.bytes(&format!("{prefix}content"), &ap.content);
 }
 
 /// What a save writes of mark `a`, holding `held`: its dictionary and

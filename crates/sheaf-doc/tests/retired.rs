@@ -1219,6 +1219,10 @@ const RETIRED_M18: &[(&str, u8)] = &[
     ("content::blocks::Marked", 17),
     ("content::blocks::Props", 17),
     ("private::lexed", 17),
+    // A mark's appearance is held as pdf-annots holds one it draws
+    // (`pdf::annots::SynthesizedAp`), and its form is made from its parts
+    // (`content::sink::form`), as any appearance's is.
+    ("annot::Appearance", 24),
 ];
 
 /// The ledgers, with the words a hit names its slice by.
@@ -1278,6 +1282,9 @@ const QUALIFIED_ONLY: &[&str] = &[
     // (`Said::Unread`), and pdf-structure's error: not the sink's objects
     // that read nothing.
     "Unread",
+    // An appearance as a form field's maker gives one (pdf-forms'): not
+    // the type a mark's had (M18 slice 24).
+    "Appearance",
     // A sink's `resource`, a glyph's `advance` and a file's font's
     // `encoding`: not what sheaf's own font trait and standard 14 had
     // (M18 slice 22).

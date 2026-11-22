@@ -1,7 +1,7 @@
 //! Where content's resources are written (M10.5 slice 9): a [`Sink`] reads
 //! what a dictionary names and writes the resources a [`ContentWriter`]'s
 //! content draws with, once however many draw with them, so a mark's
-//! appearance form ([`bind`]) serves both a PDF built in memory
+//! appearance form ([`form`], [`bind`]) serves both a PDF built in memory
 //! ([`serialize::built`](crate::serialize::built)) and the emitter, whose
 //! dictionaries refer to objects by key; the emitter reads a page's
 //! `/Contents` and `/Resources` through it too.
@@ -12,7 +12,8 @@
 //! [`ContentWriter`]: super::ContentWriter
 
 use crate::pdf::content::Limits;
-use crate::pdf::{Dictionary, Object, ObjectId, Value, resolve_fn};
+use crate::pdf::gfx::{Matrix, Rect};
+use crate::pdf::{Dictionary, Object, ObjectId, Stream, StreamExt, Value, dictionary, resolve_fn};
 use crate::source;
 
 use super::{Res, ResKind, Reserved, ResourceNeeds};
@@ -75,6 +76,48 @@ pub fn bind(sink: &mut dyn Sink, needs: &ResourceNeeds, resources: &mut Dictiona
     }
 }
 
+/// An appearance's form XObject, made from its parts: its box (`/BBox`),
+/// its matrix (`/Matrix`, where it isn't the identity), its content,
+/// compressed, and what that draws with, `needs`, written through `sink`
+/// once a file each and bound in its `/Resources` ([`bind`]). Whoever
+/// drew the appearance (`pdf::annots::SynthesizedAp`'s parts, a mark's,
+/// drawn by sheaf or by the family), its form is made here.
+pub fn form(
+    sink: &mut dyn Sink,
+    bbox: Rect,
+    matrix: Matrix,
+    content: Vec<u8>,
+    needs: &ResourceNeeds,
+) -> Stream {
+    let mut form = Stream::new(form_dict(sink, bbox, matrix, needs), content);
+    form.compress();
+    form
+}
+
+/// [`form`]'s dictionary alone, before its content is compressed and
+/// held: what a form whose content is written later (the emitter's
+/// deferred one) holds it with.
+pub fn form_dict(
+    sink: &mut dyn Sink,
+    bbox: Rect,
+    matrix: Matrix,
+    needs: &ResourceNeeds,
+) -> Dictionary {
+    let mut resources = Dictionary::new();
+    bind(sink, needs, &mut resources);
+    let numbers = |n: &[f32]| Object::from(n.iter().copied().map(Object::from).collect::<Vec<_>>());
+    let mut dict = dictionary! {
+        "Type" => Object::name("XObject"),
+        "Subtype" => Object::name("Form"),
+        "BBox" => numbers(&[bbox.x0, bbox.y0, bbox.x1, bbox.y1]),
+    };
+    if matrix != Matrix::IDENTITY {
+        dict.set("Matrix", numbers(&matrix.to_array()));
+    }
+    dict.set("Resources", resources);
+    dict
+}
+
 /// The caps a resources dictionary's names are read under
 /// ([`Reserved::read`]): sheaf's defaults, as pdf-content-streams takes
 /// them ([`ContentLimits::family`]). A sink reads for a file being
@@ -110,7 +153,7 @@ pub fn reserved_shallow(sink: &mut dyn Sink, resources: Option<&Object>) -> Rese
 mod tests {
     use super::*;
     use crate::content::{ContentWriter, DrawFont, DrawText, Glyphless};
-    use crate::pdf::{Document as Pdf, Stream, StreamExt, dictionary};
+    use crate::pdf::Document as Pdf;
     use crate::serialize::built::ResObjects;
 
     fn list(subtype: &str) -> Dictionary {
@@ -197,6 +240,89 @@ mod tests {
 
         fn reserved(&mut self, resources: Option<&Object>) -> Reserved {
             reserved_shallow(self, resources)
+        }
+    }
+
+    /// A sink over nothing that gives a resource already written its own
+    /// number, and any other the next of its own.
+    struct Numbers(u32);
+
+    impl Sink for Numbers {
+        fn dict(&mut self, _: ObjectId) -> Option<Dictionary> {
+            None
+        }
+
+        fn array(&mut self, _: ObjectId) -> Option<Vec<Object>> {
+            None
+        }
+
+        fn resource(&mut self, res: &Res) -> ObjectId {
+            match res.body() {
+                crate::content::ResBody::Written(id) => *id,
+                _ => {
+                    self.0 += 1;
+                    ObjectId::new(self.0, 0)
+                }
+            }
+        }
+
+        fn reserved(&mut self, resources: Option<&Object>) -> Reserved {
+            reserved_shallow(self, resources)
+        }
+    }
+
+    /// An appearance's form, from its parts: its box, its matrix after
+    /// it only where that isn't the identity, then its needs bound by
+    /// name; its content compressed; and its dictionary alone is the
+    /// form's, but for what holding the content adds.
+    #[test]
+    fn a_form_is_made_from_an_appearances_parts() {
+        let mut w = ContentWriter::new();
+        w.draw(Res::written(ObjectId::new(40, 0)));
+        let (content, needs) = w.finish(&Reserved::default());
+        let bbox = Rect {
+            x0: 10.0,
+            y0: 20.0,
+            x1: 110.5,
+            y1: 70.25,
+        };
+        let turned = Matrix::new(0.0, 1.0, -1.0, 0.0, 70.25, 0.0);
+        let numbers =
+            |n: &[f32]| Object::from(n.iter().map(|&v| Object::from(v)).collect::<Vec<_>>());
+        for matrix in [Matrix::IDENTITY, turned] {
+            let made = form(&mut Numbers(0), bbox, matrix, content.clone(), &needs);
+            let keys: Vec<&[u8]> = made.dict.iter().map(|(k, _)| k).collect();
+            let mut expected: Vec<&[u8]> = vec![b"Type", b"Subtype", b"BBox"];
+            if matrix != Matrix::IDENTITY {
+                expected.push(b"Matrix");
+            }
+            expected.push(b"Resources");
+            assert_eq!(keys[..expected.len()], expected[..], "{matrix:?}");
+            assert_eq!(
+                made.dict.get(b"BBox"),
+                Some(&numbers(&[10.0, 20.0, 110.5, 70.25]))
+            );
+            let written = made.dict.get(b"Matrix");
+            assert_eq!(
+                written,
+                (matrix != Matrix::IDENTITY)
+                    .then(|| numbers(&matrix.to_array()))
+                    .as_ref()
+            );
+            let xobjects = made.dict.get(b"Resources").and_then(Object::as_dict);
+            let xobjects = xobjects
+                .and_then(|r| r.get(b"XObject"))
+                .and_then(Object::as_dict);
+            assert_eq!(
+                xobjects.and_then(|x| x.get(&needs.0[0].name)),
+                Some(&Object::from(ObjectId::new(40, 0)))
+            );
+            assert_eq!(made.decompressed_content().unwrap(), content);
+            let alone = form_dict(&mut Numbers(0), bbox, matrix, &needs);
+            for (key, value) in alone.iter() {
+                assert_eq!(made.dict.get(key), Some(value));
+            }
+            assert_eq!(alone.len(), expected.len());
         }
     }
 

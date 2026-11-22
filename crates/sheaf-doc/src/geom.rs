@@ -3,14 +3,16 @@
 //! and the one conversion between the page's default user space
 //! (PageSpace, §5) and the page as it's shown.
 //!
-//! The content interpreter's events carry the PDF layer's geometry
-//! (`content::interp`'s `Rect` and `Matrix`, pdf-gfx's), which nothing
-//! sheaf ships turns into these yet: the code that first does adds the
-//! conversion here.
+//! The PDF layer has a geometry of its own (pdf-gfx's `Rect` and
+//! `Matrix`): the content interpreter's events carry it, which nothing
+//! sheaf ships turns into these yet, and an appearance's form is made of
+//! it (`pdf::annots::SynthesizedAp`'s box and matrix, M18 slice 24),
+//! which turns into these here, field for field.
 
 use sheaf_edit::{PageSize, Rotation};
 
 use crate::annot::{Box2, Pt};
+use crate::pdf::gfx;
 
 /// The smallest a page's box may be left on either side, in points: a
 /// quarter inch.
@@ -72,6 +74,15 @@ impl Rect {
         } else {
             shared
         }
+    }
+}
+
+/// The PDF layer's rectangle, its sides as they are: neither is
+/// normalized again.
+impl From<gfx::Rect> for Rect {
+    fn from(r: gfx::Rect) -> Rect {
+        let gfx::Rect { x0, y0, x1, y1 } = r;
+        Rect { x0, y0, x1, y1 }
     }
 }
 
@@ -221,6 +232,14 @@ impl Affine {
             e: (self.c * self.f - self.d * self.e) / det,
             f: (self.b * self.e - self.a * self.f) / det,
         }
+    }
+}
+
+/// The PDF layer's matrix: the same six numbers in the same order.
+impl From<gfx::Matrix> for Affine {
+    fn from(m: gfx::Matrix) -> Affine {
+        let gfx::Matrix { a, b, c, d, e, f } = m;
+        Affine { a, b, c, d, e, f }
     }
 }
 

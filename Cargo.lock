@@ -5298,6 +5298,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdf-annots"
+version = "0.1.0-alpha.1"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#fe407dcccda5f040048a6001011e789fb34e5b15"
+dependencies = [
+ "pdf-content-streams",
+ "pdf-fonts",
+ "pdf-gfx",
+ "pdf-objects",
+ "pdf-semantics",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "pdf-color"
 version = "0.1.0-alpha.2"
 source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#fe407dcccda5f040048a6001011e789fb34e5b15"
@@ -6929,6 +6942,7 @@ dependencies = [
  "log",
  "md-5 0.11.0",
  "num-bigint",
+ "pdf-annots",
  "pdf-content-streams",
  "pdf-crypt",
  "pdf-filters",

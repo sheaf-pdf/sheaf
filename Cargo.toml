@@ -107,6 +107,9 @@ pdf-content-streams = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = 
 # again, and of its own features takes only what lays text out in a font.
 pdf-fonts = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", default-features = false, features = ["programs", "predefined-cmaps"] }
 pdf-gfx = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", default-features = false, features = ["text-layout"] }
+# Without its defaults too: `programs` would turn pdf-gfx's on, under the
+# interpreter; `text-layout` is pdf-gfx's, which sheaf takes already.
+pdf-annots = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", default-features = false, features = ["text-layout"] }
 
 # Zed's workspace patches for crates GPUI uses, mirrored from the
 # [patch.crates-io] of Zed's Cargo.toml at the snapshot's rev.

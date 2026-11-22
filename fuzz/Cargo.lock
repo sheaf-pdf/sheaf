@@ -1189,6 +1189,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
 
 [[package]]
+name = "pdf-annots"
+version = "0.1.0-alpha.1"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#fe407dcccda5f040048a6001011e789fb34e5b15"
+dependencies = [
+ "pdf-content-streams",
+ "pdf-fonts",
+ "pdf-gfx",
+ "pdf-objects",
+ "pdf-semantics",
+ "thiserror",
+]
+
+[[package]]
 name = "pdf-color"
 version = "0.1.0-alpha.2"
 source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#fe407dcccda5f040048a6001011e789fb34e5b15"
@@ -1852,6 +1865,7 @@ dependencies = [
  "log",
  "md-5",
  "num-bigint",
+ "pdf-annots",
  "pdf-content-streams",
  "pdf-crypt",
  "pdf-filters",
