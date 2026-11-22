@@ -230,7 +230,7 @@ boundaries:
     bad=$(cargo tree -p sheaf-edit -e normal --prefix none | awk '{print $1}' | sort -u \
       | grep -E '^sheaf-' | grep -vx 'sheaf-edit' || true)
     [ -z "$bad" ] || { echo "sheaf-edit depends on: $bad"; exit 1; }
-    for pkg in pdf-objects pdf-filters pdf-crypt pdf-structure pdf-content-streams pdf-fonts pdf-gfx; do
+    for pkg in pdf-objects pdf-filters pdf-crypt pdf-structure pdf-content-streams pdf-fonts pdf-gfx pdf-forms; do
       bad=$(cargo tree --workspace -e all -i "$pkg" --prefix depth 2>/dev/null | awk '/^1sheaf-/ {print $1}' | sed 's/^1//' | sort -u \
         | grep -vx 'sheaf-doc' || true)
       [ -z "$bad" ] || { echo "crates outside sheaf-doc depend on $pkg directly: $bad"; exit 1; }
@@ -537,6 +537,29 @@ content-dump out:
 [group('corpus')]
 annots-dump out:
     SHEAF_ANNOTS_DUMP="{{ absolute_path(out) }}" scripts/test-capped.sh cargo test -p sheaf-doc --release --lib -- --ignored --nocapture --exact annot::corpus::annots_dump
+
+# Every text widget of every form in the corpus's manifest, as sheaf reads
+# it and as pdf-forms' read layer does, written to `out`, numbers, names
+# and checksums only: a line a file (its form's class, and how many text
+# widgets the two read alike, read otherwise, or only one of them reads),
+# and one a text widget, by its page, slot and object: the plain data
+# sheaf's model gives of it (its value's length and checksum, never the
+# value; flags, `/MaxLen`, justification, box, `/MK` colors and rotation,
+# border, and its effective `/DA` parsed), `=` where the family's reading
+# is the same or the parts that differ and the family's of each, the font
+# its `/DA` names (by reference, direct, missing and the face it falls
+# back to; its kind, program, `/BaseFont` and `/Encoding`), and the
+# appearance pdf-forms makes of it for a sample value (its size, whether
+# it overflowed, its content's length and checksum), or why it makes
+# none. It asserts nothing: run it before and after a change to what
+# reads a form or makes a text field's appearance, or a move of the PDF
+# layer's pin, over the same corpus, and `diff` the two files;
+# SHEAF_FIELDS_DUMP_ONLY=<a corpus path> prints that file's lines. Two
+# runs over the same code write the same file.
+[doc("Every corpus text widget as sheaf and pdf-forms read it, and the appearance made of it, a line each, written to a file: diff two runs across a change to forms")]
+[group('corpus')]
+fields-dump out:
+    SHEAF_FIELDS_DUMP="{{ absolute_path(out) }}" scripts/test-capped.sh cargo test -p sheaf-doc --release --lib -- --ignored --nocapture --exact forms::dump::fields_dump
 
 # ----- Gates ---------------------------------------------------------------
 

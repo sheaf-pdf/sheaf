@@ -9,7 +9,8 @@
 //! [`Matrix`], [`Point`]; a quad is a field's type nothing of sheaf's
 //! names yet). And content drawn on a [`Canvas`], over pdf-content-streams'
 //! writer: an annotation's appearance (M18 slice 24, [`super::annots`]),
-//! the family's geometry its points.
+//! the family's geometry its points; and a text field's, from a border and
+//! a default appearance string (M10 slice 6, [`super::forms`]).
 //!
 //! A page is read from a source's objects through [`Resolve`] and
 //! [`Streams`]; `crate::content::Objects` is any of sheaf's sources as
@@ -23,6 +24,12 @@ pub use pdf_gfx::{
     MarkProps, Matrix, Opts, Point, Rect, Refused, Seg, State, Summary, Unwritable, Wants,
     encode_with, interpret_with,
 };
+
+/// A box's border as a [`Canvas`] draws it ([`BoxBorder`], its
+/// [`BoxBorderStyle`]), and a default appearance string parsed
+/// ([`DefaultAppearance`]): what a text field's appearance is made with
+/// (M10 slice 6, [`super::forms`]).
+pub use pdf_gfx::{BoxBorder, BoxBorderStyle, DefaultAppearance};
 
 /// What an event carries that only tests name: a clip's parts, an image
 /// and a shading drawn, the marked ranges an event is in, a glyph's quad,

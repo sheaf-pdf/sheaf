@@ -6,11 +6,14 @@
 //!
 //! Tests build forms in code ([`fixture`]) and read real ones from Greg's
 //! corpus ([`corpus`]). Both are compiled for this crate's tests and, with
-//! the `fixtures` feature, for other crates' tests.
+//! the `fixtures` feature, for other crates' tests. A dump of the corpus's
+//! text widgets (`dump`) sets sheaf's reading of each beside pdf-forms'.
 
 pub mod check;
 #[cfg(any(test, feature = "fixtures"))]
 pub mod corpus;
+#[cfg(test)]
+mod dump;
 pub mod field;
 #[cfg(any(test, feature = "fixtures"))]
 pub mod fixture;

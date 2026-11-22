@@ -40,6 +40,9 @@ pdf-gfx.workspace = true
 # Annotations: an appearance as the parts of its form, whoever drew it
 # (M18 slice 24).
 pdf-annots.workspace = true
+# A text field's appearance, made from plain data in the font its `/DA`
+# names (M10 slice 6).
+pdf-forms.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 log.workspace = true

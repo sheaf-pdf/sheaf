@@ -5376,6 +5376,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdf-forms"
+version = "0.1.0-alpha.1"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#9e6bfb2eb4e19bdc1308f61f26d0930c17ebe6a6"
+dependencies = [
+ "pdf-annots",
+ "pdf-content-streams",
+ "pdf-fonts",
+ "pdf-gfx",
+ "pdf-objects",
+ "pdf-semantics",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "pdf-gfx"
 version = "0.1.0-alpha.1"
 source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#9e6bfb2eb4e19bdc1308f61f26d0930c17ebe6a6"
@@ -6947,6 +6961,7 @@ dependencies = [
  "pdf-crypt",
  "pdf-filters",
  "pdf-fonts",
+ "pdf-forms",
  "pdf-gfx",
  "pdf-objects",
  "pdf-structure",

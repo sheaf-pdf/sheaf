@@ -50,6 +50,13 @@ lists them):
   its appearance, a line each): run before and after a change to what
   reads, flattens or draws annotations, or a move of the PDF layer's
   pin, and `diff` the two files.
+- `just fields-dump <file>` writes every corpus text widget as sheaf
+  reads it and as pdf-forms does (the plain data its appearance is made
+  from, the two readings' differences, the font its `/DA` names, and
+  the appearance pdf-forms makes of it for a sample value, a line each,
+  never a value): run before and after a change to what reads a form or
+  makes a text field's appearance, or a move of the PDF layer's pin, and
+  `diff` the two files.
 
 Tests run under a memory cap where Linux has a user systemd
 (`scripts/test-capped.sh`; `SHEAF_UNCAPPED=1` turns it off).
