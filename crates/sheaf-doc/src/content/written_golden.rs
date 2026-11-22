@@ -9,8 +9,11 @@
 //! The file was written once, by the writer as it was before content
 //! went through pdf-content-streams, and is what its bytes are held to
 //! since: a line that differs is a byte that changed, to find, not a
-//! golden to write again. `SHEAF_GOLDEN_UPDATE=1` writes it, and
-//! `SHEAF_GOLDEN_SHOW=<part of a case's name>` prints what cases wrote.
+//! golden to write again. Its lines moved once since, where pdf-annots
+//! took over drawing a mark (M18 slice 24), each line that moved read
+//! and its drawing rendered both ways. `SHEAF_GOLDEN_UPDATE=1` writes
+//! it, and `SHEAF_GOLDEN_SHOW=<part of a case's name>` prints what cases
+//! wrote.
 //!
 //! Each case's content is read back too: its tokens through
 //! pdf-content-streams, and each operation written again by

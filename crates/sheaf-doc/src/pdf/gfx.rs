@@ -6,9 +6,10 @@
 //! ([`Fault`], told to a [`Sink`](super::fault::Sink)); and the content
 //! written again so no line depends on another ([`encode_with`],
 //! [`EncodedPage`]). The events carry the family's geometry ([`Rect`],
-//! [`Matrix`]; a point and a quad are fields' types nothing of sheaf's
+//! [`Matrix`], [`Point`]; a quad is a field's type nothing of sheaf's
 //! names yet). And content drawn on a [`Canvas`], over pdf-content-streams'
-//! writer: an annotation's appearance (M18 slice 24, [`super::annots`]).
+//! writer: an annotation's appearance (M18 slice 24, [`super::annots`]),
+//! the family's geometry its points.
 //!
 //! A page is read from a source's objects through [`Resolve`] and
 //! [`Streams`]; `crate::content::Objects` is any of sheaf's sources as
@@ -19,15 +20,15 @@
 
 pub use pdf_gfx::{
     Canvas, Cap, EncodedPage, Error, Event, Fault, Forms, Glyph, ImageOf, Kind, Limits, Mark,
-    MarkProps, Matrix, Opts, Rect, Refused, Seg, State, Summary, Unwritable, Wants, encode_with,
-    interpret_with,
+    MarkProps, Matrix, Opts, Point, Rect, Refused, Seg, State, Summary, Unwritable, Wants,
+    encode_with, interpret_with,
 };
 
 /// What an event carries that only tests name: a clip's parts, an image
-/// and a shading drawn, the marked ranges an event is in, a point, a
-/// glyph's quad, and which use of a form is drawn.
+/// and a shading drawn, the marked ranges an event is in, a glyph's quad,
+/// and which use of a form is drawn.
 #[cfg(test)]
-pub use pdf_gfx::{ClipPart, ImageDrawn, Marks, Point, Quad, ShadingDrawn, UseId};
+pub use pdf_gfx::{ClipPart, ImageDrawn, Marks, Quad, ShadingDrawn, UseId};
 
 /// What a [`State`] holds that only the corpus's events dump names: its
 /// color spaces, rendering intent, blend mode and soft mask.

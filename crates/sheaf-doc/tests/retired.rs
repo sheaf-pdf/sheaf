@@ -1241,6 +1241,10 @@ const RETIRED_M18: &[(&str, u8)] = &[
     ("import::measured", 24),
     ("import::appearance", 24),
     ("import::subtype", 24),
+    // A mark's cloudy border is drawn by pdf-annots (`synth_cloud`, round
+    // `annot::outline_of`), its scallops the family's (`cloud_outline`,
+    // which `annot::cloud_curves` adapts for the screen).
+    ("annot::cloud_path", 24),
 ];
 
 /// The ledgers, with the words a hit names its slice by.

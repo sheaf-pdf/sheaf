@@ -1,36 +1,32 @@
-//! What sheaf draws of the marks pdf-annots can draw too (M18 slice 24),
-//! set beside what the family draws of them, rendered by PDFium: for the
-//! kinds the family draws as sheaf does (a highlight; a square, an
-//! ellipse and a page border, not cloudy; a polygon and a polyline, not
-//! cloudy; ink), each case is saved as sheaf saves it, on its page and
-//! flattened, and again with its appearance the family's `synth_*` drawing
-//! of the same mark, its form's `/Matrix` the move to its `/Rect`'s
-//! corner (the family draws in `[0 0 w h]`); the two are rendered at 4
-//! pixels a point and compared pixel by pixel, a line a case in
-//! `looks.tsv`. The family's drawing is framed two more ways, to tell
-//! what the move costs: drawn in place (its `/BBox` the mark's box, no
-//! `/Matrix`), and moved by whole points ([`Frame`]). For the kinds the
-//! family draws only once it learns them
-//! (a caret, an attachment, a cloudy shape), sheaf's files are kept for
-//! that comparison. Every case's files are kept in `looks/`, with the
-//! renders of a case that differs.
+//! What sheaf draws of the marks pdf-annots draws for it now (M18 slice
+//! 24), set beside what it drew of them before: for the kinds the family
+//! draws as sheaf did (a highlight; a square, a page border, a polygon
+//! and a polyline, not cloudy; ink) and those it learned from sheaf (a
+//! caret, an attachment's icon, a cloudy square, ellipse or polygon), and
+//! a plain ellipse, which sheaf still draws, each case is saved as sheaf
+//! saves it now, on its page and flattened, and rendered by PDFium at 4
+//! pixels a point beside the files sheaf saved of it before the family
+//! drew it (`$SHEAF_LOOKS_BEFORE`, else M18 slice 24's step 2 records):
+//! compared pixel by pixel, a line a case in `looks.tsv`, each case's
+//! files kept in `looks/` with the renders of a case that differs.
 //!
-//! The cases: every kind's marks as the golden fixtures have them, at each
-//! turn; each kind's edges (the least and greatest line the tools give,
-//! and none; dashed; filled; an opacity under 1; a box under four lines
-//! wide; a path of one point and of two; a quad of no height; cloudy);
+//! The cases are the ones the records before hold, by name: every kind's
+//! marks as the golden fixtures have them, at each turn; each kind's edges
+//! (the least and greatest line the tools give, and none; dashed; filled;
+//! an opacity under 1; a box under four lines wide; a path of one point
+//! and of two; a quad of no height; cloudy; off the grid of whole points);
 //! and the corpus's comments of these kinds, as sheaf converts them, read
 //! from the files the annotations dump names (`$SHEAF_LOOKS_INDEX`, or the
 //! baseline dump of M18 slice 24).
 //!
-//! Ignored: it writes to `$SHEAF_LOOKS_DIR` (else `target/s24/step2`), and
+//! Ignored: it writes to `$SHEAF_LOOKS_DIR` (else `target/s24/step4`), and
 //! needs libpdfium (`scripts/fetch-pdfium.sh`; `PDFIUM_LIB_DIR` picks
 //! another build).
 
 // A test crate of its own, whose files go where its records are kept.
 #![allow(clippy::disallowed_methods)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -40,13 +36,10 @@ use sheaf_doc::forms::corpus::Corpus;
 use sheaf_doc::forms::fixture as forms;
 use sheaf_doc::geom::Affine;
 use sheaf_doc::import::{Interned, Options};
-use sheaf_doc::pdf::annots::{
-    AnnotColor, Border, BorderStyle, LineEnding, PaintStyle, Point, PolyKind, QuadPoints,
-    ShapeKind, SynthesizedAp, TextMarkupKind, synth_ink, synth_poly, synth_shape,
-    synth_text_markup,
+use sheaf_doc::pdf::gfx::Rect;
+use sheaf_doc::pdf::{
+    Dictionary, Document as Pdf, Object, ObjectId, Stream, StreamExt, dictionary,
 };
-use sheaf_doc::pdf::gfx::{Canvas, Matrix, Rect};
-use sheaf_doc::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_doc::serialize::built::Held;
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture::{add, flatten};
@@ -61,16 +54,18 @@ const SCALE: u32 = 4;
 
 const TURNS: [Rotation; 4] = [Rotation::R0, Rotation::R90, Rotation::R180, Rotation::R270];
 
-/// Where the records go.
-fn out_dir() -> PathBuf {
-    std::env::var_os("SHEAF_LOOKS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/s24/step2"))
+/// A folder of records: `$var`, else `step`'s of M18 slice 24.
+fn records(var: &str, step: &str) -> PathBuf {
+    std::env::var_os(var).map(PathBuf::from).unwrap_or_else(|| {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/s24")
+            .join(step)
+    })
 }
 
-/// A case: its name, which row of the comparison it's in (1, the family
-/// draws it now; 2, once it learns to), the mark, and what the mark's
-/// store must hold for it.
+/// A case: its name, which row of the comparison it was in before (1, a
+/// kind the family drew as sheaf did; 2, one it learned from sheaf), the
+/// mark, and what the mark's store must hold for it.
 struct Case {
     name: String,
     row: u8,
@@ -80,7 +75,8 @@ struct Case {
     blobs: Vec<(Arc<[u8]>, bool)>,
 }
 
-/// Which row `a` is in, or none.
+/// Which row `a` was in, or none: a plain ellipse was the first row's
+/// before it stayed sheaf's drawing.
 fn row_of(a: &Annot) -> Option<u8> {
     match &a.kind {
         AnnotKind::Highlight { .. } | AnnotKind::PageBorder { .. } | AnnotKind::Ink { .. } => {
@@ -601,173 +597,20 @@ fn sheaf_files(c: &Case, rect: Rect) -> (Vec<u8>, Vec<u8>) {
     (on_page, flat)
 }
 
-/// How the family's appearance is framed: as design 3 has it, drawn at
-/// `[0 0 w h]` and moved onto the mark's box by its `/Matrix` (`Moved`);
-/// or, to tell what that move costs, drawn where the mark is on the page,
-/// its `/BBox` the mark's box and no `/Matrix` (`InPlace`: the family
-/// given a box from the origin to the mark's far corner, its own box then
-/// set to the mark's).
-#[derive(Clone, Copy, PartialEq)]
-enum Frame {
-    Moved,
-    InPlace,
-    /// Moved by whole points: the family given a box from the whole
-    /// point at or below the mark's corner, its own box then set to the
-    /// mark's less that, and moved there by its `/Matrix`.
-    Whole,
-}
-
-/// What the family's `synth_*` draws of mark `a`, whose appearance sheaf
-/// draws over `rect`, framed as `frame` says: the geometry sheaf draws in
-/// PageSpace; a square's, an ellipse's and a page border's `/RD` the box
-/// sheaf strokes on less half the line, so the family's border, drawn
-/// inside its box, has its centre where sheaf's is. None where the family
-/// draws nothing (`synth_*` gives none); an empty appearance is what's
-/// drawn then.
-fn family(a: &Annot, rect: Rect, frame: Frame) -> (Option<SynthesizedAp>, SynthesizedAp) {
-    let user = Affine::upright(a.turn).inverse();
-    let shown = a.upright();
-    let ub = |r: Box2| {
-        let u = user.apply_box(r);
-        Rect {
-            x0: u.x,
-            y0: u.y,
-            x1: u.right(),
-            y1: u.bottom(),
-        }
-    };
-    let up = |q: Pt| {
-        let u = user.apply(q);
-        Point::new(u.x, u.y)
-    };
-    let color = AnnotColor::rgb8(a.color);
-    let opacity = a.opacity.clamp(0.0, 1.0);
-    let mut border = Border::default();
-    border.width = a.stroke;
-    if a.dashed {
-        border.style = BorderStyle::Dashed;
-        border.dash = sheaf_doc::annot::DASH.to_vec();
-    }
-    let style = PaintStyle::new(Some(color), a.fill.map(AnnotColor::rgb8))
-        .with_border(border.clone())
-        .with_opacity(opacity);
-    // The box the family is given.
-    let on = match frame {
-        Frame::Moved => rect,
-        Frame::InPlace => Rect {
-            x0: 0.0,
-            y0: 0.0,
-            x1: rect.x1,
-            y1: rect.y1,
-        },
-        Frame::Whole => Rect {
-            x0: rect.x0.floor(),
-            y0: rect.y0.floor(),
-            x1: rect.x1,
-            y1: rect.y1,
-        },
-    };
-    let inset = |shape: Box2| {
-        let s = ub(shape);
-        let half = a.stroke / 2.0;
-        [
-            s.x0 - on.x0 - half,
-            s.y0 - on.y0 - half,
-            on.x1 - s.x1 - half,
-            on.y1 - s.y1 - half,
-        ]
-    };
-    let drawn = match &shown {
-        AnnotKind::Highlight { rects } => {
-            let quads: Vec<QuadPoints> = rects
-                .iter()
-                .map(|r| QuadPoints::from_rect(ub(*r)))
-                .collect();
-            synth_text_markup(TextMarkupKind::Highlight, on, &quads, color, opacity)
-        }
-        AnnotKind::Square { rect: shape } | AnnotKind::PageBorder { rect: shape, .. } => {
-            synth_shape(ShapeKind::Square, on, &style, Some(inset(*shape)))
-        }
-        AnnotKind::Ellipse { rect: shape } => {
-            synth_shape(ShapeKind::Circle, on, &style, Some(inset(*shape)))
-        }
-        AnnotKind::Polygon { points } | AnnotKind::Polyline { points } => {
-            let kind = match shown {
-                AnnotKind::Polygon { .. } => PolyKind::Polygon,
-                _ => PolyKind::PolyLine,
-            };
-            let vertices: Vec<Point> = points.iter().map(|q| up(*q)).collect();
-            synth_poly(
-                kind,
-                on,
-                &vertices,
-                (LineEnding::None, LineEnding::None),
-                &style,
-            )
-        }
-        AnnotKind::Ink { paths } => {
-            let strokes: Vec<Vec<Point>> = (paths.iter())
-                .map(|path| path.iter().map(|q| up(*q)).collect())
-                .collect();
-            synth_ink(on, &strokes, color, &border, opacity)
-        }
-        _ => unreachable!("a kind of the first row"),
-    };
-    let box0 = Rect {
-        x0: 0.0,
-        y0: 0.0,
-        x1: rect.x1 - rect.x0,
-        y1: rect.y1 - rect.y0,
-    };
-    let mut shown_ap = (drawn.clone())
-        .unwrap_or_else(|| SynthesizedAp::drawn(box0, Matrix::IDENTITY, Canvas::new()));
-    match frame {
-        Frame::Moved => {
-            shown_ap.matrix = Matrix {
-                a: 1.0,
-                b: 0.0,
-                c: 0.0,
-                d: 1.0,
-                e: rect.x0,
-                f: rect.y0,
-            }
-        }
-        Frame::InPlace => {
-            shown_ap.bbox = rect;
-            shown_ap.matrix = Matrix::IDENTITY;
-        }
-        Frame::Whole => {
-            shown_ap.bbox = Rect {
-                x0: rect.x0 - on.x0,
-                y0: rect.y0 - on.y0,
-                x1: rect.x1 - on.x0,
-                y1: rect.y1 - on.y0,
-            };
-            shown_ap.matrix = Matrix {
-                a: 1.0,
-                b: 0.0,
-                c: 0.0,
-                d: 1.0,
-                e: on.x0,
-                f: on.y0,
-            };
-        }
-    }
-    (drawn, shown_ap)
-}
-
 /// The page dictionary of `pdf`'s one page.
 fn page_of(pdf: &Pdf) -> ObjectId {
     pdf.page_iter().next().expect("a page")
 }
 
-/// `bytes` with the one form sheaf drew for its mark, the annotation's
-/// normal appearance (`flat` false) or the form its flatten placed on the
-/// page (`flat`), the family's `ap` instead.
-fn swapped(bytes: &[u8], ap: &SynthesizedAp, flat: bool) -> Vec<u8> {
-    let mut pdf = Pdf::load_mem(bytes).expect("sheaf's file reads");
+/// The contents of the forms sheaf drew for its mark in `bytes` (a
+/// replacement's caret and its strikeout), decoded: each annotation's
+/// normal appearance (`flat` false), or the forms its flatten placed on the
+/// page (`flat`). What differs between two saves of a mark but for its id
+/// and dates.
+fn form_contents(bytes: &[u8], flat: bool) -> Vec<Vec<u8>> {
+    let pdf = Pdf::load_mem(bytes).expect("sheaf's file reads");
     let page = page_of(&pdf);
-    let form = match flat {
+    let forms: Vec<ObjectId> = match flat {
         false => {
             let annots: Vec<ObjectId> = (pdf.get_dictionary(page).ok())
                 .and_then(|d| d.get(b"Annots"))
@@ -777,32 +620,38 @@ fn swapped(bytes: &[u8], ap: &SynthesizedAp, flat: bool) -> Vec<u8> {
                         .map(|a| a.iter().filter_map(Object::as_reference).collect())
                 })
                 .unwrap_or_default();
-            assert_eq!(annots.len(), 1, "one annotation");
-            let dict = pdf.get_dictionary(annots[0]).expect("the mark");
-            let (_, ap) = pdf
-                .dereference(dict.get(b"AP").expect("its /AP"))
-                .expect("its /AP");
-            ap.as_dict()
-                .and_then(|d| d.get(b"N"))
-                .and_then(Object::as_reference)
-                .expect("its /N")
+            (annots.iter())
+                .map(|&id| {
+                    let dict = pdf.get_dictionary(id).expect("a mark");
+                    let (_, ap) = pdf
+                        .dereference(dict.get(b"AP").expect("its /AP"))
+                        .expect("its /AP");
+                    ap.as_dict()
+                        .and_then(|d| d.get(b"N"))
+                        .and_then(Object::as_reference)
+                        .expect("its /N")
+                })
+                .collect()
         }
         true => {
             let resources = pdf.resources_of_page(page).expect("the page's resources");
             let (_, forms) = pdf
                 .dereference(resources.get(b"XObject").expect("its forms"))
                 .expect("its forms");
-            let forms: Vec<ObjectId> = (forms.as_dict().into_iter().flat_map(Dictionary::iter))
+            (forms.as_dict().into_iter().flat_map(Dictionary::iter))
                 .filter_map(|(_, o)| o.as_reference())
-                .collect();
-            assert_eq!(forms.len(), 1, "one form placed");
-            forms[0]
+                .collect()
         }
     };
-    pdf.objects.insert(form, Object::from(ap.to_stream()));
-    let mut out = Vec::new();
-    pdf.save_to(&mut out).expect("written again");
-    out
+    assert!(!forms.is_empty(), "a form");
+    (forms.into_iter())
+        .map(|form| {
+            let stream = (pdf.get_object(form).ok())
+                .and_then(|o| o.as_stream())
+                .expect("a form");
+            stream.decompressed_content().expect("its content decodes")
+        })
+        .collect()
 }
 
 /// The most pixels a render is across, for a page whose box is too
@@ -907,12 +756,40 @@ fn file_name(name: &str) -> String {
         .collect()
 }
 
-/// Every case, a line each in `looks.tsv`; sheaf's files of each in
-/// `looks/`, and the renders of a case whose two differ.
+/// Whether sheaf draws `a` itself now, or the family does.
+fn drawn_by(a: &Annot) -> &'static str {
+    match (&a.kind, a.cloudy) {
+        (AnnotKind::Ellipse { .. }, false) => "sheaf",
+        _ => "family",
+    }
+}
+
+/// The cases the records before hold, by name, each with its row: the
+/// first line a header.
+fn cases_before(dir: &Path) -> BTreeMap<String, u8> {
+    let tsv = dir.join("looks.tsv");
+    let text = std::fs::read_to_string(&tsv)
+        .unwrap_or_else(|e| panic!("{}: {e}: the records before", tsv.display()));
+    (text.lines())
+        .filter(|l| !l.starts_with('#'))
+        .map(|l| {
+            let mut fields = l.split('\t');
+            let name = fields.next().expect("a case").to_string();
+            let row = (fields.next().and_then(|r| r.parse().ok())).expect("its row");
+            (name, row)
+        })
+        .collect()
+}
+
+/// Every case the records before hold, a line each in `looks.tsv`: its
+/// files now (kept in `looks/`, as the records before keep theirs) set
+/// beside its files then, rendered, and the renders of a case whose two
+/// differ kept beside them.
 #[test]
 #[ignore = "renders with PDFium into $SHEAF_LOOKS_DIR: M18 slice 24's comparison of looks"]
-fn sheaf_s_and_the_family_s_looks_set_beside_each_other() {
-    let dir = out_dir();
+fn what_sheaf_draws_now_set_beside_what_it_drew_before() {
+    let dir = records("SHEAF_LOOKS_DIR", "step4");
+    let before = records("SHEAF_LOOKS_BEFORE", "step2");
     let looks = dir.join("looks");
     std::fs::create_dir_all(&looks).expect("the records' folder");
     let index = std::env::var_os("SHEAF_LOOKS_INDEX")
@@ -920,72 +797,63 @@ fn sheaf_s_and_the_family_s_looks_set_beside_each_other() {
         .unwrap_or_else(|| {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/s24/baseline/annots.tsv")
         });
+    let wanted = cases_before(&before);
     let mut cases = fixture_cases();
-    let corpus = corpus_cases(&index);
-    // Of the corpus's, of each kind: every one the family draws nothing
-    // of, and the first 200 others.
-    let mut kept: std::collections::HashMap<String, usize> = Default::default();
-    for c in corpus {
-        let kind = kind_name(&c.mark.kind);
-        let rect = emission(&c.mark, Held::default()).appearance.bbox;
-        let nothing = c.row == 1 && {
-            let (drawn, _) = family(&c.mark, rect, Frame::Moved);
-            drawn.is_none_or(|d| d.content.is_empty())
-        };
-        let n = kept.entry(kind).or_default();
-        if nothing || *n < 200 {
-            *n += usize::from(!nothing);
-            cases.push(c);
-        }
-    }
+    cases.extend(corpus_cases(&index));
+    cases.retain(|c| wanted.contains_key(&c.name));
+    let found: BTreeSet<&str> = cases.iter().map(|c| c.name.as_str()).collect();
+    let missing: Vec<&String> = (wanted.keys())
+        .filter(|n| !found.contains(n.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "cases the records before have: {missing:?}"
+    );
+    assert_eq!(found.len(), cases.len(), "each case once");
     let mut tsv = String::from(
-        "# case\trow\tkind\tturn\tfamily\tbytes\tpage.px\tpage.most\tflat.px\tflat.most\tscale\tin-place.page.px\tin-place.page.most\tin-place.flat.px\tin-place.flat.most\twhole.page.px\twhole.page.most\twhole.flat.px\twhole.flat.most\n",
+        "# case\trow\tkind\tturn\tdrawn\tpage.content\tflat.content\tpage.px\tpage.most\tflat.px\tflat.most\tscale\n",
     );
     let (mut alike, mut apart) = (0, 0);
     for c in &cases {
+        assert_eq!(wanted[&c.name], c.row, "{}: its row", c.name);
         let kind = kind_name(&c.mark.kind);
         let rect = emission(&c.mark, Held::default()).appearance.bbox;
-        let (on_page, flat) = sheaf_files(c, rect);
         let name = file_name(&c.name);
+        let (on_page, flat) = sheaf_files(c, rect);
         std::fs::write(looks.join(format!("{name}.pdf")), &on_page).expect("kept");
         std::fs::write(looks.join(format!("{name}-flat.pdf")), &flat).expect("kept");
-        let mut line = format!("{}\t{}\t{kind}\t{}", c.name, c.row, c.mark.turn.degrees());
-        if c.row == 2 {
-            line.push_str("\t-\t-\t-\t-\t-\t-\tkept");
-            let _ = writeln!(tsv, "{line}");
-            continue;
+        let mut line = format!(
+            "{}\t{}\t{kind}\t{}\t{}",
+            c.name,
+            c.row,
+            c.mark.turn.degrees(),
+            drawn_by(&c.mark)
+        );
+        let mut renders = Vec::new();
+        for (what, now) in [("page", &on_page), ("flat", &flat)] {
+            let suffix = if what == "flat" { "-flat" } else { "" };
+            let then_path = before.join("looks").join(format!("{name}{suffix}.pdf"));
+            let then = std::fs::read(&then_path)
+                .unwrap_or_else(|e| panic!("{}: {e}", then_path.display()));
+            let flat = what == "flat";
+            let same = match form_contents(&then, flat) == form_contents(now, flat) {
+                true => "same",
+                false => "differ",
+            };
+            let _ = write!(line, "\t{same}");
+            renders.push((what, then, now.clone()));
         }
-        let (drawn, ap) = family(&c.mark, rect, Frame::Moved);
-        let (_, in_place) = family(&c.mark, rect, Frame::InPlace);
-        let (_, whole) = family(&c.mark, rect, Frame::Whole);
-        let sheaf_ap = emission(&c.mark, Held::default()).appearance;
-        let said = match &drawn {
-            None => "none",
-            Some(d) if d.content.is_empty() => "empty",
-            Some(_) => "drawn",
-        };
-        let bytes = if ap.content == sheaf_ap.content {
-            "same"
-        } else {
-            "differ"
-        };
         let mut differs = false;
-        let _ = write!(line, "\t{said}\t{bytes}");
-        for (what, sheaf, flat_ap) in [("page", &on_page, false), ("flat", &flat, true)] {
-            let theirs = swapped(sheaf, &ap, flat_ap);
-            let scale = scale_of(sheaf);
-            let (a, b) = (
-                render(sheaf, scale, &c.name),
-                render(&theirs, scale, &c.name),
-            );
+        for (what, then, now) in &renders {
+            let scale = scale_of(then);
+            assert_eq!(scale, scale_of(now), "{}: the same page", c.name);
+            let (a, b) = (render(then, scale, &c.name), render(now, scale, &c.name));
             let (n, most) = compared(&a, &b);
             let _ = write!(line, "\t{n}\t{most}");
             if n > 0 {
                 differs = true;
-                std::fs::write(looks.join(format!("{name}-{what}-family.pdf")), &theirs)
-                    .expect("kept");
-                png(&a, &looks.join(format!("{name}-{what}-sheaf.png")));
-                png(&b, &looks.join(format!("{name}-{what}-family.png")));
+                png(&a, &looks.join(format!("{name}-{what}-before.png")));
+                png(&b, &looks.join(format!("{name}-{what}-now.png")));
                 png(
                     &difference(&a, &b),
                     &looks.join(format!("{name}-{what}-difference.png")),
@@ -993,22 +861,6 @@ fn sheaf_s_and_the_family_s_looks_set_beside_each_other() {
             }
         }
         let _ = write!(line, "\t{}", scale_of(&on_page));
-        // The same appearance drawn where the mark is, no move: what the
-        // move costs, where the two above differ.
-        for (ap, sheaf, flat_ap) in [
-            (&in_place, &on_page, false),
-            (&in_place, &flat, true),
-            (&whole, &on_page, false),
-            (&whole, &flat, true),
-        ] {
-            let scale = scale_of(sheaf);
-            let theirs = swapped(sheaf, ap, flat_ap);
-            let (n, most) = compared(
-                &render(sheaf, scale, &c.name),
-                &render(&theirs, scale, &c.name),
-            );
-            let _ = write!(line, "\t{n}\t{most}");
-        }
         match differs {
             true => apart += 1,
             false => alike += 1,
@@ -1017,9 +869,8 @@ fn sheaf_s_and_the_family_s_looks_set_beside_each_other() {
     }
     std::fs::write(dir.join("looks.tsv"), &tsv).expect("looks.tsv");
     eprintln!(
-        "{} cases ({} of the first row: {alike} alike, {apart} not), in {}",
+        "{} cases: {alike} alike, {apart} not, in {}",
         cases.len(),
-        alike + apart,
         dir.display()
     );
 }

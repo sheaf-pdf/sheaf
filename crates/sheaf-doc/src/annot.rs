@@ -21,12 +21,19 @@
 //! (another version, or a kind from a newer sheaf) isn't ours to rewrite:
 //! it's kept and shown like another tool's (see `file::is_ours`). Every
 //! mark also writes a full appearance, so other viewers, and other sheaf
-//! builds, draw it. Appearances are drawn with the content toolkit's
+//! builds, draw it. pdf-annots draws the marks whose look it has as
+//! sheaf's (a highlight; a square, a page border, a polygon, a polyline;
+//! ink) and those it learned from sheaf (a caret, an attachment's icon, a
+//! cloudy border), from the geometry sheaf lays out, in place: their
+//! shapes are its, and the screen paints them from it too
+//! ([`caret_points`], [`attachment_icon`], [`cloud_curves`] are adapters
+//! over its geometry). The rest are drawn with the content toolkit's
 //! writer, their text in the standard 14 fonts; a character those lack
 //! draws `?`, which [`Annot::unencodable`] tells without drawing anything.
 //! Each is held as pdf-annots holds an appearance it draws, the parts of
 //! its form ([`SynthesizedAp`]), which the writer makes into one
-//! ([`sink::form`](crate::content::sink::form)).
+//! ([`sink::form`](crate::content::sink::form)); either way its `/BBox` is
+//! the mark's `/Rect`, drawn where the mark is, at the identity.
 //! A save writes marks as [`emission`] makes them, through the emitter.
 //! What a PDF sheaf builds in memory holds of them (the comments a data
 //! file exports, a flattened mark's page) is written through
@@ -38,8 +45,13 @@
 
 use std::sync::Arc;
 
-use crate::pdf::annots::SynthesizedAp;
-use crate::pdf::gfx::{self, Canvas};
+use crate::pdf::annots::{
+    AnnotColor, ApRect, AttachmentIcon, Border, BorderStyle, LineEnding, PaintStyle, PolyKind,
+    QuadPoints, ShapeKind, SynthesizedAp, TextMarkupKind, attachment_icon_strokes, caret_outline,
+    cloud_outline, synth_caret, synth_cloud, synth_file_attachment, synth_ink, synth_poly,
+    synth_shape, synth_text_markup,
+};
+use crate::pdf::gfx::{self, Canvas, Point};
 use crate::pdf::{Dictionary, Object, Value, dictionary, literal};
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
@@ -48,8 +60,8 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::attachments::{Objects, resolve};
 use crate::content::{
-    Blend, Color, ContentWriter, DrawFont, DrawText, FillRule, GState, LineCap, LineJoin, Paint,
-    Reserved, Std14, place_form,
+    Blend, Color, ContentWriter, DrawFont, DrawText, FillRule, GState, Paint, Reserved, Std14,
+    place_form,
 };
 use crate::geom::{Affine, Geom, Rect};
 use crate::model::{FormRef, PinnedAp};
@@ -792,121 +804,48 @@ pub fn outline_of(kind: &AnnotKind) -> Option<Vec<Pt>> {
 
 /// A cloudy border around the closed outline `pts`: scallops about
 /// `step` points long bulging outward, each a cubic (from, c1, c2, to), in
-/// the same space as `pts`.
+/// the same space as `pts`. pdf-annots' ([`cloud_outline`]): the scallops
+/// the writer draws.
 pub fn cloud_curves(pts: &[Pt], step: f32) -> Vec<[Pt; 4]> {
-    let n = pts.len();
-    if n < 3 {
-        return Vec::new();
-    }
-    // Which side is out: the outline's turning, from its signed area.
-    let area: f32 = (0..n)
-        .map(|i| {
-            let (a, b) = (pts[i], pts[(i + 1) % n]);
-            a.x * b.y - b.x * a.y
-        })
-        .sum();
-    let out = if area > 0.0 { 1.0 } else { -1.0 };
-    let mut curves = Vec::new();
-    for i in 0..n {
-        let (a, b) = (pts[i], pts[(i + 1) % n]);
-        let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
-        if len < 0.01 {
-            continue;
-        }
-        let k = (len / step).round().max(1.0) as usize;
-        for j in 0..k {
-            let t0 = j as f32 / k as f32;
-            let t1 = (j + 1) as f32 / k as f32;
-            let p = Pt {
-                x: a.x + (b.x - a.x) * t0,
-                y: a.y + (b.y - a.y) * t0,
-            };
-            let q = Pt {
-                x: a.x + (b.x - a.x) * t1,
-                y: a.y + (b.y - a.y) * t1,
-            };
-            let seg = len / k as f32;
-            let (nx, ny) = (out * (q.y - p.y) / seg, out * -(q.x - p.x) / seg);
-            let h = seg * 0.55;
-            curves.push([
-                p,
-                Pt {
-                    x: p.x + nx * h,
-                    y: p.y + ny * h,
-                },
-                Pt {
-                    x: q.x + nx * h,
-                    y: q.y + ny * h,
-                },
-                q,
-            ]);
-        }
-    }
-    curves
+    let outline: Vec<Point> = pts.iter().map(|&p| point(p)).collect();
+    (cloud_outline(&outline, step).into_iter())
+        .map(|curve| curve.map(pt))
+        .collect()
 }
 
 /// An attachment icon's strokes in the box `at`, in a frame that's y
-/// down.
+/// down: pdf-annots' ([`attachment_icon_strokes`]), the box its icon's
+/// unit square, an unknown name the pushpin.
 pub fn attachment_icon(icon: &str, at: Box2) -> Vec<Vec<Pt>> {
-    let shape: Vec<Vec<(f32, f32)>> = match icon {
-        "Paperclip" => vec![vec![
-            (0.36, 0.72),
-            (0.36, 0.24),
-            (0.5, 0.1),
-            (0.64, 0.24),
-            (0.64, 0.82),
-            (0.5, 0.94),
-            (0.43, 0.84),
-            (0.43, 0.32),
-        ]],
-        "Graph" => vec![
-            vec![(0.14, 0.1), (0.14, 0.86), (0.9, 0.86)],
-            vec![(0.32, 0.86), (0.32, 0.58)],
-            vec![(0.52, 0.86), (0.52, 0.36)],
-            vec![(0.72, 0.86), (0.72, 0.18)],
-        ],
-        "Tag" => vec![
-            vec![
-                (0.1, 0.3),
-                (0.6, 0.3),
-                (0.9, 0.5),
-                (0.6, 0.7),
-                (0.1, 0.7),
-                (0.1, 0.3),
-            ],
-            vec![
-                (0.62, 0.45),
-                (0.7, 0.45),
-                (0.7, 0.55),
-                (0.62, 0.55),
-                (0.62, 0.45),
-            ],
-        ],
-        // PushPin, and anything this build doesn't know.
-        _ => vec![
-            vec![
-                (0.3, 0.12),
-                (0.7, 0.12),
-                (0.6, 0.32),
-                (0.68, 0.56),
-                (0.32, 0.56),
-                (0.4, 0.32),
-                (0.3, 0.12),
-            ],
-            vec![(0.5, 0.56), (0.5, 0.94)],
-        ],
-    };
-    shape
-        .into_iter()
-        .map(|path| {
-            path.into_iter()
-                .map(|(fx, fy)| Pt {
-                    x: at.x + fx * at.w,
-                    y: at.y + fy * at.h,
-                })
-                .collect()
-        })
+    let icon = AttachmentIcon::from_name(icon.as_bytes());
+    (attachment_icon_strokes(&icon, unit_frame(at)).into_iter())
+        .map(|stroke| stroke.into_iter().map(pt).collect())
         .collect()
+}
+
+/// The frame that takes a picture's unit square (its top left at the
+/// origin, y down it) onto the box `at` of a frame that's y down, as
+/// pdf-annots draws a caret and an icon: the same numbers the box's own
+/// `x + fx · w` makes.
+fn unit_frame(at: Box2) -> gfx::Matrix {
+    gfx::Matrix {
+        a: at.w,
+        b: 0.0,
+        c: 0.0,
+        d: at.h,
+        e: at.x,
+        f: at.y,
+    }
+}
+
+/// A point of the layout as pdf-annots' geometry has one.
+fn point(p: Pt) -> Point {
+    Point::new(p.x, p.y)
+}
+
+/// A point of pdf-annots' geometry as the layout has one.
+fn pt(p: Point) -> Pt {
+    Pt { x: p.x, y: p.y }
 }
 
 /// `/BE` for a cloudy border.
@@ -914,28 +853,11 @@ fn cloudy_style() -> Dictionary {
     dictionary! { "S" => Object::name("C"), "I" => 1 }
 }
 
-/// A mark's cloudy border, laid out upright and drawn in user space
-/// through `up`: a path, not painted.
-fn cloud_path(w: &mut ContentWriter, kind: &AnnotKind, width: f32, up: &Affine) {
-    let Some(outline) = outline_of(kind) else {
-        return;
-    };
-    for (i, [a, c1, c2, b]) in cloud_curves(&outline, cloud_step(width))
-        .into_iter()
-        .enumerate()
-    {
-        let [a, c1, c2, b] = [a, c1, c2, b].map(|p| up.apply(p));
-        if i == 0 {
-            w.move_to(a.x, a.y);
-        }
-        w.curve_to(c1.x, c1.y, c2.x, c2.y, b.x, b.y);
-    }
-    w.close();
-}
-
-/// How long a cloud's scallops are for a mark of stroke `width`.
+/// How long a cloud's scallops are for a mark of stroke `width`, at the
+/// intensity sheaf writes (`/BE /I 1`): pdf-annots'
+/// ([`cloud_step`](crate::pdf::annots::cloud_step)).
 pub fn cloud_step(width: f32) -> f32 {
-    (9.0 + width * 3.0).min(30.0)
+    crate::pdf::annots::cloud_step(width, 1.0)
 }
 
 /// Distance from `p` to the segment `a`–`b`.
@@ -1670,9 +1592,10 @@ fn draw_runs(w: &mut ContentWriter, runs: &[Run], color: Color, at: impl Fn(Pt) 
 
 /// The main annotation dictionary (without `/AP`, `/P` or `/SHEF_Annot`)
 /// and its appearance. A page stamp's draws `stamp`, its page as a form,
-/// when it has one. The appearance is sheaf's drawing, held as the
-/// family holds one it draws ([`SynthesizedAp::drawn`]): its `/BBox` is
-/// the mark's `/Rect`, in user space, at the identity.
+/// when it has one. The appearance is pdf-annots' drawing of the kinds it
+/// draws ([`family_drawing`]), and sheaf's of the rest, held as the
+/// family holds one it draws ([`SynthesizedAp::drawn`]): either way its
+/// `/BBox` is the mark's `/Rect`, in user space, at the identity.
 fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp) {
     // Laid out as it reads, then drawn in user space through `user`, so
     // it's upright whatever the page's /Rotate.
@@ -1695,6 +1618,15 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
     let rect = user_box(&user, padded);
     let rect_user = rect;
     let [llx, lly, urx, ury] = rect;
+    let bbox = gfx::Rect {
+        x0: llx,
+        y0: lly,
+        x1: urx,
+        y1: ury,
+    };
+    // What the family draws, it draws whole; what it doesn't, sheaf draws
+    // into `w`.
+    let family = family_drawing(a, &shown, &user, bbox);
 
     let mut w = ContentWriter::new();
     // A page stamp's page first, under its text and its opacity: fitted
@@ -1722,11 +1654,13 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
     } else {
         Blend::Normal
     };
-    let mut state = GState::default();
-    state.fill_alpha = Some(alpha);
-    state.stroke_alpha = Some(alpha);
-    state.blend = Some(blend);
-    w.gstate(state);
+    if family.is_none() {
+        let mut state = GState::default();
+        state.fill_alpha = Some(alpha);
+        state.stroke_alpha = Some(alpha);
+        state.blend = Some(blend);
+        w.gstate(state);
+    }
     let mut dict = dictionary! {
         "Type" => Object::name("Annot"),
         "Rect" => pdf_rect(rect),
@@ -1762,14 +1696,10 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
             dict.set("Subtype", Object::name("Highlight"));
             dict.set("C", color_arr);
             let mut quads = Vec::new();
-            w.fill_color(color);
             for r in rects {
-                let b = user_box(&user, *r);
-                let [x0, y0, x1, y1] = b;
+                let [x0, y0, x1, y1] = user_box(&user, *r);
                 // QuadPoints order: x1 y1 x2 y2 (upper), x3 y3 x4 y4 (lower).
                 quads.extend([x0, y1, x1, y1, x0, y0, x1, y0].map(Object::from));
-                box_path(&mut w, b);
-                w.paint(Paint::Fill);
             }
             dict.set("QuadPoints", Object::from(quads));
         }
@@ -1803,10 +1733,6 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
             dict.set("RD", inner_box(rect_user, user_box(&user, *at)));
             dict.set("C", color_arr);
             dict.set("Sy", Object::name("None"));
-            w.fill_color(color);
-            path(&mut w, caret_points(*at).map(up));
-            w.close();
-            w.paint(Paint::Fill);
         }
         AnnotKind::Reply { .. } | AnnotKind::Status { .. } => {
             // The writer sets /IRT and /Rect from the parent. Nothing to
@@ -1820,22 +1746,12 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
                 dict.set("State", pdf_text_string(state));
             }
         }
-        AnnotKind::FileAttachment {
-            pos, icon, name, ..
-        } => {
+        AnnotKind::FileAttachment { icon, name, .. } => {
             dict.set("Subtype", Object::name("FileAttachment"));
             dict.set("Name", Object::name(icon.as_str()));
             dict.set("C", color_arr);
             if a.contents.is_empty() {
                 dict.set("Contents", pdf_text_string(name));
-            }
-            w.stroke_color(color);
-            w.line_width(1.5);
-            w.line_cap(LineCap::Round);
-            w.line_join(LineJoin::Round);
-            for line in attachment_icon(icon, icon_box(*pos)) {
-                path(&mut w, line.into_iter().map(up));
-                w.paint(Paint::Stroke);
             }
         }
         AnnotKind::Note { pos } => {
@@ -1881,26 +1797,31 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
             dict.set("Subtype", Object::name(subtype));
             dict.set("C", color_arr);
             dict.set("BS", border_style(a));
-            stroke_style(&mut w, a);
+            // The family draws a square and a cloud; sheaf an ellipse's
+            // plain border, by its own curve.
+            let ellipse = family.is_none();
+            if ellipse {
+                stroke_style(&mut w, a);
+            }
             if let Some(f) = a.fill {
                 dict.set("IC", interior(f));
-                w.fill_color(Color::rgb8(f));
+                if ellipse {
+                    w.fill_color(Color::rgb8(f));
+                }
             }
             let b = user_box(&user, *rect);
             dict.set("RD", inner_box(rect_user, b));
             if a.cloudy {
                 dict.set("BE", cloudy_style());
-                cloud_path(&mut w, &shown, a.stroke, &user);
-            } else if square {
-                box_path(&mut w, b);
-            } else {
-                ellipse_path(&mut w, b);
             }
-            w.paint(if a.fill.is_some() {
-                Paint::FillStroke
-            } else {
-                Paint::Stroke
-            });
+            if ellipse {
+                ellipse_path(&mut w, b);
+                w.paint(if a.fill.is_some() {
+                    Paint::FillStroke
+                } else {
+                    Paint::Stroke
+                });
+            }
         }
         AnnotKind::Polygon { points } | AnnotKind::Polyline { points } => {
             let closed = matches!(a.kind, AnnotKind::Polygon { .. });
@@ -1918,26 +1839,12 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
                     })
                     .collect::<Vec<_>>(),
             );
-            stroke_style(&mut w, a);
-            let filled = closed && a.fill.is_some();
             if let (true, Some(f)) = (closed, a.fill) {
                 dict.set("IC", interior(f));
-                w.fill_color(Color::rgb8(f));
             }
             if closed && a.cloudy {
                 dict.set("BE", cloudy_style());
-                cloud_path(&mut w, &shown, a.stroke, &user);
-            } else {
-                path(&mut w, points.iter().map(|p| up(*p)));
-                if closed {
-                    w.close();
-                }
             }
-            w.paint(if filled {
-                Paint::FillStroke
-            } else {
-                Paint::Stroke
-            });
         }
         AnnotKind::Measure {
             what,
@@ -2082,21 +1989,18 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
             dict.set("Subtype", Object::name("Ink"));
             dict.set("C", color_arr);
             dict.set("BS", border_style(a));
-            let mut ink_list: Vec<Object> = Vec::new();
-            stroke_style(&mut w, a);
-            w.line_cap(LineCap::Round);
-            w.line_join(LineJoin::Round);
-            for line in paths {
-                let users: Vec<Pt> = line.iter().map(|p| up(*p)).collect();
-                ink_list.push(Object::from(
-                    users
-                        .iter()
-                        .flat_map(|u| [Object::from(u.x), Object::from(u.y)])
-                        .collect::<Vec<_>>(),
-                ));
-                path(&mut w, users);
-                w.paint(Paint::Stroke);
-            }
+            let ink_list: Vec<Object> = (paths.iter())
+                .map(|line| {
+                    Object::from(
+                        line.iter()
+                            .flat_map(|p| {
+                                let u = up(*p);
+                                [Object::from(u.x), Object::from(u.y)]
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect();
             dict.set("InkList", ink_list);
         }
         AnnotKind::PageStamp { name, .. } => {
@@ -2105,16 +2009,13 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
                 dict.set("Contents", pdf_text_string(name));
             }
         }
-        AnnotKind::PageBorder { rect, status } => {
+        AnnotKind::PageBorder { status, .. } => {
             dict.set("Subtype", Object::name("Square"));
             dict.set("C", color_arr);
             dict.set("BS", border_style(a));
             if a.contents.is_empty() {
                 dict.set("Contents", pdf_text_string(&format!("Status: {status}")));
             }
-            stroke_style(&mut w, a);
-            box_path(&mut w, user_box(&user, *rect));
-            w.paint(Paint::Stroke);
         }
         AnnotKind::TextStamp { rect, text, .. } => {
             dict.set("Subtype", Object::name("Stamp"));
@@ -2197,14 +2098,130 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
             }
         });
     }
-    let bbox = gfx::Rect {
-        x0: llx,
-        y0: lly,
-        x1: urx,
-        y1: ury,
-    };
-    let drawn = SynthesizedAp::drawn(bbox, gfx::Matrix::IDENTITY, Canvas::from_writer(w));
+    let drawn = family.unwrap_or_else(|| {
+        SynthesizedAp::drawn(bbox, gfx::Matrix::IDENTITY, Canvas::from_writer(w))
+    });
     (dict, drawn)
+}
+
+/// Mark `a`'s appearance as pdf-annots draws it, for the kinds it draws
+/// as sheaf would (a highlight; a square and a page border, a polygon and
+/// a polyline, not cloudy; ink) and the ones it learned from sheaf (a
+/// caret, an attachment's icon, a cloudy square, ellipse or polygon):
+/// drawn in place over `bbox`, the mark's `/Rect`, from `shown`, its
+/// layout upright, taken to user space through `user`. A drawing the
+/// family has none of (a `/Rect` with no area, a cloud with no outline) is
+/// an empty appearance over `bbox`. None for the kinds sheaf draws.
+///
+/// The family strokes a border inside a square's box, where sheaf's
+/// layout has the line's centre on it: its `/RD` here is the box less half
+/// the line, so the line is where the layout has it (the dictionary's
+/// `/RD` is the box's, as ever).
+fn family_drawing(
+    a: &Annot,
+    shown: &AnnotKind,
+    user: &Affine,
+    bbox: gfx::Rect,
+) -> Option<SynthesizedAp> {
+    let at = ApRect::InPlace(bbox);
+    let up = |p: Pt| point(user.apply(p));
+    let color = AnnotColor::rgb8(a.color);
+    let alpha = a.opacity.clamp(0.0, 1.0);
+    let mut border = Border::default();
+    border.width = a.stroke;
+    if a.dashed {
+        border.style = BorderStyle::Dashed;
+        border.dash = DASH.to_vec();
+    }
+    let style = |fill: Option<[u8; 3]>, border: Border| {
+        PaintStyle::new(Some(color), fill.map(AnnotColor::rgb8))
+            .with_border(border)
+            .with_opacity(alpha)
+    };
+    let inset = |shape: Box2| {
+        let [x0, y0, x1, y1] = user_box(user, shape);
+        let half = a.stroke / 2.0;
+        [
+            x0 - bbox.x0 - half,
+            y0 - bbox.y0 - half,
+            bbox.x1 - x1 - half,
+            bbox.y1 - y1 - half,
+        ]
+    };
+    let drawn = match shown {
+        AnnotKind::Square { .. } | AnnotKind::Ellipse { .. } | AnnotKind::Polygon { .. }
+            if a.cloudy =>
+        {
+            let mut cloudy = border;
+            cloudy.cloudy_intensity = Some(1.0);
+            outline_of(shown).and_then(|outline| {
+                let outline: Vec<Point> = outline.into_iter().map(up).collect();
+                synth_cloud(at, &outline, &style(a.fill, cloudy))
+            })
+        }
+        AnnotKind::Highlight { rects } => {
+            let quads: Vec<QuadPoints> = (rects.iter())
+                .map(|r| {
+                    let [x0, y0, x1, y1] = user_box(user, *r);
+                    QuadPoints::from_rect(gfx::Rect { x0, y0, x1, y1 })
+                })
+                .collect();
+            synth_text_markup(TextMarkupKind::Highlight, at, &quads, color, alpha)
+        }
+        AnnotKind::Square { rect } => synth_shape(
+            ShapeKind::Square,
+            at,
+            &style(a.fill, border),
+            Some(inset(*rect)),
+        ),
+        AnnotKind::PageBorder { rect, .. } => synth_shape(
+            ShapeKind::Square,
+            at,
+            &style(None, border),
+            Some(inset(*rect)),
+        ),
+        AnnotKind::Polygon { points } | AnnotKind::Polyline { points } => {
+            let kind = match shown {
+                AnnotKind::Polygon { .. } => PolyKind::Polygon,
+                _ => PolyKind::PolyLine,
+            };
+            let vertices: Vec<Point> = points.iter().map(|p| up(*p)).collect();
+            let ends = (LineEnding::None, LineEnding::None);
+            synth_poly(kind, at, &vertices, ends, &style(a.fill, border))
+        }
+        AnnotKind::Ink { paths } => {
+            let strokes: Vec<Vec<Point>> = (paths.iter())
+                .map(|path| path.iter().map(|p| up(*p)).collect())
+                .collect();
+            synth_ink(at, &strokes, color, &border, alpha)
+        }
+        AnnotKind::Insert { at: caret } | AnnotKind::Replace { at: caret, .. } => {
+            synth_caret(at, user_frame(*caret, user), color, alpha)
+        }
+        AnnotKind::FileAttachment { pos, icon, .. } => {
+            let icon = AttachmentIcon::from_name(icon.as_bytes());
+            synth_file_attachment(at, &icon, user_frame(icon_box(*pos), user), color, alpha)
+        }
+        _ => return None,
+    };
+    Some(drawn.unwrap_or_else(|| SynthesizedAp::drawn(bbox, gfx::Matrix::IDENTITY, Canvas::new())))
+}
+
+/// The frame that takes a picture's unit square onto the box `at` of a
+/// mark's upright layout, in user space through `user`: a caret and an
+/// icon read upright on a turned page, at the numbers the layout's box
+/// mapped makes.
+fn user_frame(at: Box2, user: &Affine) -> gfx::Matrix {
+    let gfx::Matrix { a, b, c, d, e, f } = unit_frame(at);
+    let m = Affine { a, b, c, d, e, f }.then(*user);
+    gfx::Matrix {
+        a: m.a,
+        b: m.b,
+        c: m.c,
+        d: m.d,
+        e: m.e,
+        f: m.f,
+    }
 }
 
 /// How thick the line of an underline, strikeout or squiggly is: a
@@ -2248,22 +2265,9 @@ pub fn text_line_paths(kind: &AnnotKind) -> Vec<Vec<Pt>> {
 }
 
 /// A caret's triangle in a frame that's y down: its tip at the top
-/// centre.
+/// centre. pdf-annots' ([`caret_outline`]), the box its unit square.
 pub fn caret_points(at: Box2) -> [Pt; 3] {
-    [
-        Pt {
-            x: at.x,
-            y: at.bottom(),
-        },
-        Pt {
-            x: at.x + at.w / 2.0,
-            y: at.y,
-        },
-        Pt {
-            x: at.right(),
-            y: at.bottom(),
-        },
-    ]
+    caret_outline(unit_frame(at)).map(pt)
 }
 
 /// A text stamp's frame line, from its height.
@@ -2821,9 +2825,11 @@ mod tests {
             }
         }
         // Helvetica, Helvetica-Bold and ZapfDingbats (the tick); every
-        // mark at 0.8, all Normal but the highlight's Multiply.
+        // mark at 0.8: those sheaf draws under one state, Normal, those
+        // pdf-annots draws under its own, which names no blend, and the
+        // highlight's Multiply (M18 slice 24).
         assert_eq!(fonts.len(), 3, "{fonts:?}");
-        assert_eq!(states.len(), 2, "{states:?}");
+        assert_eq!(states.len(), 3, "{states:?}");
     }
 
     /// A tape's symbols draw in the font that has them: its minus and
@@ -3184,25 +3190,6 @@ mod tests {
             }),
             Some(Group::Tickmark("✓".into()))
         );
-    }
-
-    #[test]
-    fn clouds_bulge_outward_whichever_way_round() {
-        let square = outline_of(&AnnotKind::Square {
-            rect: bx(100.0, 100.0, 100.0, 100.0),
-        })
-        .unwrap();
-        for pts in [square.clone(), square.iter().rev().copied().collect()] {
-            let curves = cloud_curves(&pts, 20.0);
-            assert_eq!(curves.len(), 20);
-            // Every control point is outside the square.
-            for [_, c1, c2, _] in curves {
-                for c in [c1, c2] {
-                    let inside = c.x > 100.0 && c.x < 200.0 && c.y > 100.0 && c.y < 200.0;
-                    assert!(!inside, "{c:?}");
-                }
-            }
-        }
     }
 
     #[test]

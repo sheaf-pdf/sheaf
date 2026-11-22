@@ -10,11 +10,11 @@
 //!
 //! **Appearances.** An appearance as the parts of the form XObject that
 //! holds it ([`SynthesizedAp`]: its box, its matrix, its content and what
-//! that draws with, by what each is), whether the family drew it or sheaf
-//! did, on pdf-gfx's [`Canvas`](super::gfx::Canvas)
-//! ([`SynthesizedAp::drawn`]). A mark's appearance reaches the writer as
-//! one, whoever drew it, and the writer makes its form from those parts
-//! (`crate::content::sink::form`).
+//! that draws with, by what each is), whether the family drew it (its
+//! `synth_*`, in place) or sheaf did, on pdf-gfx's
+//! [`Canvas`](super::gfx::Canvas) ([`SynthesizedAp::drawn`]). A mark's
+//! appearance reaches the writer as one, whoever drew it, and the writer
+//! makes its form from those parts (`crate::content::sink::form`).
 
 use crate::content::{Objects, ReadObjects, Unkept};
 use crate::pdf::{Dictionary, Object, ObjectId, Resolve};
@@ -25,18 +25,16 @@ pub use pdf_annots::{
     PolyKind, ReplyKind, ShapeKind, StampName, SynthesizedAp, TextMarkupKind, TypedAnnot,
 };
 
-/// What only tests name yet, setting the family's drawing beside sheaf's
-/// (M18 slice 24): the appearances the family draws (`synth_*`) and what
-/// they take ([`Border`], [`PaintStyle`], [`QuadPoints`], a path's
-/// [`Point`]s).
-#[cfg(any(test, feature = "fixtures"))]
+/// The appearances the family draws of sheaf's marks (`synth_*`), in place
+/// ([`ApRect::InPlace`]), and what they take ([`Border`], [`PaintStyle`],
+/// [`QuadPoints`]); and the shapes they draw by, which the screen paints
+/// from too ([`caret_outline`], [`attachment_icon_strokes`],
+/// [`cloud_outline`], [`cloud_step`]).
 pub use pdf_annots::{
-    Border, PaintStyle, QuadPoints, synth_ink, synth_poly, synth_shape, synth_text_markup,
+    ApRect, Border, PaintStyle, QuadPoints, attachment_icon_strokes, caret_outline, cloud_outline,
+    cloud_step, synth_caret, synth_cloud, synth_file_attachment, synth_ink, synth_poly,
+    synth_shape, synth_text_markup,
 };
-
-/// A point of the family's geometry, as a `synth_*` takes a path's.
-#[cfg(any(test, feature = "fixtures"))]
-pub use pdf_annots::pdf_gfx::Point;
 
 /// The caps an annotation is read under: the family's, but for the ones
 /// sheaf has none of (a page's annotations, a markup's quadrilaterals, a
