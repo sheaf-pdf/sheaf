@@ -37,6 +37,12 @@ lists them):
   the page written again, and whether that draws the same, a line a
   page): run before and after a change to the interpreter, or a move of
   the PDF layer's pin, and `diff` the two files.
+- `just content-dump <file>` writes what every corpus page's content,
+  and every form's it draws, reads as (its tokens, operators, balance,
+  resource names, marked ranges and the private names heard in it, and
+  for a page its blocks and what's cut and written, a line each): run
+  before and after a change to what reads content, or a move of the PDF
+  layer's pin, and `diff` the two files.
 
 Tests run under a memory cap where Linux has a user systemd
 (`scripts/test-capped.sh`; `SHEAF_UNCAPPED=1` turns it off).
@@ -62,8 +68,9 @@ checking each one's sha256:
 ```sh
 cargo install --locked --git https://github.com/sheaf-pdf/fetch-pdf-corpus --tag v0.1.1
 fetch-pdf-corpus fetch --out ../pdf-corpus        # 4.3 GB
-fetch-pdf-corpus fetch --out ../pdf-corpus pool   # 1.9 GB more: the pool files the
-                                                  #   ignored realize and lexer tiers
+fetch-pdf-corpus fetch --out ../pdf-corpus pool   # 1.9 GB more: the pool sample the
+                                                  #   ignored corpus tiers (tier-realize,
+                                                  #   tier-lexer, tier-interp and others)
                                                   #   and bench/real.py read
 ```
 

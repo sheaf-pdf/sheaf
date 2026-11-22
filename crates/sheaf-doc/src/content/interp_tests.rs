@@ -657,7 +657,7 @@ fn limit(result: Result<(Seen, Summary), Error>) -> Option<Cap> {
 
 /// Each cap on the work holds at its value and refuses one past it:
 /// operators, glyphs, states saved, marked content's nesting, the bytes
-/// of content lexed, path segments, and what the forms and fonts
+/// of content read, path segments, and what the forms and fonts
 /// decompress to.
 #[test]
 fn each_cap_is_held_to() {
@@ -1282,7 +1282,7 @@ fn the_visitor_can_stop_it() {
     assert_eq!(texts, 3);
 }
 
-/// Content that can't be lexed, in the page's or a form's, and a form
+/// Content whose tokens stop, in the page's or a form's, and a form
 /// whose stream can't be read, are errors that say where.
 #[test]
 fn faults_say_where() {

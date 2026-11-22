@@ -3,8 +3,9 @@
 //! their encoding draws, event for event but for the operators
 //! themselves: each glyph and its box, each path, image and shading, the
 //! clip each is drawn in, the marked ranges each is in, and each form
-//! drawn, refused, begun and ended, to the bit. The encoding lexes, and
-//! its `q`s and `Q`s and the resource names it uses are the content's.
+//! drawn, refused, begun and ended, to the bit. The encoding's tokens
+//! read, and its `q`s and `Q`s and the resource names it uses are the
+//! content's.
 
 use std::cell::RefCell;
 use std::ops::ControlFlow;
@@ -16,7 +17,9 @@ use crate::content::interp::{
     EncodedPage, Error, Event, GfxError, ImageOf, Kind, Mark, Matrix, Opts, Rect, Seg, Unwritable,
     encode, interpret,
 };
-use crate::content::{Balance, Concat, Fonts, NameSet, ResCx, Tok, balance, lex, names_used};
+use crate::content::{
+    Balance, Concat, Fonts, NameSet, ResCx, Tok, balance, names_used, res_cx, tokens,
+};
 use crate::pdf::gfx::{ClipPart, ImageDrawn, UseId};
 use crate::pdf::{Object, ObjectId, StreamExt};
 use crate::source::Limits;
@@ -214,19 +217,23 @@ pub(super) fn assert_alike(before: &[Seen], after: &[Seen], what: &str) {
     }
 }
 
-/// How `content`'s `q`s and `Q`s balance, and the names it uses, lexed
-/// with `res`; and that it lexes.
-fn facts(content: &[u8], res: &ResCx) -> (Balance, NameSet) {
+/// How `content`'s `q`s and `Q`s balance, and the names it uses, read
+/// with `resources` of `f`'s file, its color spaces as [`res_cx`] counts
+/// them; and that its tokens read.
+fn facts(f: &Fixture, content: &[u8], resources: Option<&Object>) -> (Balance, NameSet) {
     let lim = &Limits::DEFAULT;
-    assert!(lex(content, res, lim).all(|t| t.is_ok()));
+    let res = res_cx(&f.pdf, resources, lim).expect("its resources read");
+    let family = lim.content.family();
+    assert!(tokens(content, &res, &family).all(|t| t.is_ok()));
     let content = Concat::new(&[content]);
-    let balance = balance(&content, res, lim).expect("it lexes");
-    let names = names_used(&content, res, lim, &[]).expect("it lexes");
+    let balance = balance(&content, &res, &family).expect("its tokens read");
+    let names = names_used(&content, &res, &family, &[]).expect("its tokens read");
     (balance, names)
 }
 
-/// `content`, drawn on `f`'s page, draws as its encoding, which lexes, and
-/// whose forms' do; each balances as it did and uses the names it did.
+/// `content`, drawn on `f`'s page, draws as its encoding, whose tokens
+/// read, and whose forms' do; each balances as it did and uses the names
+/// it did.
 fn round_trip(f: &Fixture, content: &[u8], what: &str) -> EncodedPage {
     let lim = &Limits::DEFAULT;
     let concat = Concat::new(&[content]);
@@ -236,10 +243,9 @@ fn round_trip(f: &Fixture, content: &[u8], what: &str) -> EncodedPage {
     let before = drawn(f, content).unwrap();
     let after = drawn(&again, &encoded.content).unwrap();
     assert_alike(&before, &after, what);
-    let res = ResCx::read(&f.pdf, f.resources());
     assert_eq!(
-        facts(content, &res),
-        facts(&encoded.content, &res),
+        facts(f, content, f.resources()),
+        facts(f, &encoded.content, f.resources()),
         "{what}"
     );
     for (id, written) in &encoded.forms {
@@ -249,10 +255,13 @@ fn round_trip(f: &Fixture, content: &[u8], what: &str) -> EncodedPage {
             .ok()
             .and_then(Object::as_stream)
             .unwrap();
-        let own = form.dict.get(b"Resources");
-        let res = ResCx::read(&f.pdf, own.or(f.resources()));
+        let resources = form.dict.get(b"Resources").or(f.resources());
         let data = form.decompressed_content().unwrap();
-        assert_eq!(facts(&data, &res), facts(written, &res), "{what}: {id:?}");
+        assert_eq!(
+            facts(f, &data, resources),
+            facts(f, written, resources),
+            "{what}: {id:?}"
+        );
     }
     encoded
 }
@@ -369,7 +378,8 @@ fn a_line_is_written_where_it_moves_to() {
 /// An inline image whose `/L` is its data's length is written as it is;
 /// one whose `/L` runs past the content, its data found by its `EI`,
 /// isn't: content after it could make the `/L` reach, so the image would
-/// end elsewhere.
+/// end elsewhere for a reader that reads `/L`, though not for
+/// pdf-content-streams, which reads none.
 #[test]
 fn an_inline_image_is_written_where_it_ends_whatever_follows() {
     let f = fixture::operators();
@@ -400,14 +410,29 @@ fn an_inline_image_is_written_where_it_ends_whatever_follows() {
         ),
         "{past:?}"
     );
-    // Written with a dozen `Q`s after it, the `/L` reaches past the `EI`.
+    // Written with a dozen `Q`s after it, the `/L` would reach past the
+    // `EI` for a reader that reads it. pdf-content-streams reads none, as
+    // PDFium reads none (its PDFium case `flate-L`): its tokens end the
+    // image at its `EI` whatever follows, and read each `Q`.
     let bytes = [
         &b"q BI /W 2 /H 2 /F /Fl /L 29 ID xy EI\n"[..],
         &b"Q\n".repeat(12),
     ]
     .concat();
-    let lexed: Vec<_> = lex(&bytes, &ResCx::none(), &Limits::DEFAULT).collect();
-    assert!(lexed[1].is_err(), "{lexed:?}");
+    let (none, lim) = (ResCx::none(), Limits::DEFAULT);
+    let read: Vec<_> = (tokens(&bytes, &none, &lim.content.family()))
+        .map(Result::unwrap)
+        .collect();
+    let ei = bytes.windows(2).position(|w| w == b"EI").unwrap();
+    assert!(
+        matches!(&read[1], (at, Tok::InlineImage(_)) if at.end == ei + 2),
+        "{read:?}"
+    );
+    assert_eq!(read.len(), 14, "{read:?}");
+    assert!(
+        read[2..].iter().all(|(_, t)| *t == Tok::Op(b"Q")),
+        "{read:?}"
+    );
 }
 
 thread_local! {
@@ -424,7 +449,8 @@ thread_local! {
 /// `f`'s pieces: of its page's content, and each form's.
 fn pieces(f: &Fixture) -> Vec<Vec<u8>> {
     let lim = &Limits::DEFAULT;
-    let res = ResCx::read(&f.pdf, f.resources());
+    let res = res_cx(&f.pdf, f.resources(), lim).expect("its resources read");
+    let family = lim.content.family();
     let forms = (f.pdf.objects.values())
         .filter_map(Object::as_stream)
         .filter(|s| s.dict.get(b"Subtype").and_then(Object::as_name) == Some(b"Form"))
@@ -432,8 +458,8 @@ fn pieces(f: &Fixture) -> Vec<Vec<u8>> {
     let mut pieces = Vec::new();
     for content in std::iter::once(f.content().into_bytes()).chain(forms) {
         let mut from = None;
-        for token in lex(&content, &res, lim) {
-            let (at, tok) = token.expect("the fixture lexes");
+        for token in tokens(&content, &res, &family) {
+            let (at, tok) = token.expect("the fixture's tokens read");
             pieces.push(content[at.clone()].to_vec());
             let start = *from.get_or_insert(at.start);
             if !matches!(tok, Tok::Operand(_)) {

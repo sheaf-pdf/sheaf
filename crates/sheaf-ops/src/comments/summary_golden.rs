@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use sheaf_doc::content::{ContentWriter, ResCx, Reserved, Tok, lex};
+use sheaf_doc::content::{ContentWriter, ResCx, Reserved, Tok, tokens};
 use sheaf_doc::file::ForeignAnnot;
 use sheaf_doc::open::{FileAnnot, FileAnnots, FileBody};
 use sheaf_doc::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StreamExt, Value};
@@ -186,12 +186,13 @@ fn commented() -> Document {
     d
 }
 
-/// `content` read back as tokens and written again an operation at a
-/// time: the same bytes.
+/// `content` read back as pdf-content-streams' tokens and written again an
+/// operation at a time: the same bytes.
 fn read_back(case: &str, content: &[u8]) {
     let mut w = ContentWriter::new();
     let mut operands: Vec<&[u8]> = Vec::new();
-    for token in lex(content, &ResCx::none(), &Limits::DEFAULT) {
+    let lim = Limits::DEFAULT.content.family();
+    for token in tokens(content, &ResCx::none(), &lim) {
         let (at, tok) = token.unwrap_or_else(|e| panic!("{case}: {e}:\n{}", text(content)));
         match tok {
             Tok::Operand(operand) => operands.push(operand),

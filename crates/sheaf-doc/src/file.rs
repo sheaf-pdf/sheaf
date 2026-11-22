@@ -649,15 +649,26 @@ mod tests {
                 .unwrap()
                 .eq_value(&Object::from(reals()))
         );
-        let content = Content::decode(&again.get_page_content(page)).unwrap();
-        let operands: Vec<Object> = content
-            .operations
-            .iter()
-            .flat_map(|op| op.operands.clone())
-            .collect();
+        let lim = crate::source::Limits::DEFAULT.content.family();
+        let content = again.get_page_content(page);
+        let operands: Vec<Object> =
+            crate::content::operations(&content, &crate::content::ResCx::none(), &lim)
+                .flat_map(|op| {
+                    let op = op.unwrap();
+                    let read: Vec<Object> =
+                        op.operands().map(|o| o.object(&lim).unwrap()).collect();
+                    read
+                })
+                .collect();
         let [a, b, c] = reals().try_into().unwrap();
-        assert_eq!(operands, vec![b, c, a]);
-        assert_eq!(String::from_utf8(content.encode().unwrap()).unwrap(), ops);
+        assert_eq!(operands, vec![b.clone(), c.clone(), a.clone()]);
+        let again = Content {
+            operations: vec![
+                Operation::new("m", vec![b, c]),
+                Operation::new("w", vec![a]),
+            ],
+        };
+        assert_eq!(String::from_utf8(again.encode().unwrap()).unwrap(), ops);
 
         // An f32 writes its shortest digits, a point always so it reads back as a Real.
         let reals = [0.1f32, 612.0, -3.0, 16_777_216.0, 1e-7].map(Object::from);

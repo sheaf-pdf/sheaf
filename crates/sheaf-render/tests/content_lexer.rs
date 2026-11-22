@@ -1,17 +1,21 @@
-//! The content lexer against PDFium (M10.5 §13): over the planning pool
-//! (`bench/pool-sample.txt`, in the corpus), each page's top-level
-//! painting operators, by kind, against the page objects PDFium makes of
-//! the same content, by type. A lexer that lost its place, in an inline
-//! image or a string, shows as a page whose counts differ, or as a page
-//! it can't read that PDFium reads.
+//! Content's tokens, as sheaf reads a page, against PDFium (M10.5 §13):
+//! over the planning pool (`bench/pool-sample.txt`, in the corpus), each
+//! page's top-level painting operators, by kind, against the page objects
+//! PDFium makes of the same content, by type. Tokens that lost their
+//! place, in an inline image or a string, show as a page whose counts
+//! differ, or as a page sheaf can't read that PDFium reads.
 //!
-//! The lexer side counts what PDFium makes an object of: a `Tj`, `'` or
-//! `"` of a string that isn't empty, or a `TJ` with a string, once a font
-//! is set; a path painted with two points or more, as PDFium keeps them,
-//! or a closed point stroked with round caps; an inline image, or an
-//! image XObject drawn; a form XObject drawn; and a shading the resources
-//! have, painted. Pages whose counts differ are listed, and fail it: on
-//! the pool, at slice 6, none did, over 23,628 pages.
+//! The tokens are pdf-content-streams' (sheaf's own lexer's until M18
+//! slice 17), read as sheaf reads a page: its streams joined by
+//! [`PageContent`], its color spaces counted by [`res_cx`]. Its side
+//! counts what PDFium makes an object of: a `Tj`, `'` or `"` of a string
+//! that isn't empty, or a `TJ` with a string, once a font is set; a path
+//! painted with two points or more, as PDFium keeps them, or a closed
+//! point stroked with round caps; an inline image, or an image XObject
+//! drawn; a form XObject drawn; and a shading the resources have,
+//! painted. Pages whose counts differ are listed, and fail it: on the
+//! pool, at M10.5 slice 6 and at M18 slice 17, none did, over 23,628
+//! pages.
 //!
 //! Ignored: it reads every page of 402 files with PDFium. It binds PDFium
 //! itself, since it reads page objects, which the engine doesn't show
@@ -27,7 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use pdfium_render::prelude::*;
-use sheaf_doc::content::{PageContent, ResCx, Tok, lex};
+use sheaf_doc::content::{ContentFault, PageContent, ResCx, Tok, name, res_cx, tokens};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::pdf::{Dictionary, LazyPdf, Object, ObjectId};
 use sheaf_doc::source::{Limits, PageFacts};
@@ -129,27 +133,53 @@ fn filled(string: &[u8]) -> bool {
     }
 }
 
-/// Whether a `TJ` array holds a string.
+/// Whether a string operand is one.
+fn string(o: &[u8]) -> bool {
+    o[0] == b'(' || (o[0] == b'<' && o.get(1) != Some(&b'<'))
+}
+
+/// Whether a `TJ` array holds a string, its elements read as tokens.
 fn has_string(array: &[u8]) -> bool {
     let inner = &array[1..array.len().saturating_sub(1).max(1)];
-    sheaf_doc::content::lex(inner, &ResCx::none(), &Limits::DEFAULT)
+    let lim = Limits::DEFAULT.content.family();
+    tokens(inner, &ResCx::none(), &lim)
         .map_while(Result::ok)
         .any(|(_, t)| match t {
-            Tok::Operand(o) => o[0] == b'(' || (o[0] == b'<' && o.get(1) != Some(&b'<')),
+            Tok::Operand(o) => string(o),
             _ => false,
         })
 }
 
-/// What the lexer finds on a page, by what PDFium would make an object of.
-/// `subtypes` keeps each XObject's `/Subtype`, by object, for the file.
-fn lexed(
+/// What a page's tokens find on it, read as sheaf reads it: its streams
+/// joined by [`PageContent`], its color spaces counted by [`res_cx`],
+/// under sheaf's limits; by what PDFium would make an object of
+/// ([`counted`]). `subtypes` keeps each XObject's `/Subtype`, by object,
+/// for the file.
+fn read(
     pdf: &LazyPdf,
     page: &PageFacts,
     subtypes: &mut HashMap<ObjectId, Option<Vec<u8>>>,
 ) -> Result<Kinds, String> {
-    let content =
-        PageContent::read(pdf, &page.contents, &Limits::DEFAULT).map_err(|e| e.to_string())?;
-    let res = ResCx::read(pdf, page.resources.as_deref());
+    let lim = Limits::DEFAULT;
+    let content = PageContent::read(pdf, &page.contents, &lim).map_err(|e| e.to_string())?;
+    let res = res_cx(pdf, page.resources.as_deref(), &lim)
+        .map_err(|e| ContentFault::Resources(e).to_string())?;
+    let family = lim.content.family();
+    let tokens = tokens(content.concat().bytes(), &res, &family).map(|token| {
+        let (_, token) = token.map_err(|e| content.fault(e).to_string())?;
+        Ok(token)
+    });
+    counted(pdf, page, subtypes, tokens)
+}
+
+/// What `tokens`, a page's, draw, by what PDFium would make an object
+/// of; the first error stops it.
+fn counted<'a>(
+    pdf: &LazyPdf,
+    page: &PageFacts,
+    subtypes: &mut HashMap<ObjectId, Option<Vec<u8>>>,
+    tokens: impl Iterator<Item = Result<Tok<'a>, String>>,
+) -> Result<Kinds, String> {
     let xobjects = category(pdf, page, b"XObject");
     let shadings = category(pdf, page, b"Shading");
     let mut subtype = |name: &[u8]| -> Option<Vec<u8>> {
@@ -169,9 +199,8 @@ fn lexed(
     // What PDFium's objects depend on of the graphics state, at each `q`
     // level.
     let mut states = vec![State::default()];
-    for token in lex(content.concat().bytes(), &res, &Limits::DEFAULT) {
-        let (_, token) = token.map_err(|e| content.fault(e).to_string())?;
-        let op = match token {
+    for token in tokens {
+        let op = match token? {
             Tok::Operand(o) => {
                 operands.push(o);
                 continue;
@@ -185,7 +214,7 @@ fn lexed(
         };
         let last = operands.last().copied();
         let state = *states.last().unwrap();
-        let name = || last.and_then(sheaf_doc::content::name);
+        let name = || last.and_then(name);
         match op {
             b"q" => states.push(state),
             b"Q" if states.len() > 1 => {
@@ -274,12 +303,12 @@ struct State {
     round: bool,
 }
 
-/// One file's pages: where the lexer and PDFium differ, and the pages the
-/// lexer can't read that PDFium can.
+/// One file's pages: where sheaf's reading and PDFium's differ, and the
+/// pages sheaf can't read that PDFium can.
 #[derive(Default)]
 struct Outcome {
     pages: usize,
-    lexed: Kinds,
+    sheaf: Kinds,
     pdfium: Kinds,
     differ: Vec<String>,
     unread: Vec<String>,
@@ -288,7 +317,7 @@ struct Outcome {
 
 #[test]
 #[ignore = "every page of the 402-file pool, through PDFium"]
-fn lexer_boundaries_match_pdfium_page_objects() {
+fn token_boundaries_match_pdfium_page_objects() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
@@ -303,7 +332,7 @@ fn lexer_boundaries_match_pdfium_page_objects() {
         })
         .collect();
     let started = Instant::now();
-    // PDFium on one thread at a time; the lexer beside it.
+    // PDFium on one thread at a time; sheaf's reading beside it.
     let pdfium = Mutex::new(pdfium());
     let outcomes = each_entry(&entries, |entry| {
         let mut out = Outcome::default();
@@ -338,9 +367,9 @@ fn lexer_boundaries_match_pdfium_page_objects() {
             let Some(shown) = shown else { continue };
             out.pages += 1;
             out.pdfium.add(shown);
-            match lexed(src.pdf(), page, &mut subtypes) {
+            match read(src.pdf(), page, &mut subtypes) {
                 Ok(kinds) => {
-                    out.lexed.add(kinds);
+                    out.sheaf.add(kinds);
                     let differ = kinds.differences(&shown);
                     if !differ.is_empty() {
                         out.differ
@@ -354,10 +383,10 @@ fn lexer_boundaries_match_pdfium_page_objects() {
         }
         out
     });
-    let (mut pages, mut lexed, mut shown) = (0, Kinds::default(), Kinds::default());
+    let (mut pages, mut sheaf, mut shown) = (0, Kinds::default(), Kinds::default());
     for outcome in &outcomes {
         pages += outcome.pages;
-        lexed.add(outcome.lexed);
+        sheaf.add(outcome.sheaf);
         shown.add(outcome.pdfium);
     }
     let differ: Vec<&String> = outcomes.iter().flat_map(|o| &o.differ).collect();
@@ -366,11 +395,11 @@ fn lexer_boundaries_match_pdfium_page_objects() {
         eprintln!("skipped {skipped}");
     }
     for line in &differ {
-        eprintln!("differs: {line} (lexer, PDFium)");
+        eprintln!("differs: {line} (sheaf, PDFium)");
     }
     eprintln!(
-        "{pages} pages of {} files in {:?}: lexer {lexed:?}, PDFium {shown:?}; \
-         {} pages differ, {} the lexer can't read",
+        "{pages} pages of {} files in {:?}: sheaf {sheaf:?}, PDFium {shown:?}; \
+         {} pages differ, {} sheaf can't read",
         entries.len(),
         started.elapsed(),
         differ.len(),

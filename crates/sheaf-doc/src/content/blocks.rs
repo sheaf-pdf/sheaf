@@ -2,8 +2,13 @@
 //! running heads, watermarks and backgrounds marked as pagination
 //! artifacts, and which tool drew each; sheaf's own blocks, by the marker
 //! on their stream or in their property list; the streams that isolate
-//! the page's content; and the content's `q`/`Q` balance. A source reads a page's once, when first
-//! asked ([`Source::blocks`]), never at open.
+//! the page's content; and the content's `q`/`Q` balance. A source reads
+//! a page's once, when first asked ([`Source::blocks`]), never at open.
+//! The content is read by pdf-content-streams' operations, its marked
+//! ranges and balance found as they're read ([`MarkedNest`],
+//! [`Balance`]); what's classified is sheaf's, and of the ranges it
+//! keeps it holds what it reads of them ([`KeptRange`]), as a source
+//! keeps a page's blocks past the property lists the family's borrow.
 //!
 //! [`Source::blocks`]: crate::source::Source::blocks
 
@@ -12,14 +17,57 @@ use std::fmt;
 use std::ops::Range;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use crate::pdf::content::{self as family, Balance, MarkedEvent, MarkedNest};
 use crate::pdf::{Dictionary, Object, ObjectId, StreamExt, Value};
 
-use super::SpliceError;
-use super::balance::Balance;
-use super::lex::{self, LexError, ResCx, Step, Tok};
-use super::marked::{self, Event, Marked, Nest, PropertiesDict, Props};
-use super::page::{Concat, ContentFault, PageContent, ReadObjects, SpanAcross, direct};
+use super::page::{
+    Concat, ContentFault, PageContent, ReadObjects, SpanAcross, direct, properties, res_cx,
+};
+use super::{Operation, ResCx, SpliceError, SyntaxError, Tok, tokens};
 use crate::source::Limits;
+
+/// A marked range a page's blocks keep ([`PageBlocks::marked`]), an
+/// artifact's or one of sheaf's blocks': what sheaf reads of the range
+/// pdf-content-streams found, held by value, so it outlives the lists it
+/// was read with.
+#[derive(Clone, PartialEq)]
+pub struct KeptRange {
+    pub tag: Vec<u8>,
+    /// Its property list, written in the content or the one the
+    /// resources have under the name written there: None for `BMC`, a
+    /// name the resources have no list under, or what's neither a
+    /// dictionary nor a name.
+    pub list: Option<Dictionary>,
+    /// Whether its list is named, `/Tag /Name BDC`, so it's the
+    /// resources' and not the content's to write again.
+    pub named: bool,
+    /// From its tag, before `BMC` or `BDC`, through its `EMC`.
+    pub span: SpanAcross,
+}
+
+impl KeptRange {
+    /// `found`, its list copied.
+    fn of(found: &family::Marked<'_>) -> KeptRange {
+        KeptRange {
+            tag: found.tag.clone(),
+            list: list(found).cloned(),
+            named: matches!(found.props, Some(family::Props::Named(..))),
+            span: found.span,
+        }
+    }
+}
+
+impl fmt::Debug for KeptRange {
+    /// Without its list's entries, which may be a page's text.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KeptRange")
+            .field("tag", &String::from_utf8_lossy(&self.tag))
+            .field("list", &self.list.as_ref().map(Dictionary::len))
+            .field("named", &self.named)
+            .field("span", &self.span)
+            .finish()
+    }
+}
 
 /// What a pagination artifact is, by its `/Subtype`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -182,34 +230,37 @@ pub struct Pagination {
 }
 
 impl Pagination {
-    /// What to take out of `content`, lexed with `res`, to remove it: its
-    /// span, but for a run of `Q`s right after its `BDC`, which end a `q`
-    /// from before it and stay. Acrobat opens its first artifact on a page
-    /// with the `Q` that ends the `q` it put before the page's content;
-    /// kept, it leaves the page as sheaf's own header does, its `Q` outside
-    /// its range. The two cuts either side are spliced together, the
-    /// marked content one opens closed by the other.
+    /// What to take out of `content`, its tokens read with `res`, to
+    /// remove it: its span, but for a run of `Q`s right after its `BDC`,
+    /// which end a `q` from before it and stay. Acrobat opens its first
+    /// artifact on a page with the `Q` that ends the `q` it put before the
+    /// page's content; kept, it leaves the page as sheaf's own header
+    /// does, its `Q` outside its range. The two cuts either side are
+    /// spliced together, the marked content one opens closed by the other.
     pub fn cuts(
         &self,
         content: &Concat,
         res: &ResCx,
         lim: &Limits,
-    ) -> Result<Vec<SpanAcross>, LexError> {
+    ) -> Result<Vec<SpanAcross>, SyntaxError> {
         let Some(range) = content.offsets(self.span) else {
             return Ok(vec![self.span]);
         };
-        let at = |e: LexError| LexError {
+        let at = |e: SyntaxError| SyntaxError {
             at: e.at + range.start,
             ..e
         };
-        let mut ops = lex::lex(&content.bytes()[range.clone()], res, lim)
+        let family = lim.content.family();
+        let mut ops = tokens(&content.bytes()[range.clone()], res, &family)
             .filter(|t| !matches!(t, Ok((_, Tok::Operand(_)))));
         // Its BMC or BDC, then the run of `Q`s.
         ops.next().transpose().map_err(at)?;
         let mut kept: Option<Range<usize>> = None;
         for token in ops {
             match token.map_err(at)? {
-                (r, Tok::Op(b"Q")) => kept = Some(kept.map_or(r.clone(), |k| k.start..r.end)),
+                (r, Tok::Op(b"Q")) => {
+                    kept = Some(kept.map_or(r.clone(), |k| k.start..r.end));
+                }
                 _ => break,
             }
         }
@@ -238,7 +289,7 @@ pub struct PageBlocks {
     /// The artifact ranges, at any depth, and sheaf's marked blocks, in
     /// the order they open; not the structure's ranges, which a tagged
     /// page has one of for every run of text.
-    pub marked: Arc<[Marked]>,
+    pub marked: Arc<[KeptRange]>,
     pub pagination: Arc<[Pagination]>,
     /// sheaf's blocks: each stream marked `/SHEF_Block`, and each range
     /// whose list has `/SHEF_Gen` or `/SHEF_OcrBlock` in a stream that
@@ -256,8 +307,9 @@ pub struct PageBlocks {
     /// Forms are read one level deep, each once, within what's left of
     /// the page's [`ContentLimits::decompressed`] after its streams: one
     /// that can't be read draws nothing, as in PDFium, and has none, but
-    /// one past the cap, or met once the page's share is spent, may have
-    /// one, and counts as having one.
+    /// one past the cap, met once the page's share is spent, or drawn with
+    /// resources that don't read but for the file's damage, may have one,
+    /// and counts as having one.
     ///
     /// [`ContentLimits::decompressed`]: crate::source::ContentLimits
     pub nested_in_forms: bool,
@@ -328,17 +380,20 @@ impl PageBlocks {
         known: &DrawnForms,
     ) -> Result<PageBlocks, ContentFault> {
         let concat = content.concat();
-        let res = ResCx::read(objects, resources);
-        let props = PropertiesDict::read(objects, resources);
+        let res = res_cx(objects, resources, lim).map_err(ContentFault::Resources)?;
+        let props = properties(objects, resources);
+        let family = lim.content.family();
         let mut scan = Scan {
-            nest: Nest::new(&props, lim),
+            nest: MarkedNest::new(&props, &family),
             balance: Balance::default(),
             open: None,
             drawn: Vec::new(),
             forms: BTreeSet::new(),
         };
-        lex::steps(concat.bytes(), &res, lim, |step| scan.step(concat, &step))
-            .map_err(|e| content.fault(e))?;
+        for op in concat.operations(&res, &family) {
+            let op = op.map_err(|e| content.fault(e))?;
+            scan.step(concat, &op).map_err(|e| content.fault(e))?;
+        }
         let Scan {
             nest,
             balance,
@@ -348,20 +403,20 @@ impl PageBlocks {
         } = scan;
         let marked = nest.done().map_err(|e| content.fault(e))?;
         let marks: Vec<StreamMark> = content.dicts().iter().map(StreamMark::of).collect();
-        let mark_of = |m: &Marked| marks.get(m.span.start.stream as usize);
+        let mark_of = |m: &family::Marked| marks.get(m.span.start.stream as usize);
         let pagination = drawn
             .iter()
             .map(|d| {
                 let range = &marked[d.index];
                 let mark = mark_of(range).unwrap_or(&StreamMark::Plain);
-                let generator = match (mark, marked_block(range)) {
+                let generator = match (mark, marked_block(list(range))) {
                     (StreamMark::Block(SheafBlock::Gen(g)), _) => Some(*g),
                     (_, Some(SheafBlock::Gen(g))) => Some(g),
                     _ => None,
                 };
                 Pagination {
                     kind: d.kind,
-                    origin: d.origin(range, mark, |form| {
+                    origin: d.origin(list(range), mark, |form| {
                         xobject(objects, resources, form)
                             .is_some_and(|id| known.acrobat(objects, id))
                     }),
@@ -387,7 +442,7 @@ impl PageBlocks {
                 return None;
             }
             Some(SheafBlockRef {
-                block: marked_block(m)?,
+                block: marked_block(list(m))?,
                 at: BlockAt::Marked(m.span),
             })
         }));
@@ -409,9 +464,9 @@ impl PageBlocks {
             .into_iter()
             .any(|form| known.nested(objects, form, resources, lim, &mut budget));
         Ok(PageBlocks {
-            marked: marked
-                .into_iter()
-                .filter(|m| m.tag == b"Artifact" || marked_block(m).is_some())
+            marked: (marked.iter())
+                .filter(|m| m.tag == b"Artifact" || marked_block(list(m)).is_some())
+                .map(KeptRange::of)
                 .collect(),
             pagination,
             sheaf: sheaf.into(),
@@ -442,8 +497,8 @@ impl PageBlocks {
     /// by their property lists: None when none draws one.
     pub fn kind_of(&self, id: GenId) -> Option<PaginationKind> {
         (self.marked.iter())
-            .filter(|m| marked_block(m) == Some(SheafBlock::Gen(id)))
-            .find_map(pagination)
+            .filter(|m| marked_block(m.list.as_ref()) == Some(SheafBlock::Gen(id)))
+            .find_map(|m| pagination(&m.tag, m.list.as_ref()))
     }
 }
 
@@ -548,10 +603,16 @@ pub fn isolates(stream: &[u8]) -> Option<(u8, u32)> {
     Some((op, n))
 }
 
+/// A marked range's property list, wherever it's written, as
+/// pdf-content-streams found it.
+fn list<'m>(m: &'m family::Marked<'_>) -> Option<&'m Dictionary> {
+    m.props.as_ref().and_then(family::Props::dict)
+}
+
 /// The block of sheaf's a range's list marks: `/SHEF_Gen` on a
 /// generator's, `/SHEF_OcrBlock` on an OCR layer's.
-fn marked_block(m: &Marked) -> Option<SheafBlock> {
-    let list = m.props.as_ref()?.dict()?;
+fn marked_block(list: Option<&Dictionary>) -> Option<SheafBlock> {
+    let list = list?;
     let string = |key: &[u8]| list.get(key)?.as_bytes();
     string(b"SHEF_Gen")
         .and_then(GenId::parse)
@@ -563,16 +624,16 @@ fn marked_block(m: &Marked) -> Option<SheafBlock> {
         })
 }
 
-/// The kind of pagination artifact `m` is, if it's one.
-fn pagination(m: &Marked) -> Option<PaginationKind> {
-    if m.tag != b"Artifact" {
+/// The kind of pagination artifact a range tagged `tag`, with `list`, is,
+/// if it's one.
+fn pagination(tag: &[u8], list: Option<&Dictionary>) -> Option<PaginationKind> {
+    if tag != b"Artifact" {
         return None;
     }
-    let list = m.props.as_ref()?.dict()?;
-    PaginationKind::from_name(list.get(b"Subtype")?.as_name()?)
+    PaginationKind::from_name(list?.get(b"Subtype")?.as_name()?)
 }
 
-/// A pagination artifact being lexed, outside any other: what it draws.
+/// A pagination artifact being read, outside any other: what it draws.
 struct Drawn {
     /// Where it is in the marked ranges.
     index: usize,
@@ -584,15 +645,15 @@ struct Drawn {
 }
 
 impl Drawn {
-    /// Who drew it, `range` in a stream marked `mark`; `acrobat` says
-    /// whether a form it draws is Acrobat's (§13's classification).
+    /// Who drew it, its range's list `list`, in a stream marked `mark`;
+    /// `acrobat` says whether a form it draws is Acrobat's (§13's
+    /// classification).
     fn origin(
         &self,
-        range: &Marked,
+        list: Option<&Dictionary>,
         mark: &StreamMark,
         acrobat: impl Fn(&[u8]) -> bool,
     ) -> PagOrigin {
-        let list = range.props.as_ref().and_then(Props::dict);
         let has = |key: &[u8]| list.is_some_and(|l| l.has(key));
         match mark {
             StreamMark::Block(_) => PagOrigin::Sheaf,
@@ -608,9 +669,9 @@ impl Drawn {
     }
 }
 
-/// A page's content as it's stepped through.
+/// A page's content as it's stepped through, an operation at a time.
 struct Scan<'p> {
-    nest: Nest<'p>,
+    nest: MarkedNest<'p>,
     balance: Balance,
     open: Option<Drawn>,
     drawn: Vec<Drawn>,
@@ -619,10 +680,13 @@ struct Scan<'p> {
 }
 
 impl Scan<'_> {
-    fn step(&mut self, concat: &Concat, step: &Step) -> Result<(), LexError> {
-        match self.nest.step(concat, step)? {
-            Some(Event::Opened(index)) if self.open.is_none() => {
-                if let Some(kind) = pagination(self.nest.get(index)) {
+    /// The page after `op`, its next operation, read from `concat`: an
+    /// inline image's is named `BI`.
+    fn step(&mut self, concat: &Concat, op: &Operation) -> Result<(), SyntaxError> {
+        match self.nest.step(concat, op)? {
+            Some(MarkedEvent::Opened(index)) if self.open.is_none() => {
+                let range = self.nest.get(index);
+                if let Some(kind) = range.and_then(|m| pagination(&m.tag, list(m))) {
                     self.open = Some(Drawn {
                         index,
                         kind,
@@ -631,30 +695,27 @@ impl Scan<'_> {
                     });
                 }
             }
-            Some(Event::Ended(index)) => {
+            Some(MarkedEvent::Ended(index)) => {
                 if let Some(drawn) = self.open.take_if(|d| d.index == index) {
                     self.drawn.push(drawn);
                 }
             }
             _ => {}
         }
-        let op = match step.tok {
-            Tok::Op(op) => op,
-            Tok::InlineImage(_) => b"BI",
-            Tok::Operand(_) => return Ok(()),
-        };
         self.balance.take(op);
+        let name = op.name();
+        let form = || op.arg(0).and_then(|o| o.name()).map(|f| f.into_owned());
         let Some(drawn) = &mut self.open else {
-            if op == b"Do"
-                && let Some(form) = step.name(0)
+            if name == b"Do"
+                && let Some(form) = form()
             {
-                self.forms.insert(form.into_owned());
+                self.forms.insert(form);
             }
             return Ok(());
         };
-        match op {
-            b"Do" => drawn.forms.extend(step.name(0).map(|f| f.into_owned())),
-            op => drawn.paints |= paints(op),
+        match name {
+            b"Do" => drawn.forms.extend(form()),
+            name => drawn.paints |= paints(name),
         }
         Ok(())
     }
@@ -728,7 +789,9 @@ impl DrawnForms {
     /// Whether XObject `id` is a form with a pagination artifact in it,
     /// drawn on a page with `resources`. Reading it takes its size from
     /// `budget`, what's left of the page's; with none left, it counts as
-    /// having one.
+    /// having one, as it does where the resources it's read with don't
+    /// read but for the file's damage ([`res_cx`]), which isn't kept: a
+    /// read of them again may.
     fn nested(
         &self,
         objects: &impl ReadObjects,
@@ -768,10 +831,14 @@ impl DrawnForms {
         // A form without resources of its own draws with its page's.
         let resources = own.as_ref().or(resources);
         let content = Concat::new(&[&data]);
-        let res = ResCx::read(objects, resources);
-        let props = PropertiesDict::read(objects, resources);
-        let nested = marked::marked(&content, &props, &res, lim)
-            .is_ok_and(|found| found.iter().any(|m| pagination(m).is_some()));
+        // Resources that don't read, but for the file's damage, may hide
+        // one.
+        let Ok(res) = res_cx(objects, resources, lim) else {
+            return true;
+        };
+        let props = properties(objects, resources);
+        let nested = family::marked(&content, &props, &res, &lim.content.family())
+            .is_ok_and(|found| found.iter().any(|m| pagination(&m.tag, list(m)).is_some()));
         if own.is_some() {
             self.knows(id, nested);
         }

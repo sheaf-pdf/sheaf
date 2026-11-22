@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [lazy_reader, page_tree, sheaf_annot, lexer, splice, interp, op_json, sheaf_generators]
+        target: [lazy_reader, page_tree, sheaf_annot, splice, interp, op_json, sheaf_generators]
     steps:
       - uses: actions/checkout@v4
 
@@ -48,7 +48,7 @@ jobs:
       # The fixtures the stable test mutates, built in code, so the
       # repository holds no PDF: from nothing, libFuzzer seldom gets past a
       # file's header and cross-reference sections. sheaf_annot's are a
-      # page's annotation objects, lexer's and splice's page content,
+      # page's annotation objects, splice's page content,
       # interp's the same page content, the content interpreter's pages'
       # and six with the fonts' parts after them (two pages, each with
       # each fixture program as /TT's), op_json's Op

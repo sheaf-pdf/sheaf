@@ -149,6 +149,7 @@ fn balance(pdf: &Pdf, page: ObjectId) -> Balance {
         .collect();
     let streams: Vec<&[u8]> = data.iter().map(Vec::as_slice).collect();
     let lim = Limits::DEFAULT;
+    let lim = lim.content.family();
     crate::content::balance(&Concat::new(&streams), &ResCx::default(), &lim).unwrap()
 }
 
@@ -372,14 +373,7 @@ fn isolation_is_counted_from_the_base_s_balance() {
                 "{what} {how:?}"
             );
             let drawn = balance(&pdf, page);
-            assert_eq!(
-                drawn,
-                Balance {
-                    net: 0,
-                    min_prefix: 0
-                },
-                "{what} {how:?}"
-            );
+            assert_eq!((drawn.net, drawn.min_prefix), (0, 0), "{what} {how:?}");
         }
     }
 }

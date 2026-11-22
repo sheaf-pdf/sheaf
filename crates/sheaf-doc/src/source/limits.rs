@@ -79,9 +79,11 @@ pub struct ContentLimits {
     /// operator takes at most 33 (`scn` with DeviceN's 32 components and
     /// a pattern), but a stream may hold runs of numbers no operator ends.
     pub operands: usize,
-    /// How deep arrays and dictionaries nest (PDFium's cap), and marked
-    /// content: where content is interpreted, every range open across a
-    /// form and what draws it.
+    /// How deep marked content nests: where content is interpreted, every
+    /// range open across a form and what draws it. It's handed to
+    /// pdf-content-streams for arrays and dictionaries too, which stop its
+    /// tokens past 64 levels whatever this says (PDFium reads what's
+    /// deeper as no object), so only a value under 64 lowers that.
     pub depth: usize,
     /// An inline image's data, in bytes.
     pub inline_image: usize,

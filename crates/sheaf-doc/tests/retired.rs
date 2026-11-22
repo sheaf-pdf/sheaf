@@ -1132,8 +1132,9 @@ const RETIRED_M18: &[(&str, u8)] = &[
     ("content::sink::Unread", 19),
     // A page's streams as one and the places in them are the family's
     // (`content::Concat`, `Pos`, `SpanAcross`), joined by its `Join`.
-    // Its `Concat` reads by its own tokens: sheaf's lexer is called on
-    // the bytes, `lex(concat.bytes(), ..)`.
+    // Its `Concat` reads by its own tokens: sheaf's own lexer was called
+    // on the bytes, `lex(concat.bytes(), ..)`, until M18 slice 17 retired
+    // it too.
     ("content::page::Concat::lex", 19),
     ("content::page::Join", 19),
     // The splice is the family's (`content::splice`, `splice_each`,
@@ -1184,10 +1185,40 @@ const RETIRED_M18: &[(&str, u8)] = &[
     ("content::interp::Encoded", 23),
     ("content::interp::Ops", 23),
     ("content::interp::Forms::Report", 23),
-    // What only sheaf's interpreter read of the lexer's: an inline
-    // image's `/L`, and a step's operands in order.
+    // What only sheaf's interpreter read of sheaf's own lexer's: an
+    // inline image's `/L`, and a step's operands in order.
     ("content::lex::image_length", 23),
     ("content::lex::Step::args", 23),
+    // Content is read by pdf-content-streams' tokens and operations,
+    // re-exported by `content` (`tokens`, `operations`, `Tok`, `name`,
+    // `object`, `balance`, `names_used`, `kept`), what stops them its
+    // error (`content::SyntaxError`, `ContentFault::Syntax`), and a
+    // page's color spaces are its `ResCx`, read by `content::res_cx`:
+    // sheaf's own lexer, its steps, its inline image rules and its own
+    // counts went, and with them the splice's second reader and the
+    // lexer's fuzz target. Marked ranges are found by the family's
+    // `MarkedNest`, their lists by `content::properties`.
+    ("content::lex::lex", 17),
+    ("content::lex::LexError", 17),
+    ("content::lex::LexErrorKind", 17),
+    ("content::lex::Step", 17),
+    ("content::lex::steps", 17),
+    ("content::lex::image_entry", 17),
+    ("content::lex::family_components", 17),
+    ("content::lex::ResCx::family", 17),
+    ("content::marked::PropertiesDict", 17),
+    ("content::marked::Nest", 17),
+    ("content::page::ContentFault::Lex", 17),
+    ("source::fuzz::lexer", 17),
+    // What was left of the lexer's company: the tests' reference reader,
+    // which had come to read through the same operations as what it was
+    // set beside; the copies of the family's marked range and its list
+    // that a page's blocks kept, now `content::KeptRange`; and the
+    // private names' walk of content, now `in_content`.
+    ("pdf::content::Content::decode", 17),
+    ("content::blocks::Marked", 17),
+    ("content::blocks::Props", 17),
+    ("private::lexed", 17),
 ];
 
 /// The ledgers, with the words a hit names its slice by.
@@ -1226,10 +1257,11 @@ const QUALIFIED_ONLY: &[&str] = &[
     "Reserved",
     "write_string",
     "place_form",
-    // sheaf's lexer, the function `content::lex`, which reads a page's
-    // joined bytes: not the method sheaf's `Concat` had. And the
-    // family's `Join`, and the app's mode that joins a running sheaf: not
-    // the join `content::page` had (M18 slice 19).
+    // sheaf's own lexer, the function `content::lex`, which read a
+    // page's joined bytes until M18 slice 17: not the method sheaf's
+    // `Concat` had. And the family's `Join`, and the app's mode that
+    // joins a running sheaf: not the join `content::page` had (M18 slice
+    // 19).
     "lex",
     "Join",
     // pdf-content-streams' splice, which `content` re-exports: not the
@@ -1271,6 +1303,20 @@ const QUALIFIED_ONLY: &[&str] = &[
     "Ops",
     "Report",
     "args",
+    // `ContentLimits::family`, content's caps as pdf-content-streams takes
+    // them, and a transaction's or a tab's steps: not those of sheaf's
+    // own lexer, `ResCx::family` and `steps` (M18 slice 17).
+    "family",
+    "steps",
+    // pdf-content-streams' marked range and its list, a block that's a
+    // marked range (`BlockAt::Marked`) and a selection of them; a reader's
+    // `decode` of anything else; and a test's local: not the copies a
+    // page's blocks kept, `Content::decode`, or the private names' walk
+    // (M18 slice 17).
+    "Marked",
+    "Props",
+    "decode",
+    "lexed",
     // The header and footer a document's state draws: not the view's.
     "header_footer",
     "Mode",

@@ -19,7 +19,7 @@ use super::key::ObjKey;
 use super::removal_tests::{opened, scratch, text_file};
 use super::watermark_tests::{image_watermark, kinds, png};
 use super::{AskAnswers, How, SaveHow, StrategyKind, save_rewritten};
-use crate::content::{Balance, Concat, GenId, ResCx};
+use crate::content::{Balance, Concat, GenId, ResCx, Tok, tokens};
 use crate::export::Export;
 use crate::model::{
     Document, Filter, ImageRef, MarkedSel, PageId, Scope, StreamSel, WatermarkContent as Content,
@@ -105,15 +105,16 @@ pub(super) fn depth(pdf: &Pdf, page: ObjectId) -> (i32, Balance) {
     let concat = Concat::new(&streams);
     let lim = Limits::DEFAULT;
     let (mut now, mut deepest) = (0, 0);
-    for token in crate::content::lex(concat.bytes(), &ResCx::default(), &lim) {
+    let (none, lim) = (ResCx::none(), lim.content.family());
+    for token in tokens(concat.bytes(), &none, &lim) {
         match token.unwrap().1 {
-            crate::content::Tok::Op(b"q") => now += 1,
-            crate::content::Tok::Op(b"Q") => now -= 1,
+            Tok::Op(b"q") => now += 1,
+            Tok::Op(b"Q") => now -= 1,
             _ => {}
         }
         deepest = deepest.max(now);
     }
-    let balance = crate::content::balance(&concat, &ResCx::default(), &lim).unwrap();
+    let balance = crate::content::balance(&concat, &none, &lim).unwrap();
     (deepest, balance)
 }
 

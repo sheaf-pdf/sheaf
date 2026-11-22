@@ -72,7 +72,7 @@
 //!
 //! - **Interpreted:** every page, its forms drawn, each glyph laid out,
 //!   within [`Limits::DEFAULT`] and with no panic. Pages past a cap, and
-//!   those whose content, or a form's, can't be lexed or drawn, are
+//!   those whose content, or a form's, has tokens that stop or can't be drawn, are
 //!   listed, and none is, nor is a glyph whose box isn't finite; those
 //!   whose content can't be read are counted; forms refused are counted
 //!   by why; and the most a page came to of each measure a cap bounds is
@@ -1014,7 +1014,7 @@ struct Interpreted {
     unread: Vec<String>,
     /// Pages past a cap ([`GfxError::Limit`]).
     limited: Vec<String>,
-    /// Pages whose content, or a form's, doesn't lex, or that draw an
+    /// Pages whose content's tokens, or a form's, stop, or that draw an
     /// XObject that can't be read.
     failed: Vec<String>,
     /// Pages whose glyphs laid out aren't as many as the interpretation

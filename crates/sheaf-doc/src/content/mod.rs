@@ -1,26 +1,38 @@
 //! The content toolkit (M10.5 §13), pulled forward from M11: page
-//! content read as tokens, without `Content::decode`, which
-//! re-encodes what it reads, loses comments and spacing, and reads inline
-//! images by the first `EI` it meets.
+//! content read as tokens, each with its bytes as written, so comments
+//! and spacing are kept and nothing is re-encoded.
 //!
-//! - [`lex`]: a content stream's tokens, each with where it is and its
-//!   bytes as written, an inline image one token found by PDFium's rules.
-//! - [`page`]: a page's `/Contents` as one, the concatenation PDFium lexes,
+//! - [`tokens`] and [`operations`]: a content stream's tokens, each with
+//!   where it is and its bytes as written, an inline image one token found
+//!   by PDFium's rules, and its operations, each operator with its
+//!   operands ([`Tok`], [`Operation`], [`Operand`]); an operand's [`name`]
+//!   and [`object`]; and what stops them, [`SyntaxError`]. They're
+//!   pdf-content-streams' (M18 slice 17; sheaf's own lexer until then),
+//!   which reads content as PDFium does. Everything here reads a page by
+//!   them, with the color spaces [`res_cx`] reads: its text bag and its
+//!   interpretation, its blocks, marked ranges, cuts and splices, and the
+//!   names it keeps, so a page is read one way.
+//! - [`page`]: a page's `/Contents` as one, the concatenation PDFium reads,
 //!   read within [`ContentLimits`](crate::source::ContentLimits), and
 //!   places in it mapped back to a stream ([`Concat`], [`Pos`] and
-//!   [`SpanAcross`], which are pdf-content-streams').
-//! - [`marked`], [`balance`] and [`names_used`]: its marked ranges, its
-//!   `q`/`Q` balance and the resource names it uses; [`kept`], the last
-//!   two of what's left once ranges are taken out.
+//!   [`SpanAcross`], which are pdf-content-streams'); and what of its
+//!   resources pdf-content-streams reads it with, read from sheaf's
+//!   sources: its color spaces ([`res_cx`], a [`ResCx`]) and property
+//!   lists ([`properties`], [`Properties`]).
+//! - [`balance`] and [`names_used`]: its `q`/`Q` balance and the resource
+//!   names it uses; [`kept`], the two of what's left once ranges are taken
+//!   out. pdf-content-streams', as are its marked ranges, which
+//!   [`PageBlocks`] keeps what it reads of ([`KeptRange`]).
 //! - [`splice`] and [`splice_each`]: its streams with ranges taken out,
 //!   byte for byte, when that's safe, and refused when it isn't; and
 //!   [`without_keys`], a marked range's property list written again
 //!   without some keys. They're pdf-content-streams', which has the
-//!   rules, called with [`ResCx::family`] and
+//!   rules, called with the [`ResCx`] content was read with and
 //!   [`ContentLimits::family`](crate::source::ContentLimits::family):
-//!   the ranges are found by sheaf's lexer, and judged by its tokens.
+//!   the ranges are found by its tokens, and judged by them.
 //! - [`PageBlocks`]: its pagination artifacts and who drew them, and
-//!   sheaf's own blocks.
+//!   sheaf's own blocks, sheaf's classification of the marked ranges
+//!   pdf-content-streams finds.
 //! - [`text_bag`]: the words it draws, as [`interp`] reads it, decoded
 //!   through its fonts.
 //! - [`DrawFont`]: what sheaf draws text in, the PDF layer's [`Std14`]
@@ -43,7 +55,6 @@
 //! - [`sink`]: where content's resources are written: the emitter, or a
 //!   PDF built in memory ([`serialize::built`](crate::serialize::built)).
 
-mod balance;
 mod blocks;
 #[cfg(test)]
 mod blocks_tests;
@@ -55,9 +66,6 @@ mod font;
 pub mod interp;
 #[cfg(test)]
 mod interp_tests;
-mod lex;
-mod marked;
-mod names;
 mod page;
 mod place;
 pub mod sink;
@@ -70,24 +78,23 @@ mod text_bag_tests;
 mod written_golden;
 
 pub use crate::pdf::content::{
-    Blend, Color, ContentWriter, FillRule, GState, LineCap, LineJoin, Need, Paint, Res, ResBody,
-    ResId, ResKind, Reserved, ResourceNeeds, Rewrite, SpliceError, Spliced, TextMode, splice,
-    splice_each, without_keys,
+    Balance, Blend, Color, ContentOperation as Operation, ContentWriter, FillRule, GState, Kept,
+    LineCap, LineJoin, NameSet, Need, Operand, Paint, Properties, Res, ResBody, ResCx, ResId,
+    ResKind, Reserved, ResourceNeeds, Rewrite, SpliceError, Spliced, SyntaxError, SyntaxErrorKind,
+    TextMode, Tok, balance, kept, name, names_used, object, operations, splice, splice_each,
+    tokens, without_keys,
 };
-pub use balance::{Balance, balance};
 pub use blocks::{
-    BlockAt, BlockId, ContentError, DrawnForms, GenId, Marker, PagOrigin, PageBlocks, Pagination,
-    PaginationKind, SheafBlock, SheafBlockRef, isolates,
+    BlockAt, BlockId, ContentError, DrawnForms, GenId, KeptRange, Marker, PagOrigin, PageBlocks,
+    Pagination, PaginationKind, SheafBlock, SheafBlockRef, isolates,
 };
 pub use font::{
     Descendant, DrawFont, DrawText, Font, FontApprox, FontKind, FontMetrics, FontProgram, Fonts,
     Glyphless, Std14, Unencoded, VerticalMetrics, std14_of, wrap_with,
 };
-pub use lex::{LexError, LexErrorKind, ResCx, Tok, lex, name, object};
-pub use marked::{Marked, PropertiesDict, Props, marked};
-pub use names::{Kept, NameSet, kept, names_used};
 pub use page::{
     Concat, ContentFault, Objects, PageContent, Pos, ReadObjects, SpanAcross, Unkept, contents,
+    properties, res_cx,
 };
 pub use place::place_form;
 pub use text_bag::{TextBag, text_bag};

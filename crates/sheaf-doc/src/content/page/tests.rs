@@ -1,7 +1,8 @@
 //! A source's objects as the PDF layer's crates read them ([`Objects`]):
 //! what's lent and what isn't kept, how a stream decodes, why an object
-//! or a stream doesn't read and what that stops, and a font read through
-//! it.
+//! or a stream doesn't read and what that stops, a font read through it,
+//! and the color spaces and property lists content is read with
+//! ([`res_cx`], [`properties`]).
 
 use std::sync::Arc;
 
@@ -747,4 +748,142 @@ fn what_an_object_that_doesn_t_read_stops_is_its_reason_s() {
     }
     let bag = text_bag(&pdf, &Concat::new(&[deep]), Some(&resources), &lim, &fonts);
     assert!(matches!(bag, Err(Error::Gfx(GfxError::Unreadable(u))) if u.why == Why::Capped));
+}
+
+/// The color spaces content is read with ([`res_cx`]), from a source
+/// through [`Objects`], each counted as pdf-content-streams counts it, as
+/// PDFium does: a space behind a reference as that space, `[/Pattern
+/// base]` as its base's components and one more, a DeviceN space with no
+/// tint transform, which doesn't load, as 3. A name whose value is a
+/// reference to nothing, or to the file's damage, has none, and a
+/// `/ColorSpace` that's damaged names none, as no resources do.
+#[test]
+fn res_cx_counts_named_spaces_as_the_family_does() {
+    use crate::pdf::content::ResCx as Spaces;
+    // 1: an ICC profile of 4 components; 2: a gray space; 3: what doesn't
+    // parse; 4: the spaces.
+    let objects = [
+        Object::from(Stream::new(dictionary! { "N" => 4i64 }, Vec::new())),
+        Object::name("DeviceGray"),
+        Object::from(dictionary! { "Broken" => 1i64 }),
+        Object::from(dictionary! {
+            "Gray" => id(2),
+            "Icc" => vec![Object::name("ICCBased"), id(1).into()],
+            "Pat" => vec![Object::name("Pattern"), Object::name("DeviceRGB")],
+            "PatGray" => vec![Object::name("Pattern"), id(2).into()],
+            "N2" => vec![
+                Object::name("DeviceN"),
+                vec![Object::name("a"), Object::name("b")].into(),
+                Object::name("DeviceRGB"),
+            ],
+            "Gone" => id(999),
+            "Bad" => id(3),
+        }),
+    ];
+    let pdf = source(&objects, b"Broken");
+    let lim = Limits::DEFAULT;
+    let read = |spaces: ObjectId| {
+        let resources = Object::from(dictionary! { "ColorSpace" => spaces });
+        res_cx(&pdf, Some(&resources), &lim).unwrap()
+    };
+    let want: [(&[u8], u32); 5] = [
+        (b"Gray", 1),
+        (b"Icc", 4),
+        (b"Pat", 4),
+        (b"PatGray", 2),
+        (b"N2", 3),
+    ];
+    assert_eq!(read(id(4)), Spaces::new(want.map(|(n, c)| (n.to_vec(), c))));
+    assert_eq!(read(id(3)), Spaces::none());
+    assert_eq!(res_cx(&pdf, None, &lim).unwrap(), Spaces::none());
+}
+
+/// A document in memory whose object `failing` fails to read with the
+/// error `error` makes; every other object as the document has it.
+pub(in crate::content) struct Failing<'a> {
+    pub(in crate::content) doc: &'a Document,
+    pub(in crate::content) failing: ObjectId,
+    pub(in crate::content) error: fn() -> crate::pdf::Error,
+}
+
+impl ReadObjects for Failing<'_> {
+    fn object(&self, id: ObjectId) -> crate::pdf::Result<&Object> {
+        match id == self.failing {
+            true => Err((self.error)()),
+            false => ReadObjects::object(self.doc, id),
+        }
+    }
+
+    fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> crate::pdf::Result<R> {
+        self.object(id).map(read)
+    }
+
+    fn peek(&self, id: ObjectId) -> crate::pdf::Result<Option<Cow<'_, Object>>> {
+        match id == self.failing {
+            true => Err((self.error)()),
+            false => ReadObjects::peek(self.doc, id),
+        }
+    }
+}
+
+/// A space that doesn't read for a reason that isn't the file's damage,
+/// the source's I/O, a password or the reader's cap, fails the color
+/// spaces content is read with ([`res_cx`]), whole, with its reason; one
+/// that's damaged isn't there, and the rest are read.
+#[test]
+fn res_cx_fails_where_a_space_doesn_t_read_but_for_damage() {
+    use crate::pdf::Error as E;
+    use crate::pdf::content::ResCx as Spaces;
+    let mut doc = Document::new();
+    let gray = doc.add_object(Object::name("DeviceGray"));
+    let resources = Object::from(dictionary! {
+        "ColorSpace" => dictionary! { "G" => gray, "R" => Object::name("DeviceRGB") },
+    });
+    let lim = Limits::DEFAULT;
+    let read = |error: fn() -> E| {
+        let failing = Failing {
+            doc: &doc,
+            failing: gray,
+            error,
+        };
+        res_cx(&failing, Some(&resources), &lim).map_err(|e| (e.id, e.why))
+    };
+    assert_eq!(
+        read(|| E::IO(std::io::Error::other("gone"))),
+        Err((gray, Why::Source))
+    );
+    assert_eq!(read(|| E::InvalidPassword), Err((gray, Why::Locked)));
+    assert_eq!(read(|| E::ReferenceLimit), Err((gray, Why::Capped)));
+    let rgb = Spaces::new([(b"R".to_vec(), 3)]);
+    assert_eq!(read(|| E::Syntax("bad".into())), Ok(rgb));
+    let both = Spaces::new([(b"G".to_vec(), 1), (b"R".to_vec(), 3)]);
+    assert_eq!(res_cx(&doc, Some(&resources), &lim), Ok(both));
+}
+
+/// The property lists content's marked ranges are read with
+/// ([`properties`]): a page's or a form's `/Properties`, it and each list
+/// behind a reference too. A list that isn't a dictionary, or that doesn't
+/// read, is none, as every one is where `/Properties` isn't a dictionary.
+#[test]
+fn properties_are_the_lists_the_resources_name() {
+    let mut doc = Document::new();
+    let header = dictionary! { "Subtype" => Object::name("Header") };
+    let ocg = dictionary! { "Type" => Object::name("OCG") };
+    let oc1 = doc.add_object(ocg.clone());
+    let lists = doc.add_object(dictionary! {
+        "P0" => header.clone(),
+        "oc1" => oc1,
+        "Num" => 7i64,
+        "Gone" => id(999),
+    });
+    let resources = Object::from(dictionary! { "Properties" => lists });
+    let read = properties(&doc, Some(&resources));
+    assert_eq!(read.get(b"P0"), Some(&header));
+    assert_eq!(read.get(b"oc1"), Some(&ocg));
+    assert_eq!(read.get(b"Num"), None);
+    assert_eq!(read.get(b"Gone"), None);
+    assert_eq!(read.lists().count(), 2);
+    let not = Object::from(dictionary! { "Properties" => 7i64 });
+    assert_eq!(properties(&doc, Some(&not)).lists().count(), 0);
+    assert_eq!(properties(&doc, None).lists().count(), 0);
 }

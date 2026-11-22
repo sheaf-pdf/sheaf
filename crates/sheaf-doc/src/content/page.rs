@@ -1,10 +1,10 @@
 //! A page's content as one: the logical concatenation of its `/Contents`
 //! streams. A marked range or a `q` may open in one stream and close in
-//! the next, so a page's streams are lexed as PDFium reads them, joined
+//! the next, so a page's streams are read as PDFium reads them, joined
 //! with a space between each ([`Concat`]), and what's found is mapped back
 //! to a stream and a place in it ([`Pos`], [`SpanAcross`]). Those three
 //! are pdf-content-streams', as is the join a page's streams are read
-//! into.
+//! into, and the tokens they're read by.
 //!
 //! [`PageContent`] reads the streams through [`ReadObjects`]: a source,
 //! which reads each without keeping it, or a document in memory (the old
@@ -18,14 +18,13 @@ use std::borrow::Cow;
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 
-use crate::pdf::content::Join;
 pub use crate::pdf::content::{Concat, Pos, SpanAcross};
+use crate::pdf::content::{Join, Properties, ResCx, SyntaxError};
 use crate::pdf::{
     Dictionary, LazyPdf, Object, ObjectId, Resolve, Stream, StreamExt, Streams, Unreadable, Value,
     Why,
 };
 
-use super::lex::{self, LexError, ResCx};
 use crate::source::Limits;
 
 /// What a page's content is read from: a source, or a document in memory.
@@ -36,8 +35,8 @@ pub trait ReadObjects {
     fn object(&self, id: ObjectId) -> crate::pdf::Result<&Object>;
 
     /// Object `id`, its references followed, handed to `read`; a source
-    /// reads it without keeping it: a page's streams, each read once to
-    /// lex.
+    /// reads it without keeping it: a page's streams, each read once for
+    /// its tokens.
     fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> crate::pdf::Result<R>;
 
     /// Object `id`, its references followed as [`object`] follows them:
@@ -291,9 +290,23 @@ pub enum ContentFault {
     },
     #[error("its streams decode to more than {0} bytes")]
     TooLarge(usize),
+    /// Its tokens stop, or its marked content doesn't balance:
     /// `error`'s offset is into `stream`.
     #[error("stream {} {} R: {error}", .stream.number, .stream.generation)]
-    Lex { stream: ObjectId, error: LexError },
+    Syntax {
+        stream: ObjectId,
+        error: SyntaxError,
+    },
+    /// What of its resources it's read with ([`res_cx`]) doesn't read,
+    /// for a reason that isn't the file's damage: the source's I/O, a
+    /// password, a cap.
+    #[error(
+        "object {} {} R of its resources can't be read: {}",
+        .0.id.number,
+        .0.id.generation,
+        .0
+    )]
+    Resources(Unreadable),
 }
 
 /// A page's content: its streams, decoded, as one.
@@ -387,17 +400,17 @@ impl PageContent {
         self.concat.bytes().to_vec()
     }
 
-    /// The fault `error`, from lexing [`PageContent::concat`], is: in
+    /// The fault `error`, from reading [`PageContent::concat`], is: in
     /// which stream, and where in it.
-    pub fn fault(&self, error: LexError) -> ContentFault {
+    pub fn fault(&self, error: SyntaxError) -> ContentFault {
         let pos = self.concat.pos(error.at);
-        ContentFault::Lex {
+        ContentFault::Syntax {
             stream: self
                 .ids
                 .get(pos.stream as usize)
                 .copied()
                 .unwrap_or(ObjectId::new(0, 0)),
-            error: LexError {
+            error: SyntaxError {
                 at: pos.at as usize,
                 ..error
             },
@@ -425,51 +438,55 @@ pub fn contents(page: &Dictionary) -> Vec<ObjectId> {
     }
 }
 
-impl ResCx {
-    /// The named color spaces of `resources`, a page's or a form's
-    /// `/Resources` as written.
-    pub fn read(objects: &impl ReadObjects, resources: Option<&Object>) -> ResCx {
-        let spaces = resources
-            .and_then(|r| direct(objects, r))
-            .and_then(Object::as_dict)
-            .and_then(|r| direct(objects, r.get(b"ColorSpace")?))
-            .and_then(Object::as_dict);
-        ResCx::new(spaces.into_iter().flat_map(|spaces| {
-            spaces
-                .iter()
-                .map(|(name, space)| (name.to_vec(), components(objects, space)))
-        }))
-    }
+/// The color spaces `resources` names, a page's or a form's `/Resources`
+/// as written, each with its components as pdf-content-streams counts
+/// them, as PDFium does ([`ResCx::read`]), read from `objects` through
+/// [`Objects`] under `lim`'s content caps
+/// ([`ContentLimits::family`](crate::source::ContentLimits::family)), with
+/// what the source doesn't keep held for this call alone. An object that's
+/// the file's damage isn't there; one that doesn't read for any other
+/// reason (the source's I/O, a password, a cap) is the `Err`.
+///
+/// # Errors
+///
+/// [`Unreadable`] where an object of the dictionary or a space it names
+/// doesn't read, but for the file's damage ([`Why::Damaged`]).
+pub fn res_cx(
+    objects: &impl ReadObjects,
+    resources: Option<&Object>,
+    lim: &Limits,
+) -> Result<ResCx, Unreadable> {
+    let unkept = Unkept::default();
+    ResCx::read(
+        Objects::new(objects, &unkept),
+        resources,
+        &lim.content.family(),
+    )
 }
 
-/// The components a color space in the resources has, as PDFium counts
-/// them, 3 where it can't make one out.
-fn components(objects: &impl ReadObjects, space: &Object) -> u32 {
-    let direct = |o| direct(objects, o);
-    let Some(space) = direct(space) else {
-        return 3;
-    };
-    let parts = match space.value() {
-        Value::Name(family) => return lex::family_components(family.as_bytes()),
-        Value::Array(parts) => parts,
-        _ => return 3,
-    };
-    let family = parts.first().and_then(direct).and_then(Object::as_name);
-    let second = || parts.get(1).and_then(direct);
-    match family {
-        Some(b"ICCBased") => second()
-            .and_then(Object::as_stream)
-            .and_then(|s| s.dict.get(b"N")?.as_integer())
-            .filter(|n| matches!(n, 1 | 3 | 4))
-            .map_or(3, |n| n as u32),
-        Some(b"DeviceN") => second()
-            .and_then(Object::as_array)
-            .map(|names| names.len() as u32)
-            .filter(|&n| n > 0)
-            .unwrap_or(3),
-        Some(family) => lex::family_components(family),
-        None => 3,
+/// The property lists `resources` names, a page's or a form's
+/// `/Properties`, each a dictionary, references followed, for
+/// pdf-content-streams' marked content to look a named list up in. A list,
+/// or the dictionary of them, that doesn't read or isn't a dictionary is
+/// none.
+pub fn properties(objects: &impl ReadObjects, resources: Option<&Object>) -> Properties {
+    fn plain_dict(o: &Object) -> Option<&Dictionary> {
+        match o.value() {
+            Value::Dict(d) => Some(d),
+            _ => None,
+        }
     }
+    let direct = |o| direct(objects, o);
+    let lists = resources
+        .and_then(direct)
+        .and_then(plain_dict)
+        .and_then(|r| direct(r.get(b"Properties")?))
+        .and_then(plain_dict);
+    Properties::new(
+        (lists.into_iter())
+            .flat_map(|lists| lists.iter())
+            .filter_map(|(name, list)| Some((name.to_vec(), plain_dict(direct(list)?)?.clone()))),
+    )
 }
 
 /// `object`, or what the reference it is names.
@@ -481,4 +498,4 @@ pub(super) fn direct<'a>(objects: &'a impl ReadObjects, object: &'a Object) -> O
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
