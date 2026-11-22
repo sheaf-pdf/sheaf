@@ -243,7 +243,7 @@ fn replies_statuses_and_replacements_keep_their_threads() {
     ];
     let unkept = Unkept::default();
     let read: Vec<annots::Annot<'_>> = (all.iter())
-        .map(|d| annots::read(&pdf, &unkept, d, None).unwrap())
+        .map(|d| crate::source::annots::read(&pdf, &unkept, d, None).unwrap())
         .collect();
     let out = convert_page(&pdf, &read, Rotation::R0, Options::default());
     match &out[0] {

@@ -25,9 +25,9 @@ use crate::content::Unkept;
 use crate::file::thread_name;
 use crate::import::{Interned, NotAMark, Options};
 use crate::model::{DocState, FormRef, PageId, Snapshot};
-use crate::pdf::annots;
 use crate::prim::Key;
 use crate::serialize::built::{Built, WriteCx};
+use crate::source::annots;
 use crate::store::{Blob, BlobId, BlobKind, Src, Store};
 use crate::tx::{Grant, Tx};
 

@@ -24,7 +24,7 @@ use crate::pdf::annots::{self, SynthesizedAp};
 use crate::pdf::{Dictionary, Object, ObjectId, Value};
 use crate::serialize::built::{Held, StampForm};
 use crate::source::ObjRef;
-use crate::source::showing::{AnnotAt, showing};
+use crate::source::showing::{AnnotAt, appearing, showing};
 use crate::store::{BlobKind, Src, Store};
 
 /// Where [`annots_dump`] writes: a path. Unset, it reads nothing.
@@ -308,7 +308,9 @@ fn raw_rect<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<Box2> {
 /// on a unit box where there's no rect, the placement then `-`), or
 /// `.frame=-` where the family places it on none. `shows=-` where there's
 /// no dictionary, and `shows=refused:` with why where the family refuses
-/// it.
+/// it. Its appearances read alone, as a flatten reads a widget's
+/// ([`appearing`]), show the same state and forms, or the line says
+/// otherwise (`alone=`: what they show, or `refused:` with why).
 fn flatten_fields(
     line: &mut Line,
     src: &Src,
@@ -331,8 +333,19 @@ fn flatten_fields(
             slot: at.1,
         },
     };
-    let read = showing(place, |s| {
-        line.field("flags", &s.flags().to_string());
+    type Shown = (Option<Vec<u8>>, Option<ObjRef>, Option<ObjRef>);
+    let shown = |s: &crate::source::showing::Showing<'_>| -> Shown {
+        let state = s.state();
+        (
+            state.map(<[u8]>::to_vec),
+            s.form(state, true),
+            s.form(state, false),
+        )
+    };
+    let mut whole = None;
+    let read = showing(place, |flags, s| {
+        whole = Some(shown(s));
+        line.field("flags", &flags.to_string());
         let state = s.state();
         match state {
             Some(state) => line.field("state", &name_of(state)),
@@ -371,6 +384,19 @@ fn flatten_fields(
         None => line.field("shows", "-"),
         Some(Err(why)) => line.field("shows", &format!("refused:{}", escaped(&why.to_string()))),
         Some(Ok(())) => {}
+    }
+    match appearing(place, shown) {
+        Some(Ok(alone)) if whole.as_ref() != Some(&alone) => {
+            let (state, by_value, by_state) = alone;
+            let id = |form: Option<ObjRef>| id_of(form.map(|f| f.id));
+            let state = state.map_or("-".into(), |s| name_of(&s));
+            line.field(
+                "alone",
+                &format!("{state},{},{}", id(by_value), id(by_state)),
+            );
+        }
+        Some(Err(why)) => line.field("alone", &format!("refused:{}", escaped(&why.to_string()))),
+        Some(Ok(_)) | None => {}
     }
 }
 
@@ -424,8 +450,10 @@ fn lines_of(path: &str, src: &Src, full: bool) -> Vec<String> {
     let pdf = src.pdf();
     let pages = src.pages();
     let turned = pages.iter().map(|p| (p.id, p.geom.rotate));
-    let walked = walk(pdf, turned);
-    let (found, refused) = (walked.found, walked.refused);
+    let mut refused = HashMap::new();
+    let found = walk(pdf, turned, |page, slot, why| {
+        refused.insert((page, slot), why);
+    });
     let mut lines = Vec::new();
     let mut counts: [usize; 4] = [0; 4];
     for (index, page) in pages.iter().enumerate() {
@@ -450,7 +478,9 @@ fn lines_of(path: &str, src: &Src, full: bool) -> Vec<String> {
             .collect();
         let unkept = Unkept::default();
         let read: Vec<annots::Annot<'_>> = (dicts.iter())
-            .map(|&(id, d)| annots::read(pdf, &unkept, d, id).expect("listed, so it reads"))
+            .map(|&(id, d)| {
+                crate::source::annots::read(pdf, &unkept, d, id).expect("listed, so it reads")
+            })
             .collect();
         let converted = convert_page(pdf, &read, page.geom.rotate, Default::default());
         let converted: HashMap<usize, &Result<Annot, NotAMark>> =

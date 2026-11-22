@@ -2,13 +2,13 @@
 //!
 //! **Reading.** An annotation as the family reads it ([`Annot`], and what
 //! it is by its subtype, [`TypedAnnot`]), each dictionary read alone by
-//! [`read`] under PDFium's rules and sheaf's caps ([`limits`]), from a
-//! source's objects as sheaf reads an annotation's parts: what the source
-//! keeps lent from it, a stream's dictionary held by an [`Unkept`] of the
-//! caller's and its data never read, and an object that doesn't read
-//! absent. What a flatten draws of one is the form its appearances
-//! ([`Annot::appearances`]) name, placed on its box by the family's
-//! placement ([`placement`]).
+//! [`read`] under PDFium's rules, or its appearances alone
+//! ([`appearances`]: `/AP` and `/AS` and nothing else of it, so no cap on
+//! the rest can refuse them). What a flatten draws of one is the form its
+//! appearances ([`Appearances`]) name, placed on its box by the family's
+//! placement ([`placement`]). These take any resolver of the family's and
+//! the caps to read under; which objects of a source they read, and
+//! sheaf's caps, are `crate::source::annots`.
 //!
 //! **Appearances.** An appearance as the parts of the form XObject that
 //! holds it ([`SynthesizedAp`]: its box, its matrix, its content and what
@@ -29,13 +29,13 @@
 //! dictionary (`plan_flatten`) aren't used.
 
 use super::gfx::{Matrix, Rect};
-use crate::content::{Objects, ReadObjects, Unkept};
-use crate::pdf::{Dictionary, Object, ObjectId, Resolve};
+use crate::pdf::{Dictionary, ObjectId, Resolve};
 
 pub use pdf_annots::{
-    Annot, AnnotColor, AnnotFlags, AnnotSubtype, AppearanceEntry, AttachmentIcon, BorderStyle,
-    Error, FileAttachmentAnnot, FreeTextIntent, Limits, LineEnding, LineIntent, PolyIntent,
-    PolyKind, ReplyKind, ShapeKind, StampName, SynthesizedAp, TextMarkupKind, TypedAnnot,
+    Annot, AnnotColor, AnnotFlags, AnnotSubtype, AppearanceEntry, Appearances, AttachmentIcon,
+    BorderStyle, Error, FileAttachmentAnnot, FreeTextIntent, Limits, LineEnding, LineIntent,
+    PolyIntent, PolyKind, ReplyKind, ShapeKind, StampName, SynthesizedAp, TextMarkupKind,
+    TypedAnnot,
 };
 
 /// The appearances the family draws of sheaf's marks (`synth_*`), in place
@@ -49,73 +49,49 @@ pub use pdf_annots::{
     synth_shape, synth_text_markup,
 };
 
-/// The caps an annotation is read under: the family's, but for the ones
-/// sheaf has none of (a page's annotations, a markup's quadrilaterals, a
-/// path's points), past reach, and references followed as deep as
-/// sheaf's reader follows them. What's left of the family's own (a `/DA`'s
-/// tokens, an action chain, a destination's name tree) refuses an
-/// annotation past it.
-pub fn limits() -> Limits {
-    let mut limits = Limits::DEFAULT;
-    limits.hops = crate::source::Limits::DEFAULT.reader.max_depth;
-    limits.annots_per_page = usize::MAX;
-    limits.quads = usize::MAX;
-    limits.points = usize::MAX;
-    limits
-}
+/// The rules sheaf reads an annotation under: PDFium's, the page view's
+/// engine.
+const RULES: pdf_objects::pdf_tokenizer::Rules = pdf_objects::pdf_tokenizer::Rules::Pdfium;
 
-/// A source's objects as an annotation's parts are read from them:
-/// [`Objects`]' (what the source keeps lent from it, a stream's dictionary
-/// held by the caller's [`Unkept`], its data unread), and one that doesn't
-/// read, whatever the reason, absent, as sheaf has always read an
-/// annotation's parts.
-struct Parts<'a, R: ?Sized>(Objects<'a, R>);
-
-impl<R: ?Sized> Clone for Parts<'_, R> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<R: ?Sized> Copy for Parts<'_, R> {}
-
-impl<'a, R: ReadObjects + ?Sized> Resolve<'a> for Parts<'a, R> {
-    fn resolve(&self, id: ObjectId) -> Option<&'a Object> {
-        self.0.resolve(id)
-    }
-}
-
-/// Annotation `dict` of `source`, object `id` (None for one written in a
-/// page's `/Annots`), as the family reads it under PDFium's rules and
-/// [`limits`], each stream it reads held by `unkept`: an error where what
-/// it reads is past one of the family's caps it keeps, or a string it
-/// reads is still encrypted.
-pub fn read<'o, R: ReadObjects + ?Sized>(
-    source: &'o R,
-    unkept: &'o Unkept,
+/// Annotation `dict`, object `id` (None for one written in a page's
+/// `/Annots`), as the family reads it whole from `objects` under PDFium's
+/// rules and `limits`: an error where what it reads is past one of the
+/// caps, or a string it reads is still encrypted.
+pub fn read<'o, R: Resolve<'o>>(
+    objects: R,
     dict: &'o Dictionary,
     id: Option<ObjectId>,
+    limits: &Limits,
 ) -> Result<Annot<'o>, Error> {
-    let parts = Parts(Objects::new(source, unkept));
-    let rules = pdf_objects::pdf_tokenizer::Rules::Pdfium;
-    Annot::from_dict_with(parts, dict, id, rules, &limits(), &mut ())
+    Annot::from_dict_with(objects, dict, id, RULES, limits, &mut ())
 }
 
-/// Form `form` of `source`, an annotation's appearance, placed on `rect`
-/// as ISO 32000-2 §12.5.5 places one, by the family's reading
-/// (`stream_placement_matrix`, under PDFium's rules and [`limits`]), what
-/// it reads held by `unkept` as [`read`] holds it: the form's `/BBox`, its
-/// `/Matrix` (the identity where it has none), and the matrix that takes
-/// the box the second makes of the first onto `rect`. None where it isn't
-/// a form with a box, or that box has no area.
-pub fn placement<'o, R: ReadObjects + ?Sized>(
-    source: &'o R,
-    unkept: &'o Unkept,
+/// Annotation `dict`'s appearances alone (`/AP` and `/AS`), as [`read`]
+/// reads them with the rest: none where it has neither. Nothing else of
+/// the annotation is read, so only an object that can't be read is an
+/// error.
+pub fn appearances<'o, R: Resolve<'o>>(
+    objects: R,
+    dict: &'o Dictionary,
+    id: Option<ObjectId>,
+    limits: &Limits,
+) -> Result<Option<Appearances>, Error> {
+    Appearances::read(objects, dict, id, RULES, limits)
+}
+
+/// Form `form`, an annotation's appearance, placed on `rect` as ISO
+/// 32000-2 §12.5.5 places one, by the family's reading
+/// (`stream_placement_matrix`, under PDFium's rules and `limits`): the
+/// form's `/BBox`, its `/Matrix` (the identity where it has none), and the
+/// matrix that takes the box the second makes of the first onto `rect`.
+/// None where it isn't a form with a box, or that box has no area.
+pub fn placement<'o, R: Resolve<'o>>(
+    objects: R,
     form: ObjectId,
     rect: Rect,
+    limits: &Limits,
 ) -> Option<(Rect, Matrix, Matrix)> {
-    let parts = Parts(Objects::new(source, unkept));
-    pdf_annots::stream_placement_matrix(parts, form, rect, &limits())
+    pdf_annots::stream_placement_matrix(objects, form, rect, limits)
         .ok()
         .flatten()
 }

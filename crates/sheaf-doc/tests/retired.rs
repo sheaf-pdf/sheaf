@@ -1223,7 +1223,7 @@ const RETIRED_M18: &[(&str, u8)] = &[
     // (`pdf::annots::SynthesizedAp`), and its form is made from its parts
     // (`content::sink::form`), as any appearance's is.
     ("annot::Appearance", 24),
-    // Another tool's annotation is read by pdf-annots (`pdf::annots::read`)
+    // Another tool's annotation is read by pdf-annots (`source::annots::read`)
     // and made a mark from what it read (`import::convert_page`): sheaf's
     // own readers of its keys went, a stamp's form is `import::normal_form`
     // and a dimension is the family's `/IT`. The `/Subtype` a data format
@@ -1248,7 +1248,7 @@ const RETIRED_M18: &[(&str, u8)] = &[
     // What a flatten reads of an annotation is pdf-annots' reading of it
     // (`source::showing`: its flags, and the form its appearances name in
     // the state sheaf's rule picks), placed by the family's placement
-    // (`pdf::annots::placement`), over objects read for it and kept
+    // (`source::annots::placement`), over objects read for it and kept
     // nowhere: sheaf's own reader of its keys and of a form's frame went.
     ("source::appearance::Shows", 24),
     ("source::appearance::Shows::read", 24),

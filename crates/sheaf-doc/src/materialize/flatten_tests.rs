@@ -394,6 +394,49 @@ fn a_comment_with_states_draws_the_one_pdfium_shows() {
     assert_eq!(forms, want);
 }
 
+/// A widget whose chain of actions is past the cap pdf-annots refuses an
+/// annotation at is flattened as any other: a flatten reads its
+/// appearances alone, so it draws the state it names and goes. Another
+/// tool's comment refused for the same chain isn't listed by the open
+/// (which says so in the log), so a flatten leaves it as the page has it.
+#[test]
+fn a_cap_on_a_widgets_actions_costs_its_flatten_nothing() {
+    let mut f = Form::new(1);
+    let page = f.pages[0];
+    let on = f.check_box("On", 0, [72.0, 600.0, 92.0, 620.0], true);
+    let chain = crate::source::showing::tests::long_chain(&mut f.pdf);
+    f.dict(on).set("A", chain);
+    let n = f.pdf.add_object(Stream::new(
+        dictionary! {
+            "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"),
+            "BBox" => vec![0.into(), 0.into(), 50.into(), 25.into()],
+        },
+        b"0 0 1 rg 0 0 50 25 re f".to_vec(),
+    ));
+    let square = f.pdf.add_object(dictionary! {
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Square"), "P" => page, "F" => 4,
+        "Rect" => vec![72.into(), 400.into(), 172.into(), 450.into()],
+        "AA" => dictionary! { "E" => chain },
+        "AP" => dictionary! { "N" => n },
+    });
+    let mut annots = f.annots(0);
+    annots.push(square);
+    f.set_annots(0, &annots);
+    let bytes = f.bytes();
+    let dir = scratch();
+    let (_, mut doc) = opened(&dir, "a.pdf", &bytes);
+    let p0 = doc.page(0).unwrap();
+    // The open lists the widget, and not the comment it couldn't read.
+    assert_eq!(objects_on(&doc, p0), [Some(on)]);
+    doc.commit_ops(vec![fx::flatten(&[p0], FlattenSet::All)], "flatten")
+        .unwrap();
+    assert_eq!(objects_on(&doc, p0), []);
+    let pdf = Pdf::load_mem(&bytes).unwrap();
+    let forms: Vec<Option<ObjectId>> = placements(&doc, p0).iter().map(base).collect();
+    assert_eq!(forms, [Some(appearance(&pdf, on, Some(b"Yes")))]);
+    assert!(!forms.contains(&Some(n)));
+}
+
 /// Undone, the annotations are back and the page draws nothing over it;
 /// done again, the same state.
 #[test]

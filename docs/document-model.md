@@ -1393,8 +1393,9 @@ What stays sheaf's is said below, each with why.
   replacement's StrikeOut by `is_ours`), so none of sheaf's marks reaches
   the family's reader. An entry whose `/Subtype` is a name the open never
   lists (a widget, a pop-up, media) isn't read. Every other entry is read
-  alone by `pdf::annots::read` (`Annot::from_dict_with`, PDFium's rules,
-  `limits()`: the family's caps, but a page's annotations, a markup's
+  alone by `source::annots::read` (the door's `pdf::annots::read`,
+  `Annot::from_dict_with` under PDFium's rules, over a source's objects
+  and `limits()`: the family's caps, but a page's annotations, a markup's
   quads and a path's points past reach and references followed to the
   reader's depth), its parts through `content::Objects` with an `Unkept`
   per page (what the source keeps lent, a stream's dictionary held until
@@ -1404,7 +1405,9 @@ What stays sheaf's is said below, each with why.
   logged; no corpus annotation is. `ForeignAnnot` is filled from the
   family's `Annot`, and `import::convert_page` makes each comment's mark
   from its `TypedAnnot`. FDF and XFDF (`exchange`) read their comments
-  the same way. The family's `page_annots` isn't the walk: it decodes
+  the same way; what they write isn't a reading of the annotation (an FDF
+  holds each dictionary as it is, and `exchange::xfdf::write` gives each
+  key of it XFDF's name, the key read as written). The family's `page_annots` isn't the walk: it decodes
   every entry (sheaf's 20,000 marks on the 7k gate's file among them) and
   ends a page at one annotation's error. The heavy 7k's walk (7,000
   widgets) is 137 ms (111 before), its open's peak RSS 242 MB as before.
@@ -1486,11 +1489,18 @@ What stays sheaf's is said below, each with why.
   both ways alike), and a page of every kind draws with three graphics
   states, not two.
 - **Flattening.** What a flatten draws of another tool's comment or a
-  widget is read in `source::showing`: its dictionary by
-  `pdf::annots::read`, its flags, the state it names and the form its
-  appearances name in the state sheaf's rule picks (Flattening, under
-  Exports), placed by the family's placement (`pdf::annots::placement`,
-  ISO 32000-2 §12.5.5), every object read for it kept nowhere (`Fresh`,
+  widget is read in `source::showing`: a comment's dictionary whole by
+  `source::annots::read`, for its flags, the state it names and the form
+  its appearances name in the state sheaf's rule picks (Flattening, under
+  Exports); a widget's appearances alone (`source::annots::appearances`,
+  the family's `Appearances::read`: `/AP` and `/AS`, its flags and state
+  being its record's), so a cap on the rest of a widget (its actions, its
+  `/DA`) can't cost it its drawing. A comment with states and none named
+  shows the state its value names where the states have an entry of that
+  name, whatever the entry is (one that's no stream shows nothing, as
+  PDFium shows it), else `/Off`. Each form is placed by the family's
+  placement (`source::annots::placement`, ISO 32000-2 §12.5.5), every
+  object read for it kept nowhere (`Fresh`,
   the flatten's own objects over the source, which reads each unkept and
   notes where a chain of references ends, so a form is its stream's own
   object), dropped with what one annotation read. The family's

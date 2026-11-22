@@ -9,8 +9,8 @@
 //! digest) with their companions (`is_ours`), so none of them reaches
 //! another reader. Every other annotation (a stale mark of sheaf's too)
 //! is read by pdf-annots, one dictionary at a time, under
-//! PDFium's rules and sheaf's caps ([`annots::read`]; M18 slice 24), and
-//! listed ([`ForeignAnnot`]) and converted to the mark editing it makes
+//! PDFium's rules and sheaf's caps
+//! ([`crate::source::annots::read`]; M18 slice 24), and listed ([`ForeignAnnot`]) and converted to the mark editing it makes
 //! ([`import::convert_page`](crate::import::convert_page)) from what it
 //! read. What's never listed (a widget, a pop-up, media), by the subtype
 //! it's written with, isn't read; one pdf-annots refuses is passed over
@@ -457,30 +457,26 @@ fn is_listed_subtype(s: &[u8]) -> bool {
 /// is converted with, each mark with what it holds: its page stamp's page
 /// or its attachment's file. sheaf's marks and their companions are found
 /// on the entry as written (by its `/SHEF_Annot` and digest); every other
-/// annotation is read by `pdf-annots` ([`crate::pdf::annots::read`]),
+/// annotation is read by `pdf-annots` ([`crate::source::annots::read`]),
 /// listed and converted from what it read. One it can't read is passed
 /// over, and said in the log.
 pub fn annots_in<P: Objects + ReadObjects + ?Sized>(
     pdf: &P,
     pages: impl IntoIterator<Item = (ObjectId, Rotation)>,
 ) -> AnnotsInFile {
-    walk(pdf, pages).found
+    walk(pdf, pages, |page, slot, why| {
+        log::warn!("page {}, annotation {slot}: not read: {why}", page + 1);
+    })
 }
 
-/// What [`annots_in`] found, and each entry `pdf-annots` couldn't read,
-/// by its page's index and its slot, with why.
-#[derive(Debug, Default)]
-pub(crate) struct Walked {
-    pub(crate) found: AnnotsInFile,
-    pub(crate) refused: HashMap<(u32, usize), annots::Error>,
-}
-
-/// [`annots_in`], with what it passed over for want of reading it.
+/// [`annots_in`], each entry `pdf-annots` couldn't read given to
+/// `refused` as it's passed over: its page's index, its slot, and why.
 pub(crate) fn walk<P: Objects + ReadObjects + ?Sized>(
     pdf: &P,
     pages: impl IntoIterator<Item = (ObjectId, Rotation)>,
-) -> Walked {
-    let mut out = Walked::default();
+    mut refused: impl FnMut(u32, usize, annots::Error),
+) -> AnnotsInFile {
+    let mut out = AnnotsInFile::default();
     for (i, (page_id, turn)) in pages.into_iter().enumerate() {
         let Ok(page) = pdf.get_dictionary(page_id) else {
             continue;
@@ -536,11 +532,10 @@ pub(crate) fn walk<P: Objects + ReadObjects + ?Sized>(
             {
                 continue;
             }
-            let a = match annots::read(pdf, &unkept, dict, object) {
+            let a = match crate::source::annots::read(pdf, &unkept, dict, object) {
                 Ok(a) => a,
                 Err(why) => {
-                    log::warn!("page {}, annotation {slot}: not read: {why}", i + 1);
-                    out.refused.insert((i as u32, slot), why);
+                    refused(i as u32, slot, why);
                     continue;
                 }
             };
@@ -570,7 +565,7 @@ pub(crate) fn walk<P: Objects + ReadObjects + ?Sized>(
             }
         }
         if !found.is_empty() {
-            out.found.pages.insert(i as u32, found);
+            out.pages.insert(i as u32, found);
         }
     }
     out
@@ -784,6 +779,61 @@ mod tests {
         assert_eq!(found[1].parent.as_deref(), Some("p"));
         assert_eq!(found[2].state.as_ref().unwrap().0, "Review");
         assert!(found[3].grouped && !found[1].grouped);
+    }
+
+    /// An annotation pdf-annots refuses (a link whose chain of actions is
+    /// past the cap) is passed over and said, by its page and slot, with
+    /// why; the page's other entries are listed as ever, each in its own
+    /// slot.
+    #[test]
+    fn an_annotation_the_family_refuses_is_passed_over_alone() {
+        let mut pdf = crate::pdf::Document::with_version("1.7");
+        let pages_id = pdf.new_object_id();
+        let content = pdf.add_object(Stream::new(dictionary! {}, b"".to_vec()));
+        let rect = || Object::from(vec![10.into(), 10.into(), 20.into(), 20.into()]);
+        let note = pdf.add_object(dictionary! {
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "Rect" => rect(),
+        });
+        let chain = crate::source::showing::tests::long_chain(&mut pdf);
+        let link = pdf.add_object(dictionary! {
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"), "Rect" => rect(), "A" => chain,
+        });
+        let highlight = pdf.add_object(dictionary! {
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Highlight"), "Rect" => rect(),
+        });
+        let list: Vec<Object> = [note, link, highlight].map(Object::from).to_vec();
+        let page = pdf.add_object(dictionary! {
+            "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
+            "MediaBox" => Object::from(vec![0.into(), 0.into(), 612.into(), 792.into()]),
+            "Annots" => list,
+        });
+        pdf.objects.insert(
+            pages_id,
+            Object::from(
+                dictionary! { "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1 },
+            ),
+        );
+        let catalog =
+            pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
+        pdf.trailer.set("Root", catalog);
+
+        let mut refused = Vec::new();
+        let read = walk(&pdf, upright(&pdf), |page, slot, why| {
+            refused.push((page, slot, why.to_string()));
+        });
+        assert_eq!(
+            refused,
+            [(0, 1, "exceeded cap on chained actions".to_string())]
+        );
+        let listed: Vec<(usize, &str)> = (read.pages[&0].iter())
+            .map(|a| match &a.found {
+                Found::Foreign(f) => (a.slot, f.subtype.as_str()),
+                Found::Mark { .. } => (a.slot, "a mark"),
+            })
+            .collect();
+        assert_eq!(listed, [(0, "Text"), (2, "Highlight")]);
+        // The open's own walk lists the same.
+        assert_eq!(annots_in(&pdf, upright(&pdf)).foreign().len(), 2);
     }
 
     /// A mark this build can't read, a kind from a newer sheaf or a
