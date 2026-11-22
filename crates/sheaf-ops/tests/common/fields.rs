@@ -602,15 +602,21 @@ pub fn theirs(case: &Case) -> Vec<u8> {
 /// Page 0 of `engine` drawn as the page view draws it, its widgets by
 /// `FPDF_FFLDraw` and nothing else beside its content.
 pub fn live_in(engine: &PdfiumEngine) -> Raster {
+    live_at(engine, PageIndex(0), SIDE_PX).unwrap()
+}
+
+/// Page `page` of `engine` drawn [`live_in`]'s way, `width` pixels wide:
+/// drawing its widgets makes the appearance each lacks.
+pub fn live_at(engine: &PdfiumEngine, page: PageIndex, width: u32) -> anyhow::Result<Raster> {
     let job = Job::Page {
-        width: SIDE_PX,
+        width,
         rotation: Rotation::R0,
     };
     let draw = Draw {
         annots: false,
         forms: true,
     };
-    (engine.render_with(PageIndex(0), job, PixelFormat::Rgba, draw)).unwrap()
+    engine.render_with(page, job, PixelFormat::Rgba, draw)
 }
 
 /// Page 0 of `bytes`, appearances only, at [`SCALE`]: flattened by
@@ -628,16 +634,22 @@ pub fn draw(bytes: &[u8]) -> Raster {
 /// matrix is pdfium-render's fixed size, unscaled), so the flattened
 /// page's content is drawn again, no annotation beside it, at [`SCALE`].
 pub fn flat(engine: &PdfiumEngine, page: PageIndex) -> Raster {
-    engine.render_appearances(page, SIDE_PX).unwrap();
+    flat_at(engine, page, SIDE_PX).unwrap()
+}
+
+/// Page `page` of `engine` drawn [`flat`]'s way, `width` pixels wide. The
+/// flatten's own drawing is a pixel wide: it's thrown away.
+pub fn flat_at(engine: &PdfiumEngine, page: PageIndex, width: u32) -> anyhow::Result<Raster> {
+    engine.render_appearances(page, 1)?;
     let job = Job::Page {
-        width: SIDE_PX,
+        width,
         rotation: Rotation::R0,
     };
     let draw = Draw {
         annots: false,
         forms: false,
     };
-    (engine.render_with(page, job, PixelFormat::Rgba, draw)).unwrap()
+    engine.render_with(page, job, PixelFormat::Rgba, draw)
 }
 
 /// How many pixels inside `px` (left, top, right, bottom) differ between

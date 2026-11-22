@@ -54,6 +54,7 @@ use crate::forms::FormClass;
 use crate::forms::appearance::{self, FontAt, TextLook, text_look};
 use crate::forms::corpus::Corpus;
 use crate::forms::field::{self, Field, FieldKind};
+use crate::forms::fixture::sample;
 use crate::history::FixedCount;
 use crate::model::Document;
 use crate::pdf::content::{Color, Res, ResBody};
@@ -71,10 +72,6 @@ const DUMP: &str = "SHEAF_FIELDS_DUMP";
 /// A corpus path whose records [`fields_dump`] prints in full to stderr,
 /// reading that file alone: to set two runs beside each other.
 const DUMP_ONLY: &str = "SHEAF_FIELDS_DUMP_ONLY";
-
-/// The most cells a sample fills a field with a `/MaxLen` to: the
-/// family's cap on a comb field's cells.
-const SAMPLE_CELLS: u32 = 1024;
 
 /// The family's caps, as the dump reads with them: its own defaults, so
 /// its column is the family's reading alone.
@@ -243,32 +240,6 @@ fn id_of(id: Option<ObjectId>) -> String {
     match id {
         Some(id) => format!("{}.{}", id.number, id.generation),
         None => "-".to_string(),
-    }
-}
-
-/// The value a widget is made with: the field's own, at most `/MaxLen`
-/// characters of it where it has one; else the digits `1234567890` again
-/// and again to `/MaxLen` (at most [`SAMPLE_CELLS`]), for a field with
-/// one; else two lines, the second long enough to wrap, for a multiline
-/// field; else `Sample 123`. So a sample is never longer than `/MaxLen`,
-/// and a comb field's fills its cells.
-pub(crate) fn sample(own: &str, flags: u32, max_len: Option<u32>) -> String {
-    let max = max_len.filter(|&n| n > 0);
-    if !own.is_empty() {
-        return match max {
-            Some(n) => own.chars().take(n as usize).collect(),
-            None => own.to_string(),
-        };
-    }
-    match max {
-        Some(n) => (b"1234567890".iter().cycle())
-            .take(n.min(SAMPLE_CELLS) as usize)
-            .map(|&b| b as char)
-            .collect(),
-        None if flags & field::flags::MULTILINE != 0 => {
-            "First line\na second line long enough to wrap".into()
-        }
-        None => "Sample 123".into(),
     }
 }
 

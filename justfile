@@ -319,11 +319,12 @@ precommit: (_steps "precommit" "markers plan-check fmt-check locks corpus intero
 # the export tier, realize_corpus's pixels and predicate, PDFium's resave
 # of a watermark, content's tokens and the content interpreter against
 # PDFium, codes over scans/, Arlington over what sheaf writes, and the
-# size of an unsigned Save As beside qpdf's). Two hours or more, the
-# interpreter's tiers about one of them.
+# size of an unsigned Save As beside qpdf's, and every text field's
+# appearance beside PDFium's). Two hours or more, the interpreter's tiers
+# about one of them.
 [doc("Before a PR merges: every ignored corpus tier (two hours or more)")]
 [group('local')]
-premerge: (_steps "premerge" "tier-append tier-exports tier-realize tier-watermark tier-lexer tier-interp tier-codes tier-arlington tier-size _corpus-ran")
+premerge: (_steps "premerge" "tier-append tier-exports tier-realize tier-watermark tier-lexer tier-interp tier-codes tier-arlington tier-size tier-fields _corpus-ran")
 
 [doc("The plan agrees with itself: tables against files, status lines, links, size budgets (AGENTS.md)")]
 [group('local')]
@@ -411,6 +412,17 @@ tier-size:
 [group('corpus')]
 tier-realize:
     scripts/test-capped.sh cargo test -p sheaf-ops --test realize_corpus -- --ignored --nocapture
+
+# Every corpus form's text fields filled (M10 slice 6): each widget's
+# appearance made or unmade by a kind, an overlay's forms the save's, and
+# each made one drawn as PDFium draws its own for the same value, inside
+# its box, or a row of a class whose count the test holds. In release;
+# SHEAF_FIELDS_ONLY=<paths, comma-separated> narrows it, its counts then
+# printed, not held.
+[doc("Every corpus text field filled: its appearance beside PDFium's, each difference classed (SHEAF_FIELDS_ONLY narrows it)")]
+[group('corpus')]
+tier-fields:
+    scripts/test-capped.sh cargo test -p sheaf-ops --release --test fields_corpus -- --ignored --nocapture
 
 # PDFium's resave of a watermark.
 [group('corpus')]

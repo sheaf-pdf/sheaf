@@ -33,6 +33,7 @@ use sheaf_edit::Rotation;
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Pt};
 use crate::model::{FormRef, Mark};
+use crate::serialize::crypt::Crypt;
 use crate::store::{Blob, BlobKind, Src, Store, blob_id};
 
 /// A rectangle in page space: left, bottom, right, top.
@@ -1711,19 +1712,41 @@ pub fn every_mark_kind() -> Vec<Annot> {
 }
 
 /// `bytes` with an incremental update appended: `change` edits a copy of
-/// each object in `ids` (and anything it adds) in the new revision.
+/// each object in `ids` (and anything it adds) in the new revision, which
+/// is encrypted as the file is, its AES IVs derived (`Crypt::with_test_ivs`)
+/// so the same file and change make the same bytes, run to run. Panics
+/// where [`try_append_revision`] fails.
 pub fn append_revision(bytes: &[u8], ids: &[ObjectId], change: impl FnOnce(&mut Pdf)) -> Vec<u8> {
-    let src = source(bytes.to_vec());
-    let mut base = crate::serialize::append::Base::over(&src).expect("the previous revision");
-    let prev = Pdf::load_mem(bytes).expect("the previous revision");
+    try_append_revision(bytes, ids, change).expect("an update appended")
+}
+
+/// [`append_revision`], or why the file takes none: it doesn't open (an
+/// encrypted one opens with the empty user password), its trailer names no
+/// catalog, an object of `ids` isn't in it, or the update can't be
+/// written.
+pub fn try_append_revision(
+    bytes: &[u8],
+    ids: &[ObjectId],
+    change: impl FnOnce(&mut Pdf),
+) -> anyhow::Result<Vec<u8>> {
+    use anyhow::Context as _;
+
+    let kind = BlobKind::file(Path::new("form.pdf"), None);
+    let src = (Store::new().open(bytes.to_vec().into(), kind)).context("the previous revision")?;
+    let mut base = (crate::serialize::append::Base::over(&src))
+        .context("the previous revision's trailer names no catalog")?;
+    let prev = Pdf::load_mem(bytes).context("the previous revision")?;
     let mut next = Pdf::with_version(prev.version.clone());
     next.trailer = prev.trailer.clone();
     next.max_id = base.size.saturating_sub(1);
     for &id in ids {
-        let obj = prev
-            .objects
-            .get(&id)
-            .expect("an object in the previous revision")
+        let obj = (prev.objects.get(&id))
+            .with_context(|| {
+                format!(
+                    "object {} {} in the previous revision",
+                    id.number, id.generation
+                )
+            })?
             .clone();
         next.objects.insert(id, obj);
     }
@@ -1740,15 +1763,49 @@ pub fn append_revision(bytes: &[u8], ids: &[ObjectId], change: impl FnOnce(&mut 
         .keys()
         .last()
         .map_or(base.size, |id| id.number.saturating_add(1).max(base.size));
-    let Some(update) = crate::serialize::append::section(&base, &objects, xref_number, None)
-        .expect("writing the update")
-    else {
-        return bytes.to_vec();
+    let crypt = src.crypt().map(|c| Crypt::clone(c).with_test_ivs());
+    let update = crate::serialize::append::section(&base, &objects, xref_number, crypt.as_ref())
+        .context("writing the update")?;
+    let Some(update) = update else {
+        return Ok(bytes.to_vec());
     };
     let mut out = bytes.to_vec();
     out.extend_from_slice(&update.bytes);
-    out
+    Ok(out)
 }
+
+/// The value the corpus's text fields are filled with where a check sets
+/// one of each (the fields dump, the corpus tier of text field
+/// appearances): the field's own, at most `/MaxLen` characters of it where
+/// it has one; else the digits `1234567890` again and again to `/MaxLen`
+/// (at most [`SAMPLE_CELLS`]), for a field with one; else two lines, the
+/// second long enough to wrap, for a multiline field; else `Sample 123`.
+/// So a sample is never empty, never longer than `/MaxLen` (where PDFium
+/// cuts any field's text), and a comb field's fills its cells. `flags` is
+/// the field's `/Ff`.
+pub fn sample(own: &str, flags: u32, max_len: Option<u32>) -> String {
+    let max = max_len.filter(|&n| n > 0);
+    if !own.is_empty() {
+        return match max {
+            Some(n) => own.chars().take(n as usize).collect(),
+            None => own.to_string(),
+        };
+    }
+    match max {
+        Some(n) => (b"1234567890".iter().cycle())
+            .take(n.min(SAMPLE_CELLS) as usize)
+            .map(|&b| b as char)
+            .collect(),
+        None if flags & crate::forms::field::flags::MULTILINE != 0 => {
+            "First line\na second line long enough to wrap".into()
+        }
+        None => "Sample 123".into(),
+    }
+}
+
+/// The most cells a [`sample`] fills a field with a `/MaxLen` to: the
+/// family's cap on a comb field's cells.
+pub const SAMPLE_CELLS: u32 = 1024;
 
 /// A one-page form written as a hybrid-reference file (ISO 32000
 /// 7.5.8.4), in one section with no `/Prev`: the cross-reference table
