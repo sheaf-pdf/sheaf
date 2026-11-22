@@ -77,7 +77,7 @@ use crate::content::{
     Blend, Color, ContentWriter, DrawFont, DrawText, FillRule, GState, Paint, Reserved, Std14,
     place_form,
 };
-use crate::geom::{Affine, Geom, Rect};
+use crate::geom::{Affine, Geom, Rect, family_point, layout_point, sides};
 use crate::model::{FormRef, PinnedAp};
 use crate::serialize::built::{Built, Held, StampForm, WriteCx};
 
@@ -821,9 +821,9 @@ pub fn outline_of(kind: &AnnotKind) -> Option<Vec<Pt>> {
 /// the same space as `pts`. pdf-annots' ([`cloud_outline`]): the scallops
 /// the writer draws.
 pub fn cloud_curves(pts: &[Pt], step: f32) -> Vec<[Pt; 4]> {
-    let outline: Vec<Point> = pts.iter().map(|&p| point(p)).collect();
+    let outline: Vec<Point> = pts.iter().map(|&p| family_point(p)).collect();
     (cloud_outline(&outline, step).into_iter())
-        .map(|curve| curve.map(pt))
+        .map(|curve| curve.map(layout_point))
         .collect()
 }
 
@@ -832,8 +832,8 @@ pub fn cloud_curves(pts: &[Pt], step: f32) -> Vec<[Pt; 4]> {
 /// unit square, an unknown name the pushpin.
 pub fn attachment_icon(icon: &str, at: Box2) -> Vec<Vec<Pt>> {
     let icon = AttachmentIcon::from_name(icon.as_bytes());
-    (attachment_icon_strokes(&icon, unit_frame(at)).into_iter())
-        .map(|stroke| stroke.into_iter().map(pt).collect())
+    (attachment_icon_strokes(&icon, unit_frame(at).into()).into_iter())
+        .map(|stroke| stroke.into_iter().map(layout_point).collect())
         .collect()
 }
 
@@ -841,8 +841,8 @@ pub fn attachment_icon(icon: &str, at: Box2) -> Vec<Vec<Pt>> {
 /// origin, y down it) onto the box `at` of a frame that's y down, as
 /// pdf-annots draws a caret and an icon: the same numbers the box's own
 /// `x + fx · w` makes.
-fn unit_frame(at: Box2) -> gfx::Matrix {
-    gfx::Matrix {
+fn unit_frame(at: Box2) -> Affine {
+    Affine {
         a: at.w,
         b: 0.0,
         c: 0.0,
@@ -850,16 +850,6 @@ fn unit_frame(at: Box2) -> gfx::Matrix {
         e: at.x,
         f: at.y,
     }
-}
-
-/// A point of the layout as pdf-annots' geometry has one.
-fn point(p: Pt) -> Point {
-    Point::new(p.x, p.y)
-}
-
-/// A point of pdf-annots' geometry as the layout has one.
-fn pt(p: Point) -> Pt {
-    Pt { x: p.x, y: p.y }
 }
 
 /// `/BE` for a cloudy border.
@@ -1632,12 +1622,7 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
     let rect = user_box(&user, padded);
     let rect_user = rect;
     let [llx, lly, urx, ury] = rect;
-    let bbox = gfx::Rect {
-        x0: llx,
-        y0: lly,
-        x1: urx,
-        y1: ury,
-    };
+    let bbox = sides(rect);
     // What the family draws, it draws whole; what it doesn't, sheaf draws
     // into `w`.
     let family = family_drawing(a, &shown, &user, bbox);
@@ -1663,16 +1648,13 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
         }
     }
     let alpha = a.opacity.clamp(0.0, 1.0);
-    let blend = if matches!(a.kind, AnnotKind::Highlight { .. }) {
-        Blend::Multiply
-    } else {
-        Blend::Normal
-    };
+    // What sheaf draws, it draws at the mark's opacity, blended as usual
+    // (a highlight's multiply is the family's: it draws every highlight).
     if family.is_none() {
         let mut state = GState::default();
         state.fill_alpha = Some(alpha);
         state.stroke_alpha = Some(alpha);
-        state.blend = Some(blend);
+        state.blend = Some(Blend::Normal);
         w.gstate(state);
     }
     let mut dict = dictionary! {
@@ -1812,14 +1794,15 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
             dict.set("C", color_arr);
             dict.set("BS", border_style(a));
             // The family draws a square and a cloud; sheaf an ellipse's
-            // plain border, by its own curve.
-            let ellipse = family.is_none();
-            if ellipse {
+            // plain border, by its own curve, and a square the family
+            // has no frame for (`family_drawing`), on its box.
+            let ours = family.is_none();
+            if ours {
                 stroke_style(&mut w, a);
             }
             if let Some(f) = a.fill {
                 dict.set("IC", interior(f));
-                if ellipse {
+                if ours {
                     w.fill_color(Color::rgb8(f));
                 }
             }
@@ -1828,8 +1811,12 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
             if a.cloudy {
                 dict.set("BE", cloudy_style());
             }
-            if ellipse {
-                ellipse_path(&mut w, b);
+            if ours {
+                if square {
+                    box_path(&mut w, b);
+                } else {
+                    ellipse_path(&mut w, b);
+                }
                 w.paint(if a.fill.is_some() {
                     Paint::FillStroke
                 } else {
@@ -2023,12 +2010,19 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
                 dict.set("Contents", pdf_text_string(name));
             }
         }
-        AnnotKind::PageBorder { status, .. } => {
+        AnnotKind::PageBorder { rect, status } => {
             dict.set("Subtype", Object::name("Square"));
             dict.set("C", color_arr);
             dict.set("BS", border_style(a));
             if a.contents.is_empty() {
                 dict.set("Contents", pdf_text_string(&format!("Status: {status}")));
+            }
+            // The family's, but one it has no frame for
+            // (`family_drawing`).
+            if family.is_none() {
+                stroke_style(&mut w, a);
+                box_path(&mut w, user_box(&user, *rect));
+                w.paint(Paint::Stroke);
             }
         }
         AnnotKind::TextStamp { rect, text, .. } => {
@@ -2112,9 +2106,19 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
             }
         });
     }
-    let drawn = family.unwrap_or_else(|| {
-        SynthesizedAp::drawn(bbox, gfx::Matrix::IDENTITY, Canvas::from_writer(w))
-    });
+    let drawn = match family {
+        // The family drew it whole, so sheaf drew nothing: each arm above
+        // draws into `w` only where the family didn't, and what one drew
+        // beside the family's would be dropped here unseen.
+        Some(drawn) => {
+            debug_assert!(
+                w.finish(&Reserved::default()).0.is_empty(),
+                "sheaf drew into an appearance the family drew whole"
+            );
+            drawn
+        }
+        None => SynthesizedAp::drawn(bbox, gfx::Matrix::IDENTITY, Canvas::from_writer(w)),
+    };
     (dict, drawn)
 }
 
@@ -2130,7 +2134,12 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
 /// The family strokes a border inside a square's box, where sheaf's
 /// layout has the line's centre on it: its `/RD` here is the box less half
 /// the line, so the line is where the layout has it (the dictionary's
-/// `/RD` is the box's, as ever).
+/// `/RD` is the box's, as ever). The family makes the box again from that
+/// `/RD` and strokes the frame half a line inside it, or no border where
+/// that frame's sides have crossed: a square of no height or no width,
+/// whose two sides, each summed three times, can land a rounding apart
+/// the wrong way. Such a square is a line, as the screen paints it, and
+/// sheaf draws it ([`framed`]): None for it too.
 fn family_drawing(
     a: &Annot,
     shown: &AnnotKind,
@@ -2138,7 +2147,7 @@ fn family_drawing(
     bbox: gfx::Rect,
 ) -> Option<SynthesizedAp> {
     let at = ApRect::InPlace(bbox);
-    let up = |p: Pt| point(user.apply(p));
+    let up = |p: Pt| family_point(user.apply(p));
     let color = AnnotColor::rgb8(a.color);
     let alpha = a.opacity.clamp(0.0, 1.0);
     let mut border = Border::default();
@@ -2162,6 +2171,7 @@ fn family_drawing(
             bbox.y1 - y1 - half,
         ]
     };
+    let inset = |shape: Box2| framed(bbox, inset(shape), a.stroke);
     let drawn = match shown {
         AnnotKind::Square { .. } | AnnotKind::Ellipse { .. } | AnnotKind::Polygon { .. }
             if a.cloudy =>
@@ -2175,10 +2185,7 @@ fn family_drawing(
         }
         AnnotKind::Highlight { rects } => {
             let quads: Vec<QuadPoints> = (rects.iter())
-                .map(|r| {
-                    let [x0, y0, x1, y1] = user_box(user, *r);
-                    QuadPoints::from_rect(gfx::Rect { x0, y0, x1, y1 })
-                })
+                .map(|r| QuadPoints::from_rect(sides(user_box(user, *r))))
                 .collect();
             synth_text_markup(TextMarkupKind::Highlight, at, &quads, color, alpha)
         }
@@ -2186,13 +2193,13 @@ fn family_drawing(
             ShapeKind::Square,
             at,
             &style(a.fill, border),
-            Some(inset(*rect)),
+            Some(inset(*rect)?),
         ),
         AnnotKind::PageBorder { rect, .. } => synth_shape(
             ShapeKind::Square,
             at,
             &style(None, border),
-            Some(inset(*rect)),
+            Some(inset(*rect)?),
         ),
         AnnotKind::Polygon { points } | AnnotKind::Polyline { points } => {
             let kind = match shown {
@@ -2221,21 +2228,30 @@ fn family_drawing(
     Some(drawn.unwrap_or_else(|| SynthesizedAp::drawn(bbox, gfx::Matrix::IDENTITY, Canvas::new())))
 }
 
+/// `rd`, a square's `/RD` in from `bbox` for a border of width `width`,
+/// where pdf-annots has a frame to stroke for it: the box it makes of the
+/// two (`synth_shape`: each side of `bbox` moved in by its `/RD`), then
+/// half the line inside that, its sides not crossed. None where they
+/// have, which the family draws no border for; and always `rd` for a
+/// width of 0, which draws none either way.
+fn framed(bbox: gfx::Rect, rd: [f32; 4], width: f32) -> Option<[f32; 4]> {
+    let [dl, db, dr, dt] = rd;
+    let outer = gfx::Rect::new(
+        (bbox.x0 + dl).min(bbox.x1),
+        (bbox.y0 + db).min(bbox.y1),
+        (bbox.x1 - dr).max(bbox.x0),
+        (bbox.y1 - dt).max(bbox.y0),
+    );
+    let half = width / 2.0;
+    (width <= 0.0 || outer.inset(half, half).is_some()).then_some(rd)
+}
+
 /// The frame that takes a picture's unit square onto the box `at` of a
 /// mark's upright layout, in user space through `user`: a caret and an
 /// icon read upright on a turned page, at the numbers the layout's box
 /// mapped makes.
 fn user_frame(at: Box2, user: &Affine) -> gfx::Matrix {
-    let gfx::Matrix { a, b, c, d, e, f } = unit_frame(at);
-    let m = Affine { a, b, c, d, e, f }.then(*user);
-    gfx::Matrix {
-        a: m.a,
-        b: m.b,
-        c: m.c,
-        d: m.d,
-        e: m.e,
-        f: m.f,
-    }
+    unit_frame(at).then(*user).into()
 }
 
 /// How thick the line of an underline, strikeout or squiggly is: a
@@ -2281,7 +2297,7 @@ pub fn text_line_paths(kind: &AnnotKind) -> Vec<Vec<Pt>> {
 /// A caret's triangle in a frame that's y down: its tip at the top
 /// centre. pdf-annots' ([`caret_outline`]), the box its unit square.
 pub fn caret_points(at: Box2) -> [Pt; 3] {
-    caret_outline(unit_frame(at)).map(pt)
+    caret_outline(unit_frame(at).into()).map(layout_point)
 }
 
 /// A text stamp's frame line, from its height.
@@ -2986,6 +3002,82 @@ mod tests {
 
     fn bx(x: f32, y: f32, w: f32, h: f32) -> Box2 {
         Box2 { x, y, w, h }
+    }
+
+    /// A square of no height or no width is a line, stroked wherever it
+    /// is: off the whole-point grid the frame pdf-annots makes of its
+    /// `/RD` can cross by a rounding, where the family strokes no border
+    /// and sheaf draws the square on its box, as it did before the family
+    /// drew any. With an interior color too, and a page border.
+    #[test]
+    fn a_flat_square_is_stroked_wherever_it_is() {
+        // Positions to three decimals, the same every run.
+        let mut seed = 0x2545_f491_u32;
+        let mut next = |span: u32| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((seed >> 8) % (span * 1000)) as f32 / 1000.0
+        };
+        let stroked = |content: &[u8]| {
+            content
+                .split(|b| *b == b'\n')
+                .any(|line| matches!(line, b"S" | b"B"))
+        };
+        let (mut sheafs, mut familys) = (0, 0);
+        for i in 0..40_000 {
+            let (x, y) = (next(500), next(700));
+            let flat = match i % 2 {
+                0 => bx(x, y, 120.0, 0.0),
+                _ => bx(x, y, 0.0, 120.0),
+            };
+            let kind = match i % 5 {
+                0 => AnnotKind::PageBorder {
+                    rect: flat,
+                    status: "Approved".into(),
+                },
+                _ => AnnotKind::Square { rect: flat },
+            };
+            let mut a = mark(kind);
+            a.stroke = [1.0, 1.5, 3.0][i % 3];
+            a.fill = (i % 7 == 0).then_some([255, 255, 0]);
+            a.turn = [Rotation::R0, Rotation::R90][i % 4 / 2];
+            let ap = appearance(&a, None);
+            assert!(
+                stroked(&ap.content),
+                "{flat:?}, line {}: {:?}",
+                a.stroke,
+                String::from_utf8_lossy(&ap.content)
+            );
+            // The family's drawing is in a `q`; sheaf's sets its opacity
+            // first.
+            match ap.content.starts_with(b"q\n") {
+                true => familys += 1,
+                false => sheafs += 1,
+            }
+        }
+        // Both are reached: most by the family, some by sheaf.
+        assert!(
+            sheafs > 0 && familys > 30_000,
+            "{sheafs} sheaf's, {familys} the family's"
+        );
+
+        // On the grid, and a square with a side: the family's, as ever.
+        for rect in [
+            bx(300.0, 600.0, 120.0, 0.0),
+            bx(198.915, 63.896, 120.0, 40.0),
+        ] {
+            let ap = appearance(&mark(AnnotKind::Square { rect }), None);
+            assert!(ap.content.starts_with(b"q\n") && stroked(&ap.content));
+        }
+        // A line of width 0 draws no border, crossed or not: the family's.
+        let mut hairline = mark(AnnotKind::Square {
+            rect: bx(198.915, 63.896, 120.0, 0.0),
+        });
+        hairline.stroke = 0.0;
+        assert_eq!(
+            framed(gfx::Rect::new(0.0, 0.0, 9.0, 9.0), [4.0; 4], 0.0),
+            Some([4.0; 4])
+        );
+        assert!(!stroked(&appearance(&hairline, None).content));
     }
 
     /// A mark turned with its page is laid out as it reads there: a
