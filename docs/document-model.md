@@ -1509,6 +1509,179 @@ What stays sheaf's is said below, each with why.
   flatten holds where it was (1.08–1.37 s, peak 425–426 MB; 1.26–1.31 s
   and 426–427 MB before).
 
+## Text field appearances through pdf-forms (M10 slice 6)
+
+A text field's widget whose value the model holds changed gets its
+appearance made anew by pdf-forms (`pdf::forms`, the door's), from plain
+data out of sheaf's model, and written where a mark's appearance is
+written, so the realizer's overlay and a save hold the same form. No op
+changes a field's value yet: before M10 slice 9's `SetFieldValues`, only
+a test's fill (`tx::fixture::fill`, or a `Prim` on a state) reaches any
+of this, and a user sees nothing new.
+
+- **What's pdf-forms', what's sheaf's.** pdf-forms makes the appearance
+  (`appearance::text`, over pdf-gfx and pdf-fonts): the `/DA` parser
+  (pdf-gfx's `DefaultAppearance`), the encoders for each `/Encoding`
+  (WinAnsi, MacRoman, a font's built-in encoding, each with
+  `/Differences`, by glyph name), the standard 14's widths, the layout
+  (`/Q`, an automatic size, multiline wrapping by real widths, comb
+  cells from `/MaxLen`), the borders and `/MK` colors, `/MK /R`, `/Tx
+  BMC … EMC` with its clip, and the face a font `/DR` lacks falls back
+  to, by its name; and it reads a `/DR` font (`FieldFont::find`). The
+  fuzz target for `/DA` is pdf-forms' too. sheaf's
+  (`forms::appearance`, the emitter, the realizer) is everything about
+  its own model: its field reader and records, which hold widgets the
+  tree doesn't reach, instances of a form and ids, so pdf-forms' read
+  layer (`Form::read`, `widget_text`) is only for tests, where `just
+  fields-dump` sets the two readings beside each other; which widgets
+  are made (`stale`); the plain data (`TextLook`); the caps; a source's
+  font cache; and the binding, with the names a made form gives a font.
+- **The plain data** (`text_look(st, aid)`, none but for a text field's
+  widget): the terminal's value, which is the text shown (a format
+  script's display string, once slice 9's op carries one), its `/Ff` and
+  `/MaxLen`; the widget's box, `/MK` background, border color and
+  rotation, and its border's width, style and dash array (width 1,
+  solid, where it has none); and the effective `/DA` and `/Q`: the
+  widget's own, else its terminal's (its own or a parent's, as read),
+  else its instance's form's, the document's (`FormDoc`) for an instance
+  of the file the document opened and its source's for another's, as
+  the emitter writes each instance's form (`Fields::defaults`). The model
+  learned two things for it (`WidgetProps.dash`, `align`): a border's
+  dash array (`/BS /D`, or `/Border`'s fourth element, which makes that
+  border dashed) and a kid widget's own `/Q`, which PDFium reads before
+  its field's; and the reader follows a `/Rect`'s, an `/MK` color's and
+  `/Border`'s numbers where they're references. A `TextLook`'s `Debug`
+  prints lengths and numbers, never the text.
+- **`stale`** (`appearance::stale(st, aid)`): a text field's widget
+  whose terminal's text isn't what its source's field held as read (no
+  value and an empty one alike; `FileForm::field_by_object`), or whose
+  field was read from no source. Until an op can change anything else
+  of a widget (M10 slices 23 to 26), its value is all that can make the
+  file's appearance wrong. It's a map lookup and a compare of two
+  strings, asked of every widget the emitter writes and `untouched`
+  reads. A value put back is no longer stale, and its widget is written as the
+  file has it again.
+- **The font, and the cache.** A widget draws in the font its `/DA`
+  names in *its own source's* `/AcroForm /DR /Font`, under the source's
+  name: one `merge_dr` renamed in the written `/DR` is still that
+  object. `read_font` finds `/DR /Font` (and the object it's in) through
+  `content::Objects`, following references no deeper than sheaf's
+  reader does, and hands it to `FieldFont::find`. `Source::field_font`
+  keeps what it read by name, a font or why it couldn't be read (locked,
+  past a reader's cap, past the font budget), at most 256 names
+  (`FIELD_FONTS`; past them a font is read each time it's asked for),
+  read outside its lock, so an overlay made at every commit doesn't read
+  a program again and every widget of a font that fails is refused
+  alike. What it keeps (an embedded program among it) is outside what
+  the history budget counts, bounded by the names. A `/DA` that names no
+  font draws in Helvetica.
+- **The caps** (`appearance::limits`): pdf-forms' defaults, with each
+  sheaf has a cap for set from sheaf's: references followed as deep as
+  sheaf's reader follows them (64), a widget and its `/DA` capped as
+  sheaf reads an annotation (`source::annots::limits`), the text as long
+  as a value sheaf reads (`FormLimits::text`, 1 MiB), a comb's cells as
+  many as sheaf lays out (`MAX_LAYOUT_LEN`, 1,000, where the family's
+  default is 1,024), a font read under sheaf's font caps and decompressed
+  within what a page's content may be (256 MiB). The tree's caps are the
+  read layer's, which only tests call. sheaf's clamps on what it reads
+  stay (a border's width to 0–100, a `/Rect` to ±1,000,000, a `/DA`
+  within `FormLimits::da`): caps on untrusted input, which no corpus
+  widget meets.
+- **The binding** (`emit/form.rs`'s `appearance`, from `widget`, and from
+  `Fields::read_from` for a widget merged with its field): the look, its
+  font, the font's resource, `appearance::make` (the `/DA` parsed, none
+  or one that doesn't parse being Helvetica at an automatic size, then
+  pdf-forms' maker; pure), and the form pushed through
+  `content::sink::form` under `ObjKey::AnnotPart(aid, Part::Ap)` where
+  the emission writes it, as a mark's is. The widget's `/AP` is `<< /N …
+  >>` alone: the file's `/D` and `/R` would show the old value. The
+  font's resource: a `/DR` font held by reference is named by
+  `font_res_id` (a digest of its source's blob, copy 0 and its object)
+  and bound to that object, so the content names it by no number, an
+  overlay's form and a save's are the same bytes, and a duplicate's
+  appearance names the font `/DR` names (copy 0 of it, as `/DR` is
+  written), not a copy of it; a direct `/DR` entry that holds references
+  is written once as an object of its own, under `ObjKey::Res` of the
+  same digest by its name; a fallback, or a direct entry that reaches
+  nothing, is its own dictionary, written once a file. A fallback isn't
+  added to `/DR`: the form's own `/Resources` hold it, which every viewer
+  draws, and adding it, for a viewer that makes appearances anew, would
+  write the form's dictionary on a fill (slice 9, with a fill's save
+  rules). A stale widget's file `/AP` is never copied (`Closure::sym`
+  would queue the old appearance's streams), and the "the file's object
+  as it is" paths don't take it, so a Rewrite holds none of the old
+  appearance's streams but one another widget, not made, names. An
+  Append's scope already followed a changed field (`Deps::field`: the
+  field, its widgets and their parts): a fill of an empty field plans an
+  Append of the widget and its form, and a change to what a field shows
+  plans a Rewrite, as before (`REPLACES_TEXT`; strict removal keeps the
+  old value out of an earlier revision).
+- **What an unmade appearance does.** One pdf-forms can't make
+  (`Unmade`: a box of no width or height, a number that isn't finite, a
+  character its font has no code for, past a cap, a font that can't be
+  read) leaves the widget with no `/AP` at all, so no file shows a value
+  the field no longer holds, and a warning names the kind of reason
+  (`unmade_kind`), never the text. The refusal a user sees will be `SetFieldValues`' lowering
+  (slices 7 and 9), which calls the same `make` first. On the screen
+  PDFium's form filler makes an appearance from `/V` for a widget with
+  none, so such a widget would show its file's old value there and
+  nothing in a viewer that draws appearances alone; before slice 9 only
+  a test reaches it. Of the corpus's 229,351 text widgets on pages, 942
+  are unmade for a sample value: 497 have no box and 445 have a
+  character their font can't encode (a fallback font draws these: M10
+  slice 7).
+- **No save writes `/V` yet.** The emitter writes a stale widget's
+  appearance and nothing of its field's value: `/V`, `/RV` and the
+  password rule are slice 9's, with its op, after M18 slice 21's text
+  strings. A file saved from a test's fill holds the new appearance
+  beside the old `/V`.
+- **The realizer.** `untouched` is false for a page with a stale widget
+  where the inputs draw widgets, so the page is realized through its
+  group's overlay, which makes the appearance by the same binding and
+  draws the form the save writes; no picture is made for a field. Under
+  `ViewInputs::content_only()`, which draws no widgets, the page stays
+  untouched.
+- **A flatten of a stale widget still draws the file's appearance,**
+  the old value: `tx::flatten` reads a widget's appearances from its
+  source (`source::showing`, M18 slice 24), and print with markup, its
+  preview and Export Flattened flatten the same way. Making a widget's
+  appearance before it's flattened is M10 slice 15's; no op reaches one
+  stale today.
+- **How it's held.** `forms::appearance`'s tests (the effective `/DA`
+  and `/Q` at each level, the IRS navy `0 0 0.502 rg`, "é € — “ ”" one
+  code each in an NJ-style `/Helv` and a PA-40-style `/Arial`, the
+  fallbacks by name, hostile plain data, `stale`) and
+  `appearance_golden.txt`, a line a case (each alignment, comb,
+  multiline, an automatic size, each border style, `/MK /R`, a password,
+  an empty value), so a move of the family's pin that changes a byte is
+  seen where CI runs; `materialize::field_ap_tests` the binding (a
+  Rewrite, an Append, saves in a row, each kind of widget and of `/DR`
+  font, an overlay and a save alike, unmade). sheaf-ops' `fields.rs`
+  sets each case's appearance beside PDFium's own for the same value
+  (its form filler's, saved: [oracles](oracles.md)), drawn appearances
+  only at 2 px a point inside the widget's box: each alignment, comb,
+  multiline and automatic size, upright and on a `/Rotate 90` page, with
+  `/MK /R 90` and without, each border style, the backgrounds and the
+  navy, all 0 px apart, and beside each a twin with one thing wrong, 117
+  px apart and more. It runs on Linux alone, where PDFium draws the
+  standard 14 in its built-in faces. pdf-forms' stated differences from
+  PDFium (a missing font's fallback by name, `/MaxLen` cutting only a
+  comb's text, a dash array as given) are each held both ways. A realized
+  page draws a changed field as its saved file does, and "é € — “ ”"
+  reads back by sheaf's interpreter and by PDFium's text of the
+  flattened page. An ignored test in `interop.rs` runs `qpdf --check` on
+  each case's output and draws it with `pdftoppm`. `just tier-fields`
+  fills every corpus form's text fields: 220,981 fields and their
+  229,351 widgets, 228,409 made, each overlay's form the save's, and each
+  made one drawn beside PDFium's. The 12,908 widgets that differ by a
+  pixel are each in one of 17 classes held by count: 6,174 draw alike
+  within 0.001 pt and differ by PDFium's rasterizing alone, 4,538 are a
+  missing font's fallback by name, 1,865 PDFium's font map for CJK
+  fonts, and the rest pdf-forms' other stated differences and readings
+  PDFium makes otherwise (a kid widget's own `/MaxLen`, a field with no
+  name). The 318 forms that can't be filled (XFA alone, three that don't
+  open, a tree past sheaf's depth) are held by name.
+
 ## Undo/redo: snapshots, not inverse commands
 
 Three candidates were considered:
@@ -3757,8 +3930,11 @@ tool's without `foreign`, a link that leads nowhere), no merged field
 split, each drawn widget's `/Parent`s (merged,
 its field's) as the model's field tree has them, which a file's `/Kids`
 made where its `/Parent`s say otherwise, and the form's `DA`, `Q` and
-`NeedAppearances` as the source's form has them. A field's value isn't
-counted: no save writes `/V` before M10 slice 9's fills. The predicate is
+`NeedAppearances` as the source's form has them, and no text field's
+widget drawn whose value the model holds changed (`stale`, M10 slice 6:
+the overlay draws the appearance a save makes for it; see Text field
+appearances through pdf-forms). The value itself isn't counted: no save
+writes `/V` before M10 slice 9's fills. The predicate is
 O(the annotations on the page); `emission_is_base` (test and fixture
 builds) checks it against the page's overlay compared with the base
 modulo placement (`/Parent`, `/Type`, `/Thumb`; boxes and `/Rotate` as
@@ -5586,7 +5762,10 @@ with markup.
 
 A widget's own pinned appearance (its value and the form's `/DA`) comes
 with M10 slice 15's `FlattenFields`; until then a widget flattens by
-reference to its form.
+reference to its form, its file's: a text field's widget whose value
+the model holds changed (M10 slice 6's `stale`) flattens with the
+appearance its file holds, the old value, though a save makes it a new
+one. Slice 15 makes it first; no op changes a value before slice 9.
 
 ### Private data
 

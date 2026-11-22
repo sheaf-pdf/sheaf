@@ -42,8 +42,13 @@
 //!   finding of is compared by kind. What save policy decides and
 //!   asks about first isn't checked here: signatures a Rewrite breaks,
 //!   `/SigFlags` and the XFA copy kept as read, earlier revisions; nor a
-//!   value with no appearance, which a page delete leaves where the chosen
-//!   button's widget went, and which fills (M10) give appearances.
+//!   value with no appearance: a page delete leaves one where the chosen
+//!   button's widget went, and from M10 slice 6 a text field's widget
+//!   whose value changed and whose appearance pdf-forms can't make is
+//!   written with none (beside the file's `/V`, which no save writes
+//!   before M10 slice 9's fills). A made appearance (`AnnotPart(aid, Ap)`)
+//!   is an object of the save's own, as a mark's is, and checked as every
+//!   other: its references, its font's among them, resolve.
 //! - **Reading back**, in debug builds: every object reads back from the
 //!   bytes as the graph has it, through the file's keys when it keeps its
 //!   encryption, so no string or stream went out in the clear, and an

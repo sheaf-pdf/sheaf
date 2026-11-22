@@ -22,11 +22,11 @@
 //! no entry left out (a record deleted, or a kind the inputs leave to the
 //! screen, as sheaf's marks under [`MarkDraw::ByHost`]), each widget's
 //! `/Parent`s as the model's field tree has them, no text field's widget
-//! whose value the model holds changed ([`stale`]: the overlay draws the
-//! appearance a save makes for it), and the form's own keys the overlay
-//! writes from the document's as its file has them. The value itself
-//! isn't one of them: no save writes a field's `/V` before M10 slice 9's
-//! fills.
+//! whose value the model holds changed ([`stale`], M10 slice 6: the
+//! overlay draws the appearance pdf-forms makes for it, the form a save
+//! writes), and the form's own keys the overlay writes from the document's
+//! as its file has them. The value itself isn't one of them: no save
+//! writes a field's `/V` before M10 slice 9's fills.
 //!
 //! [`stale`]: crate::forms::appearance::stale
 

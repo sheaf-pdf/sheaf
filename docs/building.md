@@ -53,10 +53,20 @@ lists them):
 - `just fields-dump <file>` writes every corpus text widget as sheaf
   reads it and as pdf-forms does (the plain data its appearance is made
   from, the two readings' differences, the font its `/DA` names, and
-  the appearance pdf-forms makes of it for a sample value, a line each,
+  the appearance made of it for a sample value by sheaf's path and by
+  pdf-forms' own reading, and whether the two are alike, a line each,
   never a value): run before and after a change to what reads a form or
   makes a text field's appearance, or a move of the PDF layer's pin, and
   `diff` the two files.
+- `just tier-fields` fills every corpus form's text fields through the
+  model, saves, and sets each widget's appearance beside the one PDFium
+  makes for the same value, inside its box; each widget that differs is
+  in a class whose count the test holds. It's in `just premerge`.
+  `SHEAF_FIELDS_ONLY=<corpus paths, comma-separated>` narrows it (its
+  counts printed, not held), and `SHEAF_FIELDS_ROWS=<dir>` keeps each
+  differing widget's two appearances and drawings. The pixel checks on
+  fixtures (`cargo test -p sheaf-ops --test fields`) keep each case's
+  files and drawings in `SHEAF_FIELDS_OUT=<dir>`.
 
 Tests run under a memory cap where Linux has a user systemd
 (`scripts/test-capped.sh`; `SHEAF_UNCAPPED=1` turns it off).

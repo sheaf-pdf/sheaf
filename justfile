@@ -561,9 +561,10 @@ annots-dump out:
 # is the same or the parts that differ and the family's of each, the font
 # its `/DA` names (by reference, direct, missing and the face it falls
 # back to; its kind, program, `/BaseFont` and `/Encoding`), and the
-# appearance pdf-forms makes of it for a sample value (its size, whether
-# it overflowed, its content's length and checksum), or why it makes
-# none. It asserts nothing: run it before and after a change to what
+# appearance made of it for a sample value from the family's reading and
+# from sheaf's (its size, whether it overflowed, its content's length and
+# checksum, or why none is made), with what of the two differs. It
+# asserts nothing: run it before and after a change to what
 # reads a form or makes a text field's appearance, or a move of the PDF
 # layer's pin, over the same corpus, and `diff` the two files;
 # SHEAF_FIELDS_DUMP_ONLY=<a corpus path> prints that file's lines. Two
