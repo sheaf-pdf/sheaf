@@ -927,6 +927,12 @@ pub struct Widget {
 pub struct WidgetProps {
     /// `/BS` (or the older `/Border`).
     pub border: Option<Border>,
+    /// Its border's dash array (`/BS /D`, or `/Border`'s fourth element),
+    /// as [`crate::forms::Widget::dash`] reads it: empty for none.
+    pub dash: Vec<f32>,
+    /// Its own `/Q`, when it isn't its field's dictionary too: what a text
+    /// field's widget is justified by before its field's.
+    pub align: Option<u8>,
     /// `/A` and its own `/AA`.
     pub actions: Vec<(Trigger, Action)>,
     /// It has a normal appearance: a stream, or states.
@@ -955,6 +961,8 @@ impl Widget {
             states: w.states.clone().into(),
             props: Arc::new(WidgetProps {
                 border: w.border,
+                dash: w.dash.clone(),
+                align: w.align,
                 actions: w.actions.clone(),
                 has_appearance: w.has_appearance,
             }),

@@ -230,7 +230,8 @@ pub struct Widget {
     /// annotations.
     pub slot: usize,
     /// `/Rect` in the page's own space (before `/Rotate`): left, bottom,
-    /// right, top, in order, finite and within [`super::read::MAX_COORD`].
+    /// right, top, in order, finite and within [`super::read::MAX_COORD`],
+    /// each number followed where it's a reference.
     pub rect: [f32; 4],
     /// `/F` (annotation flags: hidden, print, no view…).
     pub flags: u32,
@@ -239,6 +240,14 @@ pub struct Widget {
     pub mk: Mk,
     /// `/BS` (or the older `/Border`), when it has one.
     pub border: Option<Border>,
+    /// Its border's dash array: `/BS /D`, or `/Border`'s fourth element
+    /// (which makes that border dashed); `[3]`, the default, for a dashed
+    /// border that gives none. At most 32 numbers, each finite and not
+    /// negative, as `pdf-annots` reads them; empty for none.
+    pub dash: Vec<f32>,
+    /// Its own `/Q`, when it isn't its field's dictionary too: 0 left, 1
+    /// centered, 2 right. A text field's widget is justified by it first.
+    pub align: Option<u8>,
     /// `/AS`: the appearance state it shows.
     pub state: Option<String>,
     /// The states `/AP /N` has, when it has several: a check box's on state

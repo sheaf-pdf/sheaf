@@ -871,10 +871,16 @@ impl Feed for WidgetProps {
     fn feed(&self, sum: &mut Sum) {
         let WidgetProps {
             border,
+            dash,
+            align,
             actions,
             has_appearance,
         } = self;
-        sum.feed(border).feed(actions).feed(has_appearance);
+        sum.feed(border)
+            .feed(dash)
+            .feed(align)
+            .feed(actions)
+            .feed(has_appearance);
     }
 }
 

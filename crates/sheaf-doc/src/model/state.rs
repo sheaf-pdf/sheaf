@@ -801,6 +801,13 @@ impl DocState {
             && self.pages.get(&page).is_some_and(file)
     }
 
+    /// The file the document opened, whose form's `/DA` and `/Q` the
+    /// form's are ([`FormDoc::da`]); none for a state made in memory, as
+    /// tests build one.
+    pub fn opened_file(&self) -> Option<BlobId> {
+        self.opened_generators.file
+    }
+
     /// Annotation `id`.
     pub fn annot(&self, id: AnnotId) -> Option<&AnnotRec> {
         #[cfg(test)]

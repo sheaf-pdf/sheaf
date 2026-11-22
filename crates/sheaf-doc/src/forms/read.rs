@@ -18,9 +18,9 @@
 //! values of at most 10,000 items, and values, scripts and the rest of the
 //! text of at most 1 MiB each and 64 MiB in all. Past any of them the form
 //! is damaged: none of its fields are kept, so nothing can be filled, and
-//! the file still opens. Rects, widths and colors are made finite and
-//! clamped. `/MaxLen` is kept as the file has it; layout uses at most
-//! 1,000 of it.
+//! the file still opens. Rects, widths, dashes and colors are made finite
+//! and clamped, each number followed where it's a reference. `/MaxLen` is
+//! kept as the file has it; layout uses at most 1,000 of it.
 //!
 //! Fields are read down `/Kids` from `/Fields`, as PDFium reads them;
 //! `/Parent` isn't followed (the form check reports kids whose `/Parent`
@@ -68,6 +68,17 @@ pub struct FileForm {
     /// Their widgets on pages, by page index, each page's in `/Annots`
     /// order. A widget on two pages is on both.
     pub widgets: BTreeMap<u32, Vec<Widget>>,
+    /// Where each terminal field is among `fields`, by its object
+    /// ([`field_by_object`](Self::field_by_object)).
+    by_object: HashMap<ObjectId, usize>,
+}
+
+impl FileForm {
+    /// The terminal field whose dictionary is object `id`, as read: what a
+    /// field of the model's was read as, found without a scan.
+    pub fn field_by_object(&self, id: ObjectId) -> Option<&Field> {
+        self.fields.get(*self.by_object.get(&id)?)
+    }
 }
 
 /// A node of a form's field tree: a terminal field, or a parent of
@@ -355,11 +366,16 @@ pub fn read(src: &Source) -> FileForm {
             }
         }
     }
+    // A field's object is its node's, and the tree reads a node once.
+    let by_object = (fields.iter().enumerate())
+        .map(|(i, f)| (f.object, i))
+        .collect();
     FileForm {
         facts,
         nodes,
         fields,
         widgets,
+        by_object,
     }
 }
 
@@ -856,7 +872,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             .and_then(Object::as_array)
             .and_then(|r| <&[Object; 4]>::try_from(r).ok())
             .map(|r| {
-                let v = |o: &Object| clamp_coord(o.as_number().unwrap_or(0.0) as f32);
+                let v = |o: &Object| clamp_coord(number_of(pdf, o).unwrap_or(0.0) as f32);
                 let (x0, y0, x1, y1) = (v(&r[0]), v(&r[1]), v(&r[2]), v(&r[3]));
                 [x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)]
             })
@@ -869,37 +885,52 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             None => None,
         };
         let mk = Mk {
-            background: mk_get(b"BG").and_then(color),
-            border_color: mk_get(b"BC").and_then(color),
+            background: mk_get(b"BG").and_then(|c| color(pdf, c)),
+            border_color: mk_get(b"BC").and_then(|c| color(pdf, c)),
             rotation: match rotation.rem_euclid(360) {
                 r @ (90 | 180 | 270) => r as u16,
                 _ => 0,
             },
             caption: caption.map(|c| c.to_string()),
         };
-        let border = match (
+        let (border, dash) = match (
             get(b"BS").and_then(Object::as_dict),
             get(b"Border").and_then(Object::as_array),
         ) {
-            (Some(bs), _) => Some(Border {
-                width: bs
-                    .get(b"W")
-                    .and_then(|w| resolve(pdf, w))
-                    .and_then(Object::as_number)
-                    .map_or(1.0, |w| clamp_width(w as f32)),
-                style: match bs.get(b"S").and_then(Object::as_name) {
-                    Some(b"D") => BorderStyle::Dashed,
-                    Some(b"B") => BorderStyle::Beveled,
-                    Some(b"I") => BorderStyle::Inset,
-                    Some(b"U") => BorderStyle::Underline,
-                    _ => BorderStyle::Solid,
-                },
-            }),
-            (None, Some(b)) => b.get(2).and_then(Object::as_number).map(|w| Border {
-                width: clamp_width(w as f32),
-                style: BorderStyle::Solid,
-            }),
-            _ => None,
+            (Some(bs), _) => {
+                let style = match bs.get(b"S").and_then(|s| resolve(pdf, s)) {
+                    Some(s) => match s.as_name() {
+                        Some(b"D") => BorderStyle::Dashed,
+                        Some(b"B") => BorderStyle::Beveled,
+                        Some(b"I") => BorderStyle::Inset,
+                        Some(b"U") => BorderStyle::Underline,
+                        _ => BorderStyle::Solid,
+                    },
+                    None => BorderStyle::Solid,
+                };
+                let width = (bs.get(b"W").and_then(|w| number_of(pdf, w)))
+                    .map_or(1.0, |w| clamp_width(w as f32));
+                let dash = array(pdf, bs.get(b"D")).map_or_else(Vec::new, |d| dashes(pdf, d));
+                (Some(Border { width, style }), dashed(style, dash))
+            }
+            // The fourth element, an array, is a dash array, and makes the
+            // border dashed.
+            (None, Some(b)) => match b.get(2).and_then(|w| number_of(pdf, w)) {
+                Some(w) => {
+                    let dash = array(pdf, b.get(3)).map(|d| dashes(pdf, d));
+                    let style = match dash {
+                        Some(_) => BorderStyle::Dashed,
+                        None => BorderStyle::Solid,
+                    };
+                    let border = Border {
+                        width: clamp_width(w as f32),
+                        style,
+                    };
+                    (Some(border), dashed(style, dash.unwrap_or_default()))
+                }
+                None => (None, Vec::new()),
+            },
+            _ => (None, Vec::new()),
         };
         let state = d.get(b"AS").and_then(Object::as_name);
         let state = state.filter(|s| self.spend(s.len())).map(latin1);
@@ -921,7 +952,10 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             Some(PdfValue::Dict(_)) => !states.is_empty(),
             _ => false,
         };
-        let da = if kid { self.da(d) } else { None };
+        let (da, align) = match kid {
+            true => (self.da(d), align(pdf, d)),
+            false => (None, None),
+        };
         let actions = self.actions(d, true);
         Widget {
             field,
@@ -933,6 +967,8 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             da,
             mk,
             border,
+            dash,
+            align,
             state,
             states,
             has_appearance,
@@ -1038,13 +1074,42 @@ fn clamp_width(w: f32) -> f32 {
     }
 }
 
-/// An `/MK` color: none for an empty array (transparent) or one of the
-/// wrong length.
-fn color(o: &Object) -> Option<Color> {
+/// The number `o` is, followed where it's a reference.
+fn number_of<P: Objects + ?Sized>(pdf: &P, o: &Object) -> Option<f64> {
+    resolve(pdf, o)?.as_number()
+}
+
+/// The array `o` is, followed where it's a reference.
+fn array<'a, P: Objects + ?Sized>(pdf: &'a P, o: Option<&'a Object>) -> Option<&'a [Object]> {
+    resolve(pdf, o?)?.as_array()
+}
+
+/// A border's dash array: at most 32 of its numbers, each followed where
+/// it's a reference, the finite ones not negative, as `pdf-annots` reads
+/// one.
+fn dashes<P: Objects + ?Sized>(pdf: &P, d: &[Object]) -> Vec<f32> {
+    (d.iter().take(32))
+        .filter_map(|o| number_of(pdf, o))
+        .map(|v| v as f32)
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .collect()
+}
+
+/// `dash`, or the default `[3]` for a dashed border that gives none.
+fn dashed(style: BorderStyle, dash: Vec<f32>) -> Vec<f32> {
+    match style == BorderStyle::Dashed && dash.is_empty() {
+        true => vec![3.0],
+        false => dash,
+    }
+}
+
+/// An `/MK` color, each part followed where it's a reference: none for an
+/// empty array (transparent) or one of the wrong length.
+fn color<P: Objects + ?Sized>(pdf: &P, o: &Object) -> Option<Color> {
     let parts: Vec<f32> = o
         .as_array()?
         .iter()
-        .map(|p| match p.as_number() {
+        .map(|p| match number_of(pdf, p) {
             Some(v) if (v as f32).is_finite() => (v as f32).clamp(0.0, 1.0),
             _ => 0.0,
         })

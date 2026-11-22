@@ -1,25 +1,25 @@
 //! Every text widget of the corpus's forms, as sheaf reads it and as the
 //! family's read layer (`pdf-forms`) reads it, set beside each other, and
-//! the appearance the family makes of it for a sample value
-//! ([`fields_dump`]): a line a widget, numbers, names and checksums only.
-//! A value is never printed, only its length, and the sample's. It
-//! asserts nothing: it is for setting a change to what reads a form, or
-//! makes a text field's appearance, beside what was there (M10 slice 6).
+//! the appearance each makes of it for a sample value ([`fields_dump`]): a
+//! line a widget, numbers, names and checksums only. A value is never
+//! printed, only its length, and the sample's. It asserts nothing: it is
+//! for setting a change to what reads a form, or makes a text field's
+//! appearance, beside what was there (M10 slice 6).
 //!
-//! **sheaf's reading** is the plain data its model holds for the widget,
-//! as the file's form is read ([`crate::forms::read`]): its text, flags,
-//! `/MaxLen` and justification (its field's, else the form's); its box,
-//! `/MK` colors and rotation, and its border (none is the width of 1,
-//! solid, that a widget with no `/BS` and no `/Border` has); and its
-//! effective `/DA` (its own, as a kid, else its field's, else the form's)
-//! parsed as the family parses one. **The family's** is
-//! [`forms::widget_text`]'s, under PDFium's rules. Where the two are
-//! equal the line says `=`; else which parts differ, and the family's
-//! value of each, its field's object among them where it reads the widget
-//! as another field's. A widget the family reads as no text field's, or
-//! not at all, is said so, and a file's line counts the text widgets on
-//! no page that only the family reads (sheaf's are its fields'
-//! `outside`).
+//! **sheaf's reading** is the plain data its model holds for the widget
+//! ([`TextLook`], as [`text_look`] reads it from the file opened as a
+//! document): its text, flags, `/MaxLen` and justification (its own, else
+//! its field's, else the form's); its box, `/MK` colors and rotation, and
+//! its border and dashes (none is the width of 1, solid, that a widget
+//! with no `/BS` and no `/Border` has); and its effective `/DA` (its own,
+//! as a kid, else its field's, else the form's) parsed as the family
+//! parses one. **The family's** is [`forms::widget_text`]'s, under
+//! PDFium's rules. Where the two are equal the line says `=`; else which
+//! parts differ, and the family's value of each, its field's object among
+//! them where it reads the widget as another field's. A widget the family
+//! reads as no text field's, or not at all, is said so, and a file's line
+//! counts the text widgets on no page that only the family reads (sheaf's
+//! are its fields' `outside`).
 //!
 //! **The font** is the one the family's `/DA` names, found in the form's
 //! `/DR /Font` ([`FieldFont::find`]): by reference (`ref`), a direct
@@ -30,25 +30,38 @@
 //! name, or a dictionary's base and how many names its `/Differences`
 //! gives).
 //!
-//! **The appearance** is the family's ([`forms::text`]) of the family's
-//! reading, the text the sample value ([`sample`]) of sheaf's: its size,
-//! whether it overflowed, its content's length and checksum, and what it
-//! draws with, by their ids; or which [`Unmade`] it is.
+//! **The appearances,** each of the sample value ([`sample`]) of sheaf's
+//! text: the family's of its own reading (`made`, [`forms::text`]), and
+//! sheaf's of its model's (`ours`, [`appearance::make`]) in the font its
+//! source reads for the `/DA`'s name ([`appearance::font`]), named as the
+//! emitter names it ([`appearance::font_res`]). Each is its size, whether
+//! it overflowed, its content's length and checksum, and what it draws
+//! with, by their ids; or which [`Unmade`] it is. `ours.vs` sets sheaf's,
+//! its font named as the family names it, beside the family's: `=`, or the
+//! parts that differ.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
+use in_progress::NoProgress;
+
+use crate::annot::AnnotId;
 use crate::content::corpus::{each_path, written};
 use crate::content::{Objects, Unkept};
+use crate::forms::FormClass;
+use crate::forms::appearance::{self, FontAt, TextLook, text_look};
 use crate::forms::corpus::Corpus;
-use crate::forms::field::{self, Border, BorderStyle, Field, FieldKind, Value, Widget};
-use crate::forms::{FileForm, FormClass};
+use crate::forms::field::{self, Field, FieldKind};
+use crate::history::FixedCount;
+use crate::model::Document;
 use crate::pdf::content::{Color, Res, ResBody};
 use crate::pdf::fonts::{Descendant, FontKind, FontProgram};
-use crate::pdf::forms::{self, Cap, Error, FieldFont, Limits, Quadding, Unmade};
+use crate::pdf::forms::{self, Appearance, Cap, Error, FieldFont, Limits, Quadding, Unmade};
 use crate::pdf::gfx::{BoxBorderStyle, DefaultAppearance};
 use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, Resolve, Value as PdfValue};
+use crate::source::Source;
 use crate::store::{BlobKind, Src, Store};
 
 /// Where [`fields_dump`] writes: a path. Unset, it reads nothing.
@@ -87,37 +100,31 @@ struct Plain {
 }
 
 impl Plain {
-    /// What sheaf's model holds of widget `w` of `field`, a text field of
-    /// `form`, as [`Plain`] says.
-    fn of_sheaf(form: &FileForm, field: &Field, w: &Widget) -> Plain {
-        let text = match &field.value {
-            Some(Value::Text(text)) => text.to_string(),
-            _ => String::new(),
-        };
-        let da = (w.da.as_deref())
-            .or(field.da.as_deref())
-            .or(form.facts.da.as_deref());
-        // A `/DA` is held a character a byte (Latin-1), so its bytes come
-        // back whole.
-        let da = da.map(|da| da.chars().map(|c| c as u8).collect::<Vec<u8>>());
-        let da = (da.as_deref())
-            .and_then(|da| DefaultAppearance::parse(da, &LIMITS.annots.content))
-            .unwrap_or_default();
-        let border = match w.border {
-            Some(Border { width, style }) => (width, box_style(style), Vec::new()),
-            None => (1.0, BoxBorderStyle::Solid, Vec::new()),
+    /// What sheaf's model gives of a text widget ([`TextLook`], as
+    /// [`text_look`] reads it from the opened document), as [`Plain`]
+    /// says, its `/DA` parsed as the family parses one.
+    fn of_look(look: &TextLook) -> Plain {
+        let da = match look.da.is_empty() {
+            true => DefaultAppearance::default(),
+            false => {
+                (DefaultAppearance::parse(&look.da, &LIMITS.annots.content)).unwrap_or_default()
+            }
         };
         Plain {
-            text,
-            flags: field.flags,
-            max_len: field.max_len,
-            quadding: quadding(field.align.unwrap_or(form.facts.align)),
-            width: w.rect[2] - w.rect[0],
-            height: w.rect[3] - w.rect[1],
-            background: w.mk.background.map(color),
-            border_color: w.mk.border_color.map(color),
-            rotation: i32::from(w.mk.rotation),
-            border,
+            text: look.text.to_string(),
+            flags: look.flags,
+            max_len: look.max_len,
+            quadding: appearance::quadding(look.align),
+            width: look.width,
+            height: look.height,
+            background: look.background.map(appearance::color),
+            border_color: look.border_color.map(appearance::color),
+            rotation: i32::from(look.rotation),
+            border: (
+                look.border.width,
+                appearance::box_style(look.border.style),
+                look.dash.clone(),
+            ),
             da,
         }
     }
@@ -163,35 +170,6 @@ impl Plain {
             ("dash", numbers(&self.border.2)),
             ("da", escaped(&self.da.to_bytes())),
         ]
-    }
-}
-
-/// sheaf's border style as pdf-gfx's.
-fn box_style(style: BorderStyle) -> BoxBorderStyle {
-    match style {
-        BorderStyle::Solid => BoxBorderStyle::Solid,
-        BorderStyle::Dashed => BoxBorderStyle::Dashed,
-        BorderStyle::Beveled => BoxBorderStyle::Beveled,
-        BorderStyle::Inset => BoxBorderStyle::Inset,
-        BorderStyle::Underline => BoxBorderStyle::Underline,
-    }
-}
-
-/// sheaf's `/Q`, 0 to 2, as the family's.
-fn quadding(q: u8) -> Quadding {
-    match q {
-        1 => Quadding::Center,
-        2 => Quadding::Right,
-        _ => Quadding::Left,
-    }
-}
-
-/// An `/MK` color of sheaf's as content's.
-fn color(c: field::Color) -> Color {
-    match c {
-        field::Color::Gray(g) => Color::Gray(g),
-        field::Color::Rgb(c) => Color::Rgb(c),
-        field::Color::Cmyk(c) => Color::Cmyk(c),
     }
 }
 
@@ -436,29 +414,67 @@ where
     (said, Ok(font))
 }
 
-/// The family's appearance of `read` with its text `text`, in `font`, as
-/// the dump says it: its size, whether it overflowed, its content's
-/// length and checksum and the resources it draws with, by their ids; or
-/// `unmade:` and why.
-fn made(read: &forms::WidgetText<'_>, text: &str, font: &Result<FieldFont, Error>) -> String {
-    let font = match font {
-        Ok(font) => font,
-        Err(e) => return format!("unmade:{}", unmade_name(&Unmade::from(e.clone()))),
-    };
-    let Some(res) = font.res() else {
-        return format!("unmade:{}", unmade_name(&Unmade::FontNotBindable));
-    };
+/// The family's appearance of `read` with its text `text`, in `font`, the
+/// family's reading of its `/DA`'s font: what [`made_name`] says.
+fn family_made(
+    read: &forms::WidgetText<'_>,
+    text: &str,
+    font: &Result<FieldFont, Error>,
+) -> Result<Appearance, Unmade> {
+    let font = font.as_ref().map_err(|e| Unmade::from(e.clone()))?;
+    let res = font.res().ok_or(Unmade::FontNotBindable)?;
     let mut field = read.field();
     field.text = text;
     let look = read.look();
-    let made = forms::text(
+    forms::text(
         &field,
         &look,
         read.default_appearance(),
         res,
         &font.layout(),
         &LIMITS,
-    );
+    )
+}
+
+/// sheaf's appearance of `look` with its text `text`, as the emitter makes
+/// one: in the font its `/DA` names in `src`'s `/DR`, read once a name by
+/// the source ([`appearance::font`]), named as sheaf names it (copy
+/// `copy`'s, [`appearance::font_res`]); and the same made with the font
+/// named as the family names it, to set beside the family's. A font named
+/// by an entry, which the emitter writes as an object of its own, is
+/// bound here to no object: the content's bytes are the same.
+fn ours_made(
+    src: &Source,
+    look: &TextLook,
+    text: &str,
+    copy: u32,
+) -> (Result<Appearance, Unmade>, Result<Appearance, Unmade>) {
+    let look = TextLook {
+        text: text.into(),
+        ..look.clone()
+    };
+    let font = match appearance::font(src, &look) {
+        Ok(font) => font,
+        Err(e) => return (Err(e.clone().into()), Err(e.into())),
+    };
+    let name = look.font_name().unwrap_or_default();
+    let written = |at: FontAt<'_>| match at {
+        FontAt::Object(id) => id,
+        FontAt::Entry(_) => ObjectId::new(0, 0),
+    };
+    let res = appearance::font_res(&font, src.id(), copy, &name, written);
+    let ours = appearance::make(&look, &font, res);
+    let theirs = match font.res() {
+        Some(res) => appearance::make(&look, &font, res),
+        None => Err(Unmade::FontNotBindable),
+    };
+    (ours, theirs)
+}
+
+/// An appearance as the dump says it: its size, whether it overflowed, its
+/// content's length and checksum and the resources it draws with, by their
+/// ids; or `unmade:` and why.
+fn made_name(made: &Result<Appearance, Unmade>) -> String {
     match made {
         Ok(a) => {
             let needs: Vec<String> = (a.needs.0.iter())
@@ -473,7 +489,36 @@ fn made(read: &forms::WidgetText<'_>, text: &str, font: &Result<FieldFont, Error
                 needs.join("+")
             )
         }
-        Err(why) => format!("unmade:{}", unmade_name(&why)),
+        Err(why) => format!("unmade:{}", unmade_name(why)),
+    }
+}
+
+/// sheaf's appearance, its font named as the family names it, beside the
+/// family's: `=` where they're the same (or unmade alike), else the parts
+/// that differ, `made` where one is made and the other isn't.
+fn versus(ours: &Result<Appearance, Unmade>, theirs: &Result<Appearance, Unmade>) -> String {
+    match (ours, theirs) {
+        (Ok(a), Ok(b)) => {
+            let parts = [
+                ("bbox", a.bbox == b.bbox),
+                ("matrix", a.matrix == b.matrix),
+                ("size", a.font_size == b.font_size),
+                ("ovf", a.overflowed == b.overflowed),
+                ("content", a.content == b.content),
+                ("needs", a.needs == b.needs),
+            ];
+            let differ: Vec<&str> = (parts.iter())
+                .filter(|(_, same)| !same)
+                .map(|(name, _)| *name)
+                .collect();
+            match differ.is_empty() {
+                true => "=".into(),
+                false => differ.join(","),
+            }
+        }
+        (Err(a), Err(b)) if unmade_name(a) == unmade_name(b) => "=".into(),
+        (Err(_), Err(_)) => "unmade".into(),
+        _ => "made".into(),
     }
 }
 
@@ -542,12 +587,21 @@ struct Counts {
     sheaf_only: usize,
     made: usize,
     unmade: usize,
+    /// Text widgets the opened document gives no look of: none should be.
+    unlooked: usize,
+    ours_made: usize,
+    ours_unmade: usize,
+    /// Widgets whose appearance sheaf's plain data make other than the
+    /// family's reading does.
+    versus_differ: usize,
 }
 
-/// The dump's lines for file `path`, open as `src`: one for the file,
-/// then one for each text widget sheaf reads on a page, in page order and
-/// each page's in `/Annots` order (a widget on two pages is on both).
-fn lines_of(path: &str, src: &Src) -> Vec<String> {
+/// The dump's lines for file `path`, open as `src` in `store`: one for
+/// the file, then one for each text widget sheaf reads on a page, in page
+/// order and each page's in `/Annots` order (a widget on two pages is on
+/// both). sheaf's reading of each is its model's, of the file opened as a
+/// document.
+fn lines_of(path: &str, store: &Arc<Store>, src: &Src) -> Vec<String> {
     let pdf: &LazyPdf = src.pdf();
     let form = src.form();
     let unkept = Unkept::default();
@@ -561,6 +615,17 @@ fn lines_of(path: &str, src: &Src) -> Vec<String> {
         Ok(None) => (None, "none".to_string()),
         Err(e) => (None, format!("error:{}", error_name(&e))),
     };
+    let doc = opened(store, src, path);
+    let st = doc.as_ref().map(Document::state);
+    // Each widget of the document by its page's index and its object.
+    let mut aids: HashMap<(u32, ObjectId), AnnotId> = HashMap::new();
+    for (index, &page) in st.iter().flat_map(|st| st.order().iter().enumerate()) {
+        for (aid, w) in st.into_iter().flat_map(|st| st.widgets_on(page)) {
+            if let Some(r) = &w.src {
+                aids.entry((index as u32, r.id)).or_insert(aid);
+            }
+        }
+    }
     let fields: HashMap<_, &Field> = form.fields.iter().map(|f| (f.id, f)).collect();
     let mut fonts: HashMap<Option<Vec<u8>>, _> = HashMap::new();
     let mut counts = Counts::default();
@@ -582,84 +647,102 @@ fn lines_of(path: &str, src: &Src) -> Vec<String> {
             let mut line = Line::new(&at, "text");
             line.field("field", &id_of(Some(field.object)));
             line.field("merged", &u8::from(w.merged).to_string());
-            let ours = Plain::of_sheaf(form, field, w);
+            let aid = aids.get(&(page, w.object)).copied();
+            let look = st.zip(aid).and_then(|(st, aid)| text_look(st, aid));
+            let Some(look) = look else {
+                counts.unlooked += 1;
+                line.field("look", "-");
+                lines.push(line.0);
+                continue;
+            };
+            let ours = Plain::of_look(&look);
             for (name, value) in ours.parts() {
                 line.field(name, &value);
             }
             let sample = sample(&ours.text, ours.flags, ours.max_len);
             line.field("sample", &text_sum(&sample));
-            let Some(family) = &family else {
-                counts.sheaf_only += 1;
-                line.field("family", "-");
-                lines.push(line.0);
-                continue;
-            };
-            let Some(&(i, n)) = family.widgets.get(&w.object) else {
-                counts.sheaf_only += 1;
-                line.field("family", "-");
-                lines.push(line.0);
-                continue;
-            };
-            let theirs = &family.form.fields()[i];
-            // The field the family reads the widget as, where it isn't
-            // sheaf's: the tree read otherwise.
-            let other = (theirs.id() != Some(field.object)).then(|| id_of(theirs.id()));
-            if theirs.kind() != Some(forms::FieldKind::Text) {
-                counts.sheaf_only += 1;
-                let kind = theirs.kind().map_or("-".into(), |k| format!("{k:?}"));
-                line.field("family", &format!("kind:{kind}"));
-                if let Some(other) = &other {
-                    line.field("family.field", other);
+            let theirs = 'family: {
+                let Some(family) = &family else {
+                    counts.sheaf_only += 1;
+                    line.field("family", "-");
+                    break 'family None;
+                };
+                let Some(&(i, n)) = family.widgets.get(&w.object) else {
+                    counts.sheaf_only += 1;
+                    line.field("family", "-");
+                    break 'family None;
+                };
+                let theirs = &family.form.fields()[i];
+                // The field the family reads the widget as, where it isn't
+                // sheaf's: the tree read otherwise.
+                let other = (theirs.id() != Some(field.object)).then(|| id_of(theirs.id()));
+                if theirs.kind() != Some(forms::FieldKind::Text) {
+                    counts.sheaf_only += 1;
+                    let kind = theirs.kind().map_or("-".into(), |k| format!("{k:?}"));
+                    line.field("family", &format!("kind:{kind}"));
+                    if let Some(other) = &other {
+                        line.field("family.field", other);
+                    }
+                    break 'family None;
                 }
-                lines.push(line.0);
-                continue;
-            }
-            let widget = &theirs.widgets()[n];
-            let read = match forms::widget_text(theirs, widget, objects, &LIMITS) {
-                Ok(read) => read,
-                Err(why) => {
-                    counts.differ += 1;
-                    line.field("family", &format!("unmade:{}", unmade_name(&why)));
-                    lines.push(line.0);
-                    continue;
-                }
-            };
-            let plain = Plain::of_family(&read);
-            let differ: Vec<(&str, String)> = (other.map(|other| ("field", other)).into_iter())
-                .chain(
-                    (ours.parts().into_iter())
-                        .zip(plain.parts())
-                        .filter(|(a, b)| a.1 != b.1)
-                        .map(|(_, b)| b),
-                )
-                .collect();
-            match differ.is_empty() {
-                true => {
-                    counts.equal += 1;
-                    line.field("family", "=");
-                }
-                false => {
-                    counts.differ += 1;
-                    let names: Vec<&str> = differ.iter().map(|(n, _)| *n).collect();
-                    line.field("family", &names.join(","));
-                    for (name, value) in &differ {
-                        line.field(&format!("family.{name}"), value);
+                let widget = &theirs.widgets()[n];
+                let read = match forms::widget_text(theirs, widget, objects, &LIMITS) {
+                    Ok(read) => read,
+                    Err(why) => {
+                        counts.differ += 1;
+                        line.field("family", &format!("unmade:{}", unmade_name(&why)));
+                        break 'family None;
+                    }
+                };
+                let plain = Plain::of_family(&read);
+                let differ: Vec<(&str, String)> = (other.map(|other| ("field", other)).into_iter())
+                    .chain(
+                        (ours.parts().into_iter())
+                            .zip(plain.parts())
+                            .filter(|(a, b)| a.1 != b.1)
+                            .map(|(_, b)| b),
+                    )
+                    .collect();
+                match differ.is_empty() {
+                    true => {
+                        counts.equal += 1;
+                        line.field("family", "=");
+                    }
+                    false => {
+                        counts.differ += 1;
+                        let names: Vec<&str> = differ.iter().map(|(n, _)| *n).collect();
+                        line.field("family", &names.join(","));
+                        for (name, value) in &differ {
+                            line.field(&format!("family.{name}"), value);
+                        }
                     }
                 }
+                let name = read.font_name().map(<[u8]>::to_vec);
+                let (said, font) = fonts
+                    .entry(name.clone())
+                    .or_insert_with(|| font_of(objects, &family.form, name.as_deref()));
+                for (key, value) in said.iter() {
+                    line.field(key, value);
+                }
+                let made = family_made(&read, &sample, font);
+                match made.is_ok() {
+                    true => counts.made += 1,
+                    false => counts.unmade += 1,
+                }
+                line.field("made", &made_name(&made));
+                Some(made)
+            };
+            // sheaf's, as the emitter makes it, and beside the family's.
+            let copy = aid.and_then(|aid| st?.annot(aid)?.widget().map(|w| w.inst.copy));
+            let (made, named) = ours_made(src, &look, &sample, copy.unwrap_or(0));
+            match made.is_ok() {
+                true => counts.ours_made += 1,
+                false => counts.ours_unmade += 1,
             }
-            let name = read.font_name().map(<[u8]>::to_vec);
-            let (said, font) = fonts
-                .entry(name.clone())
-                .or_insert_with(|| font_of(objects, &family.form, name.as_deref()));
-            for (key, value) in said.iter() {
-                line.field(key, value);
-            }
-            let made = made(&read, &sample, font);
-            match made.starts_with("unmade:") {
-                true => counts.unmade += 1,
-                false => counts.made += 1,
-            }
-            line.field("made", &made);
+            line.field("ours", &made_name(&made));
+            let vs = theirs.map_or("-".into(), |theirs| versus(&named, &theirs));
+            counts.versus_differ += usize::from(vs != "=" && vs != "-");
+            line.field("ours.vs", &vs);
             lines.push(line.0);
         }
     }
@@ -686,9 +769,25 @@ fn lines_of(path: &str, src: &Src) -> Vec<String> {
     head.field("family_only", &family_only.to_string());
     head.field("made", &counts.made.to_string());
     head.field("unmade", &counts.unmade.to_string());
+    if counts.unlooked > 0 || doc.is_none() {
+        head.field("document", if doc.is_some() { "read" } else { "-" });
+        head.field("unlooked", &counts.unlooked.to_string());
+    }
+    head.field("ours_made", &counts.ours_made.to_string());
+    head.field("ours_unmade", &counts.ours_unmade.to_string());
+    head.field("vs_differ", &counts.versus_differ.to_string());
     let mut file = vec![head.0];
     file.extend(lines);
     file
+}
+
+/// `src`, in `store`, opened as a document is, as file `path`: what sheaf's
+/// reading of each widget comes from. None where its facts don't read.
+fn opened(store: &Arc<Store>, src: &Src, path: &str) -> Option<Document> {
+    let policy = Box::new(FixedCount(1));
+    let mut doc = crate::open::start(store.clone(), src.clone(), path.into(), None, policy);
+    doc.ready(crate::open::finish(src, &NoProgress)).ok()?;
+    Some(doc)
 }
 
 fn form_class(class: FormClass) -> &'static str {
@@ -709,8 +808,9 @@ fn dump_file(corpus: &Corpus, path: &str) -> Vec<String> {
         Err(e) => return none(e.to_string()),
     };
     let kind = BlobKind::file(Path::new(path), None);
-    match Store::new().open(bytes.into(), kind) {
-        Ok(src) => lines_of(path, &src),
+    let store = Store::new();
+    match store.open(bytes.into(), kind) {
+        Ok(src) => lines_of(path, &store, &src),
         Err(e) => none(format!("{e:#}").replace(['\n', '\t'], " ")),
     }
 }
@@ -782,7 +882,8 @@ mod tests {
     /// `/DA` of its own naming a font `/DR` lacks, the other inheriting
     /// its parent's dashed border style and a direct font; a comb field;
     /// one whose `/DA` names no font; and a check box, which isn't a line.
-    fn file() -> Src {
+    /// In a store of its own, as the document it's opened as is.
+    fn file() -> (Arc<Store>, Src) {
         let mut f = Form::new(1);
         let own = f.text("own", 0, [10.0, 700.0, 210.0, 720.0]);
         f.fill(own, "Trenton");
@@ -847,7 +948,10 @@ mod tests {
         f.dict(bare).set("DA", literal("0 g"));
 
         f.check_box("box", 0, [10.0, 300.0, 20.0, 310.0], true);
-        f.source()
+        let store = Store::new();
+        let kind = BlobKind::file(Path::new("f.pdf"), None);
+        let src = store.open(f.bytes().into(), kind).unwrap();
+        (store, src)
     }
 
     /// The fields of the line of the widget in slot `slot`, after its
@@ -867,21 +971,26 @@ mod tests {
             .unwrap_or_else(|| panic!("no {name} in {fields:?}"))
     }
 
-    /// Each text widget is a line, read by both and made by the family,
-    /// the two readings said equal where they are and the parts that
-    /// differ where they don't, the font by what it is; and the dump says
-    /// the same of it every time.
+    /// Each text widget is a line, read by both and made by both, the two
+    /// readings said equal where they are and the parts that differ where
+    /// they don't, the font by what it is, sheaf's appearance beside the
+    /// family's; and the dump says the same of it every time.
     #[test]
     fn the_fields_dump_says_what_each_text_widget_is() {
-        let src = file();
-        let lines = lines_of("f.pdf", &src);
-        assert_eq!(lines, lines_of("f.pdf", &src));
+        let (store, src) = file();
+        let lines = lines_of("f.pdf", &store, &src);
+        assert_eq!(lines, lines_of("f.pdf", &store, &src));
         assert_eq!(lines.len(), 1 + 5, "{}", lines.join("\n"));
         assert_eq!(
             lines[0],
             "f.pdf\t-\t-\t-\tfile\tpages=1\tclass=acroform\tfamily=read\ttext=5\toutside=0\t\
-             equal=4\tdiffer=1\tsheaf_only=0\tfamily_only=0\tmade=5\tunmade=0"
+             equal=5\tdiffer=0\tsheaf_only=0\tfamily_only=0\tmade=5\tunmade=0\t\
+             ours_made=5\tours_unmade=0\tvs_differ=0"
         );
+        // sheaf's plain data make what the family's do, each widget's.
+        for slot in 0..5 {
+            assert_eq!(field(&fields(&lines, slot), "ours.vs"), "=", "slot {slot}");
+        }
 
         // Its own widget: its value's length and checksum, never the
         // value; right-justified, a white background and a blue border;
@@ -902,6 +1011,22 @@ mod tests {
         assert!(!lines.join("\n").contains("Trenton"));
         let made: Vec<&str> = field(&own, "made").split(',').collect();
         assert_eq!(made[..2], ["10", "0"], "{made:?}");
+        // sheaf names /DR's font by its source, copy and object, so its
+        // content names it otherwise, and is as long.
+        let ours: Vec<&str> = field(&own, "ours").split(',').collect();
+        assert_eq!(ours[..2], made[..2]);
+        let len = |m: &[&str]| m[2].split(':').next().unwrap().to_string();
+        assert_eq!(len(&ours), len(&made));
+        let helv = match field(&own, "font").strip_prefix("ref:") {
+            Some(id) => {
+                let (n, g) = id.split_once('.').unwrap();
+                ObjectId::new(n.parse().unwrap(), g.parse().unwrap())
+            }
+            None => panic!("{own:?}"),
+        };
+        let named = appearance::font_res_id(src.id(), 0, FontAt::Object(helv));
+        assert_eq!(ours[3], format!("{:032x}", named.0));
+        assert_ne!(ours[3], made[3]);
 
         // A kid with a /DA of its own, whose font /DR lacks: the family
         // falls back by name, to Helvetica.
@@ -911,17 +1036,19 @@ mod tests {
         assert_eq!(field(&gone, "family"), "=");
         assert_eq!(field(&gone, "font"), "missing:Helvetica");
         assert_eq!(field(&gone, "font.name"), "Gone");
+        // A fallback is named by its dictionary, by both.
+        assert_eq!(field(&gone, "ours"), field(&gone, "made"));
 
         // The other kid: its parent's navy /DA in a direct font with
-        // /Differences; its dashes, which sheaf's model doesn't hold.
+        // /Differences; its dashes, which sheaf's model holds.
         let dashed = fields(&lines, 2);
         assert_eq!(field(&dashed, "da"), "/Direct 9 Tf 0 0 0.502 rg");
         assert_eq!(field(&dashed, "bs"), "dashed");
         assert_eq!(field(&dashed, "bw"), "2");
-        assert_eq!(field(&dashed, "dash"), "-");
-        assert_eq!(field(&dashed, "family"), "dash");
-        assert_eq!(field(&dashed, "family.dash"), "4,2");
+        assert_eq!(field(&dashed, "dash"), "4,2");
+        assert_eq!(field(&dashed, "family"), "=");
         assert_eq!(field(&dashed, "font"), "direct");
+        assert_eq!(field(&dashed, "ours"), field(&dashed, "made"));
         assert_eq!(field(&dashed, "font.base"), "Times-Roman");
         assert_eq!(field(&dashed, "font.enc"), "dict:-:2");
 

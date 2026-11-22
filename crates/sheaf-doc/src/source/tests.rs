@@ -657,3 +657,52 @@ fn an_encrypted_source_keeps_how_it_is_encrypted() {
     .unwrap();
     assert!(src.crypt().is_none());
 }
+
+/// A source reads a field's font once a name, and keeps at most
+/// [`super::FIELD_FONTS`] names: past them a font is read each time.
+#[test]
+fn a_source_keeps_at_most_its_cap_of_field_fonts() {
+    let src = crate::forms::fixture::Form::new(1).source();
+    let first = src.field_font(b"F0").unwrap();
+    for i in 1..300 {
+        src.field_font(format!("F{i}").as_bytes()).unwrap();
+    }
+    let kept = src.field_fonts.lock().unwrap().len();
+    assert_eq!(kept, super::FIELD_FONTS);
+    assert!(Arc::ptr_eq(&first, &src.field_font(b"F0").unwrap()));
+    let past = src.field_font(b"F299").unwrap();
+    let again = src.field_font(b"F299").unwrap();
+    assert!(!Arc::ptr_eq(&past, &again), "read again, not kept");
+}
+
+/// A field's font that can't be read (here a reference chain past the
+/// reader's depth) is kept as that failure, so it isn't read again and
+/// its widgets are refused alike.
+#[test]
+fn a_field_font_that_fails_is_kept_as_its_failure() {
+    use crate::pdf::forms::Error;
+    let mut f = crate::forms::fixture::Form::new(1);
+    let mut at = f.pdf.add_object(crate::pdf::dictionary! {
+        "Type" => Object::name("Font"), "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
+    });
+    for _ in 0..Limits::DEFAULT.reader.max_depth + 4 {
+        at = f.pdf.add_object(Object::from(at));
+    }
+    let acroform = f.acroform;
+    let fonts = (f.dict(acroform).get_mut(b"DR"))
+        .and_then(|dr| dr.as_dict_mut())
+        .and_then(|dr| dr.get_mut(b"Font"))
+        .and_then(|fonts| fonts.as_dict_mut())
+        .expect("the fixture's /DR /Font");
+    fonts.set("Deep", at);
+    let src = f.source();
+    let capped = |read: &super::FieldFontRead| matches!(read, Err(Error::Unreadable(u)) if u.why == crate::pdf::Why::Capped);
+    let read = src.field_font(b"Deep");
+    assert!(capped(&read), "{read:?}");
+    let kept = src.field_fonts.lock().unwrap().get(&b"Deep"[..]).cloned();
+    assert!(kept.as_ref().is_some_and(capped), "{kept:?}");
+    assert!(capped(&src.field_font(b"Deep")));
+    // /DR's other fonts read as ever.
+    assert!(!src.field_font(b"Helv").unwrap().is_fallback());
+}

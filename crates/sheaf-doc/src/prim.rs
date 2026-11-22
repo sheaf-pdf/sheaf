@@ -498,7 +498,7 @@ impl HeapSize for Mk {
 
 impl HeapSize for WidgetProps {
     fn heap_size(&self) -> usize {
-        self.actions.heap_size()
+        buf(&self.dash) + self.actions.heap_size()
     }
 }
 
