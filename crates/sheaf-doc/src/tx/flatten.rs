@@ -2,11 +2,13 @@
 //! appearance a viewer shows, placed on its page in a layer of its own, and
 //! the annotation taken off. Forms are drawn by reference, never merged
 //! into the page's content or decoded: another tool's comment's and a
-//! widget's appearance as its source holds it, a sheaf mark's pinned by
-//! what it's drawn from, which a save draws again (`PinnedAp`). Each placed
-//! through the matrix that takes the box its form's matrix makes of its
-//! bounding box onto the annotation's `/Rect` (ISO 32000-1 12.5.5), marked
-//! as an artifact on a page of a tagged file.
+//! widget's appearance as its source holds it, read by pdf-annots
+//! ([`showing`]: its flags and the forms its appearances name, nothing of
+//! it kept by the source), a sheaf mark's pinned by what it's drawn from,
+//! which a save draws again (`PinnedAp`). Each placed through the matrix
+//! that takes the box its form's matrix makes of its bounding box onto the
+//! annotation's `/Rect` (ISO 32000-2 12.5.5, the family's placement),
+//! marked as an artifact on a page of a tagged file.
 //!
 //! What a flatten takes: annotations shown (neither Hidden nor NoView),
 //! printed too (Print) when only the printable are; never a link, which
@@ -38,7 +40,7 @@ use crate::model::{
 };
 use crate::prim::{Key, Val};
 use crate::source::ObjRef;
-use crate::source::appearance::{Shows, frame};
+use crate::source::showing::{AnnotAt, Showing, showing};
 use crate::store::Src;
 
 /// The annotations on `pages` that `which` says flattened, a page at a
@@ -122,42 +124,51 @@ fn drawn(rec: &AnnotRec, def: &PageDef, which: FlattenSet) -> Option<Vec<(FormRe
         }),
         AnnotBody::Foreign(f) if f.summary.is_link() => None,
         AnnotBody::Foreign(f) => {
-            let (src, read) = match &f.src {
-                Some(r) => (&r.src, Shows::read(r)?),
-                None => {
-                    let (src, index) = (&def.base.src, def.base.index);
-                    (src, Shows::in_slot(src, index, f.summary.slot)?)
-                }
+            let at = match &f.src {
+                Some(r) => AnnotAt::Object(r),
+                None => AnnotAt::InSlot {
+                    src: &def.base.src,
+                    index: def.base.index,
+                    slot: f.summary.slot,
+                },
             };
-            if !flattens(read.flags) {
-                return None;
-            }
-            let form = read.form(src, read.state.as_deref(), true);
-            Some(placed(form, f.summary.rect))
+            // One that isn't a dictionary, or that the family refuses (the
+            // open lists none such: it read each by the same reading),
+            // stays as the page has it.
+            let drawn = showing(at, |s| {
+                (flattens(s.flags())).then(|| on_rect(s, s.form(s.state(), true), f.summary.rect))
+            });
+            drawn?.ok()?
         }
         AnnotBody::Widget(w) => {
             if !flattens(w.flags) {
                 return None;
             }
             let state = w.state.as_deref().map(str::as_bytes);
-            let form = (w.src.as_ref()).and_then(|r| Shows::read(r)?.form(&r.src, state, false));
             let [l, b, r, t] = w.rect;
             let rect = Box2::from_corners(Pt { x: l, y: b }, Pt { x: r, y: t });
-            Some(placed(form, rect))
+            // One whose appearance can't be had (no dictionary, or one the
+            // family refuses) draws nothing.
+            let drawn = (w.src.as_ref())
+                .and_then(|at| {
+                    showing(AnnotAt::Object(at), |s| {
+                        on_rect(s, s.form(state, false), rect)
+                    })
+                })
+                .and_then(Result::ok);
+            Some(drawn.unwrap_or_default())
         }
     }
 }
 
-/// Form `form`, when there's one, placed on `rect`: none when it can't
-/// be read, or its box has no area, which draws nothing.
-fn placed(form: Option<ObjRef>, rect: Box2) -> Vec<(FormRef, Affine)> {
+/// Form `form` of what `s` shows, when there's one, placed on `rect`:
+/// none when it isn't a form with a box, or that box has no area, which
+/// draws nothing.
+fn on_rect(s: &Showing<'_>, form: Option<ObjRef>, rect: Box2) -> Vec<(FormRef, Affine)> {
     let Some(form) = form else {
         return Vec::new();
     };
-    let Some((bbox, matrix)) = frame(&form) else {
-        return Vec::new();
-    };
-    let Some(onto) = Affine::onto(matrix.bounds(bbox), rect) else {
+    let Some((_, _, onto)) = s.placed(&form, rect) else {
         return Vec::new();
     };
     vec![(FormRef::Base(form), onto)]

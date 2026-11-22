@@ -1245,6 +1245,17 @@ const RETIRED_M18: &[(&str, u8)] = &[
     // `annot::outline_of`), its scallops the family's (`cloud_outline`,
     // which `annot::cloud_curves` adapts for the screen).
     ("annot::cloud_path", 24),
+    // What a flatten reads of an annotation is pdf-annots' reading of it
+    // (`source::showing`: its flags, and the form its appearances name in
+    // the state sheaf's rule picks), placed by the family's placement
+    // (`pdf::annots::placement`), over objects read for it and kept
+    // nowhere: sheaf's own reader of its keys and of a form's frame went.
+    ("source::appearance::Shows", 24),
+    ("source::appearance::Shows::read", 24),
+    ("source::appearance::Shows::in_slot", 24),
+    ("source::appearance::Shows::form", 24),
+    ("source::appearance::frame", 24),
+    ("source::appearance::unkept", 24),
 ];
 
 /// The ledgers, with the words a hit names its slice by.

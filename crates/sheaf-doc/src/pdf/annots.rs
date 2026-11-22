@@ -6,7 +6,9 @@
 //! source's objects as sheaf reads an annotation's parts: what the source
 //! keeps lent from it, a stream's dictionary held by an [`Unkept`] of the
 //! caller's and its data never read, and an object that doesn't read
-//! absent.
+//! absent. What a flatten draws of one is the form its appearances
+//! ([`Annot::appearances`]) name, placed on its box by the family's
+//! placement ([`placement`]).
 //!
 //! **Appearances.** An appearance as the parts of the form XObject that
 //! holds it ([`SynthesizedAp`]: its box, its matrix, its content and what
@@ -16,6 +18,7 @@
 //! appearance reaches the writer as one, whoever drew it, and the writer
 //! makes its form from those parts (`crate::content::sink::form`).
 
+use super::gfx::{Matrix, Rect};
 use crate::content::{Objects, ReadObjects, Unkept};
 use crate::pdf::{Dictionary, Object, ObjectId, Resolve};
 
@@ -86,4 +89,23 @@ pub fn read<'o, R: ReadObjects + ?Sized>(
     let parts = Parts(Objects::new(source, unkept));
     let rules = pdf_objects::pdf_tokenizer::Rules::Pdfium;
     Annot::from_dict_with(parts, dict, id, rules, &limits(), &mut ())
+}
+
+/// Form `form` of `source`, an annotation's appearance, placed on `rect`
+/// as ISO 32000-2 §12.5.5 places one, by the family's reading
+/// (`stream_placement_matrix`, under PDFium's rules and [`limits`]), what
+/// it reads held by `unkept` as [`read`] holds it: the form's `/BBox`, its
+/// `/Matrix` (the identity where it has none), and the matrix that takes
+/// the box the second makes of the first onto `rect`. None where it isn't
+/// a form with a box, or that box has no area.
+pub fn placement<'o, R: ReadObjects + ?Sized>(
+    source: &'o R,
+    unkept: &'o Unkept,
+    form: ObjectId,
+    rect: Rect,
+) -> Option<(Rect, Matrix, Matrix)> {
+    let parts = Parts(Objects::new(source, unkept));
+    pdf_annots::stream_placement_matrix(parts, form, rect, &limits())
+        .ok()
+        .flatten()
 }

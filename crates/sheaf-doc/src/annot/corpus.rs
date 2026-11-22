@@ -24,7 +24,7 @@ use crate::pdf::annots::{self, SynthesizedAp};
 use crate::pdf::{Dictionary, Object, ObjectId, Value};
 use crate::serialize::built::{Held, StampForm};
 use crate::source::ObjRef;
-use crate::source::appearance::{Shows, frame};
+use crate::source::showing::{AnnotAt, showing};
 use crate::store::{BlobKind, Src, Store};
 
 /// Where [`annots_dump`] writes: a path. Unset, it reads nothing.
@@ -301,10 +301,14 @@ fn raw_rect<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<Box2> {
 }
 
 /// What a flatten reads of the annotation in slot `slot` of page `index`
-/// of `src`, `entry` there ([`Shows`]): its flags, the state it shows,
-/// and the form it shows by its value (another tool's comment) and by
-/// its state alone (a widget), each with its `/BBox`, its `/Matrix` and
-/// the matrix that places it on `rect`.
+/// of `src`, `entry` there ([`showing`]: pdf-annots' reading): its flags,
+/// the state it shows, and the form it shows by its value (another
+/// tool's comment) and by its state alone (a widget), each with its
+/// `/BBox`, its `/Matrix` and the matrix that places it on `rect` (placed
+/// on a unit box where there's no rect, the placement then `-`), or
+/// `.frame=-` where the family places it on none. `shows=-` where there's
+/// no dictionary, and `shows=refused:` with why where the family refuses
+/// it.
 fn flatten_fields(
     line: &mut Line,
     src: &Src,
@@ -312,47 +316,61 @@ fn flatten_fields(
     entry: &Object,
     rect: Option<Box2>,
 ) {
-    let shows = match entry.as_reference() {
-        Some(id) => Shows::read(&ObjRef {
-            src: src.clone(),
-            id,
-        }),
-        None => Shows::in_slot(src, at.0, at.1),
-    };
-    let Some(shows) = shows else {
-        line.field("shows", "-");
-        return;
-    };
-    line.field("flags", &shows.flags.to_string());
-    match &shows.state {
-        Some(state) => line.field("state", &name_of(state)),
-        None => line.field("state", "-"),
-    }
-    let by_value = shows.form(src, shows.state.as_deref(), true).map(|f| f.id);
-    let by_state = shows.form(src, shows.state.as_deref(), false).map(|f| f.id);
-    for (tag, form) in [("by_value", by_value), ("by_state", by_state)] {
-        if tag == "by_state" && by_state == by_value {
-            line.field(tag, "same");
-            continue;
+    let object;
+    let place = match entry.as_reference() {
+        Some(id) => {
+            object = ObjRef {
+                src: src.clone(),
+                id,
+            };
+            AnnotAt::Object(&object)
         }
-        line.field(tag, &id_of(form));
-        let Some(id) = form else {
-            continue;
-        };
-        let read = frame(&ObjRef {
-            src: src.clone(),
-            id,
-        });
-        let Some((bbox, matrix)) = read else {
-            line.field(&format!("{tag}.frame"), "-");
-            continue;
-        };
-        line.bits(&format!("{tag}.bbox"), &rect_bits(bbox));
-        line.matrix(&format!("{tag}.matrix"), matrix);
-        match rect.and_then(|rect| Affine::onto(matrix.bounds(bbox), rect)) {
-            Some(onto) => line.matrix(&format!("{tag}.onto"), onto),
-            None => line.field(&format!("{tag}.onto"), "-"),
+        None => AnnotAt::InSlot {
+            src,
+            index: at.0,
+            slot: at.1,
+        },
+    };
+    let read = showing(place, |s| {
+        line.field("flags", &s.flags().to_string());
+        let state = s.state();
+        match state {
+            Some(state) => line.field("state", &name_of(state)),
+            None => line.field("state", "-"),
         }
+        let by_value = s.form(state, true);
+        let by_state = s.form(state, false);
+        for (tag, form) in [("by_value", &by_value), ("by_state", &by_state)] {
+            if tag == "by_state" && by_state == by_value {
+                line.field(tag, "same");
+                continue;
+            }
+            line.field(tag, &id_of(form.as_ref().map(|f| f.id)));
+            let Some(form) = form else {
+                continue;
+            };
+            let unit = Box2 {
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+                h: 1.0,
+            };
+            let Some((bbox, matrix, onto)) = s.placed(form, rect.unwrap_or(unit)) else {
+                line.field(&format!("{tag}.frame"), "-");
+                continue;
+            };
+            line.bits(&format!("{tag}.bbox"), &rect_bits(bbox));
+            line.matrix(&format!("{tag}.matrix"), matrix);
+            match rect {
+                Some(_) => line.matrix(&format!("{tag}.onto"), onto),
+                None => line.field(&format!("{tag}.onto"), "-"),
+            }
+        }
+    });
+    match read {
+        None => line.field("shows", "-"),
+        Some(Err(why)) => line.field("shows", &format!("refused:{}", escaped(&why.to_string()))),
+        Some(Ok(())) => {}
     }
 }
 
