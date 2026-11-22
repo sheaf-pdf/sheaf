@@ -590,6 +590,9 @@ pub fn annots_in<P: Objects + ?Sized>(
 }
 
 #[cfg(test)]
+pub(crate) mod family;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::pdf::{Object, Stream, dictionary, literal};

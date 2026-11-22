@@ -610,4 +610,6 @@ fn default_appearance(da: &str) -> (Option<f32>, Option<[u8; 3]>) {
 }
 
 #[cfg(test)]
+pub(crate) mod family;
+#[cfg(test)]
 mod tests;

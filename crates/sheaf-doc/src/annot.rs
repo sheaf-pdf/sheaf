@@ -2745,6 +2745,8 @@ fn digest<'a>(
 #[cfg(test)]
 mod corpus;
 #[cfg(test)]
+mod geometry;
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::pdf::StreamExt;
