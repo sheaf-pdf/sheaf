@@ -925,8 +925,11 @@ pub struct Widget {
 /// What a widget is beside where it is and what it shows.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WidgetProps {
-    /// `/BS` (or the older `/Border`).
+    /// `/BS` (or the older `/Border`): its width, style and dash array.
     pub border: Option<Border>,
+    /// Its own `/Q`, when it isn't its field's dictionary too: what a text
+    /// field's widget is justified by before its field's.
+    pub align: Option<u8>,
     /// `/A` and its own `/AA`.
     pub actions: Vec<(Trigger, Action)>,
     /// It has a normal appearance: a stream, or states.
@@ -954,7 +957,8 @@ impl Widget {
             state: w.state.clone(),
             states: w.states.clone().into(),
             props: Arc::new(WidgetProps {
-                border: w.border,
+                border: w.border.clone(),
+                align: w.align,
                 actions: w.actions.clone(),
                 has_appearance: w.has_appearance,
             }),

@@ -110,6 +110,10 @@ pdf-gfx = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", defa
 # Without its defaults too: `programs` would turn pdf-gfx's on, under the
 # interpreter; `text-layout` is pdf-gfx's, which sheaf takes already.
 pdf-annots = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", default-features = false, features = ["text-layout"] }
+# And pdf-forms, for its text fields' appearances: `programs` would turn
+# pdf-gfx's on, as pdf-annots' would; `text-layout`, which makes them, is
+# pdf-annots' and pdf-gfx's, which sheaf takes already.
+pdf-forms = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", default-features = false, features = ["text-layout"] }
 
 # Zed's workspace patches for crates GPUI uses, mirrored from the
 # [patch.crates-io] of Zed's Cargo.toml at the snapshot's rev.

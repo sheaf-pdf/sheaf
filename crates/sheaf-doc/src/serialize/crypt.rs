@@ -138,8 +138,9 @@ impl Crypt {
 
     /// Switches AES IV generation to deterministic `pdf_crypt::Ivs::derived`
     /// (`insecure-test-writer`), exclusively for tests that pin exact bytes
-    /// across threads or runs.
-    #[cfg(test)]
+    /// across threads or runs, here and in other crates' (the `fixtures`
+    /// feature: `forms::fixture::try_append_revision`).
+    #[cfg(any(test, feature = "fixtures"))]
     #[must_use]
     pub fn with_test_ivs(mut self) -> Crypt {
         self.encryptor = self.encryptor.with_test_ivs(crate::pdf::Ivs::derived);

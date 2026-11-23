@@ -23,9 +23,10 @@
 //!   in its group (Greg, 2026-10-20); a section refused over a base PDFium
 //!   reads fails.
 //!
-//! The field's value only checks that a value change leaves its pages on
-//! their base: no save writes `/V` from the model until fills do (M10
-//! slice 9), so the predicate ignores it and the Rewrite draws the file's.
+//! The field's value is a text field's (M10 slice 6): its widget's
+//! appearance is made anew, so its pages are realized, and drawn from the
+//! form the Rewrite writes too. No save writes its `/V` from the model
+//! until fills do (M10 slice 9).
 //!
 //! The pool's sample is slice 2's spikes': the pool sample
 //! (`bench/pool-sample.txt`); spike A's encrypted files, the first 75
@@ -649,8 +650,8 @@ fn run(tier: Tier, set: Set) {
     eprintln!(
         "{name}: {unopened} don't open, {failed} failed; {standalone} realized standalone, \
          {refused} of them refused by PDFium; another tool's comment deleted in {comments}; \
-         a field's value changed in {fields} (its pages left on their base: no save writes /V \
-         until M10 slice 9)"
+         a text field's value changed in {fields} (its widget's appearance made anew, its pages \
+         realized)"
     );
     for (class, [files, compared, differing, within, checked, disagreeing]) in &classes {
         match tier {

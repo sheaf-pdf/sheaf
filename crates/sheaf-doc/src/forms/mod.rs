@@ -1,16 +1,21 @@
 //! AcroForms (M10). The field model ([`field`]) and reading it from a
 //! source with the facts sheaf shows about the form ([`read`]), what its
-//! signatures allow after them ([`sigs`]), and the form check ([`check`]):
+//! signatures allow after them ([`sigs`]), the form check ([`check`]):
 //! what in a file's form other viewers would trip on, or what a save would
-//! carry where it shouldn't.
+//! carry where it shouldn't; and a text field's appearance made from the
+//! model's plain data through pdf-forms ([`appearance`]).
 //!
 //! Tests build forms in code ([`fixture`]) and read real ones from Greg's
 //! corpus ([`corpus`]). Both are compiled for this crate's tests and, with
-//! the `fixtures` feature, for other crates' tests.
+//! the `fixtures` feature, for other crates' tests. A dump of the corpus's
+//! text widgets (`dump`) sets sheaf's reading of each beside pdf-forms'.
 
+pub mod appearance;
 pub mod check;
 #[cfg(any(test, feature = "fixtures"))]
 pub mod corpus;
+#[cfg(test)]
+mod dump;
 pub mod field;
 #[cfg(any(test, feature = "fixtures"))]
 pub mod fixture;

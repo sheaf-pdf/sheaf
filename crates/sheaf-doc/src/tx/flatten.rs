@@ -6,10 +6,13 @@
 //! ([`showing`]: a comment's flags and the forms its appearances name;
 //! [`appearing`]: a widget's appearances alone; nothing of either kept by
 //! the source), a sheaf mark's pinned by what it's drawn from,
-//! which a save draws again (`PinnedAp`). Each placed through the matrix
-//! that takes the box its form's matrix makes of its bounding box onto the
-//! annotation's `/Rect` (ISO 32000-2 12.5.5, the family's placement),
-//! marked as an artifact on a page of a tagged file.
+//! which a save draws again (`PinnedAp`). A text field's widget whose value
+//! the model holds changed draws its file's appearance too, the old value,
+//! where a save makes it anew (M10 slice 6); making it first is M10 slice
+//! 15's, and no op changes a value before slice 9. Each placed through the
+//! matrix that takes the box its form's matrix makes of its bounding box
+//! onto the annotation's `/Rect` (ISO 32000-2 12.5.5, the family's
+//! placement), marked as an artifact on a page of a tagged file.
 //!
 //! What a flatten takes: annotations shown (neither Hidden nor NoView),
 //! printed too (Print) when only the printable are; never a link, which

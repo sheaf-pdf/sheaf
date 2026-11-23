@@ -18,6 +18,15 @@
 //! - **Widgets** not merged are their source's, `/Parent` their field and
 //!   `/P` their page, `/StructParent` kept only where the page keeps its
 //!   tags.
+//! - **A text field's widget whose value changed** ([`appearance::stale`])
+//!   gets its appearance made anew by pdf-forms from the model's plain
+//!   data, bound where a mark's is (`appearance`): the form under
+//!   [`ObjKey::AnnotPart`] (`Part::Ap`), the widget's `/AP` `<< /N … >>`
+//!   alone, so an overlay and a save write the same form. The file's
+//!   `/AP` isn't copied, so a Rewrite holds none of the old appearance's
+//!   streams. One that can't be made leaves the widget with no `/AP`. Its
+//!   `/V` is written as the file has it: no save writes a value before M10
+//!   slice 9.
 //! - **Widgets on page templates** (`/Names /Templates`) aren't records: a
 //!   primary field's kids the records don't account for and no page shows
 //!   stay in its `/Kids`, as the file has them.
@@ -53,13 +62,18 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, StringFormat, Value as PdfValue, literal};
+use crate::pdf::forms::{FieldFont, Unmade};
+use crate::pdf::{
+    Dictionary, LazyPdf, Object, ObjectId, StringFormat, Value as PdfValue, dictionary, literal,
+};
 
 use super::Cx;
 use crate::annot::AnnotId;
+use crate::content::{Res, sink};
+use crate::forms::appearance::{self, FontAt, TextLook};
 use crate::forms::{FieldId, FieldKind, Value};
 use crate::materialize::copy::Scope;
-use crate::materialize::key::{NameTree, ObjKey};
+use crate::materialize::key::{NameTree, ObjKey, Part};
 use crate::materialize::plan::SaveTransform;
 use crate::materialize::record::ACROFORM_OWNED;
 use crate::model::{AnnotRec, DocState, FieldNode, FormInst, PageId, Widget};
@@ -428,6 +442,8 @@ pub(crate) fn widget(
     };
     let split = cx.form.split.contains(&w.field);
     let key = ObjKey::Annot(aid);
+    // Its text field's value changed: its appearance is made anew.
+    let stale = appearance::stale(st, aid);
     // Nothing of it changes: the file's object as it is, unbuilt.
     let named = |k: &[u8], to: Option<ObjectId>| {
         dict.get(k)
@@ -438,6 +454,7 @@ pub(crate) fn widget(
     let page_at = cx.number_known(ObjKey::Page(page));
     if tags
         && !split
+        && !stale
         && cx.owned_at(key) == Some(r.id)
         && named(b"Parent", field)
         && (!dict.has(b"P") || named(b"P", page_at))
@@ -459,11 +476,17 @@ pub(crate) fn widget(
                 let v = cx.da(v, &r.src, &scope);
                 out.set("DA", v);
             }
+            // Never through `sym`, which would copy the old appearance's
+            // streams for nothing to name.
+            b"AP" if stale => {}
             _ => {
                 let v = cx.sym(v, &scope);
                 out.set(k, v);
             }
         }
+    }
+    if stale && let Some(ap) = appearance(cx, aid, &r.src) {
+        out.set("AP", ap);
     }
     if st.field(w.field).is_some() {
         out.set("Parent", cx.placeholder(ObjKey::Field(w.field)));
@@ -471,6 +494,65 @@ pub(crate) fn widget(
     cx.hidden(aid, &mut out);
     put(cx, key, out, r, dict);
     Some(cx.placeholder(key))
+}
+
+/// Widget `aid`'s appearance, made anew for its text field's value as the
+/// model holds it ([`appearance::stale`]) and bound as a mark's is: made
+/// by pdf-forms from the model's plain data ([`appearance::text_look`]) in
+/// the font its `/DA` names in `src`'s `/DR`, `src` the source the widget
+/// was read from, under that source's name (a merged `/DR` may have
+/// renamed it; it's still the same object), pushed under
+/// `AnnotPart(aid, Ap)` where the emission writes it. The widget's `/AP`:
+/// `<< /N … >>`, nothing else of the file's (its `/D` and `/R` would show
+/// the old value). None where none can be made: the widget is written
+/// with no `/AP`, so no file shows a value the field no longer holds, and
+/// a warning says which kind, never the text.
+fn appearance(cx: &mut Cx, aid: AnnotId, src: &Src) -> Option<Object> {
+    let made = (appearance::text_look(cx.st, aid).ok_or(Unmade::NotText)).and_then(|look| {
+        let font = appearance::font(src, &look)?;
+        let res = font_res(cx, &font, src, &look);
+        appearance::make(&look, &font, res)
+    });
+    let made = match made {
+        Ok(made) => made,
+        Err(why) => {
+            let why = appearance::unmade_kind(&why);
+            log::warn!("a text field's appearance can't be made ({why}): its widget has none");
+            return None;
+        }
+    };
+    let ap = ObjKey::AnnotPart(aid, Part::Ap);
+    if cx.writes(&ap) {
+        let form = sink::form(cx, made.bbox, made.matrix, made.content, &made.needs);
+        cx.push(ap, Object::from(form));
+    }
+    Some(Object::from(dictionary! { "N" => cx.placeholder(ap) }))
+}
+
+/// The resource a made appearance names `font` by, `font` the one
+/// `look`'s `/DA` names in `src`'s `/DR` ([`appearance::font_res`]): its
+/// own where it reaches nothing else (a fallback, or a direct entry with
+/// no reference), written once a file; else named by where it is in
+/// `src` and bound to that, copy 0 of it as `/DR` is written, so an
+/// appearance of any copy of the form names the font `/DR` names and no
+/// copy of it: a font `/DR` holds by reference, that object; a direct
+/// entry that holds references, the dictionary the font lends
+/// (`FieldFont::direct`, pdf-forms': the one it read) written as an
+/// object of its own, once, under [`ObjKey::Res`].
+fn font_res(cx: &mut Cx, font: &FieldFont, src: &Src, look: &TextLook) -> Res {
+    let name = look.font_name().unwrap_or_default();
+    let scope = Scope { src, copy: 0 };
+    let written = |at: FontAt<'_>| match at {
+        FontAt::Object(id) => (cx.sym(&Object::from(id), &scope).as_reference())
+            .expect("a reference to a font is a placeholder"),
+        FontAt::Entry(_) => {
+            let key = ObjKey::Res(appearance::font_res_id(src.id(), 0, at));
+            let entry =
+                (font.direct().cloned()).expect("a font no resource names lends its dictionary");
+            cx.push_once(key, |cx| cx.sym(&Object::from(entry), &scope))
+        }
+    };
+    appearance::font_res(font, src.id(), 0, &name, written)
 }
 
 /// `out`, built from `read`, object `r`, pushed under `key`: as the file
@@ -786,6 +868,9 @@ impl Fields {
             .copied();
         let one = merged.and_then(|w| Some(st.annot(w)?.page));
         let tags = one.is_some_and(|page| cx.keeps_tags(page));
+        // That widget's text field's value changed: its appearance is made
+        // anew.
+        let stale = merged.is_some_and(|w| appearance::stale(st, w));
         let mut kids = kids;
         for &w in term.into_iter().flat_map(|t| t.widgets.iter()) {
             // An overlay's are those on its pages.
@@ -838,6 +923,7 @@ impl Fields {
         let defaults_kept = da.is_none_or(|_| read.has(b"DA")) && q.is_none_or(|_| read.has(b"Q"));
         if cx.owned_at(key) == Some(r.id)
             && !split
+            && !stale
             && tip.is_none()
             && defaults_kept
             && (one.is_none() || tags)
@@ -862,11 +948,19 @@ impl Fields {
                     let v = cx.da(v, &r.src, &scope);
                     out.set("DA", v);
                 }
+                // Never through `sym`, which would copy the old
+                // appearance's streams for nothing to name.
+                b"AP" if stale => {}
                 _ => {
                     let v = cx.sym(v, &scope);
                     out.set(k, v);
                 }
             }
+        }
+        if let Some(w) = merged.filter(|_| stale)
+            && let Some(ap) = appearance(cx, w, &r.src)
+        {
+            out.set("AP", ap);
         }
         if !kids.is_empty() {
             out.set("Kids", kids);

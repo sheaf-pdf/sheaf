@@ -1,0 +1,22 @@
+left	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	134:02d1ed901aef050c0c5f2000e295e4bf
+center	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	138:8c26133fc5eff5817cd84282f08386df
+right	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	139:2715cd3fc3cb0376696c34045da5afbf
+comb	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	528:f66fab4331bc6afb4900ee6fc09f79a0
+comb right	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	532:255f2495e1d836ad4816256817da7abb
+multiline	bbox=0 0 200 60	matrix=1 0 0 1 0 0	size=10	ovf=0	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	243:1b136fb6323b54fe33e22cb031b51741
+auto size	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=14	ovf=0	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	134:0681b7ffd61777ab2b029191500cf06a
+auto size multiline	bbox=0 0 200 60	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	245:b4b691e379e42a457e418188c0117a6a
+solid 2	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	157:29793a5e2d71a120dd228304d4ad183b
+dashed	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	202:7d9f787bb638db52973f0cae6e376ab5
+dashed by default	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	200:a116da0c27edadff1abeb8787b98aea8
+beveled	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=1	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	271:eaa35d4b776ac8375eaa266d218a328c
+inset	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=1	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	272:e3e687adae4b8e6fee4c776ebb3e2c8a
+underline	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	161:03698a9188a429394ba73358e420cb33
+rotated 90	bbox=0 0 20 200	matrix=0 1 -1 0 200 0	size=12	ovf=1	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	135:71274e6af19abee2cf31cb617bd3f4bb
+rotated 180	bbox=0 0 200 20	matrix=-1 0 0 -1 200 20	size=12	ovf=0	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	134:02d1ed901aef050c0c5f2000e295e4bf
+rotated 270	bbox=0 0 20 200	matrix=0 -1 1 0 0 20	size=12	ovf=1	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	135:71274e6af19abee2cf31cb617bd3f4bb
+password	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	134:ae01a67200180c227b5c2af6143aebcb
+empty	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=	51:8de544d8643927a45f02522b87879642
+navy on blue	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=9	ovf=0	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	185:7858378cfb41cb2ceac8ab631c804298
+cmyk	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=9	ovf=0	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	146:a3bc5056df01922c2915958d5d46cb66
+by reference	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=ShLYJ5MN:5e13d6355d605a0327f2d9f1167a87d8	134:c61712cb47caf5700b21d202695c7c3c

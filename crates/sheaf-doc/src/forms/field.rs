@@ -230,15 +230,20 @@ pub struct Widget {
     /// annotations.
     pub slot: usize,
     /// `/Rect` in the page's own space (before `/Rotate`): left, bottom,
-    /// right, top, in order, finite and within [`super::read::MAX_COORD`].
+    /// right, top, in order, finite and within [`super::read::MAX_COORD`],
+    /// each number followed where it's a reference.
     pub rect: [f32; 4],
     /// `/F` (annotation flags: hidden, print, no view…).
     pub flags: u32,
     /// Its own `/DA`, when it isn't its field's dictionary too.
     pub da: Option<Arc<str>>,
     pub mk: Mk,
-    /// `/BS` (or the older `/Border`), when it has one.
+    /// `/BS` (or the older `/Border`), when it has one: its width, style
+    /// and dash array, one value.
     pub border: Option<Border>,
+    /// Its own `/Q`, when it isn't its field's dictionary too: 0 left, 1
+    /// centered, 2 right. A text field's widget is justified by it first.
+    pub align: Option<u8>,
     /// `/AS`: the appearance state it shows.
     pub state: Option<String>,
     /// The states `/AP /N` has, when it has several: a check box's on state
@@ -280,11 +285,32 @@ pub enum Color {
     Cmyk([f32; 4]),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// A widget's border: `/BS`, or the older `/Border` where it has no `/BS`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Border {
     /// In points, within 0–100.
     pub width: f32,
     pub style: BorderStyle,
+    /// Its dash array: `/BS /D`, or `/Border`'s fourth element (which makes
+    /// that border dashed); the default
+    /// ([`DEFAULT_DASH`](super::read::DEFAULT_DASH)) for a dashed border
+    /// that gives none. At most [`MAX_DASHES`](super::read::MAX_DASHES)
+    /// numbers, each finite and not negative; empty for none. A border
+    /// that isn't dashed keeps the one its `/BS /D` gives, which nothing
+    /// draws.
+    pub dash: Vec<f32>,
+}
+
+impl Border {
+    /// A solid border `width` wide, with no dash array: what a widget
+    /// with neither `/BS` nor `/Border` draws, at width 1.
+    pub const fn solid(width: f32) -> Border {
+        Border {
+            width,
+            style: BorderStyle::Solid,
+            dash: Vec::new(),
+        }
+    }
 }
 
 /// `/BS /S`.

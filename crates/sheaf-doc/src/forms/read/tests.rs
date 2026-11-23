@@ -553,7 +553,8 @@ fn widgets_are_finite_and_clamped() {
         wa.border,
         Some(Border {
             width: 100.0,
-            style: BorderStyle::Underline
+            style: BorderStyle::Underline,
+            dash: Vec::new(),
         })
     );
     assert_eq!(wa.da, None);
@@ -562,15 +563,209 @@ fn widgets_are_finite_and_clamped() {
         (wb.mk.background, wb.mk.border_color, wb.mk.rotation),
         (None, None, 0)
     );
-    assert_eq!(
-        wb.border,
-        Some(Border {
-            width: 2.0,
-            style: BorderStyle::Solid
-        })
-    );
+    assert_eq!(wb.border, Some(Border::solid(2.0)));
     assert_eq!(wk.da.as_deref(), Some("/ZaDb 12 Tf 1 0 0 rg"));
     assert_eq!(wk.field, field(&form, "pick").id);
+    // None is a kid with a /Q of its own.
+    assert_eq!((wa.align, wb.align, wk.align), (None, None, None));
+}
+
+/// A border's dashes are `/BS /D`'s, `[3]` for a dashed one that gives
+/// none, or a `/Border`'s fourth element, which makes it dashed: each
+/// number followed where it's a reference, the finite ones not negative,
+/// at most 32.
+#[test]
+fn a_border_s_dashes_are_read_as_pdf_annots_reads_them() {
+    let mut f = Form::new(1);
+    let three = f.pdf.add_object(3);
+    let bs = |s: &str, d: Option<Vec<Object>>| {
+        let mut bs = dictionary! { "W" => 1, "S" => Object::name(s) };
+        if let Some(d) = d {
+            bs.set("D", d);
+        }
+        bs
+    };
+    let many: Vec<Object> = (1..=40).map(Object::from).collect();
+    let cases: [(&str, Dictionary); 9] = [
+        ("dashed", bs("D", None)),
+        (
+            "own",
+            bs("D", Some(vec![4.into(), (-1).into(), three.into()])),
+        ),
+        ("odd", bs("D", Some(vec![literal("x"), huge(), 2.5.into()]))),
+        ("solid", bs("S", Some(vec![5.into()]))),
+        ("empty", bs("D", Some(Vec::new()))),
+        ("many", bs("D", Some(many))),
+        ("legacy", dictionary! {}),
+        ("legacy empty", dictionary! {}),
+        ("legacy name", dictionary! {}),
+    ];
+    for (i, (name, bs)) in cases.iter().enumerate() {
+        let id = f.text(name, 0, row(i));
+        if !bs.is_empty() {
+            f.dict(id).set("BS", bs.clone());
+        }
+    }
+    let old_border = |f: &mut Form, name: &str, fourth: Object| {
+        let id = (f.fields().into_iter())
+            .find(|&id| f.pdf.get_dictionary(id).unwrap().get(b"T") == Some(&literal(name)))
+            .unwrap();
+        let w = f.pdf.add_object(2);
+        f.dict(id)
+            .set("Border", vec![0.into(), 0.into(), Object::from(w), fourth]);
+    };
+    old_border(&mut f, "legacy", vec![Object::from(2), 1.into()].into());
+    old_border(&mut f, "legacy empty", Vec::<Object>::new().into());
+    old_border(&mut f, "legacy name", Object::name("D"));
+    let form = read(&source(with_huge(f.bytes())));
+    let widgets = &form.widgets[&0];
+    let read: Vec<(Option<BorderStyle>, Vec<f32>)> = (widgets.iter())
+        .map(|w| {
+            let b = w.border.as_ref();
+            (
+                b.map(|b| b.style),
+                b.map_or_else(Vec::new, |b| b.dash.clone()),
+            )
+        })
+        .collect();
+    let (d, s) = (Some(BorderStyle::Dashed), Some(BorderStyle::Solid));
+    assert_eq!(
+        read,
+        [
+            (d, vec![3.0]),
+            (d, vec![4.0, 3.0]),
+            (d, vec![2.5]),
+            (s, vec![5.0]),
+            (d, vec![3.0]),
+            (d, (1..=32).map(|n| n as f32).collect()),
+            (d, vec![2.0, 1.0]),
+            (d, vec![3.0]),
+            (s, vec![]),
+        ]
+    );
+    // The legacy borders' widths, references, are followed.
+    assert!((widgets[6..].iter()).all(|w| w.border.as_ref().is_some_and(|b| b.width == 2.0)));
+}
+
+/// A `/Border` of three or more elements is a border whatever its third
+/// is: a width that isn't a number is 0, and the fourth element is still
+/// its dash array, as `pdf-annots` reads one; a shorter array is no border
+/// record, and the appearance draws width 1, solid.
+#[test]
+fn a_border_whose_width_isn_t_a_number_is_width_0() {
+    let mut f = Form::new(1);
+    let dash: Object = vec![Object::from(3), 2.into()].into();
+    let cases: [(&str, Vec<Object>); 5] = [
+        (
+            "name",
+            vec![0.into(), 0.into(), Object::name("x"), dash.clone()],
+        ),
+        ("null", vec![0.into(), 0.into(), Object::null()]),
+        (
+            "missing",
+            vec![0.into(), 0.into(), f.pdf.new_object_id().into(), dash],
+        ),
+        ("short", vec![0.into(), 0.into()]),
+        ("empty", Vec::new()),
+    ];
+    for (i, (name, border)) in cases.iter().enumerate() {
+        let id = f.text(name, 0, row(i));
+        f.dict(id).set("Border", border.clone());
+    }
+    let form = read(&source(f.bytes()));
+    let read: Vec<Option<Border>> = (form.widgets[&0].iter())
+        .map(|w| w.border.clone())
+        .collect();
+    let dashed = Border {
+        width: 0.0,
+        style: BorderStyle::Dashed,
+        dash: vec![3.0, 2.0],
+    };
+    assert_eq!(
+        read,
+        [
+            Some(dashed.clone()),
+            Some(Border::solid(0.0)),
+            Some(dashed),
+            None,
+            None,
+        ]
+    );
+}
+
+/// A kid widget's own `/Q` is read beside its field's, which a merged
+/// widget's dictionary holds; one outside 0 to 2 isn't.
+#[test]
+fn a_kid_widget_s_own_q_is_read() {
+    let mut f = Form::new(1);
+    let merged = f.text("merged", 0, row(0));
+    f.dict(merged).set("Q", 2);
+    let parent = f.text("parent", 0, row(1));
+    f.dict(parent).set("Q", 1);
+    let mut kids = Vec::new();
+    for (i, q) in [Some(2), None, Some(7)].into_iter().enumerate() {
+        let r: Vec<Object> = row(2 + i).iter().map(|&v| Object::from(v)).collect();
+        let kid = f.pdf.add_object(dictionary! {
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Widget"),
+            "Rect" => r, "P" => f.pages[0], "Parent" => parent,
+        });
+        if let Some(q) = q {
+            f.dict(kid).set("Q", q);
+        }
+        kids.push(kid);
+    }
+    let d = f.dict(parent);
+    for key in ["Subtype", "Rect", "F", "P", "Type"] {
+        d.remove(key.as_bytes());
+    }
+    d.set(
+        "Kids",
+        kids.iter().map(|&k| Object::from(k)).collect::<Vec<_>>(),
+    );
+    let annots: Vec<ObjectId> = (f.annots(0).into_iter().filter(|&a| a != parent))
+        .chain(kids)
+        .collect();
+    f.set_annots(0, &annots);
+    let form = read_back(&mut f);
+    let aligns: Vec<Option<u8>> = form.widgets[&0].iter().map(|w| w.align).collect();
+    assert_eq!(aligns, [None, Some(2), None, None]);
+    assert_eq!(field(&form, "merged").align, Some(2));
+    assert_eq!(field(&form, "parent").align, Some(1));
+}
+
+/// A `/Rect`'s numbers and an `/MK` color's parts that are references are
+/// followed, as PDFium follows them.
+#[test]
+fn a_widget_s_numbers_that_are_references_are_followed() {
+    let mut f = Form::new(1);
+    let a = f.text("a", 0, row(0));
+    let [x0, y0, x1, y1] = [10, 20, 110, 40].map(|v| f.pdf.add_object(v));
+    let half = f.pdf.add_object(0.5);
+    let d = f.dict(a);
+    d.set(
+        "Rect",
+        vec![Object::from(x0), y0.into(), x1.into(), y1.into()],
+    );
+    d.set(
+        "MK",
+        dictionary! { "BG" => vec![Object::from(half)], "BC" => vec![Object::from(0), half.into(), 1.into()] },
+    );
+    let form = read_back(&mut f);
+    let w = &form.widgets[&0][0];
+    assert_eq!(w.rect, [10.0, 20.0, 110.0, 40.0]);
+    assert_eq!(w.mk.background, Some(Color::Gray(0.5)));
+    assert_eq!(w.mk.border_color, Some(Color::Rgb([0.0, 0.5, 1.0])));
+}
+
+/// A field is found by its object, as read.
+#[test]
+fn a_field_is_found_by_its_object() {
+    let mut f = every_kind();
+    let form = read_back(&mut f);
+    for field in &form.fields {
+        assert_eq!(form.field_by_object(field.object), Some(field));
+    }
+    assert_eq!(form.field_by_object(ObjectId::new(99_999, 0)), None);
 }
 
 /// What damage reads as: no fields, and a reason.

@@ -40,6 +40,7 @@ use crate::generate::Saved;
 use crate::geom::Geom;
 use crate::materialize::emit::catalog::GENERATORS;
 use crate::open::{FileAnnots, FlatOutlineItem};
+use crate::pdf::forms::FieldFont;
 use crate::serialize::crypt::Crypt;
 use crate::store::{Blob, BlobCollision, BlobId, BlobKind, MemoryKind, Origin, Src};
 
@@ -70,9 +71,32 @@ pub struct Source {
     annots: OnceLock<Arc<FileAnnots>>,
     outline: OnceLock<Arc<[FlatOutlineItem]>>,
     form: OnceLock<Arc<FileForm>>,
+    /// The fonts its form's `/DR` gives the names its fields' `/DA`s name,
+    /// each read once, or why it couldn't be ([`Source::field_font`]), at
+    /// most [`FIELD_FONTS`] names.
+    field_fonts: Mutex<HashMap<Vec<u8>, FieldFontRead>>,
     signatures: OnceLock<Arc<Signatures>>,
     /// PDFium refused its bytes ([`Source::base_refused`]).
     refused: AtomicBool,
+}
+
+/// The most `/DA` font names a source keeps the font of
+/// ([`Source::field_font`]): a form's fields name a handful. Past it a
+/// font is read each time it's asked for.
+pub const FIELD_FONTS: usize = 256;
+
+/// A field's font as a source read it, or why it couldn't.
+pub type FieldFontRead = Result<Arc<FieldFont>, crate::pdf::forms::Error>;
+
+/// Whether a source keeps `read` for its name ([`Source::field_font`]): a
+/// font, and a failure that would be the same on another read. Not one
+/// the source's own I/O gave ([`Why::Source`](crate::pdf::Why::Source):
+/// a drive gone for a moment), which another read may not meet: kept, it
+/// would leave every later save's widgets of that font with no appearance
+/// until the file is opened again.
+fn keeps(read: &FieldFontRead) -> bool {
+    use crate::pdf::forms::Error;
+    !matches!(read, Err(Error::Unreadable(u)) if u.why == crate::pdf::Why::Source)
 }
 
 /// The streams of a page's `/Contents` sheaf marked, in order, by object
@@ -182,6 +206,7 @@ impl Source {
             annots: OnceLock::new(),
             outline: OnceLock::new(),
             form: OnceLock::new(),
+            field_fonts: Mutex::default(),
             signatures: OnceLock::new(),
             refused: AtomicBool::new(false),
         })
@@ -410,6 +435,34 @@ impl Source {
     /// shows about it, read once (see [`crate::forms::read`]).
     pub fn form(&self) -> &Arc<FileForm> {
         self.form.get_or_init(|| Arc::new(crate::forms::read(self)))
+    }
+
+    /// The font a text field's `/DA` font name `name` draws it in: the one
+    /// its form's `/DR /Font` gives that name, read through pdf-forms
+    /// (`crate::forms::appearance::read_font`), or the standard 14 font the
+    /// name falls back to where `/DR` has none. Read once a name, a failure
+    /// too where it would fail the same again (a font that's locked, past
+    /// a reader's cap, or decompresses past its cap), so the widgets of a
+    /// font that fails are refused alike and it isn't read again; at most
+    /// [`FIELD_FONTS`] names are kept. A read the source's I/O failed
+    /// isn't kept (`keeps`): the next asks again.
+    pub fn field_font(&self, name: &[u8]) -> FieldFontRead {
+        let kept = |fonts: &HashMap<Vec<u8>, FieldFontRead>| fonts.get(name).cloned();
+        let lock = || (self.field_fonts.lock()).unwrap_or_else(PoisonError::into_inner);
+        if let Some(read) = kept(&lock()) {
+            return read;
+        }
+        // Read outside the lock: another thread may read it too, and the
+        // first kept is what both give.
+        let read = crate::forms::appearance::read_font(self, name).map(Arc::new);
+        if !keeps(&read) {
+            return read;
+        }
+        let mut fonts = lock();
+        if fonts.len() >= FIELD_FONTS && !fonts.contains_key(name) {
+            return read;
+        }
+        fonts.entry(name.to_vec()).or_insert(read).clone()
     }
 
     /// Its signatures, what each allows after it, and Reader's usage

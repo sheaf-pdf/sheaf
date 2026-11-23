@@ -923,19 +923,32 @@ pub(crate) fn each_dumped(
     read: impl Fn(&str) -> Vec<String> + Sync,
     panicked: impl Fn(&str, String) -> String + Sync,
 ) -> Vec<String> {
-    let mut picks = dump_picks(corpus);
+    let picks = dump_picks(corpus);
     let mut sets: BTreeMap<&str, usize> = BTreeMap::new();
     for set in picks.values() {
         *sets.entry(set).or_default() += 1;
     }
     eprintln!("{} files: {sets:?}", picks.len());
+    each_path(picks.into_keys().collect(), only, read, panicked)
+}
+
+/// The lines of each of `paths`, corpus paths, in their order, or of the
+/// one `only.0` names (`only.1` the variable that named it), each file
+/// read by `read` on its own and a panic made a line, as [`each_dumped`]
+/// reads the files it picks: for a dump of other files.
+pub(crate) fn each_path(
+    mut paths: Vec<String>,
+    only: (Option<&str>, &str),
+    read: impl Fn(&str) -> Vec<String> + Sync,
+    panicked: impl Fn(&str, String) -> String + Sync,
+) -> Vec<String> {
     if let (Some(only), var) = only {
-        picks.retain(|path, _| path == only);
-        assert_eq!(picks.len(), 1, "{var} names no file the dump reads");
+        paths.retain(|path| path == only);
+        assert_eq!(paths.len(), 1, "{var} names no file the dump reads");
     }
-    let entries: Vec<Entry> = (picks.keys())
+    let entries: Vec<Entry> = (paths.into_iter())
         .map(|path| Entry {
-            path: path.clone(),
+            path,
             ..Entry::default()
         })
         .collect();

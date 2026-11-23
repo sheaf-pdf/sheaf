@@ -230,7 +230,7 @@ boundaries:
     bad=$(cargo tree -p sheaf-edit -e normal --prefix none | awk '{print $1}' | sort -u \
       | grep -E '^sheaf-' | grep -vx 'sheaf-edit' || true)
     [ -z "$bad" ] || { echo "sheaf-edit depends on: $bad"; exit 1; }
-    for pkg in pdf-objects pdf-filters pdf-crypt pdf-structure pdf-content-streams pdf-fonts pdf-gfx; do
+    for pkg in pdf-objects pdf-filters pdf-crypt pdf-structure pdf-content-streams pdf-fonts pdf-gfx pdf-forms; do
       bad=$(cargo tree --workspace -e all -i "$pkg" --prefix depth 2>/dev/null | awk '/^1sheaf-/ {print $1}' | sed 's/^1//' | sort -u \
         | grep -vx 'sheaf-doc' || true)
       [ -z "$bad" ] || { echo "crates outside sheaf-doc depend on $pkg directly: $bad"; exit 1; }
@@ -319,11 +319,12 @@ precommit: (_steps "precommit" "markers plan-check fmt-check locks corpus intero
 # the export tier, realize_corpus's pixels and predicate, PDFium's resave
 # of a watermark, content's tokens and the content interpreter against
 # PDFium, codes over scans/, Arlington over what sheaf writes, and the
-# size of an unsigned Save As beside qpdf's). Two hours or more, the
-# interpreter's tiers about one of them.
+# size of an unsigned Save As beside qpdf's, and every text field's
+# appearance beside PDFium's). Two hours or more, the interpreter's tiers
+# about one of them.
 [doc("Before a PR merges: every ignored corpus tier (two hours or more)")]
 [group('local')]
-premerge: (_steps "premerge" "tier-append tier-exports tier-realize tier-watermark tier-lexer tier-interp tier-codes tier-arlington tier-size _corpus-ran")
+premerge: (_steps "premerge" "tier-append tier-exports tier-realize tier-watermark tier-lexer tier-interp tier-codes tier-arlington tier-size tier-fields _corpus-ran")
 
 [doc("The plan agrees with itself: tables against files, status lines, links, size budgets (AGENTS.md)")]
 [group('local')]
@@ -348,7 +349,10 @@ corpus:
     if grep -q 'skipped: no corpus' "{{logs}}/corpus-tests.log"; then echo "a corpus test skipped: no corpus found"; exit 1; fi
     exit "$rc"
 
-# The interop tests: sheaf's output read by qpdf and pdf.js.
+# The interop tests: sheaf's output read by qpdf and pdf.js, and its text
+# field appearances drawn by poppler's pdftoppm ($SHEAF_PDFTOPPM, else on
+# the PATH). A test whose tool is missing says so ("skipped ...") and
+# passes: read the output on a machine that may lack one.
 [group('local')]
 interop:
     #!/usr/bin/env bash
@@ -411,6 +415,18 @@ tier-size:
 [group('corpus')]
 tier-realize:
     scripts/test-capped.sh cargo test -p sheaf-ops --test realize_corpus -- --ignored --nocapture
+
+# Every corpus form's text fields filled (M10 slice 6): each widget's
+# appearance made or unmade by a kind, an overlay's forms the save's, and
+# each made one drawn as PDFium draws its own for the same value, inside
+# its box, or a row of a class whose count the test holds, with how many
+# it filled, made and compared. In release;
+# SHEAF_FIELDS_ONLY=<paths, comma-separated> narrows it, its counts then
+# printed, not held.
+[doc("Every corpus text field filled: its appearance beside PDFium's, each difference classed (SHEAF_FIELDS_ONLY narrows it)")]
+[group('corpus')]
+tier-fields:
+    scripts/test-capped.sh cargo test -p sheaf-ops --release --test fields_corpus -- --ignored --nocapture
 
 # PDFium's resave of a watermark.
 [group('corpus')]
@@ -537,6 +553,30 @@ content-dump out:
 [group('corpus')]
 annots-dump out:
     SHEAF_ANNOTS_DUMP="{{ absolute_path(out) }}" scripts/test-capped.sh cargo test -p sheaf-doc --release --lib -- --ignored --nocapture --exact annot::corpus::annots_dump
+
+# Every text widget of every form in the corpus's manifest, as sheaf reads
+# it and as pdf-forms' read layer does, written to `out`, numbers, names
+# and checksums only: a line a file (its form's class, and how many text
+# widgets the two read alike, read otherwise, or only one of them reads),
+# and one a text widget, by its page, slot and object: the plain data
+# sheaf's model gives of it (its value's length and checksum, never the
+# value; flags, `/MaxLen`, justification, box, `/MK` colors and rotation,
+# border, and its effective `/DA` parsed), `=` where the family's reading
+# is the same or the parts that differ and the family's of each, the font
+# its `/DA` names (by reference, direct, missing and the face it falls
+# back to; its kind, program, `/BaseFont` and `/Encoding`), and the
+# appearance made of it for a sample value from the family's reading and
+# from sheaf's (its size, whether it overflowed, its content's length and
+# checksum, or why none is made), with what of the two differs. It
+# asserts nothing: run it before and after a change to what
+# reads a form or makes a text field's appearance, or a move of the PDF
+# layer's pin, over the same corpus, and `diff` the two files;
+# SHEAF_FIELDS_DUMP_ONLY=<a corpus path> prints that file's lines. Two
+# runs over the same code write the same file.
+[doc("Every corpus text widget as sheaf and pdf-forms read it, and the appearance made of it, a line each, written to a file: diff two runs across a change to forms")]
+[group('corpus')]
+fields-dump out:
+    SHEAF_FIELDS_DUMP="{{ absolute_path(out) }}" scripts/test-capped.sh cargo test -p sheaf-doc --release --lib -- --ignored --nocapture --exact forms::dump::fields_dump
 
 # ----- Gates ---------------------------------------------------------------
 

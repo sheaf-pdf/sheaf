@@ -88,13 +88,13 @@ fn theirs() -> Form {
 /// comments drawn as they are; pages that inherit their boxes and
 /// resources, whose overlay writes them out under another parent; sheaf's
 /// marks in the file, which the screen draws itself; a comment hidden or
-/// deleted; a field's value, which no save writes yet; a header; recognized
-/// text; a duplicate; a turned page, which the job turns; a watermark and a
-/// background, which OCR's inputs don't draw, and the same found again in
-/// the file, then moved and removed; a header of page numbers found again,
-/// then its pages moved, and one replacing Acrobat's; a crop; fields
-/// whose `/Parent` isn't the parent whose `/Kids` lists them;
-/// a link to a page deleted.
+/// deleted; a text field's value, whose widget's appearance is made anew
+/// where widgets are drawn; a header; recognized text; a duplicate; a
+/// turned page, which the job turns; a watermark and a background, which
+/// OCR's inputs don't draw, and the same found again in the file, then
+/// moved and removed; a header of page numbers found again, then its pages
+/// moved, and one replacing Acrobat's; a crop; fields whose `/Parent`
+/// isn't the parent whose `/Kids` lists them; a link to a page deleted.
 #[test]
 fn the_predicate_agrees_with_the_emission_in_every_case() {
     let all = |n: usize| vec![true; n];
@@ -141,7 +141,11 @@ fn the_predicate_agrees_with_the_emission_in_every_case() {
         after: Some(Val::Field(Arc::new(filled))),
     };
     st.apply(&prim).unwrap();
-    assert_eq!(agree(&st, "field value"), all(3));
+    // Its widget's appearance is made anew where widgets are drawn, and
+    // only there.
+    assert_eq!(agree(&st, "field value"), [false, true, true]);
+    let content = verdicts(&st, &ViewInputs::content_only(), "field value");
+    assert_eq!(content, all(3));
     // A header, recognized text, a duplicate and a turn.
     let mut d = opened(theirs().bytes(), "form.pdf");
     let [p0, p1, p2] = [0, 1, 2].map(|i| d.page(i).unwrap());

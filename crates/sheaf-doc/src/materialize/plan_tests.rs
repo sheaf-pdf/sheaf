@@ -10,7 +10,6 @@
 //! the signatures don't allow.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use crate::pdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 use in_progress::NoProgress;
@@ -27,8 +26,7 @@ use crate::forms::fixture::{Form, row};
 use crate::forms::sigs::{SigImpact, Verdict};
 use crate::forms::{Finding, Value};
 use crate::materialize::ObjKey;
-use crate::model::{Document, FieldNode, Terminal};
-use crate::prim::{Key, Val};
+use crate::model::Document;
 use crate::serialize::fixture::{holds, in_clear};
 use crate::tx::fixture as fx;
 
@@ -264,21 +262,6 @@ fn a_page_inserted_into_a_signed_hybrid_form_offers_append_anyway() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Field `name` of `doc` filled with `value`, as a fill no edit makes yet
-/// (M10 slice 9) would.
-fn fill(doc: &mut Document, name: &str, value: &str) {
-    let st = doc.state();
-    let (id, node) = (st.fields())
-        .find(|(id, _)| st.full_name(*id).as_deref() == Some(name))
-        .unwrap();
-    let mut node = FieldNode::clone(node);
-    let mut term = Terminal::clone(node.term.as_deref().unwrap());
-    term.value = Some(Value::Text(value.into()));
-    node.term = Some(Arc::new(term));
-    let val = Some(Val::Field(Arc::new(node)));
-    doc.put_for_test(Key::Field(id), val, "fill");
-}
-
 /// Reader's usage rights stay on an Append within their
 /// `/TransformParams` (proposal 34), the signatures' mapping as
 /// conservative as §9.3's: a fill of a P2-certified file whose rights
@@ -291,7 +274,7 @@ fn usage_rights_stay_within_what_they_allow() {
     let dir = scratch();
     type Change = fn(&mut Document);
     let cases: [(i64, &[&str], &[&str], Change); 2] = [
-        (2, &["FillIn"], &[], |d| fill(d, "t", "filled")),
+        (2, &["FillIn"], &[], |d| fx::fill(d, "t", "filled")),
         (3, &[], &["Create"], |d| comment(d, "a comment")),
     ];
     for (i, (p, form, annots, change)) in cases.into_iter().enumerate() {

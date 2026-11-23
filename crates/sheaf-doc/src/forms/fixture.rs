@@ -14,7 +14,8 @@
 //! reads what it writes as `forms::read` reads a file. lopdf can't write a
 //! hybrid-reference file, so [`hybrid_reference`] writes one by hand.
 //! [`every_fact`] is a file with one of each fact a file opens with, and
-//! [`outline_tree`] gives a form bookmarks.
+//! [`outline_tree`] gives a form bookmarks. [`nj_helv`] and [`pa_arial`]
+//! are the state forms' `/DR` fonts, for [`Form::dr_font`].
 
 // Built for other crates' tests under the `fixtures` feature, outside
 // `cfg(test)`: its pages' content is encoded from operations.
@@ -32,6 +33,7 @@ use sheaf_edit::Rotation;
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Pt};
 use crate::model::{FormRef, Mark};
+use crate::serialize::crypt::Crypt;
 use crate::store::{Blob, BlobKind, Src, Store, blob_id};
 
 /// A rectangle in page space: left, bottom, right, top.
@@ -254,6 +256,20 @@ impl Form {
             let ap = self.text_appearance(rect, value);
             self.dict(w).set("AP", dictionary! { "N" => ap });
         }
+    }
+
+    /// `font` as an object of its own, named `name` in `/DR /Font` (in
+    /// place of a font of that name there).
+    pub fn dr_font(&mut self, name: &str, font: Dictionary) -> ObjectId {
+        let id = self.pdf.add_object(font);
+        let acroform = self.acroform;
+        let fonts = (self.dict(acroform).get_mut(b"DR"))
+            .and_then(|dr| dr.as_dict_mut())
+            .and_then(|dr| dr.get_mut(b"Font"))
+            .and_then(|fonts| fonts.as_dict_mut())
+            .expect("the fixture's /DR /Font");
+        fonts.set(name, id);
+        id
     }
 
     /// `/Fields`.
@@ -1032,6 +1048,57 @@ pub fn tst_info(imprint: &[u8]) -> Vec<u8> {
     .unwrap()
 }
 
+/// Text the state forms' fonts below each have a code a character for:
+/// PDFDocEncoding's in [`nj_helv`], MacRoman's (and the `/Differences`'
+/// Euro) in [`pa_arial`].
+pub const STATE_TEXT: &str = "é € — “ ”";
+
+/// The NJ-style `/Helv`: Helvetica, its `/Differences` PDFDocEncoding's
+/// layout over no base encoding, as the corpus's California 540 has it
+/// (from 128 on, and the two codes [`STATE_TEXT`] shows past it).
+pub fn nj_helv() -> Dictionary {
+    let mut differences = vec![Object::from(24)];
+    let names = "breve caron circumflex dotaccent hungarumlaut ogonek ring tilde";
+    differences.extend(names.split(' ').map(Object::name));
+    differences.extend([Object::from(39), Object::name("quotesingle")]);
+    differences.extend([Object::from(96), Object::name("grave"), Object::from(128)]);
+    let names = "bullet dagger daggerdbl ellipsis emdash endash florin fraction \
+                 guilsinglleft guilsinglright minus perthousand quotedblbase quotedblleft \
+                 quotedblright quoteleft quoteright quotesinglbase trademark fi fl Lslash OE \
+                 Scaron Ydieresis Zcaron dotlessi lslash oe scaron zcaron";
+    differences.extend(names.split_whitespace().map(Object::name));
+    differences.extend([Object::from(160), Object::name("Euro")]);
+    differences.extend([Object::from(233), Object::name("eacute")]);
+    dictionary! {
+        "Type" => Object::name("Font"), "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"), "Name" => Object::name("Helv"),
+        "Encoding" => dictionary! {
+            "Type" => Object::name("Encoding"), "Differences" => differences,
+        },
+    }
+}
+
+/// The PA-40-style `/Arial`: TrueType Arial under MacRoman, its
+/// `/Differences` `[65 /A 219 /Euro]`, as the corpus's safedocs 0007134
+/// has it (not embedded here).
+pub fn pa_arial() -> Dictionary {
+    let differences = vec![
+        Object::from(65),
+        Object::name("A"),
+        Object::from(219),
+        Object::name("Euro"),
+    ];
+    dictionary! {
+        "Type" => Object::name("Font"), "Subtype" => Object::name("TrueType"),
+        "BaseFont" => Object::name("Arial"),
+        "Encoding" => dictionary! {
+            "Type" => Object::name("Encoding"),
+            "BaseEncoding" => Object::name("MacRomanEncoding"),
+            "Differences" => differences,
+        },
+    }
+}
+
 /// Rows down a page, 30 pt apart.
 pub fn row(i: usize) -> Rect {
     let top = 700.0 - 30.0 * i as f32;
@@ -1645,19 +1712,41 @@ pub fn every_mark_kind() -> Vec<Annot> {
 }
 
 /// `bytes` with an incremental update appended: `change` edits a copy of
-/// each object in `ids` (and anything it adds) in the new revision.
+/// each object in `ids` (and anything it adds) in the new revision, which
+/// is encrypted as the file is, its AES IVs derived (`Crypt::with_test_ivs`)
+/// so the same file and change make the same bytes, run to run. Panics
+/// where [`try_append_revision`] fails.
 pub fn append_revision(bytes: &[u8], ids: &[ObjectId], change: impl FnOnce(&mut Pdf)) -> Vec<u8> {
-    let src = source(bytes.to_vec());
-    let mut base = crate::serialize::append::Base::over(&src).expect("the previous revision");
-    let prev = Pdf::load_mem(bytes).expect("the previous revision");
+    try_append_revision(bytes, ids, change).expect("an update appended")
+}
+
+/// [`append_revision`], or why the file takes none: it doesn't open (an
+/// encrypted one opens with the empty user password), its trailer names no
+/// catalog, an object of `ids` isn't in it, or the update can't be
+/// written.
+pub fn try_append_revision(
+    bytes: &[u8],
+    ids: &[ObjectId],
+    change: impl FnOnce(&mut Pdf),
+) -> anyhow::Result<Vec<u8>> {
+    use anyhow::Context as _;
+
+    let kind = BlobKind::file(Path::new("form.pdf"), None);
+    let src = (Store::new().open(bytes.to_vec().into(), kind)).context("the previous revision")?;
+    let mut base = (crate::serialize::append::Base::over(&src))
+        .context("the previous revision's trailer names no catalog")?;
+    let prev = Pdf::load_mem(bytes).context("the previous revision")?;
     let mut next = Pdf::with_version(prev.version.clone());
     next.trailer = prev.trailer.clone();
     next.max_id = base.size.saturating_sub(1);
     for &id in ids {
-        let obj = prev
-            .objects
-            .get(&id)
-            .expect("an object in the previous revision")
+        let obj = (prev.objects.get(&id))
+            .with_context(|| {
+                format!(
+                    "object {} {} in the previous revision",
+                    id.number, id.generation
+                )
+            })?
             .clone();
         next.objects.insert(id, obj);
     }
@@ -1674,14 +1763,47 @@ pub fn append_revision(bytes: &[u8], ids: &[ObjectId], change: impl FnOnce(&mut 
         .keys()
         .last()
         .map_or(base.size, |id| id.number.saturating_add(1).max(base.size));
-    let Some(update) = crate::serialize::append::section(&base, &objects, xref_number, None)
-        .expect("writing the update")
-    else {
-        return bytes.to_vec();
+    let crypt = src.crypt().map(|c| Crypt::clone(c).with_test_ivs());
+    let update = crate::serialize::append::section(&base, &objects, xref_number, crypt.as_ref())
+        .context("writing the update")?;
+    let Some(update) = update else {
+        return Ok(bytes.to_vec());
     };
     let mut out = bytes.to_vec();
     out.extend_from_slice(&update.bytes);
-    out
+    Ok(out)
+}
+
+/// The value the corpus's text fields are filled with where a check sets
+/// one of each (the fields dump, the corpus tier of text field
+/// appearances): the field's own, at most `/MaxLen` characters of it where
+/// it has one; else the digits `1234567890` again and again to `/MaxLen`,
+/// at most [`MAX_LAYOUT_LEN`](super::read::MAX_LAYOUT_LEN) of them (the
+/// cells sheaf lays a comb field out in, and makes one's appearance under:
+/// `appearance::limits`), for a field with one; else two lines, the
+/// second long enough to wrap, for a multiline field; else `Sample 123`.
+/// So a sample is never empty, never longer than `/MaxLen` (where PDFium
+/// cuts any field's text), and a comb field's fills its cells, where it
+/// has no more than sheaf makes: one with more is refused whatever its
+/// text (`limit:comb-cells`). `flags` is the field's `/Ff`.
+pub fn sample(own: &str, flags: u32, max_len: Option<u32>) -> String {
+    let max = max_len.filter(|&n| n > 0);
+    if !own.is_empty() {
+        return match max {
+            Some(n) => own.chars().take(n as usize).collect(),
+            None => own.to_string(),
+        };
+    }
+    match max {
+        Some(n) => (b"1234567890".iter().cycle())
+            .take(n.min(super::read::MAX_LAYOUT_LEN) as usize)
+            .map(|&b| b as char)
+            .collect(),
+        None if flags & crate::forms::field::flags::MULTILINE != 0 => {
+            "First line\na second line long enough to wrap".into()
+        }
+        None => "Sample 123".into(),
+    }
 }
 
 /// A one-page form written as a hybrid-reference file (ISO 32000

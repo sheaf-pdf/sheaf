@@ -121,6 +121,7 @@ fn widget(field: u64, state: Option<&str>) -> Widget {
         states: Arc::from([]),
         props: Arc::new(WidgetProps {
             border: None,
+            align: None,
             actions: Vec::new(),
             has_appearance: true,
         }),

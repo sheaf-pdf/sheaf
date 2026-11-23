@@ -1,7 +1,8 @@
 //! Ops as tests write them (M10.5 slice 11): a version made of the user's
 //! ops, the pages, bookmarks and files they name, and a fixture's marks
-//! said as the ops that make and change them. For tests here and in other
-//! crates (the `fixtures` feature).
+//! said as the ops that make and change them; and a field's fill, which
+//! no op makes yet. For tests here and in other crates (the `fixtures`
+//! feature).
 
 use std::sync::Arc;
 
@@ -15,8 +16,10 @@ use sheaf_edit::{
 
 use super::{Actor, Commit, CommitOpts, EditError, JobKind, Tx};
 use crate::annot::{Annot, AnnotId, AnnotKind};
+use crate::forms::Value;
 use crate::labels::LabelSpec;
-use crate::model::{Document, GroupId, GroupKind, OutlineId, PageId};
+use crate::model::{Document, FieldNode, GroupId, GroupKind, OutlineId, PageId, Terminal};
+use crate::prim::{Key, Val};
 use crate::store::{BlobId, Src};
 use crate::text_layer::TextLayer;
 
@@ -68,6 +71,23 @@ impl Document {
         tx.apply_batch(ops, &NoProgress)?;
         Ok(tx)
     }
+}
+
+/// The field of `doc` whose full name is `name` filled with the text
+/// `value`, as a version of its own: what no op does until M10 slice 9's
+/// fills, for tests of what a save or a render makes of a changed value.
+/// Panics where no field has that name or it isn't a terminal.
+pub fn fill(doc: &mut Document, name: &str, value: &str) {
+    let st = doc.state();
+    let (id, node) = (st.fields())
+        .find(|(id, _)| st.full_name(*id).as_deref() == Some(name))
+        .unwrap_or_else(|| panic!("no field is named {name:?}"));
+    let mut node = FieldNode::clone(node);
+    let mut term = Terminal::clone(node.term.as_deref().expect("a terminal field"));
+    term.value = Some(Value::Text(value.into()));
+    node.term = Some(Arc::new(term));
+    let val = Some(Val::Field(Arc::new(node)));
+    doc.put_for_test(Key::Field(id), val, "fill");
 }
 
 /// What the pages `ops` insert or put in place from files the store holds

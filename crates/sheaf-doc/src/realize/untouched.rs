@@ -3,7 +3,8 @@
 //! realized in its group's overlay. [`untouched`] is a model predicate,
 //! O(the annotations on the page), with the overlay's rules for what it
 //! writes as the base has it; [`emission_is_base`] checks it against what
-//! an overlay of the page writes, for tests.
+//! an overlay of the page writes, for tests, and [`overlay_appearances`]
+//! gives the forms such an overlay makes for its widgets.
 //!
 //! A page is untouched under some inputs when it's copy 0 of its base
 //! page, at the page's own object, with its boxes (its turn is the job's),
@@ -20,9 +21,14 @@
 //! drawn record as read from its own entry there, none hidden or dragged,
 //! no entry left out (a record deleted, or a kind the inputs leave to the
 //! screen, as sheaf's marks under [`MarkDraw::ByHost`]), each widget's
-//! `/Parent`s as the model's field tree has them, and the form's own keys
-//! the overlay writes from the document's as its file has them. A field's
-//! value isn't one of them: no save writes it before M10 slice 9's fills.
+//! `/Parent`s as the model's field tree has them, no text field's widget
+//! whose value the model holds changed ([`stale`], M10 slice 6: the
+//! overlay draws the appearance pdf-forms makes for it, the form a save
+//! writes), and the form's own keys the overlay writes from the document's
+//! as its file has them. The value itself isn't one of them: no save
+//! writes a field's `/V` before M10 slice 9's fills.
+//!
+//! [`stale`]: crate::forms::appearance::stale
 
 use std::collections::HashSet;
 
@@ -184,6 +190,11 @@ fn annots_kept(
                 let Some(r) = read.filter(|r| listed(r.id) && w.inst.copy == 0) else {
                     return false;
                 };
+                // Its text field's value changed: its appearance is made
+                // anew.
+                if crate::forms::appearance::stale(st, aid) {
+                    return false;
+                }
                 // One object with its field, which shows elsewhere too: the
                 // two are written apart.
                 let term = st.field(w.field).and_then(|node| node.term.as_ref());
@@ -361,23 +372,76 @@ fn drawn_at(
 #[cfg(any(test, feature = "fixtures"))]
 pub fn emission_is_base(st: &DocState, page: PageId, inputs: &ViewInputs) -> anyhow::Result<bool> {
     use anyhow::Context as _;
+
+    let def = st.def(page).context("not a page of the state")?;
+    let src = &def.base.src;
+    let facts = (src.page(def.base.index)).context("its file hasn't got its base page")?;
+    let e = overlay_alone(st, page, inputs)?;
+    let emitted = emitted::Emitted::new(&e, src);
+    Ok(emitted.page(page, facts, inputs) && emitted.frame(inputs))
+}
+
+/// The appearance forms an overlay of page `page` of `st` alone, for
+/// `inputs`, makes for the page's widgets (M10 slice 6), each by its
+/// widget, as the overlay's emission holds it: its references the
+/// emitter's placeholders, its content as it's written. For tests, to set
+/// beside the forms a save writes for the same widgets: the realizer
+/// draws what the save writes.
+#[cfg(any(test, feature = "fixtures"))]
+pub fn overlay_appearances(
+    st: &DocState,
+    page: PageId,
+    inputs: &ViewInputs,
+) -> anyhow::Result<Vec<(AnnotId, crate::pdf::Stream)>> {
+    use crate::materialize::ObjKey;
+    use crate::materialize::emit::SymObject;
+    use crate::materialize::key::Part;
+
+    let e = overlay_alone(st, page, inputs)?;
+    let mut forms = Vec::new();
+    for (key, object) in e.objects {
+        let ObjKey::AnnotPart(aid, Part::Ap) = key else {
+            continue;
+        };
+        if st.annot(aid).and_then(|rec| rec.widget()).is_none() {
+            continue;
+        }
+        let form = match object {
+            SymObject::Built(o) => match o.as_stream() {
+                Some(form) => form.clone(),
+                None => anyhow::bail!("{key:?} is built as no stream"),
+            },
+            SymObject::Deferred(d) => crate::pdf::Stream::new(d.dict, (d.data)()?),
+            SymObject::Raw(_) => anyhow::bail!("{key:?} is a source's object, not one it made"),
+        };
+        forms.push((aid, form));
+    }
+    Ok(forms)
+}
+
+/// The emission of an overlay of page `page` of `st` alone, for `inputs`,
+/// over its base's source, as the realizer writes one: what
+/// [`emission_is_base`] and [`overlay_appearances`] read.
+#[cfg(any(test, feature = "fixtures"))]
+fn overlay_alone(
+    st: &DocState,
+    page: PageId,
+    inputs: &ViewInputs,
+) -> anyhow::Result<crate::materialize::emit::Emission> {
+    use anyhow::Context as _;
     use in_progress::NoProgress;
 
     use crate::materialize::emit::{self, EmitBase, EmitScope, Overlay, RotatePolicy};
 
     let def = st.def(page).context("not a page of the state")?;
-    let src = &def.base.src;
-    let facts = (src.page(def.base.index)).context("its file hasn't got its base page")?;
     let overlay = Overlay {
-        src: src.clone(),
+        src: def.base.src.clone(),
         inputs,
         rotate: RotatePolicy::KeepBase,
         arts: None,
     };
     let scope = EmitScope::Pages([page].into());
-    let e = emit::emit(st, scope, EmitBase::Overlay(&overlay), &[], &NoProgress)?;
-    let emitted = emitted::Emitted::new(&e, src);
-    Ok(emitted.page(page, facts, inputs) && emitted.frame(inputs))
+    emit::emit(st, scope, EmitBase::Overlay(&overlay), &[], &NoProgress)
 }
 
 /// [`emission_is_base`]'s comparison.

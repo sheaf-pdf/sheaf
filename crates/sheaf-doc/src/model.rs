@@ -1384,8 +1384,9 @@ impl Document {
 
     /// `val` put at `key` as a version of its own, labelled `label`: what
     /// no op sets yet (a fill, the form's calculation order), for tests of
-    /// what a save writes of it. Its step names an op it doesn't run.
-    #[cfg(test)]
+    /// what a save writes of it. Its step names an op it doesn't run. Open
+    /// to the `fixtures` feature for [`fill`](crate::tx::fixture::fill).
+    #[cfg(any(test, feature = "fixtures"))]
     pub(crate) fn put_for_test(&mut self, key: Key, val: Option<Val>, label: &str) {
         let before = self.state().clone();
         let mut rec = crate::prim::Rec::new(before.clone());
