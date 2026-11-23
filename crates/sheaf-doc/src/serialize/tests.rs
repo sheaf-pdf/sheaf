@@ -2466,6 +2466,146 @@ fn a_layout_under_a_renumbering_refuses_what_it_can_t_write() {
     );
 }
 
+/// A write refuses a reading to copy from that comes without a
+/// renumbering; two objects the renumbering gives one number, written on
+/// their own or in an object stream; and an object given the number the
+/// encryption dictionary is written at, under a renumbering or without one.
+#[test]
+fn a_write_refuses_a_number_twice_and_a_reading_without_a_renumbering() {
+    use super::full::{Body, Layout, Pack, write_bodies};
+    use crate::materialize::emit::PdfVersion;
+    use crate::pdf::write::ReadFrom;
+
+    type To<'a> = Option<&'a (dyn Renumber + Sync)>;
+    /// What a layout of the test's is, but a table's at the numbers given.
+    #[derive(Default, Clone, Copy)]
+    struct Is<'a> {
+        to: To<'a>,
+        from: Option<&'a dyn ReadFrom>,
+        packed: bool,
+        crypt: Option<(&'a Crypt, u32)>,
+    }
+    let trailer = dictionary! { "Root" => ObjectId::new(1, 0) };
+    let walk = HashMap::new;
+    let id = |n| ObjectId::new(n, 0);
+    let write = |bodies: [(u32, &Object); 2], is: Is<'_>| {
+        let layout = Layout {
+            trailer: &trailer,
+            kind: if is.packed {
+                XrefKind::Stream
+            } else {
+                XrefKind::Table
+            },
+            version: PdfVersion::new(1, 7),
+            crypt: is.crypt.map(|(crypt, _)| crypt),
+            encrypt_at: id(is.crypt.map_or(0, |(_, at)| at)),
+            xref_from: 1,
+            pack: is.packed.then_some(Pack {
+                uses: &walk,
+                reuse: &[],
+            }),
+            to: is.to,
+            from: is.from,
+        };
+        let bodies =
+            bodies.map(|(n, obj)| Ok((id(n), Body::Object(Cow::Borrowed(obj), key_of(id(n))))));
+        write_bodies(bodies, &layout, &NoProgress).map(|(bytes, _)| bytes)
+    };
+    let refused = |bodies, is| format!("{:#}", write(bodies, is).unwrap_err());
+    let catalog = catalog();
+    let other = Object::from(dictionary! { "Other" => Object::from(1) });
+    let two = [(1, &catalog), (2, &other)];
+
+    // A reading, and nothing renumbered: at the numbers given, both write.
+    let read = open(&odd_table());
+    write(two, Is::default()).unwrap();
+    let from = Some(read.read_from());
+    let why = refused(
+        two,
+        Is {
+            from,
+            ..Is::default()
+        },
+    );
+    assert!(
+        why.contains("a reading to copy from is for a write under a renumbering"),
+        "{why}"
+    );
+
+    // Two objects at one number: each on its own.
+    let one = |n: ObjectId| (n.number < 3).then(|| id(2));
+    let apart = |n: ObjectId| (n.number < 3).then(|| id(n.number + 1));
+    let (one, apart): (To<'_>, To<'_>) = (Some(&one), Some(&apart));
+    write(
+        two,
+        Is {
+            to: apart,
+            ..Is::default()
+        },
+    )
+    .unwrap();
+    let why = refused(
+        two,
+        Is {
+            to: one,
+            ..Is::default()
+        },
+    );
+    assert!(why.contains("object 2 is written twice"), "{why}");
+
+    // And both in an object stream.
+    let members = [(1, &other), (2, &other)];
+    let packed = Is {
+        packed: true,
+        ..Is::default()
+    };
+    let bytes = write(
+        members,
+        Is {
+            to: apart,
+            ..packed
+        },
+    )
+    .unwrap();
+    assert!(holds(&bytes, b"/ObjStm"), "the two are packed");
+    let why = refused(members, Is { to: one, ..packed });
+    assert!(why.contains("an object is written twice"), "{why}");
+
+    // An object at the encryption dictionary's number, under a renumbering
+    // that puts it there, and at the numbers given.
+    let source = plaintext();
+    let crypt = crypt_of(&encrypted(&source, &rc4_40(&source).1, |_| {})[0]);
+    let was = crypt.at();
+    assert!(was.number > 3, "the bodies' numbers aren't its own");
+    let onto = |n: ObjectId| match n {
+        n if n == was => Some(id(3)),
+        n if n.number < 3 => Some(id(n.number + 1)),
+        _ => None,
+    };
+    let aside = |n: ObjectId| match n {
+        n if n == was => Some(id(3)),
+        n if n.number < 3 => Some(n),
+        _ => None,
+    };
+    let (onto, aside): (To<'_>, To<'_>) = (Some(&onto), Some(&aside));
+    let at = |n| Is {
+        crypt: Some((&crypt, n)),
+        ..Is::default()
+    };
+    write(two, Is { to: aside, ..at(3) }).unwrap();
+    let why = refused(two, Is { to: onto, ..at(3) });
+    assert!(
+        why.contains("object 3 is the encryption dictionary's"),
+        "{why}"
+    );
+    write(two, at(3)).unwrap();
+    let why = refused(two, at(2));
+    assert!(
+        why.contains("object 2 is the encryption dictionary's"),
+        "{why}"
+    );
+}
+
 /// A page read with odd spacing, a comment, a string that reads like a
 /// reference, and references: to the pages (2), the content (4), an object
 /// there isn't (9), and the catalog (1), whose number stays, oddly spaced.
