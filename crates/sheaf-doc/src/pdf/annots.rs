@@ -33,7 +33,7 @@ use crate::pdf::{Dictionary, ObjectId, Resolve};
 
 pub use pdf_annots::{
     Annot, AnnotColor, AnnotFlags, AnnotSubtype, AppearanceEntry, Appearances, AttachmentIcon,
-    BorderStyle, Error, FileAttachmentAnnot, FreeTextIntent, Limits, LineEnding, LineIntent,
+    BorderStyle, Cap, Error, FileAttachmentAnnot, FreeTextIntent, Limits, LineEnding, LineIntent,
     PolyIntent, PolyKind, ReplyKind, ShapeKind, StampName, SynthesizedAp, TextMarkupKind,
     TypedAnnot,
 };

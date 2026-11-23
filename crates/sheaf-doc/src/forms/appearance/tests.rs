@@ -397,6 +397,59 @@ fn helvetica() -> (FieldFont, Res) {
     (font, res)
 }
 
+/// Each kind of reason is named by hand, in sheaf's words: none is a
+/// type's `Debug` text, which a rename in the PDF layer would move under
+/// a warning, the fields dump and the corpus tier's counts.
+#[test]
+fn every_kind_is_named_by_hand() {
+    use crate::pdf::forms::Cap;
+    use crate::pdf::{Unreadable, Why};
+    let unreadable = |why| Unreadable::new(ObjectId::new(7, 0), why, "no");
+    let whys = [
+        (Why::Damaged, "damaged"),
+        (Why::Limit, "limit"),
+        (Why::Capped, "capped"),
+        (Why::Locked, "locked"),
+        (Why::Source, "source"),
+        (Why::Filter, "filter"),
+        (Why::Detached, "detached"),
+    ];
+    for (why, name) in whys {
+        let want = format!("unreadable:{name}");
+        assert_eq!(unmade_kind(&Unmade::Unreadable(unreadable(why))), want);
+        assert_eq!(error_kind(&Error::Unreadable(unreadable(why))), want);
+    }
+    let caps = [
+        (Cap::Fields, "fields"),
+        (Cap::Items, "items"),
+        (Cap::Text, "text"),
+        (Cap::CombCells, "comb-cells"),
+        (Cap::FontBudget, "font-budget"),
+        (
+            Cap::Annots(AnnotsCap::AnnotsPerPage),
+            "annots:annots-per-page",
+        ),
+        (Cap::Annots(AnnotsCap::ActionChain), "annots:action-chain"),
+        (Cap::Annots(AnnotsCap::Quads), "annots:quads"),
+        (Cap::Annots(AnnotsCap::Points), "annots:points"),
+        (Cap::Annots(AnnotsCap::DestTree), "annots:dest-tree"),
+    ];
+    for (cap, name) in caps {
+        let want = format!("limit:{name}");
+        assert_eq!(unmade_kind(&Unmade::Limit(cap)), want);
+        assert_eq!(error_kind(&Error::Limit(cap)), want);
+    }
+    let plain = [
+        (Unmade::NoBox, "no-box"),
+        (Unmade::NotFinite, "not-finite"),
+        (Unmade::NotText, "not-text"),
+        (Unmade::FontNotBindable, "font-not-bindable"),
+    ];
+    for (why, name) in plain {
+        assert_eq!(unmade_kind(&why), name);
+    }
+}
+
 /// Plain data no file should give, but a model edited by hand might: a
 /// typed refusal or an appearance, never a panic.
 #[test]

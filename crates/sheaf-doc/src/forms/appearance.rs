@@ -20,13 +20,14 @@ use super::field::{self, Border, BorderStyle, FieldKind, Value};
 use crate::annot::AnnotId;
 use crate::content::{Objects, Unkept};
 use crate::model::{DocState, FieldNode, Widget};
+use crate::pdf::annots::Cap as AnnotsCap;
 use crate::pdf::content::{Color, Res, ResBody, ResId};
 use crate::pdf::fonts::Std14;
 use crate::pdf::forms::{
     Appearance, Cap, Error, FieldFlags, FieldFont, Limits, Quadding, TextField, Unmade, WidgetLook,
 };
 use crate::pdf::gfx::{BoxBorder, BoxBorderStyle, DefaultAppearance};
-use crate::pdf::ObjectId;
+use crate::pdf::{ObjectId, Why};
 use crate::source::{FieldFontRead, Source};
 use crate::store::BlobId;
 
@@ -354,7 +355,10 @@ pub fn make(look: &TextLook, font: &FieldFont, font_res: Res) -> Result<Appearan
 }
 
 /// Which kind of reason `why` is that an appearance wasn't made, as a
-/// warning or a dump says it: never a character of the text.
+/// warning or a dump says it: never a character of the text. Each kind is
+/// named here, by hand, so no text of the PDF layer's types (their `Debug`
+/// output, which isn't their API) reaches a warning, a dump or a count; a
+/// kind the layer adds later reads `other` until it's named.
 pub fn unmade_kind(why: &Unmade) -> String {
     match why {
         Unmade::Unencodable(_) => "unencodable".into(),
@@ -363,31 +367,60 @@ pub fn unmade_kind(why: &Unmade) -> String {
         Unmade::Limit(cap) => format!("limit:{}", cap_kind(*cap)),
         Unmade::NotText => "not-text".into(),
         Unmade::FontNotBindable => "font-not-bindable".into(),
-        Unmade::Unreadable(u) => format!("unreadable:{:?}", u.why),
+        Unmade::Unreadable(u) => format!("unreadable:{}", why_kind(u.why)),
         _ => "other".into(),
     }
 }
 
 /// Which kind of reason `e` is that a form or a font couldn't be read, as
-/// [`unmade_kind`] says it.
+/// [`unmade_kind`] says it: what the fields dump and the corpus tier say
+/// of a font's error.
+#[cfg(any(test, feature = "fixtures"))]
 pub fn error_kind(e: &Error) -> String {
     match e {
         Error::Limit(cap) => format!("limit:{}", cap_kind(*cap)),
-        Error::Unreadable(u) => format!("unreadable:{:?}", u.why),
+        Error::Unreadable(u) => format!("unreadable:{}", why_kind(u.why)),
         _ => "other".into(),
     }
 }
 
-/// A cap of pdf-forms', by name.
+/// A cap of pdf-forms', by name; one of pdf-annots' it reads a widget
+/// under, as `annots:` and that cap's name.
 fn cap_kind(cap: Cap) -> String {
     match cap {
         Cap::Fields => "fields".into(),
         Cap::Items => "items".into(),
-        Cap::Annots(cap) => format!("annots:{cap:?}"),
+        Cap::Annots(cap) => format!("annots:{}", annots_cap_kind(cap)),
         Cap::Text => "text".into(),
         Cap::CombCells => "comb-cells".into(),
         Cap::FontBudget => "font-budget".into(),
         _ => "other".into(),
+    }
+}
+
+/// A cap of pdf-annots', by name.
+fn annots_cap_kind(cap: AnnotsCap) -> &'static str {
+    match cap {
+        AnnotsCap::AnnotsPerPage => "annots-per-page",
+        AnnotsCap::ActionChain => "action-chain",
+        AnnotsCap::Quads => "quads",
+        AnnotsCap::Points => "points",
+        AnnotsCap::DestTree => "dest-tree",
+        _ => "other",
+    }
+}
+
+/// Why an object couldn't be read, by name.
+fn why_kind(why: Why) -> &'static str {
+    match why {
+        Why::Damaged => "damaged",
+        Why::Limit => "limit",
+        Why::Capped => "capped",
+        Why::Locked => "locked",
+        Why::Source => "source",
+        Why::Filter => "filter",
+        Why::Detached => "detached",
+        _ => "other",
     }
 }
 

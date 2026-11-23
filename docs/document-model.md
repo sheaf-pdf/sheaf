@@ -1632,7 +1632,11 @@ of this, and a user sees nothing new.
   character its font has no code for, past a cap, a font that can't be
   read) leaves the widget with no `/AP` at all, so no file shows a value
   the field no longer holds, and a warning names the kind of reason
-  (`unmade_kind`), never the text. The refusal a user sees will be `SetFieldValues`' lowering
+  (`unmade_kind`: each kind named by hand, never a type's `Debug` text,
+  so the fields dump and the tier's counts don't move with a rename in
+  the PDF layer), never the text. The warning is logged at each emission,
+  an overlay's too: once a fill can reach it (slice 9), once a widget.
+  The refusal a user sees will be `SetFieldValues`' lowering
   (slices 7 and 9), which calls the same `make` first. On the screen
   PDFium's form filler makes an appearance from `/V` for a widget with
   none, so such a widget would show its file's old value there and
