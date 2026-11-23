@@ -729,6 +729,11 @@ impl Dense {
     /// The source's encryption dictionary, which the graph hasn't, at `at`,
     /// where the write puts it ([`Layout::to`]): what refers to it names it
     /// there.
+    ///
+    /// It stands in for something the family's writer doesn't take: where
+    /// an encryption read from a file is written, apart from the
+    /// renumbering. Were the dictionary's place the layout's alone to say,
+    /// this map would hold the graph's objects and no more.
     fn encrypt(&mut self, source: ObjectId, at: ObjectId) {
         debug_assert!(!self.to.contains_key(&source), "{source} is the graph's");
         self.to.entry(source).or_insert(at);

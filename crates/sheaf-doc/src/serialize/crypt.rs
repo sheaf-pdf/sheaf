@@ -98,27 +98,11 @@ impl Crypt {
 
     /// Whether a method it encrypts by may make each object's key of its
     /// number (RC4, AES-128: Algorithm 1), so that an object's bytes read
-    /// at one number are right at that number alone: a `/V` under 5, or a
-    /// crypt filter in `/CF` but AES-256's (`/CFM /AESV3`), or a `/CF` it
-    /// can't read where it is. Read from the dictionary, it errs toward
-    /// yes: a write under a renumbering gives such an object anew where its
-    /// number moves.
+    /// at one number are right at that number alone
+    /// ([`keys_by_number`], of its dictionary).
     #[must_use]
     pub fn keys_by_number(&self) -> bool {
-        let v = self.dict().get(b"V").and_then(Object::as_integer);
-        if v.is_none_or(|v| v < 5) {
-            return true;
-        }
-        let Some(filters) = self.dict().get(b"CF") else {
-            return false;
-        };
-        let Some(filters) = filters.as_dict() else {
-            return true;
-        };
-        filters.iter().any(|(_, filter)| {
-            let method = filter.as_dict().and_then(|f| f.get(b"CFM"));
-            method.and_then(Object::as_name) != Some(&b"AESV3"[..])
-        })
+        keys_by_number(self.dict())
     }
 
     /// Whether objects may go in object streams under it (`!Identity /StmF`
@@ -196,5 +180,148 @@ impl Crypt {
         let mut buf = Vec::new();
         crate::pdf::write::indirect_with(&mut buf, id, obj, &enc)?;
         Ok(crate::pdf::write::parse_indirect_object(&buf)?)
+    }
+}
+
+/// Whether a method the encryption dictionary `dict` names may make each
+/// object's key of its number: a `/V` under 5 or none, or under `/V 5` a
+/// crypt filter in `/CF` but AES-256's (`/CFM /AESV3`), or a `/CF` that
+/// isn't a dictionary where it is (a reference). A `/V 5` dictionary with
+/// no `/CF` names no method, so no key is made of a number. Read from the
+/// dictionary, it errs toward yes, which loses a copy; the family's writer
+/// asks its own reading of the methods before it copies at another number,
+/// so a wrong no is an object written anew on its own, never bytes under
+/// the wrong key.
+fn keys_by_number(dict: &Dictionary) -> bool {
+    let v = dict.get(b"V").and_then(Object::as_integer);
+    if v.is_none_or(|v| v < 5) {
+        return true;
+    }
+    let Some(filters) = dict.get(b"CF") else {
+        return false;
+    };
+    let Some(filters) = filters.as_dict() else {
+        return true;
+    };
+    filters.iter().any(|(_, filter)| {
+        let method = filter.as_dict().and_then(|f| f.get(b"CFM"));
+        method.and_then(Object::as_name) != Some(&b"AESV3"[..])
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::keys_by_number;
+    use crate::pdf::{Dictionary, Object, ObjectId, dictionary};
+
+    /// A crypt filter dictionary of method `cfm`, or one that names none.
+    fn filter(cfm: Option<&str>) -> Object {
+        let mut d = Dictionary::new();
+        if let Some(cfm) = cfm {
+            d.set("CFM", Object::name(cfm));
+        }
+        Object::from(d)
+    }
+
+    /// An encryption dictionary of version `v`, its `/CF` as given.
+    fn dict(v: Option<i64>, cf: Option<Object>) -> Dictionary {
+        let mut d = dictionary! { "Filter" => Object::name("Standard") };
+        if let Some(v) = v {
+            d.set("V", Object::from(v));
+        }
+        if let Some(cf) = cf {
+            d.set("CF", cf);
+        }
+        d
+    }
+
+    /// Keys are made of an object's number under any `/V` below 5 (RC4,
+    /// AES-128), whatever `/CF` says, and where there's no `/V`; under
+    /// `/V 5`, only where a crypt filter may be other than AES-256's: one
+    /// of another method or none, or a `/CF` that's a reference, which
+    /// isn't read. A `/V 5` dictionary with no `/CF`, or whose filters are
+    /// all `AESV3`, makes no key of a number: the one answer that lets an
+    /// object read at an offset be copied at another number.
+    #[test]
+    fn keys_are_made_of_the_number_but_under_aes_256_alone() {
+        let aes_256 = || filter(Some("AESV3"));
+        let cf = |filters: Vec<(&str, Object)>| {
+            let mut d = Dictionary::new();
+            for (name, f) in filters {
+                d.set(name, f);
+            }
+            Some(Object::from(d))
+        };
+        let cases = [
+            ("no /V", dict(None, None), true),
+            ("/V 1", dict(Some(1), None), true),
+            ("/V 2", dict(Some(2), None), true),
+            (
+                "/V 4, AESV2",
+                dict(Some(4), cf(vec![("StdCF", filter(Some("AESV2")))])),
+                true,
+            ),
+            (
+                "/V 4, a filter named AESV3",
+                dict(Some(4), cf(vec![("StdCF", aes_256())])),
+                true,
+            ),
+            ("/V 5, no /CF", dict(Some(5), None), false),
+            ("/V 5, an empty /CF", dict(Some(5), cf(vec![])), false),
+            (
+                "/V 5, AESV3",
+                dict(Some(5), cf(vec![("StdCF", aes_256())])),
+                false,
+            ),
+            (
+                "/V 5, two AESV3",
+                dict(Some(5), cf(vec![("A", aes_256()), ("B", aes_256())])),
+                false,
+            ),
+            (
+                "/V 5, /CF a reference",
+                dict(Some(5), Some(Object::from(ObjectId::new(11, 0)))),
+                true,
+            ),
+            (
+                "/V 5, AESV2",
+                dict(Some(5), cf(vec![("StdCF", filter(Some("AESV2")))])),
+                true,
+            ),
+            (
+                "/V 5, V2",
+                dict(Some(5), cf(vec![("StdCF", filter(Some("V2")))])),
+                true,
+            ),
+            (
+                "/V 5, AESV3 and AESV2",
+                dict(
+                    Some(5),
+                    cf(vec![("A", aes_256()), ("B", filter(Some("AESV2")))]),
+                ),
+                true,
+            ),
+            (
+                "/V 5, no /CFM",
+                dict(Some(5), cf(vec![("StdCF", filter(None))])),
+                true,
+            ),
+            (
+                "/V 5, a filter that's a reference",
+                dict(
+                    Some(5),
+                    cf(vec![("StdCF", Object::from(ObjectId::new(11, 0)))]),
+                ),
+                true,
+            ),
+            (
+                "/V 6, AESV3",
+                dict(Some(6), cf(vec![("StdCF", aes_256())])),
+                false,
+            ),
+        ];
+        for (what, dict, by_number) in cases {
+            assert_eq!(keys_by_number(&dict), by_number, "{what}");
+        }
     }
 }

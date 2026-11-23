@@ -932,6 +932,14 @@ fn whole_span(rec: &Record) -> Option<Range<usize>> {
 /// ([`RawCopies`]), and its bytes if it is: its span, by [`whole_span`]; or,
 /// of generation 0, its bytes in an object stream that leaves nothing in
 /// the clear.
+///
+/// These are the family's rules for a copy too (its writer asks them again
+/// of each object as read it's given, and may ask more: its rules narrow
+/// these, never widen them). A renumbered write's hand-over asks them here
+/// first for two things the family can't know: what isn't a candidate isn't
+/// held through the write, and is given to the writer anew, where it may go
+/// in an object stream; given as read and declined there, it would be
+/// written anew on its own.
 fn candidate<'d>(
     pdoc: &'d pdf_structure::Document,
     id: ObjectId,
