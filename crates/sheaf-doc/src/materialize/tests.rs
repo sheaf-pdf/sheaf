@@ -1706,7 +1706,9 @@ fn first_parse_spans_equal_raw_span_whole_and_members_copy_verbatim() {
     let mut packed = Vec::new();
     form.pdf.save_modern(&mut packed).unwrap();
     let pdf = lazy(&packed, None);
-    let (_, raw) = pdf.to_document_and_raw(crate::pdf::Copies::Stable).unwrap();
+    let (_, raw) = pdf
+        .to_document_and_raw(crate::pdf::Handover::Stable)
+        .unwrap();
     for id in pdf.ids() {
         assert_eq!(
             raw.spans.get(&id).cloned(),
@@ -1889,7 +1891,7 @@ fn objects() -> Vec<(u32, Object)> {
 const MOVED: [(u32, u32); 4] = [(4, 4), (5, 5), (8, 6), (9, 7)];
 
 /// `objects`, each number and each reference `by` more.
-fn shifted(objects: Vec<(u32, Object)>, by: u32) -> Vec<(u32, Object)> {
+fn raised(objects: Vec<(u32, Object)>, by: u32) -> Vec<(u32, Object)> {
     (objects.into_iter())
         .map(|(n, mut obj)| {
             obj.renumber(|r| Some(ObjectId::new(r.number + by, r.generation)));
@@ -2158,7 +2160,7 @@ fn under_a_key_of_each_number_only_what_stays_is_copied_at_an_offset() {
         reads_as(was.0, now.0, &MOVED, &what);
 
         if kind != CipherKind::Aes128 {
-            let before = odd_file(&shifted(objects(), 1), &[], XrefKind::Stream, Some(&state));
+            let before = odd_file(&raised(objects(), 1), &[], XrefKind::Stream, Some(&state));
             let d = open(&before, Some(USER));
             let out = rewrite(&d, dense(Profile::default()));
             let anew = copying(TestCopies::Nothing, || {

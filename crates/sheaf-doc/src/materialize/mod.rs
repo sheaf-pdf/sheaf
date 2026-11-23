@@ -126,7 +126,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use crate::pdf::write::Renumber;
-use crate::pdf::{ByteSource as _, Copies, Object, ObjectId, Stream, XrefKind};
+use crate::pdf::{ByteSource as _, Handover, Object, ObjectId, Stream, XrefKind};
 use anyhow::{Context as _, Result};
 use in_progress::Progress;
 
@@ -327,13 +327,13 @@ fn rewrite(
     #[cfg(test)]
     let raw = raw && (stable || TEST_COPIES.get() != TestCopies::Nothing);
     let want = match (raw, stable) {
-        (false, _) => Copies::None,
-        (true, true) => Copies::Stable,
-        (true, false) => Copies::Renumbered,
+        (false, _) => Handover::None,
+        (true, true) => Handover::Stable,
+        (true, false) => Handover::Renumbered,
     };
     let (loaded, mut raw_copies) = graph::eager_with_raw(src, want)?;
     #[cfg(test)]
-    if want == Copies::Renumbered && TEST_COPIES.get() == TestCopies::ReadAgain {
+    if want == Handover::Renumbered && TEST_COPIES.get() == TestCopies::ReadAgain {
         let again = crate::pdf::LazyPdf::open(
             src.bytes().clone(),
             src.password(),

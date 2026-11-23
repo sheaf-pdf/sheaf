@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::pdf::{Copies, Document as Pdf, Object, ObjectId, RawCopies, Stream, Value};
+use crate::pdf::{Document as Pdf, Handover, Object, ObjectId, RawCopies, Stream, Value};
 use anyhow::{Context, Result, bail};
 
 use super::emit::{Emission, SymObject, Syms};
@@ -32,7 +32,7 @@ pub fn eager(src: &Source) -> Result<Pdf> {
 /// [`eager`], plus what `want` asks of the objects a write may copy as
 /// they were read: a stable save's spans and members (M18 slice 9), or a
 /// renumbered write's objects as read (M18 slice 14).
-pub fn eager_with_raw(src: &Source, want: Copies) -> Result<(Pdf, RawCopies)> {
+pub fn eager_with_raw(src: &Source, want: Handover) -> Result<(Pdf, RawCopies)> {
     Ok(src.pdf().to_document_and_raw(want)?)
 }
 

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::pdf::test_crypt::{CipherKind, TestEncryption};
 use crate::pdf::write::{ReadFrom, Renumber, StructureError};
 use crate::pdf::{
-    Copies, Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, RawCopies, Stream, StreamExt,
+    Dictionary, Document as Pdf, Handover, LazyPdf, Object, ObjectId, RawCopies, Stream, StreamExt,
     Value, XrefKind, deflate_options, dictionary, literal, resolve_fn,
 };
 use in_progress::NoProgress;
@@ -2512,7 +2512,7 @@ fn odd_packed() -> Vec<u8> {
     use super::full::{Body, Layout, Pack, write_bodies};
     use crate::materialize::emit::PdfVersion;
 
-    let (doc, _) = (open(&odd_table()).to_document_and_raw(Copies::None)).unwrap();
+    let (doc, _) = (open(&odd_table()).to_document_and_raw(Handover::None)).unwrap();
     let layout = Layout {
         trailer: &doc.trailer,
         kind: XrefKind::Stream,
@@ -2596,7 +2596,7 @@ fn a_read_at_another_number_is_its_bytes_spliced() {
     use super::full::Body;
 
     let pdf = open(&odd_table());
-    let (doc, raw) = pdf.to_document_and_raw(Copies::Renumbered).unwrap();
+    let (doc, raw) = pdf.to_document_and_raw(Handover::Renumbered).unwrap();
     let want: [(u32, &[u8]); 4] = [
         (1, b"<< /Type /Catalog /Pages 7 0 R >>"),
         (7, b"<< /Type /Pages /Kids [5 0 R] /Count 1 >>"),
@@ -2641,7 +2641,7 @@ fn a_read_at_another_number_is_its_bytes_spliced() {
 #[test]
 fn a_member_read_at_another_number_is_its_bytes_spliced() {
     let pdf = open(&odd_packed());
-    let (mut doc, raw) = pdf.to_document_and_raw(Copies::Renumbered).unwrap();
+    let (mut doc, raw) = pdf.to_document_and_raw(Handover::Renumbered).unwrap();
     let page = ObjectId::new(3, 0);
     assert_eq!(pdf.member_bytes(page).unwrap().1, ODD_PAGE);
     // What a whole file writes: not the object and cross-reference streams.
@@ -2687,7 +2687,7 @@ fn a_read_from_another_reading_is_refused() {
         let other = open(&bytes);
         for refused in [true, false] {
             let read = if refused { &other } else { &given };
-            let (doc, raw) = read.to_document_and_raw(Copies::Renumbered).unwrap();
+            let (doc, raw) = read.to_document_and_raw(Handover::Renumbered).unwrap();
             // Of the packed file, its members alone, so that what's refused
             // is a member's.
             let bodies = (doc.objects.keys())
@@ -2706,7 +2706,7 @@ fn a_read_from_another_reading_is_refused() {
         }
     }
     let pdf = open(&odd_table());
-    let (doc, raw) = pdf.to_document_and_raw(Copies::Renumbered).unwrap();
+    let (doc, raw) = pdf.to_document_and_raw(Handover::Renumbered).unwrap();
     let layout = Layout {
         trailer: &doc.trailer,
         kind: XrefKind::Table,

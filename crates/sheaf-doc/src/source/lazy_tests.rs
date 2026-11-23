@@ -12,9 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::pdf::{
-    ByteSource, Copies, DecryptionError, Document as Pdf, Error, FileBytes, LazyPdf, Limit, Object,
-    ObjectId, ReadLimits, Stream, StreamExt, XrefKind, deflate_best, deflate_fast, dictionary,
-    literal,
+    ByteSource, DecryptionError, Document as Pdf, Error, FileBytes, Handover, LazyPdf, Limit,
+    Object, ObjectId, ReadLimits, Stream, StreamExt, XrefKind, deflate_best, deflate_fast,
+    dictionary, literal,
 };
 
 use super::Limits;
@@ -746,8 +746,8 @@ fn a_raw_span_keeps_nothing_it_read() {
     assert!(!pdf.is_read(s3) && !pdf.is_read(ObjectId::new(4, 0)));
 }
 
-/// What a renumbered write is handed as read ([`Copies::Renumbered`]) is
-/// what a stable save copies ([`Copies::Stable`]), each object as the
+/// What a renumbered write is handed as read ([`Handover::Renumbered`]) is
+/// what a stable save copies ([`Handover::Stable`]), each object as the
 /// family read it, with its record: at an offset, where the save's span
 /// is; in an object stream, where the save's member bytes are. The rest,
 /// a stream whose `/Length` is a reference among them, and the `/Encrypt`
@@ -777,9 +777,9 @@ fn a_renumbered_write_is_handed_a_stable_save_s_candidates_as_read() {
     for (name, bytes, password) in files {
         let pdf = LazyPdf::open(Arc::<[u8]>::from(bytes), password, &Limits::DEFAULT.reader);
         let pdf = pdf.unwrap();
-        let (doc, read) = pdf.to_document_and_raw(Copies::Renumbered).unwrap();
-        let (saved, stable) = pdf.to_document_and_raw(Copies::Stable).unwrap();
-        let (alone, none) = pdf.to_document_and_raw(Copies::None).unwrap();
+        let (doc, read) = pdf.to_document_and_raw(Handover::Renumbered).unwrap();
+        let (saved, stable) = pdf.to_document_and_raw(Handover::Stable).unwrap();
+        let (alone, none) = pdf.to_document_and_raw(Handover::None).unwrap();
         for other in [&saved, &alone] {
             assert!(doc.objects.keys().eq(other.objects.keys()), "{name}");
             for (id, obj) in &doc.objects {

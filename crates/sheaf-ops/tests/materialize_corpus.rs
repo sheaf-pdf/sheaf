@@ -15,10 +15,10 @@
 //! - `pool/safedocs/2932/2932995.pdf`, whose first page's logo an older
 //!   writer recoloured, renders the same written;
 //! - a Rewrite under each profile that renumbers (dense, a clean copy's,
-//!   print's) writes every form so it reads back, the same bytes twice
-//!   under dense (an AES file the same objects), and counts the primary
-//!   objects whose bytes are their source's, their header and references
-//!   aside (M18 slice 14).
+//!   print's) writes every form so it reads back, no copy refused, the
+//!   same bytes twice under dense (an AES file the same objects), and
+//!   counts the primary objects whose bytes are their source's, their
+//!   header and references aside (M18 slice 14).
 //!
 //! The identity Rewrite's counts are asserted against the baseline
 //! ([`IDENTITY`]), and the renumbered ones against theirs
@@ -385,7 +385,7 @@ const RENUMBERING: [(&str, Profile); 3] = [
 /// a string's ciphertext, as fresh IVs make it, is written with as many
 /// bytes escaped as it happens to hold.
 #[derive(Debug, Clone, Copy, Default)]
-struct Copies {
+struct Tally {
     files: usize,
     survived: usize,
     copied: usize,
@@ -400,34 +400,42 @@ fn aes(written: &Output) -> bool {
 }
 
 /// The renumbered Rewrites' counts over the corpus of 4,392 files (M18
-/// slice 14), in [`RENUMBERING`]'s order, as [`Copies`] counts them: AES
+/// slice 14), in [`RENUMBERING`]'s order, as [`Tally`] counts them: AES
 /// files' bytes aren't held. Lower counts, or more bytes, are a
-/// regression unless the slice notes say why they're right. Counted
-/// before a renumbered write copied anything: the 1,399,877 under dense
-/// (61%) are objects the writer wrote anew as their source had them, in
-/// files written as compactly as sheaf writes, at an offset and in object
-/// streams alike; print's 772 fewer are encrypted files', written in the
-/// clear.
+/// regression unless the slice notes say why they're right. First counted
+/// before a renumbered write copied anything: 1,399,877 under dense (61%),
+/// objects the writer wrote anew as their source had them, in 1,706,068,369
+/// bytes (print 1,399,105 and 1,932,696,841). Slice 14 moved them to
+/// 2,201,569 (96.0%) when a renumbered write came to copy what it left
+/// alone, its header and moved references written anew in place. What
+/// isn't copied is an object at an offset whose number moves under RC4 or
+/// AES-128, whose strings its number keys (73,876), a stream whose
+/// `/Length` is a reference (8,692 in the clear), an unsound file's objects
+/// (8,094), and what the Rewrite changed. The bytes grew by 0.86%: a copy at
+/// an offset is written on its own, where written anew it was packed into
+/// an object stream. Print copies 51,694 fewer than dense: it writes an
+/// encrypted file's objects in the clear, and their bytes as read are
+/// ciphertext.
 const RENUMBERED: Renumbering = Renumbering {
     manifest: 4392,
     profiles: [
         Held {
             files: 4389,
             survived: 2_293_235,
-            copied: 1_399_877,
-            bytes: 1_706_068_369,
+            copied: 2_201_569,
+            bytes: 1_720_670_559,
         },
         Held {
             files: 4389,
             survived: 2_293_235,
-            copied: 1_399_877,
-            bytes: 1_706_068_369,
+            copied: 2_201_569,
+            bytes: 1_720_670_559,
         },
         Held {
             files: 4389,
             survived: 2_293_235,
-            copied: 1_399_105,
-            bytes: 1_932_696_841,
+            copied: 2_149_875,
+            bytes: 1_947_222_697,
         },
     ],
 };
@@ -437,7 +445,7 @@ struct Renumbering {
     profiles: [Held; 3],
 }
 
-/// What [`RENUMBERED`] holds of a profile's [`Copies`].
+/// What [`RENUMBERED`] holds of a profile's [`Tally`].
 struct Held {
     files: usize,
     survived: usize,
@@ -553,14 +561,14 @@ fn read_back(written: &Output, password: Option<&str>) -> Result<(LazyPdf, u128)
 /// (but an object stream's), and whether its bytes are its source's,
 /// [`shaped`], where the source and the file both have it at an offset,
 /// or both in an object stream.
-fn copies(src: &Source, written: &Output, after: &LazyPdf) -> Copies {
+fn copies(src: &Source, written: &Output, after: &LazyPdf) -> Tally {
     let before = src.pdf();
     let now: HashSet<ObjectId> = after.ids().collect();
     let peeked =
         |pdf: &LazyPdf, id: ObjectId| pdf.peek(id).ok().flatten().is_some_and(|o| structural(&o));
-    let mut out = Copies {
+    let mut out = Tally {
         files: 1,
-        ..Copies::default()
+        ..Tally::default()
     };
     match aes(written) {
         true => out.aes_bytes = written.bytes.len(),
@@ -589,7 +597,7 @@ fn copies(src: &Source, written: &Output, after: &LazyPdf) -> Copies {
 /// What one file's renumbered Rewrites came to.
 struct Renumbered {
     /// Under each of [`RENUMBERING`]'s profiles.
-    copies: [Copies; 3],
+    copies: [Tally; 3],
     /// `SHEAF_RENUMBER_SUMS`'s lines, when asked: a profile's each, the
     /// default's first.
     sums: Vec<String>,
@@ -601,7 +609,7 @@ struct Renumbered {
 /// asks) and each of [`RENUMBERING`]'s, read back; twice under dense,
 /// the same bytes (an AES file, whose IVs are fresh, the same objects).
 /// A line of `sums` is the file's path, the profile, how many bytes were
-/// written and their checksum (each `-` for AES, as [`Copies`] says why),
+/// written and their checksum (each `-` for AES, as [`Tally`] says why),
 /// and the objects' checksum ([`read_back`]): a copy and its object
 /// written anew are one object, so that sum is the same whichever is
 /// written.
@@ -609,7 +617,7 @@ fn renumbered(entry: &Entry, corpus: &Corpus, sums: bool) -> Option<Renumbered> 
     let doc = opened(&corpus.path(entry))?;
     let src = doc.primary();
     let mut out = Renumbered {
-        copies: [Copies::default(); 3],
+        copies: [Tally::default(); 3],
         sums: Vec::new(),
         failed: Vec::new(),
     };
@@ -625,6 +633,10 @@ fn renumbered(entry: &Entry, corpus: &Corpus, sums: bool) -> Option<Renumbered> 
                 continue;
             }
         };
+        if let Some(why) = &written.copy_refused {
+            out.failed
+                .push(format!("{name}: a copy was refused, nothing copied: {why}"));
+        }
         let (after, objects) = match read_back(&written, src.password()) {
             Ok(back) => back,
             Err(e) => {
@@ -669,7 +681,7 @@ fn a_renumbered_rewrite_copies_what_it_left_alone() {
     let entries = corpus.forms().unwrap();
     let sums = std::env::var_os("SHEAF_RENUMBER_SUMS");
     let outcomes = each_entry(&entries, |entry| renumbered(entry, &corpus, sums.is_some()));
-    let mut totals = [Copies::default(); 3];
+    let mut totals = [Tally::default(); 3];
     let mut lines = Vec::new();
     let mut failed = BTreeMap::new();
     for (entry, outcome) in entries.iter().zip(outcomes) {

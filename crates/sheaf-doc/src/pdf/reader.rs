@@ -79,7 +79,7 @@ pub struct XrefFacts {
 /// What [`LazyPdf::to_document_and_raw`] hands over beside the document, of
 /// the objects a writer may copy as they were read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Copies {
+pub enum Handover {
     /// Nothing: every object is written anew.
     None,
     /// A stable save's: each candidate's bytes at an offset, or as a member
@@ -104,14 +104,14 @@ pub enum Copies {
 pub struct RawCopies {
     pub spans: HashMap<ObjectId, Range<usize>>,
     pub members: HashMap<ObjectId, Vec<u8>>,
-    /// Under [`Copies::Renumbered`], the candidates as read, each with its
+    /// Under [`Handover::Renumbered`], the candidates as read, each with its
     /// record: what else the reading's document held removed.
     read: Option<pdf_structure::Document>,
 }
 
 impl RawCopies {
     /// Candidate `id` as the family read it, and its record: under
-    /// [`Copies::Renumbered`] alone.
+    /// [`Handover::Renumbered`] alone.
     #[must_use]
     pub fn as_read(&self, id: ObjectId) -> Option<(&Object, &Record)> {
         let read = self.read.as_ref()?;
@@ -628,8 +628,8 @@ impl LazyPdf {
     /// and decoded member bytes for a stable save (M18 slice 9), or the
     /// family's objects as read, with their records, for a renumbered write
     /// (M18 slice 14). The candidates are the same either way.
-    pub fn to_document_and_raw(&self, want: Copies) -> Result<(Document, RawCopies)> {
-        if want == Copies::None {
+    pub fn to_document_and_raw(&self, want: Handover) -> Result<(Document, RawCopies)> {
+        if want == Handover::None {
             return Ok((self.to_document()?, RawCopies::default()));
         }
         let shift = |r: Range<usize>| (r.start + self.extra_header)..(r.end + self.extra_header);
@@ -663,10 +663,10 @@ impl LazyPdf {
                 .filter(|_| !decrypt_fallback)
                 .and_then(|rec| candidate(&pdoc, id, rec));
             match (want, candidate) {
-                (Copies::Stable, Some(Candidate::At(span))) => {
+                (Handover::Stable, Some(Candidate::At(span))) => {
                     raw.spans.insert(id, shift(span));
                 }
-                (Copies::Stable, Some(Candidate::Member(slice))) => {
+                (Handover::Stable, Some(Candidate::Member(slice))) => {
                     raw.members.insert(id, slice.to_vec());
                 }
                 (_, Some(_)) => {}
@@ -675,7 +675,7 @@ impl LazyPdf {
             out.max_id = out.max_id.max(id.number);
             out.objects.insert(id, loaded);
         }
-        if want == Copies::Renumbered {
+        if want == Handover::Renumbered {
             unwanted.extend(pdoc.unread().map(|(id, _)| id));
             for id in unwanted {
                 pdoc.remove(id);
@@ -685,7 +685,7 @@ impl LazyPdf {
         Ok((out, raw))
     }
 
-    /// The reading the objects [`Copies::Renumbered`] hands over were read
+    /// The reading the objects [`Handover::Renumbered`] hands over were read
     /// in, which their writer copies them from ([`RawCopies::as_read`]).
     #[must_use]
     pub fn read_from(&self) -> &dyn ReadFrom {
