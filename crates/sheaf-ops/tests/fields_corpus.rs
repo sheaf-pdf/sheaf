@@ -117,7 +117,8 @@ const ROWS: &str = "SHEAF_FIELDS_ROWS";
 const MAKING_WIDTH: u32 = 16;
 
 /// Each class of rows past [`TOLERANCE`] ([`class`]), and how many widgets
-/// it holds over the whole corpus: 12,908 of the 227,379 compared.
+/// it holds over the whole corpus: 12,908 of the 227,379 compared
+/// ([`TOTALS`]).
 const CLASSES: &[(&str, usize)] = &[
     (FALLBACK, 4538),
     (ALIKE, 2938),
@@ -137,6 +138,44 @@ const CLASSES: &[(&str, usize)] = &[
     (DROID, 2),
     (TYPE_UP, 1),
 ];
+
+/// How much of the corpus the tier filled, made and compared: held, so a
+/// reader that finds fewer text widgets, a form that falls among those
+/// with no text field, or a widget that drops out of the comparison (its
+/// box shows nothing of the page) fails the tier, where [`CLASSES`] alone
+/// would count the same rows and pass.
+const TOTALS: Totals = Totals {
+    forms: 4392,
+    no_text: 1577,
+    fields: 220_981,
+    filled: 229_351,
+    made: 228_409,
+    overlaid: 228_409,
+    pages: 8426,
+    compared: 227_379,
+    off_page: 1030,
+};
+
+/// What [`TOTALS`] holds of a whole run.
+#[derive(Debug, PartialEq)]
+struct Totals {
+    /// The corpus's forms.
+    forms: usize,
+    /// Those that open and have no text field with a widget on a page.
+    no_text: usize,
+    /// Text fields filled, and their widgets on pages.
+    fields: usize,
+    filled: usize,
+    /// The widgets whose appearance sheaf made, and how many of those
+    /// forms an overlay holds as the save does: every one.
+    made: usize,
+    overlaid: usize,
+    /// Pages drawn; the widgets compared with PDFium's on them, and those
+    /// left out because their box shows nothing of the page.
+    pages: usize,
+    compared: usize,
+    off_page: usize,
+}
 
 /// The filled widgets sheaf makes no appearance for, by the kind of
 /// reason (`appearance::unmade_kind`), over the whole corpus.
@@ -1494,6 +1533,20 @@ fn every_text_field_is_drawn_as_pdfium_draws_it_or_its_difference_is_classed() {
     if narrowed {
         eprintln!("tier-fields: narrowed by {ONLY}: its counts are printed, not held");
     } else {
+        let totals = Totals {
+            forms: paths.len(),
+            no_text,
+            fields,
+            filled,
+            made,
+            overlaid,
+            pages,
+            compared,
+            off_page,
+        };
+        if totals != TOTALS {
+            problems.push(format!("the totals {totals:?}, held {TOTALS:?}"));
+        }
         let held: BTreeMap<&str, usize> = CLASSES.iter().copied().collect();
         if classes != held {
             problems.push(format!("the classes' counts {classes:?}, held {held:?}"));

@@ -416,7 +416,8 @@ tier-realize:
 # Every corpus form's text fields filled (M10 slice 6): each widget's
 # appearance made or unmade by a kind, an overlay's forms the save's, and
 # each made one drawn as PDFium draws its own for the same value, inside
-# its box, or a row of a class whose count the test holds. In release;
+# its box, or a row of a class whose count the test holds, with how many
+# it filled, made and compared. In release;
 # SHEAF_FIELDS_ONLY=<paths, comma-separated> narrows it, its counts then
 # printed, not held.
 [doc("Every corpus text field filled: its appearance beside PDFium's, each difference classed (SHEAF_FIELDS_ONLY narrows it)")]
