@@ -706,3 +706,29 @@ fn a_field_font_that_fails_is_kept_as_its_failure() {
     // /DR's other fonts read as ever.
     assert!(!src.field_font(b"Helv").unwrap().is_fallback());
 }
+
+/// What a source keeps of a field font's read: the font, and each failure
+/// another read would meet again; never the source's own I/O failing,
+/// which the next read may not.
+#[test]
+fn a_field_font_s_read_is_kept_unless_the_source_s_io_failed() {
+    use crate::pdf::forms::{Cap, Error};
+    use crate::pdf::{Unreadable, Why};
+    let font = crate::pdf::forms::FieldFont::standard(crate::pdf::fonts::Std14::Helvetica);
+    assert!(super::keeps(&Ok(Arc::new(font))));
+    assert!(super::keeps(&Err(Error::Limit(Cap::FontBudget))));
+    let id = ObjectId::new(7, 0);
+    for why in [
+        Why::Damaged,
+        Why::Limit,
+        Why::Capped,
+        Why::Locked,
+        Why::Filter,
+        Why::Detached,
+    ] {
+        let read = Err(Error::Unreadable(Unreadable::new(id, why, "no")));
+        assert!(super::keeps(&read), "{why:?}");
+    }
+    let io = Err(Error::Unreadable(Unreadable::new(id, Why::Source, "no")));
+    assert!(!super::keeps(&io));
+}

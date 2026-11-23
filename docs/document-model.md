@@ -1576,7 +1576,9 @@ of this, and a user sees nothing new.
   than sheaf's reader does (`limits`); sheaf walks nothing of `/DR`
   for it. `Source::field_font`
   keeps what it read by name, a font or why it couldn't be read (locked,
-  past a reader's cap, past the font budget), at most 256 names
+  past a reader's cap, past the font budget; never the source's own I/O
+  failing, `Why::Source`, which the next read may not meet), at most 256
+  names
   (`FIELD_FONTS`; past them a font is read each time it's asked for),
   read outside its lock, so an overlay made at every commit doesn't read
   a program again and every widget of a font that fails is refused

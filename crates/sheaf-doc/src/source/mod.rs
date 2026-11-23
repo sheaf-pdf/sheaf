@@ -88,6 +88,17 @@ pub const FIELD_FONTS: usize = 256;
 /// A field's font as a source read it, or why it couldn't.
 pub type FieldFontRead = Result<Arc<FieldFont>, crate::pdf::forms::Error>;
 
+/// Whether a source keeps `read` for its name ([`Source::field_font`]): a
+/// font, and a failure that would be the same on another read. Not one
+/// the source's own I/O gave ([`Why::Source`](crate::pdf::Why::Source):
+/// a drive gone for a moment), which another read may not meet: kept, it
+/// would leave every later save's widgets of that font with no appearance
+/// until the file is opened again.
+fn keeps(read: &FieldFontRead) -> bool {
+    use crate::pdf::forms::Error;
+    !matches!(read, Err(Error::Unreadable(u)) if u.why == crate::pdf::Why::Source)
+}
+
 /// The streams of a page's `/Contents` sheaf marked, in order, by object
 /// ([`Source::markers`]).
 pub type Markers = Arc<[(ObjectId, Marker)]>;
@@ -430,9 +441,11 @@ impl Source {
     /// its form's `/DR /Font` gives that name, read through pdf-forms
     /// (`crate::forms::appearance::read_font`), or the standard 14 font the
     /// name falls back to where `/DR` has none. Read once a name, a failure
-    /// too (a font that can't be read, or decompresses past its cap), so
-    /// the widgets of a font that fails are refused alike and it isn't read
-    /// again; at most [`FIELD_FONTS`] names are kept.
+    /// too where it would fail the same again (a font that's locked, past
+    /// a reader's cap, or decompresses past its cap), so the widgets of a
+    /// font that fails are refused alike and it isn't read again; at most
+    /// [`FIELD_FONTS`] names are kept. A read the source's I/O failed
+    /// isn't kept (`keeps`): the next asks again.
     pub fn field_font(&self, name: &[u8]) -> FieldFontRead {
         let kept = |fonts: &HashMap<Vec<u8>, FieldFontRead>| fonts.get(name).cloned();
         let lock = || (self.field_fonts.lock()).unwrap_or_else(PoisonError::into_inner);
@@ -442,6 +455,9 @@ impl Source {
         // Read outside the lock: another thread may read it too, and the
         // first kept is what both give.
         let read = crate::forms::appearance::read_font(self, name).map(Arc::new);
+        if !keeps(&read) {
+            return read;
+        }
         let mut fonts = lock();
         if fonts.len() >= FIELD_FONTS && !fonts.contains_key(name) {
             return read;
