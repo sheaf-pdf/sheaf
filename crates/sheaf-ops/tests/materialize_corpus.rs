@@ -13,12 +13,23 @@
 //!   1040 write too: a copy never brings its file's catalog or form along,
 //!   nor stops on a signature it can't decrypt;
 //! - `pool/safedocs/2932/2932995.pdf`, whose first page's logo an older
-//!   writer recoloured, renders the same written.
+//!   writer recoloured, renders the same written;
+//! - a Rewrite under each profile that renumbers (dense, a clean copy's,
+//!   print's) writes every form so it reads back, the same bytes twice
+//!   under dense (an AES file the same objects), and counts the primary
+//!   objects whose bytes are their source's, their header and references
+//!   aside (M18 slice 14).
 //!
 //! The identity Rewrite's counts are asserted against the baseline
-//! ([`IDENTITY`]), when the corpus is the one they were counted on (its
+//! ([`IDENTITY`]), and the renumbered ones against theirs
+//! ([`RENUMBERED`]), when the corpus is the one they were counted on (its
 //! manifest's length): a later step that moves one says why in the plan's
 //! slice notes, and moves the baseline.
+//!
+//! `SHEAF_RENUMBER_SUMS=<file>` has the renumbered test write a line per
+//! file and profile, the default's too, to `<file>`: what tells a change
+//! of the bytes written from one of the objects they hold
+//! ([`renumbered`]).
 //!
 //! Skips when there's no corpus (see `sheaf_doc::forms::corpus`). Needs
 //! libpdfium (`scripts/fetch-pdfium.sh`) for the logo, like the app.
@@ -27,29 +38,36 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use sheaf_doc::Document;
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::{Finding, Report};
 use sheaf_doc::materialize::{
-    Output, Profile, SaveInput, SaveTarget, materialize, plan as save_plan,
+    Encryption, Numbering, ObjKey, Output, Private, Profile, SaveInput, SaveTarget, Unheld,
+    materialize, plan as save_plan,
 };
 use sheaf_doc::pdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, StreamExt, Value};
 use sheaf_doc::source::Limits;
 use sheaf_doc::tx::fixture::{delete, duplicate, file};
+use sheaf_doc::{Document, Source};
 use sheaf_edit::{Bring, FormBring, Op, OutlineBring, Rotation};
 use sheaf_image::raster::PixelFormat;
 use sheaf_ops::NoProgress;
 use sheaf_render::PageIndex;
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Job, Renderer};
+use sheaf_util::{Checksum, checksum_hex};
 
 /// `doc` Rewritten by the new writer, as a save to another file plans it.
 fn written(doc: &Document) -> anyhow::Result<Output> {
+    written_as(doc, Profile::default())
+}
+
+/// [`written`] under `profile`.
+fn written_as(doc: &Document, profile: Profile) -> anyhow::Result<Output> {
     let input = SaveInput::detached(&doc.snapshot());
     let target = SaveTarget {
         path: Path::new("out.pdf").into(),
         same_file: false,
-        profile: Profile::default(),
+        profile,
         stamp: None,
     };
     let plan = save_plan(&input, &target);
@@ -327,6 +345,403 @@ fn the_same_document_writes_the_same_bytes_twice_and_from_two_threads() {
     }
     println!("{files} files written four times, {} differ", differ.len());
     assert_eq!(differ, Vec::<String>::new());
+}
+
+/// An export's profile with nothing else asked: from 1, encryption and
+/// sheaf's private data kept (an extract's, a flattened copy's).
+const DENSE: Profile = Profile {
+    encryption: Encryption::Keep,
+    numbering: Numbering::Dense,
+    private: Private::Keep,
+    unheld: Unheld::Keep,
+};
+
+/// The profiles that renumber, written as identity exports (no
+/// transform): dense; a clean copy's, without sheaf's private data; and
+/// print's, in the clear too.
+const RENUMBERING: [(&str, Profile); 3] = [
+    ("dense", DENSE),
+    (
+        "clean",
+        Profile {
+            private: Private::Strip,
+            ..DENSE
+        },
+    ),
+    (
+        "print",
+        Profile {
+            encryption: Encryption::None,
+            private: Private::Scrub,
+            ..DENSE
+        },
+    ),
+];
+
+/// What the writes under one profile came to: files written, primary
+/// objects still in them, those whose bytes are their source's (but
+/// their header and references, [`shaped`]), and the bytes written, but
+/// AES files' (`aes_bytes`), whose length varies from write to write:
+/// a string's ciphertext, as fresh IVs make it, is written with as many
+/// bytes escaped as it happens to hold.
+#[derive(Debug, Clone, Copy, Default)]
+struct Copies {
+    files: usize,
+    survived: usize,
+    copied: usize,
+    bytes: usize,
+    aes_bytes: usize,
+}
+
+/// Whether `written` is encrypted with AES: its strings and streams
+/// under IVs drawn as it was written.
+fn aes(written: &Output) -> bool {
+    written.record.crypt.as_ref().is_some_and(|c| c.is_aes())
+}
+
+/// The renumbered Rewrites' counts over the corpus of 4,392 files (M18
+/// slice 14), in [`RENUMBERING`]'s order, as [`Copies`] counts them: AES
+/// files' bytes aren't held. Lower counts, or more bytes, are a
+/// regression unless the slice notes say why they're right. Counted
+/// before a renumbered write copied anything: the 1,399,877 under dense
+/// (61%) are objects the writer wrote anew as their source had them, in
+/// files written as compactly as sheaf writes, at an offset and in object
+/// streams alike; print's 772 fewer are encrypted files', written in the
+/// clear.
+const RENUMBERED: Renumbering = Renumbering {
+    manifest: 4392,
+    profiles: [
+        Held {
+            files: 4389,
+            survived: 2_293_235,
+            copied: 1_399_877,
+            bytes: 1_706_068_369,
+        },
+        Held {
+            files: 4389,
+            survived: 2_293_235,
+            copied: 1_399_877,
+            bytes: 1_706_068_369,
+        },
+        Held {
+            files: 4389,
+            survived: 2_293_235,
+            copied: 1_399_105,
+            bytes: 1_932_696_841,
+        },
+    ],
+};
+
+struct Renumbering {
+    manifest: usize,
+    profiles: [Held; 3],
+}
+
+/// What [`RENUMBERED`] holds of a profile's [`Copies`].
+struct Held {
+    files: usize,
+    survived: usize,
+    copied: usize,
+    bytes: usize,
+}
+
+/// Whether `b` is PDF whitespace (ISO 32000-1 7.2.2).
+fn white(b: u8) -> bool {
+    matches!(b, b'\0' | b'\t' | b'\n' | b'\x0c' | b'\r' | b' ')
+}
+
+/// Whether `b` is a regular character: neither whitespace nor a
+/// delimiter.
+fn regular(b: u8) -> bool {
+    !white(b) && !b"()<>[]{}/%".contains(&b)
+}
+
+/// The end of the run of `bytes` from `at` that `pick` takes, where it
+/// takes one.
+fn run(bytes: &[u8], at: usize, pick: impl Fn(u8) -> bool) -> Option<usize> {
+    let n = bytes[at..].iter().take_while(|&&b| pick(b)).count();
+    (n > 0).then_some(at + n)
+}
+
+/// The end of the reference, `n g R`, at `at` in `bytes`, where one is.
+fn reference(bytes: &[u8], at: usize) -> Option<usize> {
+    let at = run(bytes, at, |b| b.is_ascii_digit())?;
+    let at = run(bytes, at, white)?;
+    let at = run(bytes, at, |b| b.is_ascii_digit())?;
+    let at = run(bytes, at, white)?;
+    let ends = |at: usize| bytes.get(at).is_none_or(|&b| !regular(b));
+    (bytes.get(at) == Some(&b'R') && ends(at + 1)).then_some(at + 1)
+}
+
+/// `bytes`, an object's as a file has them, as a copy under a
+/// renumbering keeps them: its header, `n g obj` and the whitespace after
+/// it, cut where `header` says it has one, and each reference and each
+/// `null` one token, so that an object whose references a renumbering
+/// rewrote, `null` where they name nothing now, is its source's bytes.
+fn shaped(bytes: &[u8], header: bool) -> Vec<u8> {
+    let mut i = 0;
+    if header {
+        let at = run(bytes, 0, white).unwrap_or(0);
+        let body = (run(bytes, at, |b| b.is_ascii_digit()))
+            .and_then(|at| run(bytes, at, white))
+            .and_then(|at| run(bytes, at, |b| b.is_ascii_digit()))
+            .and_then(|at| run(bytes, at, white))
+            .filter(|&at| bytes[at..].starts_with(b"obj"))
+            .map(|at| at + 3);
+        if let Some(at) = body {
+            i = run(bytes, at, white).unwrap_or(at);
+        }
+    }
+    let start = i;
+    let mut out = Vec::with_capacity(bytes.len() - i);
+    while i < bytes.len() {
+        // A token starts here: not within a number, a name or a word.
+        if i == start || (!regular(bytes[i - 1]) && bytes[i - 1] != b'/') {
+            let null = || {
+                let ends = bytes.get(i + 4).is_none_or(|&b| !regular(b));
+                (bytes[i..].starts_with(b"null") && ends).then_some(i + 4)
+            };
+            if let Some(end) = reference(bytes, i).or_else(null) {
+                out.extend_from_slice(b"\0R");
+                i = end;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Whether `obj` is an object or cross-reference stream: a file's
+/// structure, which no write keeps.
+fn structural(obj: &Object) -> bool {
+    obj.as_stream()
+        .is_some_and(|s| matches!(s.dict.type_name(), Some(b"ObjStm" | b"XRef")))
+}
+
+/// `written`, read back with `password`: the file, and the checksum of
+/// its objects but its object and cross-reference streams, each read
+/// (decrypted) and written as sheaf's writer writes it in the clear, at
+/// its number, in order: a reference to object 0, which a stable save's
+/// copy keeps as its source had it, as `null`.
+fn read_back(written: &Output, password: Option<&str>) -> Result<(LazyPdf, u128), String> {
+    use sheaf_doc::pdf::write::{Refused, indirect_renumbered, non_zero_ref};
+    let password = written.record.crypt.as_ref().and(password);
+    let bytes = Arc::<[u8]>::from(written.bytes.as_slice());
+    let pdf = LazyPdf::open(bytes, password, &Limits::DEFAULT.reader)
+        .map_err(|e| format!("doesn't read back: {e}"))?;
+    let mut sum = Checksum::new();
+    let mut out = Vec::new();
+    for id in pdf.ids() {
+        let obj = (pdf.object_unkept(id)).map_err(|e| format!("{id} doesn't read back: {e}"))?;
+        if structural(&obj) {
+            continue;
+        }
+        out.clear();
+        indirect_renumbered(&mut out, id, &obj, &(), &non_zero_ref).map_err(|e| match e {
+            Refused::Write(e) => format!("{id} doesn't write: {e}"),
+            Refused::Encrypt { why, .. } => match why {},
+        })?;
+        sum.write(&out);
+    }
+    Ok((pdf, sum.finish()))
+}
+
+/// What `written`, `src`'s document renumbered, read back as `after`,
+/// copied: each primary object the record puts at a number of the file
+/// (but an object stream's), and whether its bytes are its source's,
+/// [`shaped`], where the source and the file both have it at an offset,
+/// or both in an object stream.
+fn copies(src: &Source, written: &Output, after: &LazyPdf) -> Copies {
+    let before = src.pdf();
+    let now: HashSet<ObjectId> = after.ids().collect();
+    let peeked =
+        |pdf: &LazyPdf, id: ObjectId| pdf.peek(id).ok().flatten().is_some_and(|o| structural(&o));
+    let mut out = Copies {
+        files: 1,
+        ..Copies::default()
+    };
+    match aes(written) {
+        true => out.aes_bytes = written.bytes.len(),
+        false => out.bytes = written.bytes.len(),
+    }
+    for (key, &at) in &written.record.map.keys {
+        let ObjKey::Base { blob, obj, copy: 0 } = *key else {
+            continue;
+        };
+        if blob != src.id() || !now.contains(&at) || peeked(before, obj) || peeked(after, at) {
+            continue;
+        }
+        out.survived += 1;
+        let copied = match (before.raw_span_whole(obj), after.raw_span(at)) {
+            (Some(a), Some(b)) => shaped(&src.bytes()[a], true) == shaped(&written.bytes[b], true),
+            _ => match (before.member_bytes(obj), after.member_bytes(at)) {
+                (Some((_, a)), Some((_, b))) => shaped(&a, false) == shaped(&b, false),
+                _ => false,
+            },
+        };
+        out.copied += usize::from(copied);
+    }
+    out
+}
+
+/// What one file's renumbered Rewrites came to.
+struct Renumbered {
+    /// Under each of [`RENUMBERING`]'s profiles.
+    copies: [Copies; 3],
+    /// `SHEAF_RENUMBER_SUMS`'s lines, when asked: a profile's each, the
+    /// default's first.
+    sums: Vec<String>,
+    /// What's wrong with it.
+    failed: Vec<String>,
+}
+
+/// The form `entry` written under the default profile (when `sums`
+/// asks) and each of [`RENUMBERING`]'s, read back; twice under dense,
+/// the same bytes (an AES file, whose IVs are fresh, the same objects).
+/// A line of `sums` is the file's path, the profile, how many bytes were
+/// written and their checksum (each `-` for AES, as [`Copies`] says why),
+/// and the objects' checksum ([`read_back`]): a copy and its object
+/// written anew are one object, so that sum is the same whichever is
+/// written.
+fn renumbered(entry: &Entry, corpus: &Corpus, sums: bool) -> Option<Renumbered> {
+    let doc = opened(&corpus.path(entry))?;
+    let src = doc.primary();
+    let mut out = Renumbered {
+        copies: [Copies::default(); 3],
+        sums: Vec::new(),
+        failed: Vec::new(),
+    };
+    let default = sums.then_some((None, "default", Profile::default()));
+    let renumbering = (0..)
+        .zip(RENUMBERING)
+        .map(|(i, (name, p))| (Some(i), name, p));
+    for (i, name, profile) in default.into_iter().chain(renumbering) {
+        let written = match written_as(&doc, profile) {
+            Ok(w) => w,
+            Err(e) => {
+                out.failed.push(format!("{name}: not written: {e:#}"));
+                continue;
+            }
+        };
+        let (after, objects) = match read_back(&written, src.password()) {
+            Ok(back) => back,
+            Err(e) => {
+                out.failed.push(format!("{name}: {e}"));
+                continue;
+            }
+        };
+        let in_aes = aes(&written);
+        if profile == DENSE {
+            let alike = written_as(&doc, profile).is_ok_and(|again| match in_aes {
+                true => read_back(&again, src.password()).is_ok_and(|(_, sum)| sum == objects),
+                false => again.bytes == written.bytes,
+            });
+            if !alike {
+                out.failed.push(format!("{name}: a second write differs"));
+            }
+        }
+        if let Some(i) = i {
+            out.copies[i] = copies(src, &written, &after);
+        }
+        if sums {
+            let (len, file) = match in_aes {
+                true => ("-".to_owned(), "-".to_owned()),
+                false => (
+                    written.bytes.len().to_string(),
+                    checksum_hex(&written.bytes),
+                ),
+            };
+            let path = &entry.path;
+            let line = format!("{path}\t{name}\t{len}\t{file}\t{objects:032x}");
+            out.sums.push(line);
+        }
+    }
+    Some(out)
+}
+
+#[test]
+fn a_renumbered_rewrite_copies_what_it_left_alone() {
+    let Some(corpus) = Corpus::or_skip() else {
+        return;
+    };
+    let entries = corpus.forms().unwrap();
+    let sums = std::env::var_os("SHEAF_RENUMBER_SUMS");
+    let outcomes = each_entry(&entries, |entry| renumbered(entry, &corpus, sums.is_some()));
+    let mut totals = [Copies::default(); 3];
+    let mut lines = Vec::new();
+    let mut failed = BTreeMap::new();
+    for (entry, outcome) in entries.iter().zip(outcomes) {
+        let Some(o) = outcome else {
+            continue;
+        };
+        for (total, c) in totals.iter_mut().zip(o.copies) {
+            total.files += c.files;
+            total.survived += c.survived;
+            total.copied += c.copied;
+            total.bytes += c.bytes;
+            total.aes_bytes += c.aes_bytes;
+        }
+        lines.extend(o.sums.into_iter().map(|line| (entry.path.clone(), line)));
+        if !o.failed.is_empty() {
+            failed.insert(entry.path.clone(), o.failed);
+        }
+    }
+    if let Some(file) = &sums {
+        // By path; a file's profiles in the order written.
+        lines.sort_by(|a, b| a.0.cmp(&b.0));
+        let text: String = lines.iter().map(|(_, line)| format!("{line}\n")).collect();
+        std::fs::write(file, text).unwrap();
+    }
+    for ((name, _), c) in RENUMBERING.iter().zip(&totals) {
+        println!(
+            "{name}: {} of {} files written; {} primary objects survived, {} copied as they \
+             were; {} bytes, and {} of AES files",
+            c.files,
+            entries.len(),
+            c.survived,
+            c.copied,
+            c.bytes,
+            c.aes_bytes
+        );
+    }
+    println!("{} files failed", failed.len());
+    for (path, why) in &failed {
+        println!("{path}: {}", why[..why.len().min(3)].join("; "));
+    }
+    assert!(failed.is_empty());
+    if entries.len() == RENUMBERED.manifest {
+        for ((name, _), (c, b)) in RENUMBERING
+            .iter()
+            .zip(totals.iter().zip(&RENUMBERED.profiles))
+        {
+            assert!(
+                c.files >= b.files,
+                "{name}: {} files, from {}",
+                c.files,
+                b.files
+            );
+            assert!(
+                c.survived >= b.survived,
+                "{name}: {} survived, from {}",
+                c.survived,
+                b.survived
+            );
+            assert!(
+                c.copied >= b.copied,
+                "{name}: {} copied, from {}",
+                c.copied,
+                b.copied
+            );
+            assert!(
+                c.bytes <= b.bytes,
+                "{name}: {} bytes, from {}",
+                c.bytes,
+                b.bytes
+            );
+        }
+    }
 }
 
 /// What each of `report`'s findings names, by kind: its widgets', fields'
