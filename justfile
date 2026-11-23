@@ -349,7 +349,10 @@ corpus:
     if grep -q 'skipped: no corpus' "{{logs}}/corpus-tests.log"; then echo "a corpus test skipped: no corpus found"; exit 1; fi
     exit "$rc"
 
-# The interop tests: sheaf's output read by qpdf and pdf.js.
+# The interop tests: sheaf's output read by qpdf and pdf.js, and its text
+# field appearances drawn by poppler's pdftoppm ($SHEAF_PDFTOPPM, else on
+# the PATH). A test whose tool is missing says so ("skipped ...") and
+# passes: read the output on a machine that may lack one.
 [group('local')]
 interop:
     #!/usr/bin/env bash
