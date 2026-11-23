@@ -491,7 +491,7 @@ fn part((id, body): (ObjectId, Body<'_>)) -> Result<(ObjectId, PartBody<'_>)> {
 /// its [`Body::Raw`]: where its rules hold, the family copies it there,
 /// and never in an object stream.
 fn read_at_offset(body: &PartBody<'_>) -> bool {
-    matches!(body, PartBody::Read { record, .. } if record.at.stream().is_none())
+    matches!(body, PartBody::Read { record, .. } if crate::pdf::write::read_at_offset(record))
 }
 
 /// The refusal of an object as read ([`Body::Read`]) given to a write at

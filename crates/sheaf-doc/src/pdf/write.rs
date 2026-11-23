@@ -32,6 +32,17 @@ pub fn non_zero_ref(id: pdf_objects::ObjectId) -> Option<pdf_objects::ObjectId> 
     (id.number != 0).then_some(id)
 }
 
+/// Whether `record` is of an object read at an offset in its file, not in
+/// an object stream: where its rules hold, [`Parts`] copies such an object
+/// on its own at an offset, never in an object stream, so a writer that
+/// lays a file out asks this of each object as read ([`PartBody::Read`])
+/// it gives.
+#[inline]
+#[must_use]
+pub fn read_at_offset(record: &Record) -> bool {
+    record.at.stream().is_none()
+}
+
 /// Whether `obj` is an `/ObjStm` stream container (ISO 32000-2 §7.5.7).
 #[must_use]
 pub fn is_container(obj: &Object) -> bool {

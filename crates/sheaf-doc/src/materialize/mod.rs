@@ -125,7 +125,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
-use crate::pdf::write::Renumber;
+use crate::pdf::write::{Renumber, read_at_offset};
 use crate::pdf::{ByteSource as _, Handover, Object, ObjectId, Stream, XrefKind};
 use anyhow::{Context as _, Result};
 use in_progress::Progress;
@@ -478,7 +478,7 @@ fn rewrite(
         let graph = &graph;
         let raw_copies = &raw_copies;
         let dense = dense.as_ref();
-        let name = |id| name(dense, id);
+        let name = |id: ObjectId| name(dense, id);
         // Which pages use each object, by number written, which its
         // container is grouped by: the walk over the graph as written.
         let uses = || {
@@ -525,7 +525,7 @@ fn rewrite(
                 }
                 if copy
                     && let Some((object, record)) = raw_copies.as_read(id)
-                    && !(by_number && record.at.stream().is_none() && name(id) != Some(id))
+                    && !(by_number && read_at_offset(record) && name(id) != Some(id))
                 {
                     let (object, record) = (Cow::Borrowed(object), Cow::Borrowed(record));
                     return Ok((
@@ -540,7 +540,6 @@ fn rewrite(
                 Ok((id, Body::Object(Cow::Borrowed(obj), key)))
             })
         };
-        let to = |id: ObjectId| name(id);
         let layout = |from| Layout {
             trailer: &graph.pdf.trailer,
             kind,
@@ -552,7 +551,7 @@ fn rewrite(
                 uses: &uses,
                 reuse: &reuse,
             }),
-            to: dense.map(|_| &to as &(dyn Renumber + Sync)),
+            to: dense.map(|_| &name as &(dyn Renumber + Sync)),
             from,
         };
         // The reading the objects as read are copied from, when there are
