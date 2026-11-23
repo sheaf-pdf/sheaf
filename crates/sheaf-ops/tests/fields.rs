@@ -26,7 +26,8 @@
 //! On every system, a realized page draws a changed field as its saved
 //! file does, appearances only and live; and "é € — “ ”" in the state
 //! forms' `/Helv` and `/Arial` reads back, by sheaf's interpreter over the
-//! made form and by PDFium's text of the page it flattened.
+//! made form and by PDFium's text of the page it flattened (the `/Arial`'s
+//! "€" as PDFium reads it on each system: [`pdfium_reads`]).
 //!
 //! PDFium is sheaf's linked build (`scripts/fetch-pdfium.sh`). Needs
 //! libpdfium, like the app itself.
@@ -142,7 +143,26 @@ fn the_state_forms_text_reads_back() {
         assert_eq!(fonts, [dr], "{name}: the form's font is /DR's");
         let text = appearance_text(&saved, None, PageIndex(0)).unwrap();
         println!("{name}\tPDFium reads {text:?}");
-        assert!(text.contains(STATE_TEXT), "{name}: {text:?}");
+        let reads = pdfium_reads(name);
+        assert!(
+            text.contains(reads),
+            "{name}: {text:?}, not {reads:?} (is an Arial installed?)"
+        );
+    }
+}
+
+/// What PDFium's text of the flattened page reads for [`STATE_TEXT`] in the
+/// state form's font `name`. The `/Arial` isn't embedded, and PDFium's
+/// reading of it turns on the system's fonts: on Windows and macOS, which
+/// have an Arial, it reads code 219 by MacRoman's own table, `¤`, where the
+/// font's `/Differences` names it `/Euro` (CI's windows-latest and
+/// macos-latest alike); on Linux, with none, it reads the `/Differences`.
+/// sheaf's interpreter reads the `/Differences` on every system.
+fn pdfium_reads(name: &str) -> &'static str {
+    if name == "Arial" && cfg!(any(target_os = "windows", target_os = "macos")) {
+        "é ¤ — “ ”"
+    } else {
+        STATE_TEXT
     }
 }
 
