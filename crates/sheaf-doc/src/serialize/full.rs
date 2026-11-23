@@ -10,9 +10,13 @@
 //! names it and encrypts under the number written; the `/Encrypt`
 //! dictionary is the one laid out for the numbers written. An object given
 //! as read ([`Body::Read`]) is copied there by the family's rules, its
-//! header and each reference that moved written anew in place. Without
-//! one, each object is written at its own number by sheaf's writer, copies
-//! as [`Body::Raw`] and [`Body::Member`] say.
+//! header and each reference that moved written anew in place, or, where
+//! they decline (at another number under a key made of it, say), written
+//! anew from the object as read; a copy whose bytes or record aren't what
+//! the reading read fails the write, which a dense Rewrite then makes
+//! again with nothing given as read. Without a renumbering, each object is
+//! written at its own number by sheaf's writer, copies as [`Body::Raw`]
+//! and [`Body::Member`] say.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};

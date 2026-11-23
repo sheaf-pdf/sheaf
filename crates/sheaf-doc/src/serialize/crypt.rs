@@ -96,6 +96,31 @@ impl Crypt {
         })
     }
 
+    /// Whether a method it encrypts by may make each object's key of its
+    /// number (RC4, AES-128: Algorithm 1), so that an object's bytes read
+    /// at one number are right at that number alone: a `/V` under 5, or a
+    /// crypt filter in `/CF` but AES-256's (`/CFM /AESV3`), or a `/CF` it
+    /// can't read where it is. Read from the dictionary, it errs toward
+    /// yes: a write under a renumbering gives such an object anew where its
+    /// number moves.
+    #[must_use]
+    pub fn keys_by_number(&self) -> bool {
+        let v = self.dict().get(b"V").and_then(Object::as_integer);
+        if v.is_none_or(|v| v < 5) {
+            return true;
+        }
+        let Some(filters) = self.dict().get(b"CF") else {
+            return false;
+        };
+        let Some(filters) = filters.as_dict() else {
+            return true;
+        };
+        filters.iter().any(|(_, filter)| {
+            let method = filter.as_dict().and_then(|f| f.get(b"CFM"));
+            method.and_then(Object::as_name) != Some(&b"AESV3"[..])
+        })
+    }
+
     /// Whether objects may go in object streams under it (`!Identity /StmF`
     /// or `Identity /StrF`).
     #[must_use]
