@@ -37,6 +37,9 @@ pdf-content-streams.workspace = true
 # its codes and widths by.
 pdf-fonts.workspace = true
 pdf-gfx.workspace = true
+# Annotations: an appearance as the parts of its form, whoever drew it
+# (M18 slice 24).
+pdf-annots.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 log.workspace = true

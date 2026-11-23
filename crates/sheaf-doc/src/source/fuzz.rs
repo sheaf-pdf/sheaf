@@ -46,8 +46,11 @@ pub fn page_tree(data: &[u8]) {
 }
 
 /// `data` as the objects of a page's annotations, `n 0 obj … endobj` from
-/// 4 up, read as the open reads sheaf's marks: each entry's `/SHEF_Annot`
-/// and digest, and whether it's ours to rewrite. The page, turned 90°, lists an annotation for each
+/// 4 up, read as the open reads them: each entry's `/SHEF_Annot` and
+/// digest, and whether it's ours to rewrite, and the page's annotations as
+/// the open lists them, another tool's (a mark of sheaf's the bytes have
+/// changed among them) read by `pdf-annots` and converted to marks
+/// (`file::annots_in`). The page, turned 90°, lists an annotation for each
 /// `endobj`, in a file with no cross-reference table, which the reader
 /// rebuilds by scanning.
 pub fn sheaf_annot(data: &[u8]) {
@@ -66,6 +69,8 @@ pub fn sheaf_annot(data: &[u8]) {
             let _ = crate::annot::staleness(pdf, d, false);
         }
     }
+    let pages = src.pages().iter().map(|p| (p.id, p.geom.rotate));
+    let _ = crate::file::annots_in(pdf, pages);
 }
 
 /// `data` opened as a source, and the generators sheaf drew on it found as

@@ -1219,6 +1219,48 @@ const RETIRED_M18: &[(&str, u8)] = &[
     ("content::blocks::Marked", 17),
     ("content::blocks::Props", 17),
     ("private::lexed", 17),
+    // A mark's appearance is held as pdf-annots holds one it draws
+    // (`pdf::annots::SynthesizedAp`), and its form is made from its parts
+    // (`content::sink::form`), as any appearance's is.
+    ("annot::Appearance", 24),
+    // Another tool's annotation is read by pdf-annots (`source::annots::read`)
+    // and made a mark from what it read (`import::convert_page`): sheaf's
+    // own readers of its keys went, a stamp's form is `import::normal_form`
+    // and a dimension is the family's `/IT`. The `/Subtype` a data format
+    // names a comment by, as written, is `exchange::subtype`.
+    ("import::numbers", 24),
+    ("import::floats", 24),
+    ("import::points", 24),
+    ("import::quads", 24),
+    ("import::bounds", 24),
+    ("import::ink", 24),
+    ("import::border_width", 24),
+    ("import::border_style", 24),
+    ("import::color_of", 24),
+    ("import::default_appearance", 24),
+    ("import::measured", 24),
+    ("import::appearance", 24),
+    ("import::subtype", 24),
+    // A mark's cloudy border is drawn by pdf-annots (`synth_cloud`, round
+    // `annot::outline_of`), its scallops the family's (`cloud_outline`,
+    // which `annot::cloud_curves` adapts for the screen).
+    ("annot::cloud_path", 24),
+    // What a flatten reads of an annotation is pdf-annots' reading of it
+    // (`source::showing`: its flags, and the form its appearances name in
+    // the state sheaf's rule picks), placed by the family's placement
+    // (`source::annots::placement`), over objects read for it and kept
+    // nowhere: sheaf's own reader of its keys and of a form's frame went.
+    ("source::appearance::Shows", 24),
+    ("source::appearance::Shows::read", 24),
+    ("source::appearance::Shows::in_slot", 24),
+    ("source::appearance::Shows::form", 24),
+    ("source::appearance::frame", 24),
+    ("source::appearance::unkept", 24),
+    // A form a flatten draws is placed on its annotation's box by the
+    // family's placement, read with the annotation (`Showing::placed`,
+    // which `tx::flatten::on_rect` asks), not by a frame sheaf read of
+    // the form itself.
+    ("tx::flatten::placed", 24),
 ];
 
 /// The ledgers, with the words a hit names its slice by.
@@ -1278,6 +1320,29 @@ const QUALIFIED_ONLY: &[&str] = &[
     // (`Said::Unread`), and pdf-structure's error: not the sink's objects
     // that read nothing.
     "Unread",
+    // An appearance as a form field's maker gives one (pdf-forms'): not
+    // the type a mark's had (M18 slice 24).
+    "Appearance",
+    // Words other code names its own things by (a mark's appearance, a
+    // box's bounds, a path's points, a stroke of ink, a value measured,
+    // `exchange::subtype`, the family's `subtype()`): not the readers of
+    // an annotation's keys `import` had (M18 slice 24).
+    "appearance",
+    "border_style",
+    "bounds",
+    "color_of",
+    "default_appearance",
+    "floats",
+    "ink",
+    "measured",
+    "numbers",
+    "points",
+    "quads",
+    "subtype",
+    // What places a form, a page or a glyph elsewhere (`Showing::placed`,
+    // sheaf-render's page matrix, tests' helpers): not the flatten's own,
+    // which placed a form by the frame sheaf read of it (M18 slice 24).
+    "placed",
     // A sink's `resource`, a glyph's `advance` and a file's font's
     // `encoding`: not what sheaf's own font trait and standard 14 had
     // (M18 slice 22).

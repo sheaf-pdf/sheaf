@@ -3,14 +3,22 @@
 //! and the one conversion between the page's default user space
 //! (PageSpace, §5) and the page as it's shown.
 //!
-//! The content interpreter's events carry the PDF layer's geometry
-//! (`content::interp`'s `Rect` and `Matrix`, pdf-gfx's), which nothing
-//! sheaf ships turns into these yet: the code that first does adds the
-//! conversion here.
+//! The PDF layer has a geometry of its own (pdf-gfx's `Rect` and
+//! `Matrix`): the content interpreter's events carry it, which nothing
+//! sheaf ships turns into these yet, and an appearance's form is made of
+//! it (`pdf::annots::SynthesizedAp`'s box and matrix, M18 slice 24),
+//! which turns into these here, field for field. What sheaf hands the
+//! family (a mark's box, its points, the frame a picture is drawn in, the
+//! box a form is placed on) turns into the family's here too, the same
+//! numbers: every conversion between the two geometries, either way, is
+//! one of this file's `From`s, or for the types that are another crate's
+//! (a box, a point, sides in an array) one of `family_box`, `sides`,
+//! `family_point` and `layout_point`.
 
 use sheaf_edit::{PageSize, Rotation};
 
 use crate::annot::{Box2, Pt};
+use crate::pdf::gfx;
 
 /// The smallest a page's box may be left on either side, in points: a
 /// quarter inch.
@@ -73,6 +81,51 @@ impl Rect {
             shared
         }
     }
+}
+
+/// The PDF layer's rectangle, its sides as they are: neither is
+/// normalized again.
+impl From<gfx::Rect> for Rect {
+    fn from(r: gfx::Rect) -> Rect {
+        let gfx::Rect { x0, y0, x1, y1 } = r;
+        Rect { x0, y0, x1, y1 }
+    }
+}
+
+/// A rectangle as the PDF layer has one, its sides as they are: neither
+/// is normalized again.
+impl From<Rect> for gfx::Rect {
+    fn from(r: Rect) -> gfx::Rect {
+        let Rect { x0, y0, x1, y1 } = r;
+        gfx::Rect { x0, y0, x1, y1 }
+    }
+}
+
+/// A box as the PDF layer's rectangle: its corner, and its corner moved
+/// by its size.
+pub(crate) fn family_box(b: Box2) -> gfx::Rect {
+    gfx::Rect {
+        x0: b.x,
+        y0: b.y,
+        x1: b.x + b.w,
+        y1: b.y + b.h,
+    }
+}
+
+/// The sides `[x0 y0 x1 y1]` as the PDF layer's rectangle, as they are:
+/// not normalized.
+pub(crate) fn sides([x0, y0, x1, y1]: [f32; 4]) -> gfx::Rect {
+    gfx::Rect { x0, y0, x1, y1 }
+}
+
+/// A point of a layout as the PDF layer has one.
+pub(crate) fn family_point(p: Pt) -> gfx::Point {
+    gfx::Point::new(p.x, p.y)
+}
+
+/// The PDF layer's point as a layout has one.
+pub(crate) fn layout_point(p: gfx::Point) -> Pt {
+    Pt { x: p.x, y: p.y }
 }
 
 /// An affine map of the plane, in PDF's order: `x' = a·x + c·y + e`,
@@ -221,6 +274,23 @@ impl Affine {
             e: (self.c * self.f - self.d * self.e) / det,
             f: (self.b * self.e - self.a * self.f) / det,
         }
+    }
+}
+
+/// The PDF layer's matrix: the same six numbers in the same order.
+impl From<gfx::Matrix> for Affine {
+    fn from(m: gfx::Matrix) -> Affine {
+        let gfx::Matrix { a, b, c, d, e, f } = m;
+        Affine { a, b, c, d, e, f }
+    }
+}
+
+/// A map as the PDF layer's matrix: the same six numbers in the same
+/// order.
+impl From<Affine> for gfx::Matrix {
+    fn from(m: Affine) -> gfx::Matrix {
+        let Affine { a, b, c, d, e, f } = m;
+        gfx::Matrix { a, b, c, d, e, f }
     }
 }
 

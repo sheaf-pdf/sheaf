@@ -21,11 +21,13 @@ use sheaf_edit::{AnnotRef, BlobSel, NewMark, Op, PageRef};
 
 use crate::annot::{Annot, AnnotId, Emitted};
 use crate::attachments::Objects;
+use crate::content::Unkept;
 use crate::file::thread_name;
 use crate::import::{Interned, NotAMark, Options};
 use crate::model::{DocState, FormRef, PageId, Snapshot};
 use crate::prim::Key;
 use crate::serialize::built::{Built, WriteCx};
+use crate::source::annots;
 use crate::store::{Blob, BlobId, BlobKind, Src, Store};
 use crate::tx::{Grant, Tx};
 
@@ -73,6 +75,15 @@ impl Comments {
     }
 }
 
+/// `/Subtype` as written: what a data format names a comment by, and
+/// what one another PDF holds is, to pass its links and form fields over.
+pub(crate) fn subtype(dict: &Dictionary) -> String {
+    dict.get(b"Subtype")
+        .and_then(Object::as_name)
+        .map(|n| String::from_utf8_lossy(n).into_owned())
+        .unwrap_or_default()
+}
+
 /// A data file or PDF, by what it starts with.
 pub fn read(bytes: &[u8], password: Option<&str>) -> Result<Comments> {
     let head: Vec<u8> = bytes
@@ -105,10 +116,7 @@ pub fn from_pdf(bytes: &[u8], password: Option<&str>) -> Result<Comments> {
             let Ok(d) = src.pdf().get_dictionary(id) else {
                 continue;
             };
-            if matches!(
-                crate::import::subtype(d).as_str(),
-                "Link" | "Widget" | "Popup" | ""
-            ) {
+            if matches!(subtype(d).as_str(), "Link" | "Widget" | "Popup" | "") {
                 continue;
             }
             annots.push((i as u32, id));
@@ -241,20 +249,15 @@ pub fn import(snap: &Snapshot, store: &Store, comments: &Comments) -> Imported {
         }
     }
     for (page, ids) in by_page {
-        let entries: Vec<Object> = ids.iter().map(|&id| Object::from(id)).collect();
-        let dicts: Vec<&Dictionary> = ids
-            .iter()
-            .filter_map(|&id| pdf.get_dictionary(id).ok())
+        let dicts: Vec<(ObjectId, &Dictionary)> = (ids.iter())
+            .filter_map(|&id| Some((id, pdf.get_dictionary(id).ok()?)))
             .collect();
         let Some((id, rotation)) = st
             .page_at(page as usize)
             .and_then(|id| Some((id, st.geom(id)?.rotate)))
         else {
             out.reads.insert(Key::Order);
-            out.off_the_end += dicts
-                .iter()
-                .filter(|d| crate::import::subtype(d) != "Popup")
-                .count();
+            out.off_the_end += dicts.iter().filter(|(_, d)| subtype(d) != "Popup").count();
             continue;
         };
         out.reads
@@ -262,9 +265,26 @@ pub fn import(snap: &Snapshot, store: &Store, comments: &Comments) -> Imported {
         let files = Options {
             files: Some(&interned),
         };
-        let converted = crate::import::convert_page(pdf, &dicts, rotation, files);
+        // Each read by pdf-annots, and converted together, so a
+        // replacement's parts meet; one it can't read is skipped, said.
+        let unkept = Unkept::default();
+        let (mut entries, mut read) = (Vec::new(), Vec::new());
+        for &(at, dict) in &dicts {
+            match annots::read(pdf, &unkept, dict, Some(at)) {
+                Ok(a) => {
+                    entries.push(Object::from(at));
+                    read.push(a);
+                }
+                Err(why) => {
+                    log::warn!("comment {at}: not read: {why}");
+                    *out.skipped.entry(subtype(dict)).or_default() += 1;
+                }
+            }
+        }
+        let converted = crate::import::convert_page(pdf, &read, rotation, files);
         let mut new = Vec::new();
-        for ((dict, entry), mark) in dicts.iter().zip(&entries).zip(converted) {
+        for ((as_read, entry), mark) in read.iter().zip(&entries).zip(converted) {
+            let dict = as_read.dict();
             // One of sheaf's comes back exactly as it was, under the name
             // it had there, so what replies to it there does here; one
             // another tool has edited since is that tool's.

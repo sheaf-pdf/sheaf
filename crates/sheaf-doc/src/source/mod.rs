@@ -12,7 +12,7 @@
 //! refuses the bytes, once an engine has tried them. Sources come from the
 //! [`Store`](crate::store::Store), one per distinct file.
 
-pub(crate) mod appearance;
+pub(crate) mod annots;
 mod conformance;
 #[doc(hidden)]
 pub mod fuzz;
@@ -20,6 +20,7 @@ pub mod fuzz;
 pub(crate) mod lazy_tests;
 mod limits;
 mod pages;
+pub(crate) mod showing;
 #[cfg(test)]
 pub(crate) mod tests;
 

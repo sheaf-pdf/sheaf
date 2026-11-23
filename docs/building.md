@@ -43,6 +43,13 @@ lists them):
   for a page its blocks and what's cut and written, a line each): run
   before and after a change to what reads content, or a move of the PDF
   layer's pin, and `diff` the two files.
+- `just annots-dump <file>` writes what sheaf makes of every corpus
+  annotation (for each slot of a page's `/Annots`: what the open reads
+  of it, through pdf-annots, and the mark it converts to; what a flatten
+  reads of it; and what a save writes of that mark, its dictionary and
+  its appearance, a line each): run before and after a change to what
+  reads, flattens or draws annotations, or a move of the PDF layer's
+  pin, and `diff` the two files.
 
 Tests run under a memory cap where Linux has a user systemd
 (`scripts/test-capped.sh`; `SHEAF_UNCAPPED=1` turns it off).

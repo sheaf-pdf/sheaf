@@ -4,9 +4,11 @@
 //! (`pdf-objects`, `pdf-structure`, `pdf-filters`, `pdf-crypt`), and
 //! content's (`content`: `pdf-content-streams`, M18 slice 19), fonts'
 //! (`fonts`: `pdf-fonts` and `pdf-gfx`, M18 slice 22), and content
-//! interpreted and written again (`gfx`: `pdf-gfx`, M18 slice 23), with
-//! where its readers tell what they read past (`fault`).
+//! interpreted and written again (`gfx`: `pdf-gfx`, M18 slice 23), and
+//! annotations' (`annots`: `pdf-annots`, M18 slice 24), with where its
+//! readers tell what they read past (`fault`).
 
+pub mod annots;
 pub mod content;
 mod document;
 mod error;

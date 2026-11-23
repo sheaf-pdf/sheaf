@@ -8,8 +8,11 @@
 //! The file was written once, by the content writer as it was before
 //! content went through pdf-content-streams, and is what the sheets'
 //! bytes are held to since: a line that differs is a byte that changed,
-//! to find, not a golden to write again. `SHEAF_GOLDEN_UPDATE=1` writes
-//! it. Each sheet is read back too: its tokens, each operation written
+//! to find, not a golden to write again. Two of its lines moved once
+//! since, where pdf-annots took over drawing a highlight and a square
+//! (M18 slice 24): the page pictures' digests, the forms of those two
+//! marks' appearances in them, each read and the summary rendered both
+//! ways. `SHEAF_GOLDEN_UPDATE=1` writes it. Each sheet is read back too: its tokens, each operation written
 //! again by [`ContentWriter::operation`], give the same bytes.
 
 use std::collections::HashMap;

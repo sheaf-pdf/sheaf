@@ -3,17 +3,38 @@
 //! importing comments from FDF, XFDF or another PDF: each is, or is made
 //! into, a PDF annotation dictionary first.
 //!
+//! Each dictionary is read by `pdf-annots` under PDFium's rules
+//! (`source::annots::read`, M18 slice 24), and the mark made from what
+//! it read ([`convert_page`]). What stays sheaf's own read of the dictionary: its
+//! names in threads ([`thread_name`], and `/IRT` by its target's name or,
+//! as XFDF gives it, a string: [`irt_name`]); the dates, kept as written;
+//! a dimension's `/Measure`; an attachment's embedded file; and whether a
+//! stamp has a `/Name` at all (one without is named none, as PDFium reads
+//! it, where the family gives ISO 32000's default for its icon). Which
+//! mark each annotation becomes is sheaf's: the family says what it is,
+//! and this says what sheaf holds it as (a dimension by the family's
+//! `/IT`, a page stamp by its form, a reply or a replacement by its
+//! thread), each color rounded to a byte as sheaf writes it.
+//!
 //! The mark keeps the annotation's `/NM` ([`Annot::name`]), so replies to
 //! it still find it, and a save puts the mark where the annotation was.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::pdf::annots::{
+    self, AnnotColor, AnnotSubtype, AppearanceEntry, AttachmentIcon, BorderStyle,
+    FileAttachmentAnnot, FreeTextIntent, LineEnding, LineIntent, PolyIntent, PolyKind, ReplyKind,
+    ShapeKind, StampName, TextMarkupKind, TypedAnnot,
+};
+use crate::pdf::gfx::Rect;
 use crate::pdf::{Dictionary, Object, ObjectId, StreamExt, Value};
 use sheaf_edit::Rotation;
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Box2, Pt, REVIEW};
 use crate::attachments::Objects;
+use crate::content::{ReadObjects, Unkept};
 use crate::file::{pdf_text, thread_name};
 use crate::store::{Blob, BlobKind, Store};
 
@@ -75,44 +96,48 @@ pub enum NotAMark {
     NotComment,
     /// A comment sheaf can't hold, by subtype. Reported.
     Unsupported(String),
+    /// What doesn't read as an annotation, with why: a string still
+    /// encrypted, or past one of `pdf-annots`' caps
+    /// (`source::annots::limits`).
+    Unread(String),
     /// Part of another, which became a mark with it: the crossed-out
     /// text of a replacement.
     Part,
 }
 
-/// Each of a page's annotations (`dicts`, in order) as a mark that reads
-/// upright turned `turn`, as the page shows. A replacement's StrikeOut,
-/// grouped under its Caret, is folded into the Caret's mark. `pdf`
-/// resolves references (`/IRT`, `/AP`, `/FS`).
+/// Each of a page's annotations (`read`, in order, as `pdf-annots` read
+/// them) as a mark that reads upright turned `turn`, as the page shows. A
+/// replacement's StrikeOut, grouped under its Caret, is folded into the
+/// Caret's mark. `pdf` resolves references (`/IRT`, `/AP`, `/FS`).
 pub fn convert_page<P: Objects + ?Sized>(
     pdf: &P,
-    dicts: &[&Dictionary],
+    read: &[annots::Annot<'_>],
     turn: Rotation,
     opts: Options<'_>,
 ) -> Vec<Result<Annot, NotAMark>> {
-    let names: Vec<String> = dicts.iter().map(|d| thread_name(d)).collect();
+    let names: Vec<String> = read.iter().map(|a| thread_name(a.dict())).collect();
     // Grouped parts, by the name of what they're grouped under.
-    let mut parts: std::collections::HashMap<String, Vec<usize>> = Default::default();
-    for (i, d) in dicts.iter().enumerate() {
-        if is_grouped(d)
-            && let Some(parent) = irt_name(pdf, d)
+    let mut parts: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, a) in read.iter().enumerate() {
+        if is_grouped(a)
+            && let Some(parent) = irt_name(pdf, a.dict())
         {
             parts.entry(parent).or_default().push(i);
         }
     }
-    let mut out: Vec<Result<Annot, NotAMark>> =
-        dicts.iter().map(|d| convert(pdf, d, turn, opts)).collect();
-    for (i, d) in dicts.iter().enumerate() {
+    let mut out: Vec<Result<Annot, NotAMark>> = read
+        .iter()
+        .map(|a| convert_read(pdf, a, turn, opts))
+        .collect();
+    for (i, a) in read.iter().enumerate() {
         let Some(kids) = parts.get(&names[i]) else {
             continue;
         };
-        if subtype(d) != "Caret" {
+        if *a.subtype() != AnnotSubtype::Caret {
             continue;
         }
-        let strike = kids
-            .iter()
-            .copied()
-            .find(|&k| subtype(dicts[k]) == "StrikeOut");
+        let strike =
+            (kids.iter().copied()).find(|&k| *read[k].subtype() == AnnotSubtype::StrikeOut);
         let Some(k) = strike else { continue };
         let rects = match &out[k] {
             Ok(Annot {
@@ -121,10 +146,10 @@ pub fn convert_page<P: Objects + ?Sized>(
             }) => rects.clone(),
             _ => continue,
         };
-        if let Ok(a) = &mut out[i]
-            && let AnnotKind::Insert { at } = a.kind
+        if let Ok(m) = &mut out[i]
+            && let AnnotKind::Insert { at } = m.kind
         {
-            a.kind = AnnotKind::Replace {
+            m.kind = AnnotKind::Replace {
                 rects,
                 struck: String::new(),
                 at,
@@ -135,15 +160,31 @@ pub fn convert_page<P: Objects + ?Sized>(
     out
 }
 
-/// `dict` as a mark that reads upright turned `turn`. Its geometry is the
-/// standard keys', which are PageSpace.
-pub fn convert<P: Objects + ?Sized>(
+/// `dict` as a mark that reads upright turned `turn`: read by
+/// `pdf-annots` (`source::annots::read`) and made a mark as
+/// [`convert_page`] makes each.
+pub fn convert<P: Objects + ReadObjects + ?Sized>(
     pdf: &P,
     dict: &Dictionary,
     turn: Rotation,
     opts: Options<'_>,
 ) -> Result<Annot, NotAMark> {
-    let sub = subtype(dict);
+    let unkept = Unkept::default();
+    let read = crate::source::annots::read(pdf, &unkept, dict, None);
+    let a = read.map_err(|why| NotAMark::Unread(why.to_string()))?;
+    convert_read(pdf, &a, turn, opts)
+}
+
+/// `a` as a mark that reads upright turned `turn`. Its geometry is the
+/// standard keys', which are PageSpace.
+fn convert_read<P: Objects + ?Sized>(
+    pdf: &P,
+    a: &annots::Annot<'_>,
+    turn: Rotation,
+    opts: Options<'_>,
+) -> Result<Annot, NotAMark> {
+    let dict = a.dict();
+    let sub = subtype_of(a);
     if matches!(
         sub.as_str(),
         "" | "Link" | "Widget" | "Popup" | "PrinterMark" | "TrapNet" | "Watermark"
@@ -151,31 +192,34 @@ pub fn convert<P: Objects + ?Sized>(
         return Err(NotAMark::NotComment);
     }
     let unsupported = || NotAMark::Unsupported(sub.clone());
-    let rect = numbers(pdf, dict, b"Rect")
-        .filter(|r| r.len() == 4)
-        .map(|r| user_box([r[0], r[1], r[2], r[3]]))
-        .ok_or_else(unsupported)?;
-    let text = |key: &[u8]| dict.get(key).map(pdf_text).unwrap_or_default();
-    let stroke = border_width(pdf, dict);
+    if !a.has_valid_rect() {
+        return Err(unsupported());
+    }
+    let raw = a.raw_rect();
+    let rect = user_box(raw);
+    let stroke = a.border().width;
+    let rect_diff = match a.typed() {
+        TypedAnnot::Shape(s) => s.rect_diff,
+        TypedAnnot::FreeText(f) => f.rect_diff,
+        TypedAnnot::Caret(c) => c.rect_diff,
+        _ => None,
+    };
     // The box inside /Rect: less /RD where there is one, else less
     // `border` (half a shape's line, which is drawn on the box).
-    let within = |border: f32| match numbers(pdf, dict, b"RD").filter(|d| d.len() == 4) {
-        Some(d) => {
-            let r = numbers(pdf, dict, b"Rect").unwrap_or_default();
-            user_box([r[0] + d[0], r[1] + d[1], r[2] - d[2], r[3] - d[3]])
-        }
+    let within = |border: f32| match rect_diff {
+        Some(d) => user_box([raw[0] + d[0], raw[1] + d[1], raw[2] - d[2], raw[3] - d[3]]),
         None => inset(rect, border),
     };
     let inner = || within(stroke / 2.0);
     let point = |x: f32, y: f32| Pt { x, y };
-    let mut color = color_of(pdf, dict, b"C");
-    let kind = match sub.as_str() {
-        "Text" => {
-            let state = text(b"State");
+    let mut color = a.color().and_then(rgb);
+    let kind = match a.typed() {
+        TypedAnnot::Text(t) => {
+            let state = t.state.clone().unwrap_or_default();
             match irt_name(pdf, dict) {
                 Some(parent) if !state.is_empty() => AnnotKind::Status {
                     parent,
-                    model: Some(text(b"StateModel"))
+                    model: (t.state_model.clone())
                         .filter(|m| !m.is_empty())
                         .unwrap_or_else(|| REVIEW.to_string()),
                     state,
@@ -184,99 +228,106 @@ pub fn convert<P: Objects + ?Sized>(
                 None => AnnotKind::Note { pos: icon_at(rect) },
             }
         }
-        "Highlight" | "Underline" | "StrikeOut" | "Squiggly" => {
-            let rects = quads(pdf, dict)
-                .filter(|q| !q.is_empty())
-                .unwrap_or_else(|| vec![rect]);
-            match sub.as_str() {
-                "Highlight" => {
+        TypedAnnot::TextMarkup(m) => {
+            let mut rects: Vec<Box2> = (m.quad_points.iter()).map(|q| box_of(q.bounds())).collect();
+            if rects.is_empty() {
+                rects = vec![rect];
+            }
+            match m.kind {
+                TextMarkupKind::Highlight => {
                     color = color.or(Some([255, 230, 0]));
                     AnnotKind::Highlight { rects }
                 }
-                "Underline" => AnnotKind::Underline { rects },
-                "StrikeOut" => AnnotKind::StrikeOut { rects },
-                _ => AnnotKind::Squiggly { rects },
+                TextMarkupKind::Underline => AnnotKind::Underline { rects },
+                TextMarkupKind::StrikeOut => AnnotKind::StrikeOut { rects },
+                TextMarkupKind::Squiggly => AnnotKind::Squiggly { rects },
             }
         }
-        "FreeText" => {
-            let (size, ink) = default_appearance(&text(b"DA"));
+        TypedAnnot::FreeText(f) => {
+            let da = f.da.as_ref();
             // The text's color, not the box's.
-            color = ink.or(Some([0, 0, 0]));
-            let size = size.filter(|s| *s > 0.0).unwrap_or(12.0);
-            let callout = dict
-                .get(b"IT")
-                .and_then(Object::as_name)
-                .is_some_and(|n| n == b"FreeTextCallout");
-            match numbers(pdf, dict, b"CL").filter(|_| callout) {
-                Some(cl) if cl.len() == 4 || cl.len() == 6 => {
-                    let pts = points(&cl);
-                    // [point, knee, end], or [point, end] with no knee.
-                    AnnotKind::Callout {
-                        rect: inner(),
-                        point: pts[0],
-                        knee: pts[1],
-                        size,
-                    }
-                }
+            color = (da.and_then(|da| da.color))
+                .and_then(|c| rgb(AnnotColor::from(c)))
+                .or(Some([0, 0, 0]));
+            let size = (da.and_then(|da| da.font_size))
+                .filter(|s| *s > 0.0)
+                .unwrap_or(12.0);
+            let callout = f.intent == FreeTextIntent::Callout;
+            match f.callout_line.as_slice() {
+                // [point, knee, end], or [point, end] with no knee.
+                [p, knee, ..] if callout && f.callout_line.len() <= 3 => AnnotKind::Callout {
+                    rect: inner(),
+                    point: point(p.x, p.y),
+                    knee: point(knee.x, knee.y),
+                    size,
+                },
                 _ => AnnotKind::FreeText {
                     rect: inner(),
                     size,
                 },
             }
         }
-        "Square" => AnnotKind::Square { rect: inner() },
-        "Circle" => AnnotKind::Ellipse { rect: inner() },
-        "Line" => {
-            let l = numbers(pdf, dict, b"L")
-                .filter(|l| l.len() == 4)
-                .ok_or_else(unsupported)?;
-            let ends: Vec<bool> = match dict
-                .get(b"LE")
-                .and_then(|o| pdf.dereference(o).ok())
-                .and_then(|(_, o)| o.as_array())
-            {
-                Some(a) => a
-                    .iter()
-                    .map(|o| o.as_name().is_some_and(|n| n.ends_with(b"Arrow")))
-                    .collect(),
-                None => Vec::new(),
-            };
+        TypedAnnot::Shape(s) => match s.kind {
+            ShapeKind::Square => AnnotKind::Square { rect: inner() },
+            ShapeKind::Circle => AnnotKind::Ellipse { rect: inner() },
+        },
+        TypedAnnot::Line(l) => {
+            let (from, to) = l.endpoints.ok_or_else(unsupported)?;
             AnnotKind::Line {
-                a: point(l[0], l[1]),
-                b: point(l[2], l[3]),
-                arrow: ends.get(1).copied().unwrap_or(false),
-                arrow_start: ends.first().copied().unwrap_or(false),
+                a: point(from.x, from.y),
+                b: point(to.x, to.y),
+                arrow: is_arrow(l.endings.1),
+                arrow_start: is_arrow(l.endings.0),
             }
         }
-        "Ink" => {
-            let paths = ink(pdf, dict)
-                .filter(|p| !p.is_empty())
-                .ok_or_else(unsupported)?;
+        TypedAnnot::Ink(i) => {
+            let paths: Vec<Vec<Pt>> = (i.strokes.iter())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.iter().map(|p| point(p.x, p.y)).collect())
+                .collect();
+            if paths.is_empty() {
+                return Err(unsupported());
+            }
             AnnotKind::Ink { paths }
         }
-        "Polygon" | "PolyLine" => {
-            let pts = numbers(pdf, dict, b"Vertices")
-                .map(|v| points(&v))
-                .filter(|p| p.len() >= 2)
-                .ok_or_else(unsupported)?;
-            if sub == "Polygon" {
-                AnnotKind::Polygon { points: pts }
-            } else {
-                AnnotKind::Polyline { points: pts }
+        TypedAnnot::Poly(p) => {
+            let points: Vec<Pt> = p.vertices.iter().map(|v| point(v.x, v.y)).collect();
+            if points.len() < 2 {
+                return Err(unsupported());
+            }
+            match p.kind {
+                PolyKind::Polygon => AnnotKind::Polygon { points },
+                PolyKind::PolyLine => AnnotKind::Polyline { points },
             }
         }
-        "Caret" => AnnotKind::Insert { at: within(0.0) },
-        "Stamp" => stamp(pdf, dict, rect, opts.files),
-        "FileAttachment" => match opts.files {
-            Some(files) => attachment(pdf, dict, rect, files).ok_or_else(unsupported)?,
+        TypedAnnot::Caret(_) => AnnotKind::Insert { at: within(0.0) },
+        // A stamp with no `/Name` has a name of none, where the family's
+        // view gives ISO's default, `/Draft`, for its icon.
+        TypedAnnot::Stamp(s) => {
+            let name = dict.get(b"Name").map(|_| &s.name);
+            stamp(pdf, a, name, rect, opts.files)
+        }
+        TypedAnnot::FileAttachment(f) => match opts.files {
+            Some(files) => attachment(pdf, dict, f, rect, files).ok_or_else(unsupported)?,
             None => return Err(unsupported()),
         },
         _ => return Err(unsupported()),
     };
     // A dimension with a scale is a measurement (decision 9). Its value
     // leads its text, as Acrobat writes it; sheaf draws that itself.
-    let mut contents = text(b"Contents");
-    let kind = match (measured(dict), scale(pdf, dict), kind) {
+    let measured = match a.typed() {
+        TypedAnnot::Line(l) => {
+            (l.intent == Some(LineIntent::Dimension)).then_some(crate::measure::Measured::Distance)
+        }
+        TypedAnnot::Poly(p) => match p.intent {
+            Some(PolyIntent::LineDimension) => Some(crate::measure::Measured::Perimeter),
+            Some(PolyIntent::PolygonDimension) => Some(crate::measure::Measured::Area),
+            _ => None,
+        },
+        _ => None,
+    };
+    let mut contents = a.contents().unwrap_or_default().to_string();
+    let kind = match (measured, scale(pdf, dict), kind) {
         (Some(what), Some(scale), AnnotKind::Line { a, b, .. }) => {
             measure(what, vec![a, b], scale, &mut contents)
         }
@@ -287,44 +338,31 @@ pub fn convert<P: Objects + ?Sized>(
         ) => measure(what, points, scale, &mut contents),
         (_, _, kind) => kind,
     };
+    let interior = match a.typed() {
+        TypedAnnot::Shape(s) => s.interior_color,
+        TypedAnnot::Poly(p) => p.interior_color,
+        TypedAnnot::Line(l) => l.interior_color,
+        _ => None,
+    };
     let fillable = kind.fillable();
+    let markup = a.markup();
+    let text = |key: &[u8]| dict.get(key).map(pdf_text).unwrap_or_default();
     Ok(Annot {
         id: AnnotId(0),
         kind,
         color: color.unwrap_or([0, 0, 0]),
-        opacity: dict
-            .get(b"CA")
-            .and_then(Object::as_number)
-            .unwrap_or(1.0)
-            .clamp(0.0, 1.0) as f32,
+        opacity: markup.map_or(1.0, |m| m.opacity),
         stroke,
-        author: text(b"T"),
+        author: (markup.and_then(|m| m.author.clone())).unwrap_or_default(),
         contents,
         modified: text(b"M"),
         created: text(b"CreationDate"),
-        fill: color_of(pdf, dict, b"IC").filter(|_| fillable),
-        dashed: border_style(pdf, dict).is_some_and(|s| s == b"D"),
-        cloudy: dict
-            .get(b"BE")
-            .and_then(|o| pdf.dereference(o).ok())
-            .and_then(|(_, o)| o.as_dict())
-            .and_then(|be| be.get(b"S"))
-            .and_then(Object::as_name)
-            .is_some_and(|s| s == b"C"),
+        fill: interior.and_then(rgb).filter(|_| fillable),
+        dashed: a.border().style == BorderStyle::Dashed,
+        cloudy: a.border().cloudy_intensity.is_some(),
         turn,
         name: thread_name(dict),
     })
-}
-
-/// What a dimension annotation measures, by its `/IT`.
-fn measured(dict: &Dictionary) -> Option<crate::measure::Measured> {
-    use crate::measure::Measured;
-    match dict.get(b"IT")?.as_name()? {
-        b"LineDimension" => Some(Measured::Distance),
-        b"PolyLineDimension" => Some(Measured::Perimeter),
-        b"PolygonDimension" => Some(Measured::Area),
-        _ => None,
-    }
 }
 
 /// Its `/Measure` as a scale.
@@ -355,23 +393,22 @@ fn measure(
     }
 }
 
-/// A stamp: its appearance as one of ours, a one-page PDF it names by its
-/// blob's stem, when it has one sheaf can read; else a text stamp saying
-/// its name. The page is interned through `files` and held there; a file
-/// converted ahead of need, with none, has only the stem, which the form
-/// the page is made of stands for in the file
+/// A stamp, `a`, named `name` (none where its dictionary has no `/Name`):
+/// its appearance as one of ours, a one-page PDF it names by its blob's
+/// stem, when its normal appearance is a form sheaf can read; else a text
+/// stamp saying its name. The page is interned through `files` and held
+/// there; a file converted ahead of need, with none, has only the stem,
+/// which the form the page is made of stands for in the file
 /// ([`ForeignAnnot::stamp`](crate::file::ForeignAnnot::stamp)).
 fn stamp<P: Objects + ?Sized>(
     pdf: &P,
-    dict: &Dictionary,
+    a: &annots::Annot<'_>,
+    name: Option<&StampName>,
     rect: Box2,
     files: Option<&Interned<'_>>,
 ) -> AnnotKind {
-    let name = dict
-        .get(b"Name")
-        .and_then(Object::as_name)
-        .map(|n| String::from_utf8_lossy(n).into_owned())
-        .unwrap_or_default();
+    let name =
+        (name.map(|n| String::from_utf8_lossy(n.as_bytes()).into_owned())).unwrap_or_default();
     // Acrobat's own are "SBApproved", "SHSignHere"…; custom ones "#…".
     let shown = match name.as_str() {
         n if n.starts_with('#') || n.is_empty() => "Stamp".to_string(),
@@ -383,7 +420,7 @@ fn stamp<P: Objects + ?Sized>(
         }
         n => n.to_string(),
     };
-    let page = appearance(pdf, dict).and_then(|f| crate::stamp_lib::form_to_pdf(pdf, f).ok());
+    let page = normal_form(a).and_then(|f| crate::stamp_lib::form_to_pdf(pdf, f).ok());
     let stem = page.and_then(|page| match files {
         Some(files) => Some(files.intern(page.into(), BlobKind::stamp())?.id().stem()),
         None => Some(crate::store::blob_id(&page).stem()),
@@ -403,63 +440,67 @@ fn stamp<P: Objects + ?Sized>(
     }
 }
 
-/// The form a stamp's normal appearance (`/AP /N`) is.
-pub(crate) fn appearance<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<ObjectId> {
-    let (_, ap) = pdf.dereference(dict.get(b"AP")?).ok()?;
-    ap.as_dict()?.get(b"N")?.as_reference()
+/// The form `a`'s normal appearance is (`/AP /N`), where it's one form:
+/// what a stamp's page is made of.
+pub(crate) fn normal_form(a: &annots::Annot<'_>) -> Option<ObjectId> {
+    match a.appearances()?.normal.as_ref()? {
+        AppearanceEntry::Single(id) => Some(*id),
+        AppearanceEntry::States(_) => None,
+    }
 }
 
-/// An attachment, its embedded file interned through `files`.
+/// An attachment, `f` as the family read it of `dict`: its file's name and
+/// icon from there, its embedded file from the dictionary's `/FS`,
+/// interned through `files`.
 fn attachment<P: Objects + ?Sized>(
     pdf: &P,
     dict: &Dictionary,
+    f: &FileAttachmentAnnot,
     rect: Box2,
     files: &Interned<'_>,
 ) -> Option<AnnotKind> {
     let deref_dict = |o: &Object| pdf.dereference(o).ok()?.1.as_dict().cloned();
     let fs = deref_dict(dict.get(b"FS")?)?;
     let ef = deref_dict(fs.get(b"EF")?)?;
-    let file = ef.get(b"UF").or_else(|| ef.get(b"F"))?.as_reference()?;
-    let s = pdf.get_object(file).ok()?.as_stream()?;
-    let bytes = s
-        .decompressed_content()
-        .unwrap_or_else(|_| s.raw_bytes().to_vec());
+    let at = ef.get(b"UF").or_else(|| ef.get(b"F"))?.as_reference()?;
+    let s = pdf.get_object(at).ok()?.as_stream()?;
+    let bytes = (s.decompressed_content()).unwrap_or_else(|_| s.raw_bytes().to_vec());
     let size = bytes.len() as u64;
-    let stem = files
+    let file = files
         .intern(bytes.into(), BlobKind::Attachment)?
         .id()
         .stem();
-    let name = [b"UF".as_slice(), b"F"]
-        .iter()
-        .find_map(|k| fs.get(k).map(pdf_text).filter(|n| !n.is_empty()))
+    let name = (f.file_name.clone())
+        .filter(|n| !n.is_empty())
         .unwrap_or_else(|| "attachment".into());
-    let icon = dict
-        .get(b"Name")
-        .and_then(Object::as_name)
-        .map(|n| String::from_utf8_lossy(n).into_owned())
+    let icon = match &f.icon {
+        AttachmentIcon::PushPin => "PushPin".to_string(),
+        AttachmentIcon::Graph => "Graph".to_string(),
+        AttachmentIcon::Paperclip => "Paperclip".to_string(),
+        AttachmentIcon::Tag => "Tag".to_string(),
+        AttachmentIcon::Other(name) => String::from_utf8_lossy(name).into_owned(),
+        _ => String::new(),
+    };
+    let icon = Some(icon)
         .filter(|n| crate::annot::ATTACHMENT_ICONS.contains(&n.as_str()))
         .unwrap_or_else(|| "PushPin".into());
     Some(AnnotKind::FileAttachment {
         pos: icon_at(rect),
         icon,
-        file: stem,
+        file,
         name,
         size,
     })
 }
 
-pub fn subtype(dict: &Dictionary) -> String {
-    dict.get(b"Subtype")
-        .and_then(Object::as_name)
-        .map(|n| String::from_utf8_lossy(n).into_owned())
-        .unwrap_or_default()
+/// `/Subtype` as the family read it, as text.
+pub(crate) fn subtype_of(a: &annots::Annot<'_>) -> String {
+    String::from_utf8_lossy(a.subtype().as_bytes()).into_owned()
 }
 
 /// `/RT /Group`: part of what its `/IRT` is, not a reply to it.
-fn is_grouped(dict: &Dictionary) -> bool {
-    dict.get(b"RT")
-        .and_then(Object::as_name)
-        .is_some_and(|n| n == b"Group")
+pub(crate) fn is_grouped(a: &annots::Annot<'_>) -> bool {
+    a.markup().is_some_and(|m| m.reply_kind == ReplyKind::Group)
 }
 
 /// What `/IRT` names: the annotation it refers to, by its name, or (as
@@ -473,47 +514,33 @@ pub fn irt_name<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<Strin
     }
 }
 
-/// `/InkList`'s strokes, those with points.
-fn ink<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<Vec<Vec<Pt>>> {
-    let (_, list) = pdf.dereference(dict.get(b"InkList")?).ok()?;
-    Some(
-        list.as_array()?
-            .iter()
-            .filter_map(|s| pdf.dereference(s).ok())
-            .filter_map(|(_, s)| s.as_array())
-            .map(|s| points(&floats(pdf, s)))
-            .filter(|p| !p.is_empty())
-            .collect(),
+/// A color as sheaf's, each component rounded to a byte, as sheaf writes
+/// `/C` to thousandths and reads it back: none for a transparent one. Gray
+/// and CMYK are made RGB.
+pub(crate) fn rgb(color: AnnotColor) -> Option<[u8; 3]> {
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    match color {
+        AnnotColor::Transparent => None,
+        AnnotColor::Gray(g) => Some([byte(g); 3]),
+        AnnotColor::Rgb([r, g, b]) => Some([byte(r), byte(g), byte(b)]),
+        AnnotColor::Cmyk([c, m, y, k]) => Some([
+            byte((1.0 - c) * (1.0 - k)),
+            byte((1.0 - m) * (1.0 - k)),
+            byte((1.0 - y) * (1.0 - k)),
+        ]),
+    }
+}
+
+/// Whether a line ending is an arrow sheaf draws: an open or closed one,
+/// either way round.
+fn is_arrow(end: LineEnding) -> bool {
+    matches!(
+        end,
+        LineEnding::OpenArrow
+            | LineEnding::ClosedArrow
+            | LineEnding::ROpenArrow
+            | LineEnding::RClosedArrow
     )
-}
-
-/// `/QuadPoints` as the box each quad bounds.
-fn quads<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<Vec<Box2>> {
-    let q = numbers(pdf, dict, b"QuadPoints")?;
-    let quads = q.as_chunks::<8>().0;
-    Some(quads.iter().map(|c| bounds(&points(c))).collect())
-}
-
-/// Coordinates `[x0 y0 x1 y1 …]` as points.
-fn points(v: &[f32]) -> Vec<Pt> {
-    let pairs = v.as_chunks::<2>().0;
-    pairs.iter().map(|&[x, y]| Pt { x, y }).collect()
-}
-
-fn floats<P: Objects + ?Sized>(pdf: &P, a: &[Object]) -> Vec<f32> {
-    a.iter()
-        .map(|o| {
-            pdf.dereference(o)
-                .ok()
-                .and_then(|(_, o)| o.as_number())
-                .unwrap_or(0.0) as f32
-        })
-        .collect()
-}
-
-fn numbers<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, key: &[u8]) -> Option<Vec<f32>> {
-    let (_, o) = pdf.dereference(dict.get(key)?).ok()?;
-    Some(floats(pdf, o.as_array()?))
 }
 
 /// A user-space box `[x0 y0 x1 y1]`, in either order, as a mark's.
@@ -521,16 +548,13 @@ fn user_box(r: [f32; 4]) -> Box2 {
     Box2::from_corners(Pt { x: r[0], y: r[1] }, Pt { x: r[2], y: r[3] })
 }
 
-fn bounds(points: &[Pt]) -> Box2 {
-    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-    for p in points {
-        (x0, y0, x1, y1) = (x0.min(p.x), y0.min(p.y), x1.max(p.x), y1.max(p.y));
-    }
+/// A family rectangle, normalized, as a mark's box.
+fn box_of(r: Rect) -> Box2 {
     Box2 {
-        x: x0,
-        y: y0,
-        w: (x1 - x0).max(0.0),
-        h: (y1 - y0).max(0.0),
+        x: r.x0,
+        y: r.y0,
+        w: (r.x1 - r.x0).max(0.0),
+        h: (r.y1 - r.y0).max(0.0),
     }
 }
 
@@ -551,62 +575,6 @@ fn inset(r: Box2, d: f32) -> Box2 {
         w: r.w - 2.0 * d,
         h: r.h - 2.0 * d,
     }
-}
-
-/// `/BS /W`, else `/Border`'s width, else 1.
-fn border_width<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> f32 {
-    let bs = dict
-        .get(b"BS")
-        .and_then(|o| pdf.dereference(o).ok())
-        .and_then(|(_, o)| o.as_dict());
-    if let Some(w) = bs.and_then(|bs| bs.get(b"W")).and_then(Object::as_number) {
-        return w as f32;
-    }
-    numbers(pdf, dict, b"Border")
-        .and_then(|b| b.get(2).copied())
-        .unwrap_or(1.0)
-}
-
-fn border_style<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<Vec<u8>> {
-    let (_, bs) = pdf.dereference(dict.get(b"BS")?).ok()?;
-    Some(bs.as_dict()?.get(b"S")?.as_name()?.to_vec())
-}
-
-/// `/C` or `/IC` as RGB: gray, RGB or CMYK; none when empty.
-fn color_of<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, key: &[u8]) -> Option<[u8; 3]> {
-    let c = numbers(pdf, dict, key)?;
-    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    match c.as_slice() {
-        [g] => Some([byte(*g); 3]),
-        [r, g, b] => Some([byte(*r), byte(*g), byte(*b)]),
-        [c, m, y, k] => Some([
-            byte((1.0 - c) * (1.0 - k)),
-            byte((1.0 - m) * (1.0 - k)),
-            byte((1.0 - y) * (1.0 - k)),
-        ]),
-        _ => None,
-    }
-}
-
-/// A `/DA` string's font size and fill color: `/Helv 12 Tf 1 0 0 rg`.
-fn default_appearance(da: &str) -> (Option<f32>, Option<[u8; 3]>) {
-    let tokens: Vec<&str> = da.split_whitespace().collect();
-    let num = |i: usize| tokens.get(i).and_then(|t| t.parse::<f32>().ok());
-    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    let (mut size, mut color) = (None, None);
-    for (i, t) in tokens.iter().enumerate() {
-        match *t {
-            "Tf" if i >= 1 => size = num(i - 1),
-            "rg" if i >= 3 => {
-                if let (Some(r), Some(g), Some(b)) = (num(i - 3), num(i - 2), num(i - 1)) {
-                    color = Some([byte(r), byte(g), byte(b)]);
-                }
-            }
-            "g" if i >= 1 => color = num(i - 1).map(|v| [byte(v); 3]),
-            _ => {}
-        }
-    }
-    (size, color)
 }
 
 #[cfg(test)]

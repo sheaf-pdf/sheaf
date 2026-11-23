@@ -384,7 +384,8 @@ Session and `sheaf edit`):
 - **`finish` reads the rest, on any thread, from the source alone:** sheaf's
   marks and other tools' comments and links in one pass over the page
   table's annotations, read once a source (`Source::annots`, which an insert
-  reads too), each with its object and an id (a page stamp's page and an
+  reads too; other tools' through pdf-annots from M18 slice 24, see
+  Annotations through pdf-annots), each with its object and an id (a page stamp's page and an
   attachment's file are found in the file, not in this machine's cache, and
   a mark whose file doesn't hold them is another tool's comment; a mark
   another tool has edited since sheaf wrote it, whose `/SHEF_Annot` digest
@@ -1378,6 +1379,136 @@ splices read too (from M18 slice 17, when sheaf's lexer went).
   with budgets asserted with `SHEAF_GATE_INTERP`, and measures every
   page's text bag beside it.
 
+## Annotations through pdf-annots (M18 slice 24)
+
+sheaf reads another tool's annotations, holds every mark's appearance,
+draws the marks whose look the family has, and reads what a flatten
+draws of an annotation through pdf-annots (`pdf::annots`, the door's).
+What stays sheaf's is said below, each with why.
+
+- **Reading.** The walk of a page's `/Annots` is sheaf's
+  (`file::annots_in`): each entry followed, its slot its index, and
+  sheaf's own marks found on the entry as written (`sheaf_mark`: a
+  `/SHEF_Annot` this build reads, fresh by its staleness digest; a
+  replacement's StrikeOut by `is_ours`), so none of sheaf's marks reaches
+  the family's reader. An entry whose `/Subtype` is a name the open never
+  lists (a widget, a pop-up, media) isn't read. Every other entry is read
+  alone by `source::annots::read` (the door's `pdf::annots::read`,
+  `Annot::from_dict_with` under PDFium's rules, over a source's objects
+  and `limits()`: the family's caps, but a page's annotations, a markup's
+  quads and a path's points past reach and references followed to the
+  reader's depth), its parts through `content::Objects` with an `Unkept`
+  per page (what the source keeps lent, a stream's dictionary held until
+  the page's comments are converted, its data unread; what doesn't read,
+  absent). One the family refuses (past a cap it keeps: a `/DA`'s tokens,
+  an action chain; a string still encrypted) is passed over alone and
+  logged; no corpus annotation is. `ForeignAnnot` is filled from the
+  family's `Annot`, and `import::convert_page` makes each comment's mark
+  from its `TypedAnnot`. FDF and XFDF (`exchange`) read their comments
+  the same way; what they write isn't a reading of the annotation (an FDF
+  holds each dictionary as it is, and `exchange::xfdf::write` gives each
+  key of it XFDF's name, the key read as written). The family's `page_annots` isn't the walk: it decodes
+  every entry (sheaf's 20,000 marks on the 7k gate's file among them) and
+  ends a page at one annotation's error. The heavy 7k's walk (7,000
+  widgets) is 137 ms (111 before), its open's peak RSS 242 MB as before.
+- **What sheaf still reads from the dictionary,** where the family's
+  reading has no place, as PDFium reads it: the dates, kept as written; a
+  review state on a subtype that isn't a note; the author (`/T`) of an
+  annotation that isn't markup; `/IRT` written in place, and by its
+  target's name (or, from XFDF, a string); thread names (`/NM`, else
+  `anon_name`); a dimension's `/Measure` (the family reads none); an
+  attachment's embedded file; and whether a stamp has a `/Name` at all
+  (one without is named none, where the family gives ISO's `/Draft` for
+  its icon). Colors are rounded to a byte, as sheaf writes them.
+- **What reads otherwise than sheaf's own did** (each corpus annotation
+  set beside it by `just annots-dump`, every difference asked of PDFium
+  chromium/8152): text is decoded as PDFium decodes PDFDocEncoding, so „
+  “ ” • € … ’ – ˆ read where sheaf's read Latin-1 (28 annotations in 9
+  files; two FreeTexts draw `…` and “NA” where they drew `?`); a
+  `/Contents` by reference is followed (13), and a `/Rect` of references
+  (1); a form whose `/BBox` has no area is placed by none (1,145, which
+  drew nothing either way); a gray or CMYK `/C` is read (none in the
+  corpus). Nothing else the open or a flatten reads of the corpus's
+  395,221 slots moved.
+- **One kind of appearance.** Every mark's appearance is a
+  `SynthesizedAp`, pdf-annots' result (`bbox`, `matrix`, `content`, and
+  `needs`, what it draws with by what each is), and one function makes a
+  form XObject of an appearance's parts (`content::sink::form`; `/Type
+  /XObject /Subtype /Form /BBox`, `/Matrix` where it isn't the identity,
+  `/Resources` bound through the sink as `/Sh` names, deflated;
+  `form_dict` the dictionary of a deferred one): the emitter's mark and
+  companion (`AnnotPart(id, Ap)`, `CompanionAp`), a pinned form
+  (`Cx::pinned`) and `serialize::built`. Whoever drew it, its `/BBox` is
+  the mark's `/Rect` and it's drawn where the mark is, at the identity,
+  so a flatten places it by the identity as before.
+- **Who draws which mark.** The screen paints marks from sheaf's own
+  layout (sheaf-app's page view), so a look that changed in the file
+  alone would part the file from the screen. pdf-annots draws, in place
+  (`ApRect::InPlace`: the form's box the `/Rect`, its content in
+  PageSpace), the kinds whose look it has as sheaf's: a highlight
+  (`synth_text_markup`); a square and a page border, a polygon and a
+  polyline, not cloudy (`synth_shape`, `synth_poly`); ink (`synth_ink`).
+  And those it learned from sheaf, whose geometry it took: an
+  insertion's and a replacement's caret (`synth_caret`,
+  `caret_outline`), an attachment's icon (`synth_file_attachment`,
+  `attachment_icon_strokes`), and a cloudy square, ellipse or polygon
+  (`synth_cloud` round sheaf's outline, `cloud_outline`); the screen
+  paints these shapes from the family's geometry too, through
+  `annot::caret_points`, `attachment_icon` and `cloud_curves`, held to
+  what sheaf's own made to the bit (`annot::geometry`). sheaf draws the
+  rest from its layout on pdf-gfx's `Canvas`, over the same writer
+  (`SynthesizedAp::drawn`), where the family's look isn't sheaf's: the
+  underline, strikeout and squiggly (a replacement's struck text too),
+  the note, the line and the dimension, free text and the callout (its
+  layout, and a `?` for what the standard 14 can't draw), a plain
+  ellipse (sheaf's curve constant is 0.5523 and its path open, the
+  family's 0.5522847 and closed: up to 12 levels apart at 4 px/pt), and
+  sheaf's own tools (the tape, the connector, the stamps). Replies and
+  statuses draw nothing. A mark's dictionary is still built key by key
+  (`annot.rs`): its bytes are what the staleness digest holds.
+- **In place, not moved.** A `synth_*` draws in its form's own `[0 0 w
+  h]` by default; moved onto the page by a `/Matrix`, the `f32` sums of
+  a coordinate and the move put an edge a hair from where the same shape
+  drawn in PageSpace lands, and PDFium's coverage rounds the two apart
+  (26 of the corpus's 149 highlights, inks and squares). Drawn in place,
+  none.
+- **What a save draws of them now.** Each mark kind's appearance was
+  rendered by PDFium at 4 px/pt as sheaf drew it and as it draws it now,
+  on its page and flattened (the fixtures' marks at each turn, each
+  kind's edges, the corpus's converted comments: 445 cases): 383 alike to
+  the pixel. The other 62 are two edges, where the family draws as ISO
+  32000-2 and PDFium's own drawing of the annotation do: a border or a
+  cloud of width 0 draws no line (Table 168; sheaf stroked a device
+  hairline, and the screen still draws one), and an ink stroke of one
+  point draws a dot, its round cap (sheaf drew nothing, nor does the
+  screen). The family writes its graphics state inside `q … Q` and only
+  where an alpha isn't 1 or the blend is Multiply, so the digests of
+  those kinds' appearances moved once (`content/written_golden.txt`,
+  and the comment summary's page pictures, `summary_golden.txt`, which
+  draw a highlight and a square: each line read, the summary rendered
+  both ways alike), and a page of every kind draws with three graphics
+  states, not two.
+- **Flattening.** What a flatten draws of another tool's comment or a
+  widget is read in `source::showing`: a comment's dictionary whole by
+  `source::annots::read`, for its flags, the state it names and the form
+  its appearances name in the state sheaf's rule picks (Flattening, under
+  Exports); a widget's appearances alone (`source::annots::appearances`,
+  the family's `Appearances::read`: `/AP` and `/AS`, its flags and state
+  being its record's), so a cap on the rest of a widget (its actions, its
+  `/DA`) can't cost it its drawing. A comment with states and none named
+  shows the state its value names where the states have an entry of that
+  name, whatever the entry is (one that's no stream shows nothing, as
+  PDFium shows it), else `/Off`. Each form is placed by the family's
+  placement (`source::annots::placement`, ISO 32000-2 §12.5.5), every
+  object read for it kept nowhere (`Fresh`,
+  the flatten's own objects over the source, which reads each unkept and
+  notes where a chain of references ends, so a form is its stream's own
+  object), dropped with what one annotation read. The family's
+  `plan_flatten`, a page dictionary's overlay, isn't used: sheaf's
+  flatten is an edit of its model, which the save draws. The heavy 7k's
+  flatten holds where it was (1.08–1.37 s, peak 425–426 MB; 1.26–1.31 s
+  and 426–427 MB before).
+
 ## Undo/redo: snapshots, not inverse commands
 
 Three candidates were considered:
@@ -2151,13 +2282,14 @@ projection of the records, went in slice 9 with the old rewrite path; in
 slice 9 every save was a Rewrite.
 
 What a save draws goes through `ContentWriter`, pdf-content-streams'
-writer (see Page content), its text through `DrawText`: marks' appearances, tapes, the header and footer,
+writer (see Page content), its text through `DrawText`: marks' appearances (on pdf-gfx's `Canvas` over it, or pdf-annots' drawing: see Annotations through pdf-annots), tapes, the header and footer,
 OCR layers and the watermark's text, in the built-in fonts' exact
 encodings, where a character a font can't draw is a `?` in the drawing
 and the text itself is kept. The resources they draw with are named
 `/Sh` and six characters of their digest, and are one object a file
 whichever marks and pages use them (bug 19): one mark of every kind
-draws with three fonts and two graphics states between them. A page
+draws with three fonts and three graphics states between them (one of
+them pdf-annots', which names no blend mode, from M18 slice 24). A page
 stamp's page is written once a file, as a form drawn under such a name,
 and an attachment's file once. Both come
 from what the marks hold (a form a source's mark draws, a library
@@ -5395,16 +5527,18 @@ field and the field with its last), and what it drew goes on a new
 placed through a matrix:
 
 - **Another tool's comment or a widget:** `FormRef::Base` of its `/AP
-  /N` form, placed through `Affine::onto` (its matrix times its bounding
-  box, onto its `/Rect`, ISO 32000-1 12.5.5). A widget draws the state
+  /N` form, placed through the matrix that takes its matrix times its
+  bounding box onto its `/Rect` (ISO 32000-2 12.5.5; pdf-annots'
+  placement from M18 slice 24, `Affine::onto` before). A widget draws the state
   its `/AS` names, and one with states and none named draws nothing (no
   first-state fallback, M10 bug 10); another tool's comment with none
   named draws what PDFium, the page view's engine, shows: the state its
   `/V` (or its parent's) names, else its `/Off`, else nothing. Until the
   backlog-fixes PR (B12) it drew its first, as the old flatten did, so
   print, print preview and page images showed it where the page view
-  didn't. Its dictionary and form are read unkept, and its bounding box
-  once.
+  didn't. Its dictionary, its appearances and its form are read by
+  pdf-annots and kept nowhere (`source::showing`, from M18 slice 24: see
+  Annotations through pdf-annots), and its bounding box once.
 - **A sheaf mark:** `FormRef::Pinned(PinnedAp)`, its appearance pinned
   by what it's drawn from (`MarkAp`: kind, a connector's without its
   partner, color, opacity, stroke, contents, fill, dash, cloud, turn and
@@ -6266,10 +6400,10 @@ pass it:
   `sheaf_doc::FlatOutlineItem`): cached in the `Source`, it can't hold an
   `ObjRef`, which would hold its source. `holding` and `file_in` take
   `ObjRef`s.
-- **`source::appearance`** (`Shows::read`, `Shows::in_slot`,
-  `Shows::form`, `frame`) is what a flatten reads of an annotation, moved
-  from tx/flatten.rs, which keeps `placed` and imports nothing from
-  lopdf.
+- **What a flatten reads of an annotation** (its flags, the form it
+  shows, that form's frame) moved from tx/flatten.rs into the source,
+  and tx/flatten.rs imports nothing from lopdf. From M18 slice 24 it's
+  `source::showing`, pdf-annots' reading of it.
 - **`generate::saved`** holds the reader of a file's saved generators
   (`Saved`, `read`, `Block`, `rebind`), moved as it was, re-exported at
   `generate::{Saved, read}`; generate.rs itself is checked.
@@ -6315,7 +6449,8 @@ Lopdf`, `annot::{WriteCx, StampForm, Held, Written, to_pdf, to_pdf_in,
 NoObjects}` and `Appearance::write` (moved or replaced in
 `serialize::built`), `materialize::copy::copy_page_dict`,
 `exchange::Comments::{pdf, new}`; `model::FlatOutlineItem` and
-`tx::flatten::{Shows, read, shown, frame, unkept}` (moved). Slice 11
+tx::flatten's reader of what an annotation shows, with `read`, `shown`,
+`frame` and `unkept` (moved). Slice 11
 had retired `edit_from_wit`, `sign_marks` and `keep_unseen`, and slice
 12 docview's `edit_source` and `DocContext`'s per-call snapshot.
 `tests/retired.rs` lists them.

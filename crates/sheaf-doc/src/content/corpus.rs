@@ -917,7 +917,7 @@ fn glyphs_and_text_dump() {
 /// read by `read` on its own, in the order of their paths. A file whose
 /// reading panics is the one line `panicked` makes of its path and what
 /// the panic said.
-fn each_dumped(
+pub(crate) fn each_dumped(
     corpus: &Corpus,
     only: (Option<&str>, &str),
     read: impl Fn(&str) -> Vec<String> + Sync,
@@ -953,7 +953,7 @@ fn each_dumped(
 
 /// A dump's `lines`, printed to stderr where its records were (`full`),
 /// and written to `to`, where it's set.
-fn written(lines: &[String], full: bool, to: Option<std::ffi::OsString>) {
+pub(crate) fn written(lines: &[String], full: bool, to: Option<std::ffi::OsString>) {
     if full {
         for line in lines {
             eprintln!("{line}");

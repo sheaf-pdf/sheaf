@@ -1,6 +1,25 @@
 //! Direct access to a PDF file's object graph. This is the
 //! serialization backend (see docs/document-model.md), not the editing
 //! model; the viewer never touches it.
+//!
+//! **A file's annotations as the open lists them** ([`annots_in`]). The
+//! walk of each page's `/Annots` is sheaf's: every entry followed, its
+//! slot its place in the array, and sheaf's own marks found on the entry
+//! as written (`sheaf_mark`: its `/SHEF_Annot`, fresh by its staleness
+//! digest) with their companions (`is_ours`), so none of them reaches
+//! another reader. Every other annotation (a stale mark of sheaf's too)
+//! is read by pdf-annots, one dictionary at a time, under
+//! PDFium's rules and sheaf's caps (`source::annots::read`; M18 slice
+//! 24), and listed ([`ForeignAnnot`]) and converted to the mark editing it
+//! makes ([`import::convert_page`](crate::import::convert_page)) from what
+//! it read. What's never listed (a widget, a pop-up, media), by the subtype
+//! it's written with, isn't read; one pdf-annots refuses is passed over
+//! alone, and said in the log. What the family's reading has no place for
+//! is read from its dictionary, as PDFium reads it: a review state on a
+//! subtype that isn't a note, the author of an annotation that isn't
+//! markup, `/IRT` written in place, and the dates, kept as written. A name
+//! for one without `/NM` ([`anon_name`]) and a thread's names
+//! ([`thread_name`]) are sheaf's.
 
 use std::path::Path;
 
@@ -35,11 +54,13 @@ impl PdfFile {
 
 use std::collections::HashMap;
 
+use crate::pdf::annots::{self, AnnotFlags, TypedAnnot};
 use crate::pdf::{Dictionary, Object, ObjectId, Value};
 use sheaf_edit::Rotation;
 
 use crate::annot::{Annot, AnnotKind, Box2, Pt, from_json};
 use crate::attachments::Objects;
+use crate::content::{ReadObjects, Unkept};
 
 /// The mark an `/Annots` entry carries, when this build can read it and
 /// no other tool has changed it since sheaf wrote it (M10.5 §3.6): its
@@ -181,7 +202,7 @@ pub struct ForeignAnnot {
     pub slot: usize,
     /// The file hides it (`/F` bit 2): sheaf never shows it.
     pub hidden: bool,
-    /// `/C`, when it's RGB.
+    /// `/C` as RGB, gray and CMYK made RGB, when it has one.
     pub color: Option<[u8; 3]>,
     /// What it is as one of our marks, when sheaf can hold it: what
     /// editing it makes it (M9 decision 5). Read when the file is.
@@ -414,19 +435,19 @@ pub fn pdf_text_bytes(bytes: &[u8]) -> String {
 /// Subtypes listed as other tools' annotations: comments, and links.
 /// Form fields, the popup windows that belong to other annotations, and
 /// what else is no comment are left to the page.
-fn is_listed_subtype(s: &str) -> bool {
+fn is_listed_subtype(s: &[u8]) -> bool {
     !matches!(
         s,
-        "Widget"
-            | "Popup"
-            | "Screen"
-            | "PrinterMark"
-            | "TrapNet"
-            | "Watermark"
-            | "3D"
-            | "Movie"
-            | "Sound"
-            | "RichMedia"
+        b"Widget"
+            | b"Popup"
+            | b"Screen"
+            | b"PrinterMark"
+            | b"TrapNet"
+            | b"Watermark"
+            | b"3D"
+            | b"Movie"
+            | b"Sound"
+            | b"RichMedia"
     )
 }
 
@@ -434,10 +455,26 @@ fn is_listed_subtype(s: &str) -> bool {
 /// index, each with its `/Rotate` as the page table reads it
 /// ([`Source::geom`](crate::Source::geom)), which another tool's comment
 /// is converted with, each mark with what it holds: its page stamp's page
-/// or its attachment's file.
-pub fn annots_in<P: Objects + ?Sized>(
+/// or its attachment's file. sheaf's marks and their companions are found
+/// on the entry as written (by its `/SHEF_Annot` and digest); every other
+/// annotation is read by `pdf-annots` (`source::annots::read`),
+/// listed and converted from what it read. One it can't read is passed
+/// over, and said in the log.
+pub fn annots_in<P: Objects + ReadObjects + ?Sized>(
     pdf: &P,
-    pages: impl IntoIterator<Item = (crate::pdf::ObjectId, Rotation)>,
+    pages: impl IntoIterator<Item = (ObjectId, Rotation)>,
+) -> AnnotsInFile {
+    walk(pdf, pages, |page, slot, why| {
+        log::warn!("page {}, annotation {slot}: not read: {why}", page + 1);
+    })
+}
+
+/// [`annots_in`], each entry `pdf-annots` couldn't read given to
+/// `refused` as it's passed over: its page's index, its slot, and why.
+pub(crate) fn walk<P: Objects + ReadObjects + ?Sized>(
+    pdf: &P,
+    pages: impl IntoIterator<Item = (ObjectId, Rotation)>,
+    mut refused: impl FnMut(u32, usize, annots::Error),
 ) -> AnnotsInFile {
     let mut out = AnnotsInFile::default();
     for (i, (page_id, turn)) in pages.into_iter().enumerate() {
@@ -456,10 +493,14 @@ pub fn annots_in<P: Objects + ?Sized>(
         if list.is_empty() {
             continue;
         }
+        // What the page's annotations read that the source doesn't keep:
+        // their appearances' dictionaries, held until they're converted.
+        let unkept = Unkept::default();
         let mut found = Vec::new();
-        // Other tools', each by its place in `found`, and their
-        // dictionaries, to convert together.
-        let mut dicts: Vec<(usize, &crate::pdf::Dictionary)> = Vec::new();
+        // Other tools', each by its place in `found`, as read, to convert
+        // together.
+        let mut comments = Vec::new();
+        let mut read = Vec::new();
         for (slot, entry) in list.iter().enumerate() {
             let Ok((object, obj)) = pdf.dereference(entry) else {
                 continue;
@@ -483,102 +524,43 @@ pub fn annots_in<P: Objects + ?Sized>(
             if is_ours(pdf, entry) {
                 continue;
             }
-            let subtype = dict
-                .get(b"Subtype")
-                .and_then(Object::as_name)
-                .map(|n| String::from_utf8_lossy(n).into_owned())
-                .unwrap_or_default();
-            if subtype.is_empty() || !is_listed_subtype(&subtype) {
+            // What's never listed, by the name it's written with, isn't
+            // read: pdf-annots would read it as that subtype too, and a
+            // form's thousands of widgets would be read for nothing.
+            if (dict.get(b"Subtype").and_then(Object::as_name))
+                .is_some_and(|s| !is_listed_subtype(s))
+            {
                 continue;
             }
-            let rect: Vec<f32> = dict
-                .get(b"Rect")
-                .and_then(|o| pdf.dereference(o).ok())
-                .and_then(|(_, o)| o.as_array())
-                .map(|a| {
-                    a.iter()
-                        .map(|v| v.as_number().unwrap_or(0.0) as f32)
-                        .collect()
-                })
-                .unwrap_or_default();
-            if rect.len() != 4 {
-                continue;
-            }
-            let text = |key: &[u8]| dict.get(key).map(pdf_text).unwrap_or_default();
-            let name_of = |key: &[u8]| -> Option<String> {
-                let (_, o) = pdf.dereference(dict.get(key)?).ok()?;
-                let Value::Dict(d) = o.value() else {
-                    return None;
-                };
-                Some(thread_name(d))
+            let a = match crate::source::annots::read(pdf, &unkept, dict, object) {
+                Ok(a) => a,
+                Err(why) => {
+                    refused(i as u32, slot, why);
+                    continue;
+                }
             };
-            let state = match (text(b"StateModel"), text(b"State")) {
-                (_, s) if s.is_empty() => None,
-                // Acrobat's default model.
-                (m, s) if m.is_empty() => Some((crate::annot::REVIEW.to_string(), s)),
-                (m, s) => Some((m, s)),
+            let Some(foreign) = foreign(pdf, &a, slot) else {
+                continue;
             };
             // A link is no mark sheaf can hold.
-            if subtype != "Link" {
-                dicts.push((found.len(), dict));
+            if !foreign.is_link() {
+                comments.push(found.len());
+                read.push(a);
             }
-            let foreign = ForeignAnnot {
-                subtype,
-                author: text(b"T"),
-                contents: text(b"Contents"),
-                modified: text(b"M"),
-                rect: Box2::from_corners(
-                    Pt {
-                        x: rect[0],
-                        y: rect[1],
-                    },
-                    Pt {
-                        x: rect[2],
-                        y: rect[3],
-                    },
-                ),
-                name: thread_name(dict),
-                parent: name_of(b"IRT"),
-                grouped: dict
-                    .get(b"RT")
-                    .and_then(Object::as_name)
-                    .is_some_and(|n| n == b"Group"),
-                state,
-                created: text(b"CreationDate"),
-                slot,
-                hidden: dict
-                    .get(b"F")
-                    .and_then(Object::as_integer)
-                    .is_some_and(|f| f & 2 != 0),
-                color: dict
-                    .get(b"C")
-                    .and_then(|c| pdf.dereference(c).ok())
-                    .and_then(|(_, c)| c.as_array())
-                    .filter(|c| c.len() == 3)
-                    .map(|c| {
-                        let v = |i: usize| {
-                            (c[i].as_number().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8
-                        };
-                        [v(0), v(1), v(2)]
-                    }),
-                mark: None,
-                stamp: None,
-            };
             found.push(InFile {
                 object,
                 slot,
                 found: Found::Foreign(foreign),
             });
         }
-        if !dicts.is_empty() {
-            let (at, dicts): (Vec<usize>, Vec<&crate::pdf::Dictionary>) = dicts.into_iter().unzip();
-            let marks = crate::import::convert_page(pdf, &dicts, turn, Default::default());
-            for ((i, dict), m) in at.into_iter().zip(dicts).zip(marks) {
-                if let Found::Foreign(f) = &mut found[i].found {
+        if !read.is_empty() {
+            let marks = crate::import::convert_page(pdf, &read, turn, Default::default());
+            for ((at, a), m) in comments.into_iter().zip(&read).zip(marks) {
+                if let Found::Foreign(f) = &mut found[at].found {
                     f.mark = m.ok().map(Box::new);
                     f.stamp = (f.mark.as_deref())
-                        .filter(|m| matches!(m.kind, crate::annot::AnnotKind::PageStamp { .. }))
-                        .and_then(|_| crate::import::appearance(pdf, dict));
+                        .filter(|m| matches!(m.kind, AnnotKind::PageStamp { .. }))
+                        .and_then(|_| crate::import::normal_form(a));
                 }
             }
         }
@@ -587,6 +569,69 @@ pub fn annots_in<P: Objects + ?Sized>(
         }
     }
     out
+}
+
+/// What the open lists of another tool's annotation `a`, as `pdf-annots`
+/// read it, in slot `slot`: None for what isn't listed (a form field, a
+/// popup, what has no `/Rect` of four numbers).
+fn foreign<P: Objects + ?Sized>(
+    pdf: &P,
+    a: &annots::Annot<'_>,
+    slot: usize,
+) -> Option<ForeignAnnot> {
+    let dict = a.dict();
+    let subtype = crate::import::subtype_of(a);
+    if subtype.is_empty() || !is_listed_subtype(subtype.as_bytes()) || !a.has_valid_rect() {
+        return None;
+    }
+    let [x0, y0, x1, y1] = a.raw_rect();
+    let text = |key: &[u8]| dict.get(key).map(pdf_text).unwrap_or_default();
+    let name_of = |key: &[u8]| -> Option<String> {
+        let (_, o) = pdf.dereference(dict.get(key)?).ok()?;
+        let Value::Dict(d) = o.value() else {
+            return None;
+        };
+        Some(thread_name(d))
+    };
+    // A note's state is the family's; another subtype's, as written.
+    let (model, state) = match a.typed() {
+        TypedAnnot::Text(t) => (
+            t.state_model.clone().unwrap_or_default(),
+            t.state.clone().unwrap_or_default(),
+        ),
+        _ => (text(b"StateModel"), text(b"State")),
+    };
+    let state = match (model, state) {
+        (_, s) if s.is_empty() => None,
+        // Acrobat's default model.
+        (m, s) if m.is_empty() => Some((crate::annot::REVIEW.to_string(), s)),
+        (m, s) => Some((m, s)),
+    };
+    let markup = a.markup();
+    Some(ForeignAnnot {
+        subtype,
+        // What isn't a markup annotation has no author in the family's
+        // view: its `/T` as PDFium reads any annotation's.
+        author: (markup.and_then(|m| m.author.clone()))
+            .or_else(|| {
+                let (_, t) = pdf.dereference(dict.get(b"T")?).ok()?;
+                Some(text_string(t.as_bytes()?))
+            })
+            .unwrap_or_default(),
+        contents: a.contents().unwrap_or_default().to_string(),
+        modified: text(b"M"),
+        rect: Box2::from_corners(Pt { x: x0, y: y0 }, Pt { x: x1, y: y1 }),
+        name: thread_name(dict),
+        parent: name_of(b"IRT"),
+        grouped: crate::import::is_grouped(a),
+        state,
+        created: text(b"CreationDate"),
+        slot,
+        hidden: a.flags().contains(AnnotFlags::HIDDEN),
+        color: a.color().and_then(crate::import::rgb),
+        mark: None,
+        stamp: None,
+    })
 }
 
 #[cfg(test)]
@@ -734,6 +779,61 @@ mod tests {
         assert_eq!(found[1].parent.as_deref(), Some("p"));
         assert_eq!(found[2].state.as_ref().unwrap().0, "Review");
         assert!(found[3].grouped && !found[1].grouped);
+    }
+
+    /// An annotation pdf-annots refuses (a link whose chain of actions is
+    /// past the cap) is passed over and said, by its page and slot, with
+    /// why; the page's other entries are listed as ever, each in its own
+    /// slot.
+    #[test]
+    fn an_annotation_the_family_refuses_is_passed_over_alone() {
+        let mut pdf = crate::pdf::Document::with_version("1.7");
+        let pages_id = pdf.new_object_id();
+        let content = pdf.add_object(Stream::new(dictionary! {}, b"".to_vec()));
+        let rect = || Object::from(vec![10.into(), 10.into(), 20.into(), 20.into()]);
+        let note = pdf.add_object(dictionary! {
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "Rect" => rect(),
+        });
+        let chain = crate::source::showing::tests::long_chain(&mut pdf);
+        let link = pdf.add_object(dictionary! {
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Link"), "Rect" => rect(), "A" => chain,
+        });
+        let highlight = pdf.add_object(dictionary! {
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Highlight"), "Rect" => rect(),
+        });
+        let list: Vec<Object> = [note, link, highlight].map(Object::from).to_vec();
+        let page = pdf.add_object(dictionary! {
+            "Type" => Object::name("Page"), "Parent" => pages_id, "Contents" => content,
+            "MediaBox" => Object::from(vec![0.into(), 0.into(), 612.into(), 792.into()]),
+            "Annots" => list,
+        });
+        pdf.objects.insert(
+            pages_id,
+            Object::from(
+                dictionary! { "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1 },
+            ),
+        );
+        let catalog =
+            pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id });
+        pdf.trailer.set("Root", catalog);
+
+        let mut refused = Vec::new();
+        let read = walk(&pdf, upright(&pdf), |page, slot, why| {
+            refused.push((page, slot, why.to_string()));
+        });
+        assert_eq!(
+            refused,
+            [(0, 1, "exceeded cap on chained actions".to_string())]
+        );
+        let listed: Vec<(usize, &str)> = (read.pages[&0].iter())
+            .map(|a| match &a.found {
+                Found::Foreign(f) => (a.slot, f.subtype.as_str()),
+                Found::Mark { .. } => (a.slot, "a mark"),
+            })
+            .collect();
+        assert_eq!(listed, [(0, "Text"), (2, "Highlight")]);
+        // The open's own walk lists the same.
+        assert_eq!(annots_in(&pdf, upright(&pdf)).foreign().len(), 2);
     }
 
     /// A mark this build can't read, a kind from a newer sheaf or a

@@ -106,7 +106,7 @@ The **PDFlyer Stamps** set lists: Keep Stamp Selected, Stamp Color, Favorites, C
 | **Preparer/reviewer sign-off stamps** | **Not a PDFlyer feature.** The closest is Set Status with the text set to, say, "Reviewed GE" plus Date/Time. In ProSystem fx Engagement, sign-off happens at **binder/workpaper level** (Preparer, 1st Reviewer, 2nd Reviewer columns), not as a mark on the PDF. | Set_Status; [Axcess Engagement sign-offs](https://help-engagement.cchaxcess.com/FinPrep/Content/Workpapers/Sign-off-workpaper.htm) *(snippet)* |
 | Highlighter | **None in PDFlyer.** It relies on Acrobat's Highlight tool. Clean Copy does strip "highlights". | v12 notes |
 | AutoFlow annotations | Scan/AutoFlow writes **color-coded annotations** on extracted fields. Green means imported to tax, Blue means extracted but the tax default was used, Red means a field error, Orange means there was no place to import. | [UsingAnnotations](https://www.scanautoflow.com/ophelp/v22/en/Scan_WkStn/Content/AutoFlow/UsingAnnotations.htm) |
-| AutoFlow Summary | Shows who ran AutoFlow and when, plus Client ID, Client Name, Return ID and Office Group | [AutoFlow_Summary](https://www.scanautoflow.com/ophelp/v22/en/Scan_WkStn/Content/PDFlyer/AutoFlow_Summary.htm) |
+| AutoFlow Summary | Lists who ran AutoFlow and when, plus Client ID, Client Name, Return ID and Office Group | [AutoFlow_Summary](https://www.scanautoflow.com/ophelp/v22/en/Scan_WkStn/Content/PDFlyer/AutoFlow_Summary.htm) |
 
 ### 2.5 Bookmark tools
 

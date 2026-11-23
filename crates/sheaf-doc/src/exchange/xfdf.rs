@@ -70,7 +70,7 @@ pub fn write(comments: &Comments) -> Result<Vec<u8>> {
         let Ok(d) = pdf.get_dictionary(id) else {
             continue;
         };
-        let sub = crate::import::subtype(d);
+        let sub = super::subtype(d);
         let Some(&(_, element)) = ELEMENTS.iter().find(|(s, _)| *s == sub) else {
             continue;
         };
@@ -346,7 +346,7 @@ pub fn read(bytes: &[u8]) -> Result<Comments> {
                 } else if let Some((page, dict)) = current.take_if(|(_, d)| {
                     ELEMENTS
                         .iter()
-                        .any(|(sub, el)| *el == tag && crate::import::subtype(d) == *sub)
+                        .any(|(sub, el)| *el == tag && super::subtype(d) == *sub)
                 }) {
                     let id = built.pdf().add_object(Object::from(dict));
                     annots.push((page, id));

@@ -9,8 +9,11 @@
 //! The file was written once, by the writer as it was before content
 //! went through pdf-content-streams, and is what its bytes are held to
 //! since: a line that differs is a byte that changed, to find, not a
-//! golden to write again. `SHEAF_GOLDEN_UPDATE=1` writes it, and
-//! `SHEAF_GOLDEN_SHOW=<part of a case's name>` prints what cases wrote.
+//! golden to write again. Its lines moved once since, where pdf-annots
+//! took over drawing a mark (M18 slice 24), each line that moved read
+//! and its drawing rendered both ways. `SHEAF_GOLDEN_UPDATE=1` writes
+//! it, and `SHEAF_GOLDEN_SHOW=<part of a case's name>` prints what cases
+//! wrote.
 //!
 //! Each case's content is read back too: its tokens through
 //! pdf-content-streams, and each operation written again by
@@ -26,7 +29,7 @@ use sheaf_edit::{
     BatesSpec, FlattenSet, FontChoice, GridPos, HeaderFooterSpec, Margins, OcrWord, Op, Rotation, Z,
 };
 
-use super::sink::Sink;
+use super::sink::{self, Sink};
 use super::{
     BlockId, Concat, ContentWriter, DrawText, Fonts, GenId, Glyphless, Need, PaginationKind, Res,
     Reserved, ResourceNeeds, Std14, fixture, interp,
@@ -203,7 +206,7 @@ fn stamp_form(matrix: Affine) -> StampForm {
 fn appearance(cases: &mut Cases, case: &str, a: &Annot, stamp: Option<StampForm>) {
     let drawn = crate::annot::appearance(a, stamp);
     let mut asked = Asked::default();
-    let form = drawn.form_dict(&mut asked);
+    let form = sink::form_dict(&mut asked, drawn.bbox, drawn.matrix, &drawn.needs);
     let resources = form.get(b"Resources").and_then(Object::as_dict);
     let mut fields = Vec::new();
     for (i, id) in asked.0.iter().enumerate() {
@@ -219,9 +222,9 @@ fn appearance(cases: &mut Cases, case: &str, a: &Annot, stamp: Option<StampForm>
         let bound = bound.unwrap_or_else(|| panic!("{case}: need {i} isn't bound"));
         fields.push(format!("{bound}/{}", hex(*id)));
     }
-    let b = drawn.bbox();
+    let b = Rect::from(drawn.bbox);
     fields.push(format!("bbox={},{},{},{}", b.x0, b.y0, b.x1, b.y1));
-    cases.push(case, &drawn.into_content(), fields);
+    cases.push(case, &drawn.content, fields);
 }
 
 /// A kind's name, as its `Debug` starts.

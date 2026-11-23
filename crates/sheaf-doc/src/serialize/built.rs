@@ -6,14 +6,15 @@ use std::collections::HashMap;
 
 use anyhow::{Context as _, Result};
 
-use crate::annot::{Annot, AnnotKind, Appearance};
+use crate::annot::{Annot, AnnotKind};
 #[cfg(any(test, feature = "fixtures"))]
 use crate::annot::{Emitted, emission};
-use crate::content::sink::Sink;
+use crate::content::sink::{self, Sink};
 use crate::content::{Need, Res, ResBody, ResId, ResKind, Reserved, ResourceNeeds};
 use crate::geom::{Affine, Rect};
 use crate::materialize::copy::copy_object;
 use crate::model::{FormRef, Mark};
+use crate::pdf::annots::SynthesizedAp;
 use crate::pdf::{
     Dictionary, Document as Pdf, Object, ObjectId, Stream, StreamExt, dictionary, resolve_fn,
 };
@@ -88,8 +89,15 @@ impl Sink for Graph<'_> {
     }
 }
 
-fn as_form(appearance: Appearance, pdf: &mut Pdf, res: &mut ResObjects) -> ObjectId {
-    let form = appearance.form(&mut Graph { pdf, res });
+fn as_form(drawn: SynthesizedAp, pdf: &mut Pdf, res: &mut ResObjects) -> ObjectId {
+    let mut graph = Graph { pdf, res };
+    let form = sink::form(
+        &mut graph,
+        drawn.bbox,
+        drawn.matrix,
+        drawn.content,
+        &drawn.needs,
+    );
     pdf.add_object(form)
 }
 
@@ -170,9 +178,9 @@ impl WriteCx {
                     _ => None,
                 };
                 let drawn = crate::annot::appearance(&ap.inputs.annot(), page);
-                let bbox = drawn.bbox();
+                let (bbox, matrix) = (Rect::from(drawn.bbox), Affine::from(drawn.matrix));
                 let id = as_form(drawn, pdf, &mut self.res);
-                Ok(StampForm::written(id, bbox, Affine::IDENTITY))
+                Ok(StampForm::written(id, bbox, matrix))
             }
         };
         let made = made
@@ -186,7 +194,7 @@ impl WriteCx {
         held(&m.annot, m.stamp.as_ref(), m.file.as_ref(), pdf, self)
     }
 
-    pub fn form(&mut self, appearance: Appearance, pdf: &mut Pdf) -> ObjectId {
+    pub fn form(&mut self, appearance: SynthesizedAp, pdf: &mut Pdf) -> ObjectId {
         as_form(appearance, pdf, &mut self.res)
     }
 
