@@ -1548,11 +1548,16 @@ of this, and a user sees nothing new.
   else its instance's form's, the document's (`FormDoc`) for an instance
   of the file the document opened and its source's for another's, as
   the emitter writes each instance's form (`Fields::defaults`). The model
-  learned two things for it (`WidgetProps.dash`, `align`): a border's
-  dash array (`/BS /D`, or `/Border`'s fourth element, which makes that
-  border dashed) and a kid widget's own `/Q`, which PDFium reads before
-  its field's; and the reader follows a `/Rect`'s, an `/MK` color's and
-  `/Border`'s numbers where they're references. A `TextLook`'s `Debug`
+  learned two things for it: a border's dash array, part of the border
+  (`field::Border`: width, style and dash, one value; `/BS /D`, or
+  `/Border`'s fourth element, which makes that border dashed; at most
+  `MAX_DASHES` numbers, `[DEFAULT_DASH]` for a dashed border that gives
+  none), and a kid widget's own `/Q` (`WidgetProps.align`), which PDFium
+  reads before its field's; and the reader follows a `/Rect`'s, an `/MK`
+  color's and `/Border`'s numbers where they're references. A `/Border`
+  of three or more elements is a border whatever its third is: a width
+  that isn't a number is 0, and its fourth is still its dash array, as
+  pdf-annots reads one; a shorter array is no border. A `TextLook`'s `Debug`
   prints lengths and numbers, never the text.
 - **`stale`** (`appearance::stale(st, aid)`): a text field's widget
   whose terminal's text isn't what its source's field held as read (no

@@ -1369,7 +1369,7 @@ fn facts_of(w: &Filled, saved: &Pdf, copy: &Pdf) -> Facts {
         height: w.look.height,
         rotation: w.look.rotation,
         border: (w.look.border.width, style),
-        dash: w.look.dash.clone(),
+        dash: w.look.border.dash.clone(),
         bg: match w.look.background {
             None => "-",
             Some(sheaf_doc::forms::field::Color::Gray(_)) => "g",

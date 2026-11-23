@@ -893,7 +893,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             },
             caption: caption.map(|c| c.to_string()),
         };
-        let (border, dash) = match (
+        let border = match (
             get(b"BS").and_then(Object::as_dict),
             get(b"Border").and_then(Object::as_array),
         ) {
@@ -911,26 +911,30 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
                 let width = (bs.get(b"W").and_then(|w| number_of(pdf, w)))
                     .map_or(1.0, |w| clamp_width(w as f32));
                 let dash = array(pdf, bs.get(b"D")).map_or_else(Vec::new, |d| dashes(pdf, d));
-                (Some(Border { width, style }), dashed(style, dash))
+                Some(Border {
+                    width,
+                    style,
+                    dash: dashed(style, dash),
+                })
             }
-            // The fourth element, an array, is a dash array, and makes the
-            // border dashed.
-            (None, Some(b)) => match b.get(2).and_then(|w| number_of(pdf, w)) {
-                Some(w) => {
-                    let dash = array(pdf, b.get(3)).map(|d| dashes(pdf, d));
-                    let style = match dash {
-                        Some(_) => BorderStyle::Dashed,
-                        None => BorderStyle::Solid,
-                    };
-                    let border = Border {
-                        width: clamp_width(w as f32),
-                        style,
-                    };
-                    (Some(border), dashed(style, dash.unwrap_or_default()))
-                }
-                None => (None, Vec::new()),
-            },
-            _ => (None, Vec::new()),
+            // An array of three or more: its third element is the width, 0
+            // where it isn't a number, and its fourth, an array, is a dash
+            // array, which makes the border dashed. A shorter one is no
+            // border record. As `pdf-annots` reads a `/Border`.
+            (None, Some(b)) if b.len() >= 3 => {
+                let width = number_of(pdf, &b[2]).map_or(0.0, |w| clamp_width(w as f32));
+                let dash = array(pdf, b.get(3)).map(|d| dashes(pdf, d));
+                let style = match dash {
+                    Some(_) => BorderStyle::Dashed,
+                    None => BorderStyle::Solid,
+                };
+                Some(Border {
+                    width,
+                    style,
+                    dash: dashed(style, dash.unwrap_or_default()),
+                })
+            }
+            _ => None,
         };
         let state = d.get(b"AS").and_then(Object::as_name);
         let state = state.filter(|s| self.spend(s.len())).map(latin1);
@@ -967,7 +971,6 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             da,
             mk,
             border,
-            dash,
             align,
             state,
             states,
@@ -1084,21 +1087,31 @@ fn array<'a, P: Objects + ?Sized>(pdf: &'a P, o: Option<&'a Object>) -> Option<&
     resolve(pdf, o?)?.as_array()
 }
 
-/// A border's dash array: at most 32 of its numbers, each followed where
-/// it's a reference, the finite ones not negative, as `pdf-annots` reads
-/// one.
+/// The most elements of a border's dash array that are read: `pdf-annots`'
+/// count for an annotation's border, which names it nowhere public; the
+/// fields dump sets the two readings beside each other.
+pub const MAX_DASHES: usize = 32;
+
+/// The one dash of a dashed border that gives no dash array: `[3]`, ISO
+/// 32000-2's default (12.5.4, Table 168), as `pdf-annots` fills it in.
+pub const DEFAULT_DASH: f32 = 3.0;
+
+/// A border's dash array: the first [`MAX_DASHES`] of its elements, each
+/// followed where it's a reference, the numbers among them that are
+/// finite and not negative, as `pdf-annots` reads one.
 fn dashes<P: Objects + ?Sized>(pdf: &P, d: &[Object]) -> Vec<f32> {
-    (d.iter().take(32))
+    (d.iter().take(MAX_DASHES))
         .filter_map(|o| number_of(pdf, o))
         .map(|v| v as f32)
         .filter(|v| v.is_finite() && *v >= 0.0)
         .collect()
 }
 
-/// `dash`, or the default `[3]` for a dashed border that gives none.
+/// `dash`, or the default ([`DEFAULT_DASH`]) for a dashed border that
+/// gives none.
 fn dashed(style: BorderStyle, dash: Vec<f32>) -> Vec<f32> {
     match style == BorderStyle::Dashed && dash.is_empty() {
-        true => vec![3.0],
+        true => vec![DEFAULT_DASH],
         false => dash,
     }
 }

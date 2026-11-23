@@ -58,11 +58,9 @@ pub struct TextLook {
     pub border_color: Option<field::Color>,
     /// `/MK /R`: 0, 90, 180 or 270.
     pub rotation: u16,
-    /// Its border's width and style: width 1, solid, where it has none, as
-    /// a widget with neither `/BS` nor `/Border` draws.
+    /// Its border, its width, style and dash array: width 1, solid, where
+    /// it has none, as a widget with neither `/BS` nor `/Border` draws.
     pub border: Border,
-    /// Its border's dash array; empty for none.
-    pub dash: Vec<f32>,
     /// The effective `/DA`, its bytes: the widget's own, else its field's
     /// (its own or a parent's), else its form's; empty for none.
     pub da: Vec<u8>,
@@ -81,7 +79,6 @@ impl fmt::Debug for TextLook {
             border_color,
             rotation,
             border,
-            dash,
             da,
         } = self;
         f.debug_struct("TextLook")
@@ -95,7 +92,6 @@ impl fmt::Debug for TextLook {
             .field("border_color", border_color)
             .field("rotation", rotation)
             .field("border", border)
-            .field("dash", dash)
             .field("da_len", &da.len())
             .finish()
     }
@@ -130,10 +126,7 @@ pub fn text_look(st: &DocState, aid: AnnotId) -> Option<TextLook> {
     let da = (w.da.as_deref())
         .or(term.props.da.as_deref())
         .or(form_da.as_deref());
-    let border = w.props.border.unwrap_or(Border {
-        width: 1.0,
-        style: BorderStyle::Solid,
-    });
+    let border = (w.props.border.clone()).unwrap_or(Border::solid(1.0));
     Some(TextLook {
         text: text_of(term.value.as_ref()),
         flags: term.flags,
@@ -145,7 +138,6 @@ pub fn text_look(st: &DocState, aid: AnnotId) -> Option<TextLook> {
         border_color: w.mk.border_color,
         rotation: w.mk.rotation,
         border,
-        dash: w.props.dash.clone(),
         // A `/DA` is held a character a byte (Latin-1), so its bytes come
         // back whole.
         da: da.map_or_else(Vec::new, |da| da.chars().map(|c| c as u8).collect()),
@@ -356,8 +348,8 @@ pub fn make(look: &TextLook, font: &FieldFont, font_res: Res) -> Result<Appearan
     widget.background = look.background.map(color);
     widget.border_color = look.border_color.map(color);
     widget.rotation = i32::from(look.rotation);
-    widget.border =
-        BoxBorder::new(look.border.width, box_style(look.border.style)).with_dash(&look.dash);
+    let Border { width, style, dash } = &look.border;
+    widget.border = BoxBorder::new(*width, box_style(*style)).with_dash(dash);
     crate::pdf::forms::text(&field, &widget, &da, font_res, &font.layout(), &limits)
 }
 

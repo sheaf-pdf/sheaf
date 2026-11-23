@@ -553,7 +553,8 @@ fn widgets_are_finite_and_clamped() {
         wa.border,
         Some(Border {
             width: 100.0,
-            style: BorderStyle::Underline
+            style: BorderStyle::Underline,
+            dash: Vec::new(),
         })
     );
     assert_eq!(wa.da, None);
@@ -562,17 +563,10 @@ fn widgets_are_finite_and_clamped() {
         (wb.mk.background, wb.mk.border_color, wb.mk.rotation),
         (None, None, 0)
     );
-    assert_eq!(
-        wb.border,
-        Some(Border {
-            width: 2.0,
-            style: BorderStyle::Solid
-        })
-    );
+    assert_eq!(wb.border, Some(Border::solid(2.0)));
     assert_eq!(wk.da.as_deref(), Some("/ZaDb 12 Tf 1 0 0 rg"));
     assert_eq!(wk.field, field(&form, "pick").id);
-    // Neither border gives dashes; none is a kid with a /Q of its own.
-    assert!(wa.dash.is_empty() && wb.dash.is_empty());
+    // None is a kid with a /Q of its own.
     assert_eq!((wa.align, wb.align, wk.align), (None, None, None));
 }
 
@@ -626,7 +620,13 @@ fn a_border_s_dashes_are_read_as_pdf_annots_reads_them() {
     let form = read(&source(with_huge(f.bytes())));
     let widgets = &form.widgets[&0];
     let read: Vec<(Option<BorderStyle>, Vec<f32>)> = (widgets.iter())
-        .map(|w| (w.border.map(|b| b.style), w.dash.clone()))
+        .map(|w| {
+            let b = w.border.as_ref();
+            (
+                b.map(|b| b.style),
+                b.map_or_else(Vec::new, |b| b.dash.clone()),
+            )
+        })
         .collect();
     let (d, s) = (Some(BorderStyle::Dashed), Some(BorderStyle::Solid));
     assert_eq!(
@@ -644,7 +644,53 @@ fn a_border_s_dashes_are_read_as_pdf_annots_reads_them() {
         ]
     );
     // The legacy borders' widths, references, are followed.
-    assert!(widgets[6..].iter().all(|w| w.border.unwrap().width == 2.0));
+    assert!((widgets[6..].iter()).all(|w| w.border.as_ref().is_some_and(|b| b.width == 2.0)));
+}
+
+/// A `/Border` of three or more elements is a border whatever its third
+/// is: a width that isn't a number is 0, and the fourth element is still
+/// its dash array, as `pdf-annots` reads one; a shorter array is no border
+/// record, and the appearance draws width 1, solid.
+#[test]
+fn a_border_whose_width_isn_t_a_number_is_width_0() {
+    let mut f = Form::new(1);
+    let dash: Object = vec![Object::from(3), 2.into()].into();
+    let cases: [(&str, Vec<Object>); 5] = [
+        (
+            "name",
+            vec![0.into(), 0.into(), Object::name("x"), dash.clone()],
+        ),
+        ("null", vec![0.into(), 0.into(), Object::null()]),
+        (
+            "missing",
+            vec![0.into(), 0.into(), f.pdf.new_object_id().into(), dash],
+        ),
+        ("short", vec![0.into(), 0.into()]),
+        ("empty", Vec::new()),
+    ];
+    for (i, (name, border)) in cases.iter().enumerate() {
+        let id = f.text(name, 0, row(i));
+        f.dict(id).set("Border", border.clone());
+    }
+    let form = read(&source(f.bytes()));
+    let read: Vec<Option<Border>> = (form.widgets[&0].iter())
+        .map(|w| w.border.clone())
+        .collect();
+    let dashed = Border {
+        width: 0.0,
+        style: BorderStyle::Dashed,
+        dash: vec![3.0, 2.0],
+    };
+    assert_eq!(
+        read,
+        [
+            Some(dashed.clone()),
+            Some(Border::solid(0.0)),
+            Some(dashed),
+            None,
+            None,
+        ]
+    );
 }
 
 /// A kid widget's own `/Q` is read beside its field's, which a merged

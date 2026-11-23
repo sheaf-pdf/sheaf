@@ -120,7 +120,7 @@ impl Plain {
             border: (
                 look.border.width,
                 appearance::box_style(look.border.style),
-                look.dash.clone(),
+                look.border.dash.clone(),
             ),
             da,
         }

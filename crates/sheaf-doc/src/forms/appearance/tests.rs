@@ -223,16 +223,13 @@ fn the_look_is_the_model_s_plain_data() {
     let dashed = Border {
         width: 2.0,
         style: BorderStyle::Dashed,
+        dash: vec![4.0, 2.0],
     };
-    assert_eq!((look.border, look.dash), (dashed, vec![4.0, 2.0]));
+    assert_eq!(look.border, dashed);
     assert_eq!(&*look.text, "");
     let b = look_of(&d, "b", 0);
     assert_eq!(&*b.text, "Trenton");
-    let unbordered = Border {
-        width: 1.0,
-        style: BorderStyle::Solid,
-    };
-    assert_eq!((b.border, b.dash.len()), (unbordered, 0));
+    assert_eq!(b.border, Border::solid(1.0));
     // Never the text in its Debug.
     let debug = format!("{b:?}");
     assert!(
@@ -387,11 +384,7 @@ fn plain() -> TextLook {
         background: None,
         border_color: Some(field::Color::Gray(0.0)),
         rotation: 0,
-        border: Border {
-            width: 1.0,
-            style: BorderStyle::Solid,
-        },
-        dash: Vec::new(),
+        border: Border::solid(1.0),
         da: b"/Helv 12 Tf 0 g".to_vec(),
     }
 }
@@ -461,6 +454,7 @@ fn hostile_plain_data_is_refused_by_kind_or_made() {
         border: Border {
             width: 100.0,
             style: BorderStyle::Beveled,
+            dash: Vec::new(),
         },
         width: 10.0,
         height: 10.0,
@@ -471,8 +465,8 @@ fn hostile_plain_data_is_refused_by_kind_or_made() {
         border: Border {
             width: 1.0,
             style: BorderStyle::Dashed,
+            dash: vec![1e30, 0.0, f32::MAX],
         },
-        dash: vec![1e30, 0.0, f32::MAX],
         ..p()
     };
     let _ = made(dashes);
@@ -531,8 +525,11 @@ fn a_widget_is_stale_while_its_text_isn_t_the_file_s() {
 fn golden_cases() -> Vec<(&'static str, TextLook, bool)> {
     let p = plain;
     let bordered = |width: f32, style: BorderStyle, dash: &[f32]| TextLook {
-        border: Border { width, style },
-        dash: dash.to_vec(),
+        border: Border {
+            width,
+            style,
+            dash: dash.to_vec(),
+        },
         background: Some(field::Color::Gray(0.75)),
         ..p()
     };

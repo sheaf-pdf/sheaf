@@ -925,11 +925,8 @@ pub struct Widget {
 /// What a widget is beside where it is and what it shows.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WidgetProps {
-    /// `/BS` (or the older `/Border`).
+    /// `/BS` (or the older `/Border`): its width, style and dash array.
     pub border: Option<Border>,
-    /// Its border's dash array (`/BS /D`, or `/Border`'s fourth element),
-    /// as [`crate::forms::Widget::dash`] reads it: empty for none.
-    pub dash: Vec<f32>,
     /// Its own `/Q`, when it isn't its field's dictionary too: what a text
     /// field's widget is justified by before its field's.
     pub align: Option<u8>,
@@ -960,8 +957,7 @@ impl Widget {
             state: w.state.clone(),
             states: w.states.clone().into(),
             props: Arc::new(WidgetProps {
-                border: w.border,
-                dash: w.dash.clone(),
+                border: w.border.clone(),
                 align: w.align,
                 actions: w.actions.clone(),
                 has_appearance: w.has_appearance,
