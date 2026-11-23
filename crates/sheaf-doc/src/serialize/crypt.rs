@@ -4,7 +4,7 @@
 //! 16-byte OS CSPRNG AES IVs in production (`pdf_crypt::Ivs::new()`) per
 //! ISO 32000-2 §7.6.3.2 & §7.6.3.3.
 
-use crate::pdf::write::{Encrypting, Encryptor, StructureError};
+use crate::pdf::write::{Encrypting, Encryptor, Renumber, StructureError};
 use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, Resolve};
 
 /// How a source is encrypted: what a save needs to write it encrypted
@@ -120,14 +120,18 @@ impl Crypt {
     }
 
     /// Prepares a per-file [`Encrypting`] context for writing objects with
-    /// `/Encrypt` placed at `at`.
+    /// `/Encrypt` placed at `at`, a number written: each object at the
+    /// number `to` gives it (none for each at its own), what's left in the
+    /// clear and the dictionary's references named as `to` names them.
+    /// `trailer` and `resolve` are in the numbers the objects are held at.
     pub fn laid_out<'a>(
         &'a self,
+        to: Option<&'a (dyn Renumber + Sync)>,
         at: ObjectId,
         trailer: &Dictionary,
         resolve: &'a (dyn Resolve<'a> + Sync),
     ) -> Result<Encrypting<'a>, StructureError> {
-        self.encryptor.laid_out(None, Some(at), trailer, resolve)
+        self.encryptor.laid_out(to, Some(at), trailer, resolve)
     }
 
     /// The same encryption with its `/Encrypt` dictionary moved to `at`.
@@ -163,7 +167,7 @@ impl Crypt {
                 self.fallback_resolve(oid)
             }
         });
-        let enc = self.laid_out(self.at, &trailer, &resolve)?;
+        let enc = self.laid_out(None, self.at, &trailer, &resolve)?;
         let mut buf = Vec::new();
         crate::pdf::write::indirect_with(&mut buf, id, obj, &enc)?;
         Ok(crate::pdf::write::parse_indirect_object(&buf)?)

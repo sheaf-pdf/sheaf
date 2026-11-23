@@ -1,5 +1,8 @@
 //! PDF serialization, cross-reference section, object-stream, and encryption
-//! primitives exposed through `sheaf_doc::pdf` (M18 slices 11–12).
+//! primitives exposed through `sheaf_doc::pdf` (M18 slices 11–12), and the
+//! family's per-body writer, [`Parts`], with what it writes ([`PartBody`],
+//! [`Packed`]) and reads from ([`ReadFrom`], [`Record`]), for a whole file
+//! written under a renumbering (M18 slice 14).
 
 use pdf_objects::Object;
 
@@ -8,10 +11,11 @@ pub use self::object::{
     indirect_stream, indirect_stream_with, indirect_with, real, write, write_renumbered,
 };
 pub use pdf_objects::serialize as object;
+pub use pdf_structure::Record;
 pub use pdf_structure::write::{
-    Deflate, Encrypting, Encryptor, Entry, Error as StructureError, KeptOut, MAX_DATA, MEMBERS,
-    NUMBERS, Section, Unencryptable, container, encryption as encryption_dict, fits, kept_out,
-    packable,
+    Body as PartBody, Deflate, Encrypting, Encryptor, Entry, Error as StructureError, KeptOut,
+    MAX_DATA, MEMBERS, NUMBERS, Packed, Parts, ReadFrom, Section, Unencryptable, container,
+    encryption as encryption_dict, fits, kept_out, packable,
 };
 
 /// Writes `/name` in canonical PDF name syntax (`#xx` escaping delimiters,

@@ -211,6 +211,8 @@ fn write_whole(
         encrypt_at: ObjectId::new(past, 0),
         xref_from: 1,
         pack,
+        to: None,
+        from: None,
     };
     full::write_bodies(bodies, &layout, &NoProgress).unwrap().0
 }
