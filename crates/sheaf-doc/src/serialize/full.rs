@@ -8,9 +8,11 @@
 //! they were given at and written at those it gives them, each through the
 //! family's [`Parts`], which writes every reference as the renumbering
 //! names it and encrypts under the number written; the `/Encrypt`
-//! dictionary is the one laid out for the numbers written. Without one,
-//! each object is written at its own number by sheaf's writer, copies as
-//! [`Body::Raw`] and [`Body::Member`] say.
+//! dictionary is the one laid out for the numbers written. An object given
+//! as read ([`Body::Read`]) is copied there by the family's rules, its
+//! header and each reference that moved written anew in place. Without
+//! one, each object is written at its own number by sheaf's writer, copies
+//! as [`Body::Raw`] and [`Body::Member`] say.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -25,7 +27,7 @@ use super::xref::{Entry, Section};
 use super::{object, objstm};
 use crate::materialize::ObjKey;
 use crate::materialize::emit::PdfVersion;
-use crate::pdf::write::{Encrypting, Packed, PartBody, Parts, ReadFrom, Renumber};
+use crate::pdf::write::{Encrypting, Packed, PartBody, Parts, ReadFrom, Record, Renumber};
 use crate::pdf::{
     Dictionary, Object, ObjectId, Value, XrefFacts, XrefKind, deflate_options, resolve_fn,
 };
@@ -66,6 +68,19 @@ pub enum Body<'a> {
     /// An object written anew (and encrypted when the file is) on its own
     /// or, when the layout packs it, with its object stream.
     Object(Cow<'a, Object>, ObjKey),
+    /// An object as the family read it, with where it was read
+    /// ([`RawCopies::as_read`](crate::pdf::RawCopies::as_read)), for a write
+    /// under a renumbering alone ([`Layout::to`]): the family's
+    /// [`PartBody::Read`], copied from [`Layout::from`] where its rules for a
+    /// copy hold, its header and each reference that moved written anew in
+    /// place, else written anew from `object`. One read from an object
+    /// stream goes in one where the layout packs it; one read at an offset is
+    /// written on its own, never packed, as a stable save's [`Body::Raw`] is.
+    Read {
+        object: Cow<'a, Object>,
+        record: Cow<'a, Record>,
+        key: ObjKey,
+    },
 }
 
 /// An object [`write_bodies`] packs: its id, its key, itself, and its
@@ -94,19 +109,21 @@ pub struct Layout<'a> {
     /// Where each object is written, by the number it's given at, and what
     /// each reference names: none for each at its own. Under one, each
     /// body is given once, at the number it's held at, as a
-    /// [`Body::Object`], and written through [`Parts`]; `trailer` is in
-    /// the numbers held too (what encryption reads its `/Root` by), its
-    /// section's copy written in those `to` gives; `encrypt_at`,
-    /// `xref_from`, [`Pack::uses`] and `reuse` are in the numbers written.
+    /// [`Body::Object`] or [`Body::Read`], and written through [`Parts`];
+    /// `trailer` is in the numbers held too (what encryption reads its
+    /// `/Root` by), its section's copy written in those `to` gives;
+    /// `encrypt_at`, `xref_from`, [`Pack::uses`] and `reuse` are in the
+    /// numbers written.
     /// With a `crypt`, `to` gives its dictionary's number ([`Crypt::at`])
     /// `encrypt_at`, where it's written, so that the encryption is laid out
     /// with it there, and what refers to it names it there: else the family
     /// takes it for a new file's, which writes the document's metadata
     /// stream without its own `/Identity` crypt filter.
     pub to: Option<&'a (dyn Renumber + Sync)>,
-    /// The reading the bodies were read in, which [`Parts`] copies from
-    /// and reads a stream's data where it was written from: under `to`
-    /// alone.
+    /// The reading the bodies were read in, which [`Parts`] copies a
+    /// [`Body::Read`] from and reads a stream's data where it was written
+    /// from ([`LazyPdf::read_from`](crate::pdf::LazyPdf::read_from)): under
+    /// `to` alone.
     pub from: Option<&'a dyn ReadFrom>,
 }
 
@@ -170,7 +187,7 @@ fn file<'a>(
             .iter()
             .filter_map(|(id, body)| match body {
                 Body::Object(obj, _) | Body::Member(_, obj, _) => Some((*id, obj.as_ref())),
-                Body::Raw(_) => None,
+                Body::Raw(_) | Body::Read { .. } => None,
             })
             .collect();
         let resolve = resolve_fn(|id| {
@@ -211,6 +228,7 @@ fn file<'a>(
                     continue;
                 }
                 Body::Object(obj, _) => super::indirect_as(&mut out, *id, obj, Some(&encrypting))?,
+                Body::Read { .. } => return Err(as_read_unrenumbered(*id)),
             };
             section.insert(
                 id.number,
@@ -254,6 +272,7 @@ fn file<'a>(
                     continue;
                 }
                 Body::Object(obj, _) => super::indirect_as(&mut out, id, &obj, None)?,
+                Body::Read { .. } => return Err(as_read_unrenumbered(id)),
             };
             section.insert(
                 id.number,
@@ -378,8 +397,9 @@ const BATCH: usize = 32;
 /// [`file`] under the renumbering `to` ([`Layout::to`]): each body, held at
 /// the number it's given at, written at the one `to` gives it through the
 /// family's [`Parts`], on its own or, where the layout packs it, in an
-/// object stream; encrypted as [`Crypt::laid_out`] lays the file out under
-/// `to`, which `resolve`s by the numbers held.
+/// object stream, but one as read at an offset on its own; encrypted as
+/// [`Crypt::laid_out`] lays the file out under `to`, which `resolve`s by
+/// the numbers held, an object as read by its object as read.
 fn renumbered<'a>(
     bodies: impl IntoIterator<Item = Result<(ObjectId, Body<'a>)>>,
     to: &(dyn Renumber + Sync),
@@ -420,8 +440,10 @@ fn renumbered<'a>(
         for (id, body) in &given {
             p.check()?;
             let at = file.at(*id)?;
-            let packed =
-                packs && !encrypting.dictionary_object(at) && objstm::packable(at, body.object());
+            let packed = packs
+                && !read_at_offset(body)
+                && !encrypting.dictionary_object(at)
+                && objstm::packable(at, body.object());
             match packed {
                 true => members.push((*id, at, body)),
                 false => file.on_its_own((*id, at, body), &parts)?,
@@ -435,7 +457,7 @@ fn renumbered<'a>(
             p.check()?;
             let (id, body) = part(item?)?;
             let at = file.at(id)?;
-            match packs && objstm::packable(at, body.object()) {
+            match packs && !read_at_offset(&body) && objstm::packable(at, body.object()) {
                 true => held.push((id, at, body)),
                 false => file.on_its_own((id, at, &body), &parts)?,
             }
@@ -447,16 +469,32 @@ fn renumbered<'a>(
     }
 }
 
-/// A body as [`Parts`] writes it: under a renumbering, only an object
-/// written anew is given ([`Layout::to`]); a stable save's copies are
-/// bytes at their own numbers.
+/// A body as [`Parts`] writes it: under a renumbering, an object written
+/// anew or one as read is given ([`Layout::to`]); a stable save's copies
+/// are bytes at their own numbers.
 fn part((id, body): (ObjectId, Body<'_>)) -> Result<(ObjectId, PartBody<'_>)> {
     match body {
         Body::Object(obj, _) => Ok((id, PartBody::New(obj))),
+        Body::Read { object, record, .. } => Ok((id, PartBody::Read { object, record })),
         Body::Raw(_) | Body::Member(..) => {
             bail!("object {id} is copied as it is, which a renumbered write doesn't take")
         }
     }
+}
+
+/// Whether `body` is an object as read at an offset in its file, which a
+/// write under a renumbering writes on its own, as a stable save writes
+/// its [`Body::Raw`]: where its rules hold, the family copies it there,
+/// and never in an object stream.
+fn read_at_offset(body: &PartBody<'_>) -> bool {
+    matches!(body, PartBody::Read { record, .. } if record.at.stream().is_none())
+}
+
+/// The refusal of an object as read ([`Body::Read`]) given to a write at
+/// the numbers the bodies are given at: its copy is the family's, under a
+/// renumbering.
+fn as_read_unrenumbered(id: ObjectId) -> anyhow::Error {
+    anyhow::anyhow!("object {id} is given as read, which only a write under a renumbering takes")
 }
 
 /// A whole file being written under a renumbering ([`renumbered`]): what's

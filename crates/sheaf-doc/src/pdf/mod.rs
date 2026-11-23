@@ -32,7 +32,7 @@ pub use pdf_objects::{
     Resolve, SmallBytes, Span, Str, Stream, Streams, Unreadable, Value, Why, resolve_fn,
 };
 pub use pdf_structure::{ByteSource, FileBytes};
-pub use reader::{LazyPdf, RawCopies, ReadLimits, XrefFacts, XrefKind};
+pub use reader::{Copies, LazyPdf, RawCopies, ReadLimits, XrefFacts, XrefKind};
 pub use stream::{StreamExt, deflate, deflate_best, deflate_fast, deflate_options, inflate};
 
 /// Where a family reader tells what it read past and went on: a [`Sink`]

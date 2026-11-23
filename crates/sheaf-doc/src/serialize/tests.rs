@@ -12,10 +12,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::pdf::test_crypt::{CipherKind, TestEncryption};
-use crate::pdf::write::Renumber;
+use crate::pdf::write::{ReadFrom, Renumber, StructureError};
 use crate::pdf::{
-    Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, StreamExt, Value, XrefKind,
-    deflate_options, dictionary, literal, resolve_fn,
+    Copies, Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, RawCopies, Stream, StreamExt,
+    Value, XrefKind, deflate_options, dictionary, literal, resolve_fn,
 };
 use in_progress::NoProgress;
 use sheaf_edit::Rotation;
@@ -2464,6 +2464,264 @@ fn a_layout_under_a_renumbering_refuses_what_it_can_t_write() {
         e.to_string().contains("puts the encryption dictionary"),
         "{e:#}"
     );
+}
+
+/// A page read with odd spacing, a comment, a string that reads like a
+/// reference, and references: to the pages (2), the content (4), an object
+/// there isn't (9), and the catalog (1), whose number stays, oddly spaced.
+const ODD_PAGE: &[u8] = b"<<  /Type   /Page  % a comment, kept\n  /Parent 2   0   R \
+    /Contents [4 0 R\n  ] /Gone 9 0 R /Text (4 0 R stays) /Kept 1  0  R >>";
+
+/// [`ODD_PAGE`] copied under [`spliced_to`]: each reference that moved
+/// written anew where it was, the one to nothing `null`, every other byte
+/// as it was.
+const ODD_PAGE_SPLICED: &[u8] = b"<<  /Type   /Page  % a comment, kept\n  /Parent 7 0 R \
+    /Contents [2 0 R\n  ] /Gone null /Text (4 0 R stays) /Kept 1  0  R >>";
+
+/// The renumbering the copies' tests write under: 1 stays, 2 goes to 7, 3
+/// to 5, 4 to 2 and 10 to 11; none for any other.
+fn spliced_to(id: ObjectId) -> Option<ObjectId> {
+    let at = match id.number {
+        1 => 1,
+        2 => 7,
+        3 => 5,
+        4 => 2,
+        10 => 11,
+        _ => return None,
+    };
+    (id.generation == 0).then(|| ObjectId::new(at, 0))
+}
+
+/// A file with a table of a catalog (1), its pages (2), [`ODD_PAGE`] (3)
+/// and its content (4), a stream whose data reads like a reference.
+fn odd_table() -> Vec<u8> {
+    use crate::source::lazy_tests::{stream, with_table};
+
+    with_table(&[
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (3, ODD_PAGE.to_vec()),
+        (4, stream("/Length 10 /Page 3 0 R", b"(3 0 R) Tj")),
+    ])
+}
+
+/// [`odd_table`]'s objects in a file with object streams, by a stable save:
+/// the catalog, the pages and [`ODD_PAGE`] in one, the page as its bytes;
+/// the content at an offset.
+fn odd_packed() -> Vec<u8> {
+    use super::full::{Body, Layout, Pack, write_bodies};
+    use crate::materialize::emit::PdfVersion;
+
+    let (doc, _) = (open(&odd_table()).to_document_and_raw(Copies::None)).unwrap();
+    let layout = Layout {
+        trailer: &doc.trailer,
+        kind: XrefKind::Stream,
+        version: PdfVersion::new(1, 7),
+        crypt: None,
+        encrypt_at: ObjectId::new(0, 0),
+        xref_from: 1,
+        pack: Some(Pack {
+            uses: &HashMap::new,
+            reuse: &[],
+        }),
+        to: None,
+        from: None,
+    };
+    let bodies = (doc.objects.iter()).map(|(&id, obj)| {
+        let obj = Cow::Borrowed(obj);
+        Ok(match id.number {
+            3 => (id, Body::Member(ODD_PAGE, obj, key_of(id))),
+            _ => (id, Body::Object(obj, key_of(id))),
+        })
+    });
+    write_bodies(bodies, &layout, &NoProgress).unwrap().0
+}
+
+/// Object `id` as `raw` holds it read, given to a write under a
+/// renumbering.
+fn as_read(raw: &RawCopies, id: ObjectId) -> super::full::Body<'_> {
+    let (object, record) = raw.as_read(id).unwrap();
+    super::full::Body::Read {
+        object: Cow::Borrowed(object),
+        record: Cow::Borrowed(record),
+        key: key_of(id),
+    }
+}
+
+/// `bodies` written whole under [`spliced_to`], copied from `from`: with a
+/// table, or, `packed`, with what goes in object streams there.
+fn written_under<'a>(
+    bodies: impl IntoIterator<Item = (ObjectId, super::full::Body<'a>)>,
+    trailer: &Dictionary,
+    packed: bool,
+    from: Option<&dyn ReadFrom>,
+) -> anyhow::Result<Vec<u8>> {
+    use super::full::{Layout, Pack, write_bodies};
+    use crate::materialize::emit::PdfVersion;
+
+    let layout = Layout {
+        trailer,
+        kind: match packed {
+            true => XrefKind::Stream,
+            false => XrefKind::Table,
+        },
+        version: PdfVersion::new(1, 7),
+        crypt: None,
+        encrypt_at: ObjectId::new(0, 0),
+        xref_from: 1,
+        pack: packed.then_some(Pack {
+            uses: &HashMap::new,
+            reuse: &[],
+        }),
+        to: Some(&spliced_to),
+        from,
+    };
+    Ok(write_bodies(bodies.into_iter().map(Ok), &layout, &NoProgress)?.0)
+}
+
+/// Bytes `bytes` of a file as a lossy string, to show where they differ.
+fn shown(bytes: &[u8]) -> Cow<'_, str> {
+    String::from_utf8_lossy(bytes)
+}
+
+/// Under a renumbering, an object given as read at an offset is copied as
+/// its bytes: its header written anew at the number it goes to, and each
+/// reference that moved, `null` where it names nothing; every other byte
+/// as it was, odd spacing, a comment, a string and a stream's data that
+/// read like references, and a reference whose number stays. Packed, it's
+/// written on its own still, where an object written anew beside it goes
+/// in an object stream. What's written reads back as the file renumbered.
+#[test]
+fn a_read_at_another_number_is_its_bytes_spliced() {
+    use super::full::Body;
+
+    let pdf = open(&odd_table());
+    let (doc, raw) = pdf.to_document_and_raw(Copies::Renumbered).unwrap();
+    let want: [(u32, &[u8]); 4] = [
+        (1, b"<< /Type /Catalog /Pages 7 0 R >>"),
+        (7, b"<< /Type /Pages /Kids [5 0 R] /Count 1 >>"),
+        (5, ODD_PAGE_SPLICED),
+        (
+            2,
+            b"<< /Length 10 /Page 5 0 R >>\nstream\n(3 0 R) Tj\nendstream",
+        ),
+    ];
+    let note = ObjectId::new(10, 0);
+    let mut renumbered = doc.clone();
+    let named = dictionary! { "Page" => ObjectId::new(3, 0) };
+    renumbered.objects.insert(note, Object::from(named));
+    let first = renumbered_first(&renumbered, &spliced_to);
+    for packed in [false, true] {
+        let bodies = (doc.objects.keys()).map(|&id| (id, as_read(&raw, id)));
+        let anew = Body::Object(Cow::Borrowed(&renumbered.objects[&note]), key_of(note));
+        let from = Some(pdf.read_from());
+        let bytes = written_under(bodies.chain([(note, anew)]), &doc.trailer, packed, from);
+        let bytes = bytes.unwrap();
+        let back = open(&bytes);
+        assert!(back.base_sound(), "packed: {packed}");
+        for (n, body) in want {
+            let at = ObjectId::new(n, 0);
+            let span = back.raw_span_whole(at).expect("at an offset");
+            let copy = [format!("{n} 0 obj\n").as_bytes(), body, b"\nendobj"].concat();
+            assert_eq!(shown(&bytes[span]), shown(&copy), "packed: {packed}");
+        }
+        let noted = ObjectId::new(11, 0);
+        assert_eq!(back.member_bytes(noted).is_some(), packed);
+        assert!(holds(&bytes, b"/ObjStm") == packed);
+        for (&id, obj) in &first.objects {
+            assert!(same(back.get(id).unwrap(), obj), "packed: {packed}, {id:?}");
+        }
+    }
+}
+
+/// Under a renumbering, an object given as read from an object stream goes
+/// in one of the write's as its bytes there, each reference that moved
+/// written anew where it was, and every other byte as it was: what a stable
+/// save copied as its bytes, odd as they are, and what it wrote anew alike.
+#[test]
+fn a_member_read_at_another_number_is_its_bytes_spliced() {
+    let pdf = open(&odd_packed());
+    let (mut doc, raw) = pdf.to_document_and_raw(Copies::Renumbered).unwrap();
+    let page = ObjectId::new(3, 0);
+    assert_eq!(pdf.member_bytes(page).unwrap().1, ODD_PAGE);
+    // What a whole file writes: not the object and cross-reference streams.
+    doc.objects.retain(|_, obj| !super::full::left_out(obj));
+    let ids: Vec<ObjectId> = doc.objects.keys().copied().collect();
+    let members = (ids.iter()).filter(|&&id| raw.as_read(id).unwrap().1.at.stream().is_some());
+    assert_eq!(members.count(), 3, "the catalog, the pages and the page");
+    let bodies = ids.iter().map(|&id| (id, as_read(&raw, id)));
+    let bytes = written_under(bodies, &doc.trailer, true, Some(pdf.read_from())).unwrap();
+    let back = open(&bytes);
+    assert!(back.base_sound());
+    let (_, at_5) = back
+        .member_bytes(ObjectId::new(5, 0))
+        .expect("in an object stream");
+    assert_eq!(shown(&at_5), shown(ODD_PAGE_SPLICED));
+    let (_, pages) = pdf.member_bytes(ObjectId::new(2, 0)).unwrap();
+    let pages = shown(&pages).replace("3 0 R", "5 0 R");
+    let (_, at_7) = back.member_bytes(ObjectId::new(7, 0)).unwrap();
+    assert_eq!(shown(&at_7), pages);
+    assert!(
+        back.raw_span_whole(ObjectId::new(2, 0)).is_some(),
+        "content"
+    );
+    for (&id, obj) in &renumbered_first(&doc, &spliced_to).objects {
+        assert!(same(back.get(id).unwrap(), obj), "{id:?}");
+    }
+}
+
+/// An object as read is refused from another reading than the one the
+/// write is given, though of the same bytes, at an offset and in an object
+/// stream; from its own it's written. And a write at the numbers the bodies
+/// are given at takes none.
+#[test]
+fn a_read_from_another_reading_is_refused() {
+    use super::full::{Layout, write_bodies};
+    use crate::materialize::emit::PdfVersion;
+
+    for (name, bytes, packed) in [
+        ("at an offset", odd_table(), false),
+        ("in an object stream", odd_packed(), true),
+    ] {
+        let given = open(&bytes);
+        let other = open(&bytes);
+        for refused in [true, false] {
+            let read = if refused { &other } else { &given };
+            let (doc, raw) = read.to_document_and_raw(Copies::Renumbered).unwrap();
+            // Of the packed file, its members alone, so that what's refused
+            // is a member's.
+            let bodies = (doc.objects.keys())
+                .filter(|&&id| !packed || raw.as_read(id).unwrap().1.at.stream().is_some())
+                .map(|&id| (id, as_read(&raw, id)));
+            let written = written_under(bodies, &doc.trailer, packed, Some(given.read_from()));
+            match refused {
+                true => {
+                    let e = written.unwrap_err();
+                    let elsewhere = e.downcast_ref::<StructureError>();
+                    let elsewhere = matches!(elsewhere, Some(StructureError::Elsewhere(_)));
+                    assert!(elsewhere, "{name}: {e:#}");
+                }
+                false => assert!(open(&written.unwrap()).base_sound(), "{name}"),
+            }
+        }
+    }
+    let pdf = open(&odd_table());
+    let (doc, raw) = pdf.to_document_and_raw(Copies::Renumbered).unwrap();
+    let layout = Layout {
+        trailer: &doc.trailer,
+        kind: XrefKind::Table,
+        version: PdfVersion::new(1, 7),
+        crypt: None,
+        encrypt_at: ObjectId::new(0, 0),
+        xref_from: 1,
+        pack: None,
+        to: None,
+        from: None,
+    };
+    let id = ObjectId::new(1, 0);
+    let e = write_bodies([Ok((id, as_read(&raw, id)))], &layout, &NoProgress).unwrap_err();
+    let why = "only a write under a renumbering takes";
+    assert!(e.to_string().contains(why), "{e:#}");
 }
 
 /// A file of `pages` pages ([`file`](crate::materialize::tests::file)),

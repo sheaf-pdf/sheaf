@@ -120,7 +120,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use crate::pdf::write::Renumber;
-use crate::pdf::{ByteSource as _, Object, ObjectId, Stream, XrefKind};
+use crate::pdf::{ByteSource as _, Copies, Object, ObjectId, Stream, XrefKind};
 use anyhow::{Context as _, Result};
 use in_progress::Progress;
 
@@ -293,7 +293,11 @@ fn rewrite(
     };
     let stable = target.profile.numbering == Numbering::Stable;
     let raw = stable && src.base_sound() && same_crypt(crypt.as_ref(), src.crypt());
-    let (loaded, mut raw_copies) = graph::eager_with_raw(src, raw)?;
+    let want = match raw {
+        true => Copies::Stable,
+        false => Copies::None,
+    };
+    let (loaded, mut raw_copies) = graph::eager_with_raw(src, want)?;
     let in_use: HashSet<u32> = src.pdf().ids().map(|id| id.number).collect();
     let numbers = number::stable(&e, &input.target, src, &loaded, &in_use, prev)?;
     let owned = std::mem::take(&mut e.owned);

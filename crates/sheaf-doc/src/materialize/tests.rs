@@ -1703,7 +1703,7 @@ fn first_parse_spans_equal_raw_span_whole_and_members_copy_verbatim() {
     let mut packed = Vec::new();
     form.pdf.save_modern(&mut packed).unwrap();
     let pdf = lazy(&packed, None);
-    let (_, raw) = pdf.to_document_and_raw(true).unwrap();
+    let (_, raw) = pdf.to_document_and_raw(crate::pdf::Copies::Stable).unwrap();
     for id in pdf.ids() {
         assert_eq!(
             raw.spans.get(&id).cloned(),

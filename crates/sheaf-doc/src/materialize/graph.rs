@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::pdf::{Document as Pdf, Object, ObjectId, Stream, Value};
+use crate::pdf::{Copies, Document as Pdf, Object, ObjectId, RawCopies, Stream, Value};
 use anyhow::{Context, Result, bail};
 
 use super::emit::{Emission, SymObject, Syms};
@@ -29,10 +29,11 @@ pub fn eager(src: &Source) -> Result<Pdf> {
     Ok(src.pdf().to_document()?)
 }
 
-/// [`eager`], plus first-parse verbatim copy candidates when `want_raw` is
-/// `true` (M18 slice 9).
-pub fn eager_with_raw(src: &Source, want_raw: bool) -> Result<(Pdf, crate::pdf::RawCopies)> {
-    Ok(src.pdf().to_document_and_raw(want_raw)?)
+/// [`eager`], plus what `want` asks of the objects a write may copy as
+/// they were read: a stable save's spans and members (M18 slice 9), or a
+/// renumbered write's objects as read (M18 slice 14).
+pub fn eager_with_raw(src: &Source, want: Copies) -> Result<(Pdf, RawCopies)> {
+    Ok(src.pdf().to_document_and_raw(want)?)
 }
 
 /// A Rewrite's objects: the primary's, the emitted ones over them.
