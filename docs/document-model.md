@@ -1527,7 +1527,9 @@ of this, and a user sees nothing new.
   (`/Q`, an automatic size, multiline wrapping by real widths, comb
   cells from `/MaxLen`), the borders and `/MK` colors, `/MK /R`, `/Tx
   BMC … EMC` with its clip, and the face a font `/DR` lacks falls back
-  to, by its name; and it reads a `/DR` font (`FieldFont::find`). The
+  to, by its name; and it finds and reads a `/DR` font from the catalog
+  (`FieldFont::find_in_catalog`: the walk to `/AcroForm /DR /Font` is
+  the family's own, the one its reading of a form takes). The
   fuzz target for `/DA` is pdf-forms' too. sheaf's
   (`forms::appearance`, the emitter, the realizer) is everything about
   its own model: its field reader and records, which hold widgets the
@@ -1564,9 +1566,10 @@ of this, and a user sees nothing new.
 - **The font, and the cache.** A widget draws in the font its `/DA`
   names in *its own source's* `/AcroForm /DR /Font`, under the source's
   name: one `merge_dr` renamed in the written `/DR` is still that
-  object. `read_font` finds `/DR /Font` (and the object it's in) through
-  `content::Objects`, following references no deeper than sheaf's
-  reader does, and hands it to `FieldFont::find`. `Source::field_font`
+  object. `read_font` hands the source's catalog and `content::Objects`
+  to `FieldFont::find_in_catalog`, which follows references no deeper
+  than sheaf's reader does (`limits`); sheaf walks nothing of `/DR`
+  for it. `Source::field_font`
   keeps what it read by name, a font or why it couldn't be read (locked,
   past a reader's cap, past the font budget), at most 256 names
   (`FIELD_FONTS`; past them a font is read each time it's asked for),
@@ -1601,8 +1604,9 @@ of this, and a user sees nothing new.
   overlay's form and a save's are the same bytes, and a duplicate's
   appearance names the font `/DR` names (copy 0 of it, as `/DR` is
   written), not a copy of it; a direct `/DR` entry that holds references
-  is written once as an object of its own, under `ObjKey::Res` of the
-  same digest by its name; a fallback, or a direct entry that reaches
+  is written once as an object of its own (the dictionary the font
+  lends, `FieldFont::direct`: the one pdf-forms read, not looked up
+  again), under `ObjKey::Res` of the same digest by its name; a fallback, or a direct entry that reaches
   nothing, is its own dictionary, written once a file. A fallback isn't
   added to `/DR`: the form's own `/Resources` hold it, which every viewer
   draws, and adding it, for a viewer that makes appearances anew, would

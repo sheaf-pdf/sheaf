@@ -14,7 +14,7 @@ use crate::forms::fixture::{Form, Rect, STATE_TEXT, nj_helv, pa_arial, row};
 use crate::materialize::tests::{add, insert, open};
 use crate::model::Document;
 use crate::pdf::content::read_back;
-use crate::pdf::{dictionary, literal};
+use crate::pdf::{Object, dictionary, literal};
 use crate::tx::fixture as fx;
 
 /// A kid widget of field `parent` at `rect` on page 0, last in its

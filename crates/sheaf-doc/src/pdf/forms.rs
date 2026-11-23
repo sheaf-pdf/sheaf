@@ -7,8 +7,11 @@
 //! pdf-gfx's [`BoxBorder`](super::gfx::BoxBorder)), its default
 //! appearance string parsed
 //! ([`DefaultAppearance`](super::gfx::DefaultAppearance)), and the font
-//! that names ([`FieldFont`], read once from a form's `/DR /Font` by
-//! [`FieldFont::find`], or a standard 14 font where that has none), under
+//! that names ([`FieldFont`], read once from the `/DR /Font` of the form
+//! a catalog names by [`FieldFont::find_in_catalog`], the walk there the
+//! family's, or a standard 14 font where that has none; a direct font
+//! that holds references lends its dictionary, [`FieldFont::direct`], for
+//! the writer to write as an object), under
 //! the family's caps ([`Limits`], [`Cap`]). What comes back is the form
 //! XObject's parts ([`Appearance`]: its box, its matrix, its content and
 //! what that draws with, by what each is), or why none could be made

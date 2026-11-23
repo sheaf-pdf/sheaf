@@ -510,7 +510,7 @@ pub(crate) fn widget(
 fn appearance(cx: &mut Cx, aid: AnnotId, src: &Src) -> Option<Object> {
     let made = (appearance::text_look(cx.st, aid).ok_or(Unmade::NotText)).and_then(|look| {
         let font = appearance::font(src, &look)?;
-        let res = font_res(cx, &font, src, &look)?;
+        let res = font_res(cx, &font, src, &look);
         appearance::make(&look, &font, res)
     });
     let made = match made {
@@ -536,33 +536,23 @@ fn appearance(cx: &mut Cx, aid: AnnotId, src: &Src) -> Option<Object> {
 /// `src` and bound to that, copy 0 of it as `/DR` is written, so an
 /// appearance of any copy of the form names the font `/DR` names and no
 /// copy of it: a font `/DR` holds by reference, that object; a direct
-/// entry that holds references, its dictionary written as an object of
-/// its own, once, under [`ObjKey::Res`].
-fn font_res(cx: &mut Cx, font: &FieldFont, src: &Src, look: &TextLook) -> Result<Res, Unmade> {
+/// entry that holds references, the dictionary the font lends
+/// (`FieldFont::direct`, pdf-forms': the one it read) written as an
+/// object of its own, once, under [`ObjKey::Res`].
+fn font_res(cx: &mut Cx, font: &FieldFont, src: &Src, look: &TextLook) -> Res {
     let name = look.font_name().unwrap_or_default();
-    let entry = match font.res() {
-        None => Some(dr_entry(src, &name).ok_or(Unmade::FontNotBindable)?),
-        Some(_) => None,
-    };
     let scope = Scope { src, copy: 0 };
     let written = |at: FontAt<'_>| match at {
         FontAt::Object(id) => (cx.sym(&Object::from(id), &scope).as_reference())
             .expect("a reference to a font is a placeholder"),
         FontAt::Entry(_) => {
             let key = ObjKey::Res(appearance::font_res_id(src.id(), 0, at));
-            let entry = entry.expect("an entry read for a font with no resource of its own");
+            let entry =
+                (font.direct().cloned()).expect("a font no resource names lends its dictionary");
             cx.push_once(key, |cx| cx.sym(&Object::from(entry), &scope))
         }
     };
-    Ok(appearance::font_res(font, src.id(), 0, &name, written))
-}
-
-/// The direct dictionary `name` is in `src`'s `/AcroForm /DR /Font`.
-fn dr_entry(src: &Src, name: &[u8]) -> Option<Dictionary> {
-    let pdf = src.pdf();
-    let (_, form) = form_of(src)?;
-    let fonts = dict_at(pdf, dict_at(pdf, form, b"DR")?, b"Font")?;
-    plain_dict(fonts.get(name)?).cloned()
+    appearance::font_res(font, src.id(), 0, &name, written)
 }
 
 /// `out`, built from `read`, object `r`, pushed under `key`: as the file

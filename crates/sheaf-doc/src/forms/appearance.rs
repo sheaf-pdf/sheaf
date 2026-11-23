@@ -26,7 +26,7 @@ use crate::pdf::forms::{
     Appearance, Cap, Error, FieldFlags, FieldFont, Limits, Quadding, TextField, Unmade, WidgetLook,
 };
 use crate::pdf::gfx::{BoxBorder, BoxBorderStyle, DefaultAppearance};
-use crate::pdf::{Dictionary, Object, ObjectId, Resolve, Why};
+use crate::pdf::ObjectId;
 use crate::source::{FieldFontRead, Source};
 use crate::store::BlobId;
 
@@ -250,77 +250,20 @@ fn parsed(da: &[u8], limits: &Limits) -> DefaultAppearance {
 }
 
 /// The font a field whose `/DA` names `name` is drawn in, read from `src`:
-/// its form's `/DR /Font` entry of that name (the dictionary, and its
-/// object where `/Font` is one, else `/DR`'s or the form's), read by
-/// pdf-forms (`FieldFont::find`) under [`limits`]; the standard 14 font the
-/// name falls back to where `/DR` has none. An error where what it reads
-/// is locked, past a reader's cap, or the font past its budget: what
-/// [`Source::field_font`] keeps.
+/// its form's `/DR /Font` entry of that name, found from the catalog and
+/// read by pdf-forms (`FieldFont::find_in_catalog`: the walk to
+/// `/AcroForm /DR /Font` is the family's, as its own reading of a form
+/// walks it) under [`limits`]; the standard 14 font the name falls back to
+/// where `/DR` has none, or the source no catalog. An error where what it
+/// reads is locked, past a reader's cap, or the font past its budget.
 pub(crate) fn read_font(src: &Source, name: &[u8]) -> Result<FieldFont, Error> {
     let limits = limits();
     let unkept = Unkept::default();
     let objects = Objects::new(src.pdf(), &unkept);
-    let fonts = match src.pdf().catalog() {
-        Ok(catalog) => dr_fonts(objects, catalog, limits.hops)?,
-        Err(_) => None,
-    };
-    FieldFont::find(objects, fonts, name, &limits, &mut ())
-}
-
-/// `catalog`'s `/AcroForm /DR /Font` and the object it's in: its own, else
-/// `/DR`'s, else the form's.
-fn dr_fonts<'o, R: Resolve<'o> + Copy>(
-    objects: R,
-    catalog: &'o Dictionary,
-    hops: usize,
-) -> Result<Option<(&'o Dictionary, Option<ObjectId>)>, Error> {
-    let Some((form, at)) = dict_entry(objects, catalog, b"AcroForm", None, hops)? else {
-        return Ok(None);
-    };
-    let Some((dr, at)) = dict_entry(objects, form, b"DR", at, hops)? else {
-        return Ok(None);
-    };
-    dict_entry(objects, dr, b"Font", at, hops)
-}
-
-/// `d`'s entry `key`, a dictionary, [`reached`], and the object it's in:
-/// its own, else `within`, the one `d` is in.
-fn dict_entry<'o, R: Resolve<'o>>(
-    objects: R,
-    d: &'o Dictionary,
-    key: &[u8],
-    within: Option<ObjectId>,
-    hops: usize,
-) -> Result<Option<(&'o Dictionary, Option<ObjectId>)>, Error> {
-    let Some(raw) = d.get(key) else {
-        return Ok(None);
-    };
-    let reached = reached(objects, raw, hops)?;
-    Ok(reached.and_then(|(o, id)| Some((o.as_dict()?, id.or(within)))))
-}
-
-/// `raw`, followed through at most `hops` references, with the object it
-/// was reached as: none where a reference names nothing, an object that's
-/// damaged, or a chain past `hops`; an error where one is locked or past a
-/// reader's cap.
-fn reached<'o, R: Resolve<'o>>(
-    objects: R,
-    raw: &'o Object,
-    hops: usize,
-) -> Result<Option<(&'o Object, Option<ObjectId>)>, Error> {
-    let (mut at, mut id) = (raw, None);
-    for _ in 0..=hops {
-        let Some(next) = at.as_reference() else {
-            return Ok(Some((at, id)));
-        };
-        match objects.try_resolve(next) {
-            Ok(Some(object)) => (at, id) = (object, Some(next)),
-            Ok(None) => return Ok(None),
-            Err(unreadable) if unreadable.why == Why::Damaged => return Ok(None),
-            Err(unreadable) => return Err(Error::Unreadable(unreadable)),
-        }
+    match src.pdf().catalog() {
+        Ok(catalog) => FieldFont::find_in_catalog(objects, catalog, name, &limits, &mut ()),
+        Err(_) => FieldFont::find(objects, None, name, &limits, &mut ()),
     }
-    Ok(None)
 }
 
 /// The font `look` is drawn in, from `src`, its widget's source: the one
@@ -338,7 +281,8 @@ pub fn font(src: &Source, look: &TextLook) -> FieldFontRead {
 /// Where a font a made appearance names is in its source, where the
 /// appearance names it by an object: a font `/DR` holds by reference, by
 /// that object; or a direct entry of `/DR /Font` that holds references,
-/// which a writer writes as an object of its own, by its name there.
+/// which a writer writes as an object of its own (the dictionary the font
+/// lends, `FieldFont::direct`), by its name there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FontAt<'a> {
     Object(ObjectId),
