@@ -1777,12 +1777,15 @@ pub fn try_append_revision(
 /// The value the corpus's text fields are filled with where a check sets
 /// one of each (the fields dump, the corpus tier of text field
 /// appearances): the field's own, at most `/MaxLen` characters of it where
-/// it has one; else the digits `1234567890` again and again to `/MaxLen`
-/// (at most [`SAMPLE_CELLS`]), for a field with one; else two lines, the
+/// it has one; else the digits `1234567890` again and again to `/MaxLen`,
+/// at most [`MAX_LAYOUT_LEN`](super::read::MAX_LAYOUT_LEN) of them (the
+/// cells sheaf lays a comb field out in, and makes one's appearance under:
+/// `appearance::limits`), for a field with one; else two lines, the
 /// second long enough to wrap, for a multiline field; else `Sample 123`.
 /// So a sample is never empty, never longer than `/MaxLen` (where PDFium
-/// cuts any field's text), and a comb field's fills its cells. `flags` is
-/// the field's `/Ff`.
+/// cuts any field's text), and a comb field's fills its cells, where it
+/// has no more than sheaf makes: one with more is refused whatever its
+/// text (`limit:comb-cells`). `flags` is the field's `/Ff`.
 pub fn sample(own: &str, flags: u32, max_len: Option<u32>) -> String {
     let max = max_len.filter(|&n| n > 0);
     if !own.is_empty() {
@@ -1793,7 +1796,7 @@ pub fn sample(own: &str, flags: u32, max_len: Option<u32>) -> String {
     }
     match max {
         Some(n) => (b"1234567890".iter().cycle())
-            .take(n.min(SAMPLE_CELLS) as usize)
+            .take(n.min(super::read::MAX_LAYOUT_LEN) as usize)
             .map(|&b| b as char)
             .collect(),
         None if flags & crate::forms::field::flags::MULTILINE != 0 => {
@@ -1802,10 +1805,6 @@ pub fn sample(own: &str, flags: u32, max_len: Option<u32>) -> String {
         None => "Sample 123".into(),
     }
 }
-
-/// The most cells a [`sample`] fills a field with a `/MaxLen` to: the
-/// family's cap on a comb field's cells.
-pub const SAMPLE_CELLS: u32 = 1024;
 
 /// A one-page form written as a hybrid-reference file (ISO 32000
 /// 7.5.8.4), in one section with no `/Prev`: the cross-reference table

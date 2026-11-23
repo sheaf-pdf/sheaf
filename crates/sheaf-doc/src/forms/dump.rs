@@ -1011,7 +1011,10 @@ mod tests {
         assert_eq!(sample("Trenton", 0, Some(3)), "Tre");
         assert_eq!(sample("Trenton", 0, Some(0)), "Trenton");
         assert_eq!(sample("", 0, Some(12)), "123456789012");
-        assert_eq!(sample("", 0, Some(u32::MAX)).len(), 1024);
+        // To the cells sheaf lays out, the cap an appearance is made under.
+        let cells = crate::forms::read::MAX_LAYOUT_LEN as usize;
+        assert_eq!(sample("", 0, Some(u32::MAX)).len(), cells);
+        assert_eq!(appearance::limits().comb_cells, cells);
         assert_eq!(sample("", multiline, None).lines().count(), 2);
         assert_eq!(sample("", 0, None), "Sample 123");
     }
