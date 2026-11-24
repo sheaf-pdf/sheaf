@@ -59,7 +59,6 @@ const ALLOWED: &[(&str, &str)] = &[
         "attachments.rs",
         "the open's attachment facts, and the `Objects` seam they read through",
     ),
-    ("labels.rs", "the open's page-label facts: the number tree"),
     (
         "layers.rs",
         "the open's optional content: a layer is its group's object",

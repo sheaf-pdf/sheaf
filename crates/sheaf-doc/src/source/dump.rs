@@ -414,8 +414,8 @@ fn claims(src: &Src) -> String {
     if let Some(pdfa) = claims.pdfa {
         said.push(pdfa.to_string());
     }
-    if let Some(part) = claims.pdfua {
-        said.push(format!("PDF/UA-{part}"));
+    if let Some(ua) = claims.pdfua {
+        said.push(ua.to_string());
     }
     match said.is_empty() {
         true => "claims=-".into(),

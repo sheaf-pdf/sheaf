@@ -4,7 +4,8 @@
 //! metadata claims it conforms to ([`xmp`]), each under PDFium's rules
 //! where the family has rules to choose, and under the caller's caps
 //! ([`Limits`]). The walks tell what they read past to a sink of
-//! [`Fault`]s; sheaf's own callers want none (`()`).
+//! [`Fault`]s; sheaf's own callers want none (`()`) but the claims', which
+//! tells a packet it can't read from one that claims nothing.
 //!
 //! What's read is read from a source's objects through
 //! [`Resolve`](super::Resolve), and a packet's stream through
@@ -68,12 +69,18 @@ pub mod pages {
 pub mod xmp {
     pub use pdf_semantics::xmp::{ClaimError, Claims, Conformance, Error, PdfA, PdfUa, XmpWhy};
 
-    use super::Limits;
+    use super::{Fault, Limits};
+    use crate::pdf::fault::Sink;
     use crate::pdf::{Dictionary, Resolve, Streams};
 
     /// The claims of the packet `catalog`'s `/Metadata` names, its stream
     /// decoded by `objects` under `limits`' `xmp_bytes`: none where the
     /// catalog names no stream. [`Claims::conformance`] reads them.
+    /// `sink` hears what's read past: an attribute or a claim's value that
+    /// doesn't read, which is as though it weren't written, and a packet
+    /// whose first bytes say it isn't UTF-8 ([`Fault::XmpNotUtf8`]), of
+    /// which nothing is read, so that it claims nothing unless the caller
+    /// tells it apart by that.
     ///
     /// # Errors
     ///
@@ -82,12 +89,13 @@ pub mod xmp {
     /// claimed before there.
     // A packet is read once a file, and its error holds what's read.
     #[allow(clippy::result_large_err)]
-    pub fn claims<'o, O: Resolve<'o> + Streams>(
+    pub fn claims<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized>(
         objects: O,
         catalog: &'o Dictionary,
         limits: &Limits,
+        sink: &mut S,
     ) -> Result<Option<Claims>, Error> {
-        pdf_semantics::xmp::read_from(objects, catalog, limits, &mut ())
+        pdf_semantics::xmp::read_from(objects, catalog, limits, sink)
     }
 }
 
@@ -255,7 +263,7 @@ mod tests {
             )),
         });
         let catalog = dictionary! { "Metadata" => Object::reference(5) };
-        let claims = xmp::claims(file, &catalog, &Limits::DEFAULT)
+        let claims = xmp::claims(file, &catalog, &Limits::DEFAULT, &mut ())
             .unwrap()
             .unwrap();
         let conformance = claims.conformance().unwrap();
@@ -265,11 +273,14 @@ mod tests {
         assert_eq!(conformance.pdfua.unwrap().to_string(), "PDF/UA-1");
 
         let none = dictionary! { "Type" => Object::name("Catalog") };
-        assert_eq!(xmp::claims(file, &none, &Limits::DEFAULT).unwrap(), None);
+        assert_eq!(
+            xmp::claims(file, &none, &Limits::DEFAULT, &mut ()).unwrap(),
+            None
+        );
 
         let mut small = Limits::DEFAULT;
         small.xmp_bytes = 16;
-        let error = xmp::claims(file, &catalog, &small).unwrap_err();
+        let error = xmp::claims(file, &catalog, &small, &mut ()).unwrap_err();
         assert_eq!(error.why, xmp::XmpWhy::TooLong);
     }
 }

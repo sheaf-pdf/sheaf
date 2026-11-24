@@ -11,7 +11,7 @@ use crate::pdf::{Object, ObjectId, Value, deflate};
 use sheaf_edit::{PageSize, Rotation};
 
 use super::lazy_tests::{QUICK, catalog, plaintext, stream, with_table};
-use super::{Conformance, Limits, OpenError, PageTreeError, PageTreeLimits, PdfA};
+use super::{Conformance, Limits, OpenError, PageTreeError, PageTreeLimits, PdfA, PdfUa};
 use crate::geom::Rect;
 use crate::serialize::fixture::{
     USER, attachment_only, encrypt_dict_for, encrypted, rc4_aes_128_and_aes_256,
@@ -689,11 +689,12 @@ fn per_page_annots_are_listed() {
 
 /// A file whose catalog has XMP `xml` as its `/Metadata`, deflated when
 /// `deflate`.
-fn with_xmp(xml: &str, deflate_xmp: bool) -> Result<Src, OpenError> {
+fn with_xmp(xml: impl AsRef<[u8]>, deflate_xmp: bool) -> Result<Src, OpenError> {
+    let xml = xml.as_ref();
     let (filter, data) = if deflate_xmp {
-        ("/Filter /FlateDecode ", deflate(xml.as_bytes()))
+        ("/Filter /FlateDecode ", deflate(xml))
     } else {
-        ("", xml.as_bytes().to_vec())
+        ("", xml.to_vec())
     };
     let metadata = stream(
         &format!(
@@ -720,22 +721,30 @@ pub(crate) fn xmp(description: &str) -> String {
     )
 }
 
+/// The claims `pdfa` and `pdfua`, as [`Source::conformance`] gives them.
+///
+/// [`Source::conformance`]: super::Source::conformance
+fn claimed(pdfa: Option<PdfA>, pdfua: Option<PdfUa>) -> Conformance {
+    let mut claims = Conformance::default();
+    (claims.pdfa, claims.pdfua) = (pdfa, pdfua);
+    claims
+}
+
+/// A file whose packet has `description` as its `rdf:Description`s, read
+/// for its claims.
+fn claims(description: &str, deflate: bool) -> anyhow::Result<Conformance> {
+    with_xmp(xmp(description), deflate).unwrap().conformance()
+}
+
 #[test]
 fn conformance_reads_pdfa_and_pdfua_claims() {
-    let claims =
-        |description: &str, deflate| with_xmp(&xmp(description), deflate).unwrap().conformance();
     // Attributes.
     let attributes = "<rdf:Description rdf:about=\"\" \
          xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" pdfaid:part=\"2\" pdfaid:conformance=\"b\"/>";
-    let pdfa_2b = Conformance {
-        pdfa: Some(PdfA {
-            part: 2,
-            level: Some('B'),
-        }),
-        pdfua: None,
-    };
+    let pdfa_2b = claimed(Some(PdfA::new(2, Some('B'))), None);
     assert_eq!(claims(attributes, false).unwrap(), pdfa_2b);
     assert_eq!(claims(attributes, true).unwrap(), pdfa_2b);
+    assert_eq!(pdfa_2b.pdfa.unwrap().level, Some('B'));
     assert_eq!(pdfa_2b.pdfa.unwrap().to_string(), "PDF/A-2b");
     // Elements, under any prefix, and PDF/UA beside PDF/A.
     let elements = "<rdf:Description rdf:about=\"\" xmlns:a=\"http://www.aiim.org/pdfa/ns/id/\">\
@@ -744,13 +753,7 @@ fn conformance_reads_pdfa_and_pdfua_claims() {
          <pdfuaid:part> 1 </pdfuaid:part></rdf:Description>";
     assert_eq!(
         claims(elements, false).unwrap(),
-        Conformance {
-            pdfa: Some(PdfA {
-                part: 3,
-                level: Some('A'),
-            }),
-            pdfua: Some(1),
-        }
+        claimed(Some(PdfA::new(3, Some('A'))), Some(PdfUa::new(1)))
     );
     // PDF/A-4 gives no level; a part in another namespace is no claim.
     let pdfa_4 = "<rdf:Description xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" \
@@ -758,18 +761,9 @@ fn conformance_reads_pdfa_and_pdfua_claims() {
          </rdf:Description>";
     assert_eq!(
         claims(pdfa_4, false).unwrap(),
-        Conformance {
-            pdfa: Some(PdfA {
-                part: 4,
-                level: None,
-            }),
-            pdfua: None,
-        }
+        claimed(Some(PdfA::new(4, None)), None)
     );
-    let named = PdfA {
-        part: 4,
-        level: None,
-    };
+    let named = PdfA::new(4, None);
     assert_eq!(named.to_string(), "PDF/A-4");
     assert_eq!(claims("", false).unwrap(), Conformance::default());
     let unreadable =
@@ -783,6 +777,135 @@ fn conformance_reads_pdfa_and_pdfua_claims() {
     ])
     .unwrap();
     assert_eq!(src.conformance().unwrap(), Conformance::default());
+}
+
+/// An attribute that doesn't read, or a claim's value that doesn't, is read
+/// past: a claim elsewhere in the packet counts, and a value after one that
+/// doesn't read is the claim's.
+#[test]
+fn a_claim_counts_past_what_doesn_t_read_elsewhere_in_the_packet() {
+    // Unquoted, and given twice, before the claims and among them.
+    let attributes = "<rdf:Description rdf:about=\"\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
+         dc:format=application/pdf/>\
+         <rdf:Description rdf:about=\"\" rdf:about=\"\" \
+         xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" pdfaid:part=\"2\" pdfaid:conformance=\"B\"/>\
+         <rdf:Description rdf:about=\"\" xmlns:pdfuaid=\"http://www.aiim.org/pdfua/ns/id/\">\
+         <pdfuaid:part>1</pdfuaid:part></rdf:Description>";
+    let both = claimed(Some(PdfA::new(2, Some('B'))), Some(PdfUa::new(1)));
+    assert_eq!(claims(attributes, false).unwrap(), both);
+    assert_eq!(claims(attributes, true).unwrap(), both);
+    // A part with an entity no DOCTYPE declares, then one that reads.
+    let value = "<rdf:Description rdf:about=\"\" xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\">\
+         <pdfaid:part>&two;</pdfaid:part><pdfaid:part>3</pdfaid:part>\
+         <pdfaid:conformance>u</pdfaid:conformance></rdf:Description>";
+    assert_eq!(
+        claims(value, false).unwrap(),
+        claimed(Some(PdfA::new(3, Some('U'))), None)
+    );
+}
+
+/// A catalog `/Metadata` that names a dictionary, or nothing, has no
+/// packet: no claims, and no error.
+#[test]
+fn metadata_that_s_no_stream_claims_nothing() {
+    for metadata in [
+        "<< /Type /Metadata /Subtype /XML >>",
+        "(pdfaid:part=\"2\")",
+        "null",
+    ] {
+        let src = open(&[
+            object(1, "<< /Type /Catalog /Pages 2 0 R /Metadata 4 0 R >>"),
+            object(2, "<< /Type /Pages /Kids [3 0 R] >>"),
+            object(3, "<< /Type /Page /Parent 2 0 R >>"),
+            object(4, metadata),
+        ])
+        .unwrap();
+        assert_eq!(
+            src.conformance().unwrap(),
+            Conformance::default(),
+            "{metadata}"
+        );
+    }
+    // One written in the catalog, and a reference to an object that isn't
+    // there.
+    for metadata in ["<< /Type /Metadata /Subtype /XML >>", "9 0 R"] {
+        let src = open(&[
+            object(
+                1,
+                &format!("<< /Type /Catalog /Pages 2 0 R /Metadata {metadata} >>"),
+            ),
+            object(2, "<< /Type /Pages /Kids [3 0 R] >>"),
+            object(3, "<< /Type /Page /Parent 2 0 R >>"),
+        ])
+        .unwrap();
+        assert_eq!(
+            src.conformance().unwrap(),
+            Conformance::default(),
+            "{metadata}"
+        );
+    }
+}
+
+/// A packet in UTF-16 or UTF-32, which XMP allows and the reader reads
+/// none of, can't be read: it isn't taken for one that claims nothing.
+#[test]
+fn a_packet_that_isn_t_utf8_can_t_be_read() {
+    let packet = xmp("<rdf:Description rdf:about=\"\" \
+         xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" pdfaid:part=\"1\" pdfaid:conformance=\"B\"/>");
+    let utf16 = |be: bool, mark: bool| -> Vec<u8> {
+        let units = (mark.then_some(0xFEFF).into_iter()).chain(packet.encode_utf16());
+        units
+            .flat_map(|u| if be { u.to_be_bytes() } else { u.to_le_bytes() })
+            .collect()
+    };
+    let utf32le: Vec<u8> = (packet.chars())
+        .flat_map(|c| u32::from(c).to_le_bytes())
+        .collect();
+    let encoded = [
+        utf16(true, true),
+        utf16(true, false),
+        utf16(false, true),
+        utf16(false, false),
+        utf32le,
+    ];
+    for (i, xml) in encoded.into_iter().enumerate() {
+        let error = with_xmp(xml, false).unwrap().conformance().unwrap_err();
+        assert!(
+            format!("{error:#}").contains("isn't UTF-8"),
+            "{i}: {error:#}"
+        );
+    }
+    // The same packet in UTF-8, after its mark or not, claims PDF/A-1b.
+    let pdfa_1b = claimed(Some(PdfA::new(1, Some('B'))), None);
+    assert_eq!(
+        with_xmp(&packet, false).unwrap().conformance().unwrap(),
+        pdfa_1b
+    );
+    let marked = [&[0xEF, 0xBB, 0xBF][..], packet.as_bytes()].concat();
+    assert_eq!(
+        with_xmp(marked, false).unwrap().conformance().unwrap(),
+        pdfa_1b
+    );
+}
+
+/// XML that breaks off after a claim is an error, though the claim before
+/// it was read: none is taken from a packet that doesn't read to its end.
+#[test]
+fn xml_that_breaks_off_after_a_claim_is_an_error() {
+    let claim = "<rdf:Description rdf:about=\"\" \
+         xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" pdfaid:part=\"2\" pdfaid:conformance=\"B\"/>";
+    // A tag left open where the packet ends, and an end tag that closes
+    // another element.
+    let whole = xmp(claim);
+    let open = &whole[..whole.find("</rdf:RDF>").unwrap()];
+    let broken = [
+        format!("{open}<rdf:Description rdf:about="),
+        xmp(&format!("{claim}</rdf:Description>")),
+    ];
+    for xml in broken {
+        let error = with_xmp(xml, false).unwrap().conformance().unwrap_err();
+        assert!(format!("{error:#}").contains("XMP metadata"), "{error:#}");
+    }
 }
 
 #[test]

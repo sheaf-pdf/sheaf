@@ -46,7 +46,7 @@ use crate::pdf::forms::FieldFont;
 use crate::serialize::crypt::Crypt;
 use crate::store::{Blob, BlobCollision, BlobId, BlobKind, MemoryKind, Origin, Src};
 
-pub use conformance::{Conformance, PdfA};
+pub use crate::pdf::semantics::xmp::{Conformance, PdfA, PdfUa};
 pub use limits::{ContentLimits, FormLimits, Limits, PageTreeLimits};
 pub use pages::{PageFacts, Parent};
 

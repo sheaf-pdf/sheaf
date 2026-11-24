@@ -979,7 +979,7 @@ fn claim_broken(input: &SaveInput, path: Option<&PathEffects>) -> Option<Note> {
         .ok()?;
     let claimed: Vec<String> = (claims.pdfa.map(|a| a.to_string()))
         .into_iter()
-        .chain(claims.pdfua.map(|part| format!("PDF/UA-{part}")))
+        .chain(claims.pdfua.map(|ua| ua.to_string()))
         .collect();
     if claimed.is_empty() {
         return None;
