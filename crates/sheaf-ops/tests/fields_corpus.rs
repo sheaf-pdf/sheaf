@@ -117,7 +117,7 @@ const ROWS: &str = "SHEAF_FIELDS_ROWS";
 const MAKING_WIDTH: u32 = 16;
 
 /// Each class of rows past [`TOLERANCE`] ([`class`]), and how many widgets
-/// it holds over the whole corpus: 13,028 of the 227,577 compared
+/// it holds over the whole corpus: 13,021 of the 227,577 compared
 /// ([`TOTALS`]).
 const CLASSES: &[(&str, usize)] = &[
     (FALLBACK, 4538),
@@ -133,10 +133,8 @@ const CLASSES: &[(&str, usize)] = &[
     (BEVEL_CMYK, 14),
     (EURO, 9),
     (FEWER, 4),
-    (HEIGHTS, 4),
     (BORDER_ARRAY, 4),
     (OTHER_FIELD, 3),
-    (EXACT_FIT, 3),
     (TYPE_UP, 1),
 ];
 
@@ -267,11 +265,6 @@ const OTHER_FIELD: &str = "PDFium shows another field's value";
 /// the color and moves black halfway to full; PDFium halves it (pdf-forms'
 /// stated `ap-border-beveled-colors`).
 const BEVEL_CMYK: &str = "beveled over CMYK: the dark band";
-/// The same glyphs, a line set higher or lower, or at another automatic
-/// size: the font's heights as PDFium has them from the face it draws in
-/// (an embedded program's own, or the face it takes for one not embedded),
-/// beside pdf-fonts' reading of the font.
-const HEIGHTS: &str = "the font's heights: PDFium's";
 /// The same glyphs, a centered line set further left or a line broken a
 /// word sooner: a euro sign in a standard 14 font drawn without a program
 /// or `/Widths`, which pdf-forms measures by Adobe's metrics (556 a
@@ -279,10 +272,6 @@ const HEIGHTS: &str = "the font's heights: PDFium's";
 /// in Helvetica-Bold and Times, whose metrics have 556 and 500): pdf-fonts
 /// says its width is guessed (`Font::width_guessed`).
 const EURO: &str = "a euro sign: PDFium's width";
-/// A line whose glyphs' widths come to the box's width exactly: pdf-forms
-/// keeps them on one line, PDFium's sum of them in `f32`s passes it and
-/// breaks the line a glyph sooner.
-const EXACT_FIT: &str = "a line exactly as wide as the box";
 /// Drawn alike, each glyph, path and clip within 0.001 pt, and another
 /// made widget whose box meets this one's differs itself, and draws here.
 const ALIKE_BESIDE: &str = "alike within 0.001 pt, beside a widget that differs";
@@ -322,9 +311,6 @@ fn class(f: &Facts) -> Option<&'static str> {
     let cjk = f.kind.starts_with("Type0(") && f.kind.ends_with("/None");
     let alike = f.drawn == "alike";
     let moved = moved(&f.drawn);
-    let lower = moved.is_some_and(|(i, dx, _)| i == 0 && dx.abs() < 0.0005);
-    let multiline = f.flags & sheaf_doc::forms::field::flags::MULTILINE != 0;
-    let broke = moved.is_some_and(|(i, dx, dy)| i > 0 && dx < 0.0 && dy < 0.0);
     let painted = f.drawn.starts_with("paint") && f.drawn.ends_with(":color");
     let own_font = ["DroidSansFallback", "ChromeSansMM"]
         .iter()
@@ -341,9 +327,7 @@ fn class(f: &Facts) -> Option<&'static str> {
         _ if f.text_vs == "fewer" && !f.ascii => FEWER,
         _ if f.text_vs == "other" => OTHER_FIELD,
         _ if painted && f.border.1 == 'B' && f.bg == "cmyk" => BEVEL_CMYK,
-        _ if f.text_vs == "same" && (lower || (f.drawn == "glyph0:size" && f.auto)) => HEIGHTS,
         _ if f.euro && f.kind == "Type1/None" && f.text_vs == "same" && moved.is_some() => EURO,
-        _ if multiline && f.text_vs == "same" && broke => EXACT_FIT,
         _ if alike && f.overlap_differs => ALIKE_BESIDE,
         _ if alike && f.edge_only => ALIKE_EDGE,
         _ if alike => ALIKE,
