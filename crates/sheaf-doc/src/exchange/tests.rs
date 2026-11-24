@@ -136,6 +136,44 @@ fn xfdf_and_fdf_carry_every_kind_through() {
     assert_eq!(marks(&back), want);
 }
 
+/// A string's bytes that PDFDocEncoding leaves undefined read as NUL,
+/// which XML can't hold: XFDF is written without them, and stays XML.
+#[test]
+fn xfdf_leaves_out_what_an_undefined_byte_reads_as() {
+    let mut c = Making::default();
+    c.add(
+        0,
+        dictionary! {
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"),
+            "Rect" => vec![100.into(), 600.into(), 120.into(), 620.into()],
+            "NM" => literal("n1"), "T" => literal(b"Ann\xADMarie".as_slice()),
+            "Subj" => literal(b"\x7F".as_slice()),
+            "Contents" => literal(b"co\xADoperate re\x7Fd\x9F".as_slice()),
+        },
+    );
+    let xfdf = xfdf::write(&c.comments(None)).unwrap();
+    let text = String::from_utf8(xfdf.clone()).unwrap();
+    assert!(!text.contains('\0'), "{text:?}");
+    assert!(text.contains(r#"title="AnnMarie""#), "{text}");
+    assert!(!text.contains("subject="), "{text}");
+    assert!(
+        text.contains("<contents>cooperate red</contents>"),
+        "{text}"
+    );
+    let back = xfdf::read(&xfdf).unwrap();
+    let note = crate::import::convert(
+        back.src.pdf(),
+        back.dict(0).unwrap(),
+        Rotation::R0,
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        (note.author.as_str(), note.contents.as_str()),
+        ("AnnMarie", "cooperate red")
+    );
+}
+
 #[test]
 fn acrobat_xfdf_reads() {
     let xml = r##"<?xml version="1.0" encoding="UTF-8" ?>

@@ -75,7 +75,11 @@ pub fn write(comments: &Comments) -> Result<Vec<u8>> {
         };
         let mut attrs: Vec<(&str, String)> = vec![("page", page.to_string())];
         let nums = |key: &[u8]| numbers(pdf, d, key);
-        let text = |key: &[u8]| d.get(key).map(text::of).filter(|t| !t.is_empty());
+        // Without the NUL a byte PDFDocEncoding leaves undefined reads as
+        // (0x7F, 0x9F, 0xAD), which no XML holds, escaped or not.
+        let text = |key: &[u8]| {
+            (d.get(key).map(|o| text::of(o).replace('\0', ""))).filter(|t| !t.is_empty())
+        };
         let name = |key: &[u8]| {
             d.get(key)
                 .and_then(Object::as_name)
