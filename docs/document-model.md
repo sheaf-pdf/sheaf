@@ -1657,8 +1657,8 @@ of this, and a user sees nothing new.
   PDFium's form filler makes an appearance from `/V` for a widget with
   none, so such a widget would show its file's old value there and
   nothing in a viewer that draws appearances alone; before slice 9 only
-  a test reaches it. Of the corpus's 229,351 text widgets on pages, 942
-  are unmade for a sample value: 497 have no box and 445 have a
+  a test reaches it. Of the corpus's 229,351 text widgets on pages, 744
+  are unmade for a sample value: 497 have no box and 247 have a
   character their font can't encode (a fallback font draws these: M10
   slice 7).
 - **No save writes `/V` yet.** The emitter writes a stale widget's
@@ -1703,9 +1703,9 @@ of this, and a user sees nothing new.
   flattened page. An ignored test in `interop.rs` runs `qpdf --check` on
   each case's output and draws it with `pdftoppm`. `just tier-fields`
   fills every corpus form's text fields: 220,981 fields and their
-  229,351 widgets, 228,409 made, each overlay's form the save's, and each
-  made one drawn beside PDFium's. The 12,908 widgets that differ by a
-  pixel are each in one of 17 classes held by count: 6,174 draw alike
+  229,351 widgets, 228,607 made, each overlay's form the save's, and each
+  made one drawn beside PDFium's. The 13,028 widgets that differ by a
+  pixel are each in one of 18 classes held by count: 6,172 draw alike
   within 0.001 pt and differ by PDFium's rasterizing alone, 4,538 are a
   missing font's fallback by name, 1,865 PDFium's font map for CJK
   fonts, and the rest pdf-forms' other stated differences and readings
