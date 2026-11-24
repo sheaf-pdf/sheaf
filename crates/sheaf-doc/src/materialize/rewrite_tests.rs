@@ -20,7 +20,7 @@ use crate::history::FixedCount;
 use crate::materialize::{self, AskAnswers, Came, How, SaveHow, StrategyKind, Why};
 use crate::model::{Document, Mark, PageId};
 use crate::open::FlatOutlineItem;
-use crate::save::{rewrite, rewrite_to_path, text_string};
+use crate::save::{rewrite, rewrite_to_path};
 use crate::serialize::crypt::Crypt;
 use crate::store::{BlobKind, Src, Store};
 use crate::tx::fixture as fx;
@@ -865,7 +865,7 @@ fn closed_bookmark_stays_closed(how: How) {
     let mut f = crate::forms::fixture::Form::new(3);
     let p = f.pages.clone();
     let item = |title: &str, page: usize| {
-        dictionary! { "Title" => text_string(title), "Dest" => vec![p[page].into(), Object::name("Fit")] }
+        dictionary! { "Title" => crate::pdf::text::string(title), "Dest" => vec![p[page].into(), Object::name("Fit")] }
     };
     let mut closed = item("Closed", 0);
     closed.set("Count", -2);

@@ -144,10 +144,10 @@ fn the_summary_has_its_title_producer_and_date() {
     let pdf = pdf(&dir);
     for layout in ["comments", "pages"] {
         let out = dir.join(format!("{layout}.pdf"));
-        let before = sheaf_doc::pdf_date_now();
+        let before = sheaf_doc::pdf::semantics::date::now();
         let (p, o) = (pdf.to_str().unwrap(), out.to_str().unwrap());
         ok(&sheaf(&["comments", "summary", p, "-l", layout, "-o", o]));
-        let after = sheaf_doc::pdf_date_now();
+        let after = sheaf_doc::pdf::semantics::date::now();
         let written = Pdf::load(&out).unwrap();
         let info = written.trailer.get(b"Info").unwrap().as_reference();
         let info = written.get_dictionary(info.unwrap()).unwrap();

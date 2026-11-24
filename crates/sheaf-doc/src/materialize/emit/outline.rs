@@ -262,7 +262,7 @@ impl<'a> Items<'a> {
             }
         }
         if !out.has(b"Title") {
-            out.set("Title", crate::save::text_string(&b.title));
+            out.set("Title", crate::pdf::text::string(&b.title));
             same = false;
         }
         if let Some(Target::Page { page, view }) = &b.target

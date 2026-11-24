@@ -36,7 +36,7 @@ fn sample() -> Comments {
         0,
         dictionary! {
             "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "Rect" => r(100, 600), "NM" => literal("n1"),
-            "T" => literal("Ann"), "Contents" => crate::save::text_string("Tie <&> “foot”"),
+            "T" => literal("Ann"), "Contents" => crate::pdf::text::string("Tie <&> “foot”"),
             "M" => literal("D:20261001120000"), "C" => vec![1.into(), 1.into(), 0.into()],
             "F" => 28, "Name" => Object::name("Comment"), "Open" => false,
         },
@@ -378,7 +378,7 @@ fn imports_match_by_name_and_report_the_rest() {
     // sheaf can't hold; one past the last page.
     c.add(
         0,
-        dictionary! { "Subtype" => Object::name("Text"), "Rect" => r(), "NM" => crate::save::text_string(&ours.name()), "Contents" => literal("ours, edited") },
+        dictionary! { "Subtype" => Object::name("Text"), "Rect" => r(), "NM" => crate::pdf::text::string(&ours.name()), "Contents" => literal("ours, edited") },
     );
     c.add(
         0,

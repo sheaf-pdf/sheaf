@@ -1,7 +1,6 @@
-//! PDF text strings ([`text_string`]), and, for tests, a whole document
-//! written as a save writes it: [`rewrite`] and [`rewrite_to_path`], an
-//! export of it with no transform ([`Export::whole`]), its encryption and
-//! object numbers kept.
+//! For tests, a whole document written as a save writes it: [`rewrite`]
+//! and [`rewrite_to_path`], an export of it with no transform
+//! ([`Export::whole`]), its encryption and object numbers kept.
 //!
 //! Every way out of a document is an export ([`crate::export`]) or a
 //! save: [`materialize::save_with`]'s (the command line's
@@ -9,8 +8,6 @@
 //!
 //! [`materialize::save_with`]: crate::materialize::save_with
 //! [`materialize::write_file`]: crate::materialize::write_file
-
-use crate::pdf::{Object, literal};
 
 #[cfg(any(test, feature = "fixtures"))]
 pub use whole::{rewrite, rewrite_to_path};
@@ -61,20 +58,6 @@ mod whole {
             log::warn!("{n}");
         }
         Ok(exported.bytes)
-    }
-}
-
-/// PDF text string: as is when PDFDocEncoding reads it back so
-/// (`file::is_pdf_doc_ascii`), otherwise UTF-16BE with BOM.
-pub fn text_string(s: &str) -> Object {
-    if crate::file::is_pdf_doc_ascii(s) {
-        literal(s.as_bytes())
-    } else {
-        let mut bytes = vec![0xFE, 0xFF];
-        for u in s.encode_utf16() {
-            bytes.extend_from_slice(&u.to_be_bytes());
-        }
-        Object::hex(bytes)
     }
 }
 

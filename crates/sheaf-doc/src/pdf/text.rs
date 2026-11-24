@@ -154,65 +154,16 @@ mod tests {
         assert_eq!(decode(&utf16be("a\u{1B}b")), "a");
     }
 
-    /// The codecs sheaf had beside these, while both stand: what each
-    /// gives against what these give, over every character written and
-    /// every short string of bytes read, and where they differ only as
-    /// the slice's design says they do (M18 slice 21). It goes with the
-    /// old codecs: the writers' half when they're gone, the readers' when
-    /// they are.
+    /// The readers sheaf had beside these, while both stand: what each
+    /// gives against what `decode` gives, over every short string of
+    /// bytes and many random ones, and where they differ only as the
+    /// slice's design says they do (M18 slice 21). It goes with the old
+    /// readers. Its writers' half went with the old writers, once it had
+    /// shown every character written as before but the ASCII control
+    /// characters other than tab, line feed and carriage return, which
+    /// are UTF-16BE now.
     mod old_against_new {
         use super::super::*;
-        use super::utf16be;
-        use crate::pdf::literal;
-
-        /// The characters that send a string to UTF-16BE where sheaf's own
-        /// writers wrote their byte: the control characters
-        /// PDFDocEncoding has none of but tab, line feed and carriage
-        /// return.
-        fn control(c: char) -> bool {
-            matches!(c, '\u{00}'..='\u{08}' | '\u{0B}' | '\u{0C}' | '\u{0E}'..='\u{17}')
-        }
-
-        /// And those the stamp file's writer wrote as their byte too,
-        /// which read back as PDFDocEncoding's accents, or NUL.
-        fn stamp_only(c: char) -> bool {
-            matches!(c, '\u{18}'..='\u{1F}' | '\u{7F}')
-        }
-
-        #[test]
-        fn every_character_is_written_as_before_but_control_characters() {
-            let (mut same, mut save_moved, mut stamp_moved) = (0usize, 0usize, 0usize);
-            for c in '\0'..=char::MAX {
-                for text in [c.to_string(), format!("a{c}b")] {
-                    let new = string(&text);
-                    let save = crate::save::text_string(&text);
-                    let annot = crate::annot::pdf_text_string(&text);
-                    let stamp = crate::stamp_lib::text_string(&text);
-                    assert_eq!(annot, save, "{c:?}: annot's and save's are the same code");
-                    let as_utf16 = Object::hex(utf16be(&text));
-                    if control(c) {
-                        assert_eq!(new, as_utf16, "{c:?}");
-                        assert_eq!(save, literal(text.as_bytes()), "{c:?}");
-                        assert_eq!(stamp, literal(text.as_bytes()), "{c:?}");
-                        save_moved += 1;
-                        stamp_moved += 1;
-                    } else if stamp_only(c) {
-                        assert_eq!(new, as_utf16, "{c:?}");
-                        assert_eq!(save, new, "{c:?}");
-                        assert_eq!(stamp, literal(text.as_bytes()), "{c:?}");
-                        stamp_moved += 1;
-                    } else {
-                        assert_eq!(new, save, "{c:?}");
-                        assert_eq!(new, stamp, "{c:?}");
-                        same += 1;
-                    }
-                }
-            }
-            // 21 control characters, 9 more for the stamp file's writer,
-            // each alone and between letters.
-            assert_eq!((save_moved, stamp_moved), (2 * 21, 2 * 30));
-            assert_eq!(same + stamp_moved, 2 * (0x11_0000 - 0x800));
-        }
 
         /// The UTF-16 code units of `rest`, read by `unit`, a last odd
         /// byte left out.

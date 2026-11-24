@@ -621,7 +621,7 @@ fn rewrite(
     let record = OutputRecord {
         version: input.version,
         path: target.path.clone(),
-        at: crate::annot::pdf_date_now(),
+        at: crate::pdf::semantics::date::now(),
         strategy: StrategyKind::Rewrite,
         sound: true,
         signatures_hold: false,

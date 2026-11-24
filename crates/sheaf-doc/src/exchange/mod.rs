@@ -616,7 +616,7 @@ pub fn gather(snap: &Snapshot, ours: &[AnnotId], theirs: &[AnnotId]) -> Result<C
         };
         copied.set("Page", index as i64);
         if !copied.has(b"NM") {
-            copied.set("NM", crate::save::text_string(&f.name));
+            copied.set("NM", crate::pdf::text::string(&f.name));
         }
         let id = built.pdf().add_object(Object::from(copied));
         annots.push((index as u32, id));
@@ -629,7 +629,7 @@ pub fn gather(snap: &Snapshot, ours: &[AnnotId], theirs: &[AnnotId]) -> Result<C
         let to = match names.get(&parent) {
             Some(&p) => Object::from(p),
             // Not written: by name, as XFDF says it.
-            None => crate::save::text_string(&parent),
+            None => crate::pdf::text::string(&parent),
         };
         if let Ok(d) = built.pdf().get_dictionary_mut(child) {
             d.set("IRT", to);

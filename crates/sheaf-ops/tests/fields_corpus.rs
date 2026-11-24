@@ -1225,7 +1225,7 @@ fn pixels(
     let theirs_file = try_append_revision(bytes, &ids, |pdf| {
         for &id in &valued {
             if let Some(d) = dict_mut(pdf, id) {
-                d.set("V", sheaf_doc::save::text_string(&samples[&id]));
+                d.set("V", sheaf_doc::pdf::text::string(&samples[&id]));
             }
         }
         for &id in &bare {

@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use sheaf_doc::export::Export;
 use sheaf_doc::materialize::AskAnswers;
 use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary, literal};
-use sheaf_doc::save::text_string;
 use sheaf_doc::tx::fixture::add;
 use sheaf_doc::{Actor, Annot, AnnotId, AnnotKind, Box2, Pt};
 use sheaf_edit::Rotation;
@@ -58,7 +57,7 @@ fn pdf(dir: &Path) -> PathBuf {
             let note = pdf.add_object(dictionary! {
                 "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "P" => page_id,
                 "Rect" => vec![100.into(), 600.into(), 120.into(), 620.into()],
-                "Contents" => text_string("Check “this” (please)"),
+                "Contents" => sheaf_doc::pdf::text::string("Check “this” (please)"),
                 "T" => literal("Ann"),
                 "NM" => literal("ann-1"),
                 "M" => literal("D:20261001120000"),

@@ -328,9 +328,9 @@ pub fn read(bytes: &[u8]) -> Result<Comments> {
                     if let Some((_, dict)) = &mut current {
                         let value = std::mem::take(&mut buf);
                         match tag.as_str() {
-                            "contents" => dict.set("Contents", crate::save::text_string(&value)),
+                            "contents" => dict.set("Contents", crate::pdf::text::string(&value)),
                             "defaultappearance" => dict.set("DA", literal(value.into_bytes())),
-                            "defaultstyle" => dict.set("DS", crate::save::text_string(&value)),
+                            "defaultstyle" => dict.set("DS", crate::pdf::text::string(&value)),
                             "vertices" => dict.set("Vertices", reals(&value)),
                             "gesture" => strokes.push(reals(&value)),
                             _ => {}
@@ -371,7 +371,7 @@ fn annotation(subtype: &str, attrs: &[(String, String)]) -> (u32, Dictionary) {
     let mut bs = Dictionary::new();
     let mut ends: (Option<String>, Option<String>) = (None, None);
     let (mut start, mut end) = (None, None);
-    let text = |v: &str| crate::save::text_string(v);
+    let text = |v: &str| crate::pdf::text::string(v);
     let name = |v: &str| Object::name(v);
     for (k, v) in attrs {
         match k.as_str() {

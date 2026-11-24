@@ -66,7 +66,7 @@ use crate::pdf::annots::{
     synth_shape, synth_text_markup,
 };
 use crate::pdf::gfx::{self, Canvas, Point};
-use crate::pdf::{Dictionary, Object, Value, dictionary, literal};
+use crate::pdf::{Dictionary, Object, Value, dictionary, text};
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use sheaf_edit::Rotation;
@@ -1114,8 +1114,8 @@ pub fn emission(a: &Annot, held: Held) -> Emitted {
             "FS",
             dictionary! {
                 "Type" => Object::name("Filespec"),
-                "F" => pdf_text_string(&name.chars().map(|c| if c.is_ascii() { c } else { '_' }).collect::<String>()),
-                "UF" => pdf_text_string(name),
+                "F" => text::string(&name.chars().map(|c| if c.is_ascii() { c } else { '_' }).collect::<String>()),
+                "UF" => text::string(name),
                 "EF" => dictionary! { "F" => ef, "UF" => ef },
             },
         );
@@ -1130,12 +1130,12 @@ pub fn emission(a: &Annot, held: Held) -> Emitted {
     };
     main.set(
         "SHEF_Annot",
-        pdf_text_string(&serde_json::to_string(&payload).unwrap_or_default()),
+        text::string(&serde_json::to_string(&payload).unwrap_or_default()),
     );
     let mut companions = Vec::new();
     if let Some(strike) = companion(a) {
         let (mut dict, appearance) = annotation(&strike, None);
-        dict.set("NM", pdf_text_string(&a.strike_name()));
+        dict.set("NM", text::string(&a.strike_name()));
         companions.push((dict, appearance));
     }
     Emitted {
@@ -1269,28 +1269,6 @@ impl Annot {
     }
 }
 
-/// Current time as a PDF date string (`D:YYYYMMDDHHmmSS`, UTC).
-pub fn pdf_date_now() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let days = (secs / 86400) as i64;
-    let (h, m, sec) = ((secs % 86400) / 3600, (secs % 3600) / 60, secs % 60);
-    // Civil-from-days (Howard Hinnant).
-    let z = days + 719468;
-    let era = z.div_euclid(146097);
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if mo <= 2 { y + 1 } else { y };
-    format!("D:{y:04}{mo:02}{d:02}{h:02}{m:02}{sec:02}Z")
-}
-
 /// A reasonable default author: the OS user name.
 pub fn default_author() -> String {
     std::env::var("USER")
@@ -1355,27 +1333,11 @@ fn ellipse_path(w: &mut ContentWriter, [x0, y0, x1, y1]: [f32; 4]) {
     w.curve_to(cx + rx * k, cy - ry, cx + rx, cy - ry * k, cx + rx, cy);
 }
 
-/// A text string: as is when PDFDocEncoding reads it back so
-/// ([`crate::file::is_pdf_doc_ascii`]), else UTF-16BE with its BOM. The
-/// `/SHEF_Annot` JSON is one too: a DEL in a mark's text, written as is,
-/// would read back as a NUL, which no JSON string holds.
-pub(crate) fn pdf_text_string(s: &str) -> Object {
-    if crate::file::is_pdf_doc_ascii(s) {
-        literal(s.as_bytes())
-    } else {
-        let mut bytes = vec![0xFE, 0xFF];
-        for u in s.encode_utf16() {
-            bytes.extend_from_slice(&u.to_be_bytes());
-        }
-        Object::hex(bytes)
-    }
-}
-
 /// `/DA` for a mark that shows text, for viewers that lay it out again:
 /// Helvetica at `size`, in `c`.
 fn default_appearance(size: f32, c: [u8; 3]) -> Object {
     let [r, g, b] = c.map(|v| f32::from(v) / 255.0);
-    pdf_text_string(&format!("/Helv {size} Tf {r:.3} {g:.3} {b:.3} rg"))
+    text::string(&format!("/Helv {size} Tf {r:.3} {g:.3} {b:.3} rg"))
 }
 
 /// The dash pattern sheaf draws, in points: a mark's `/BS /D` and its
@@ -1660,17 +1622,17 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
     let mut dict = dictionary! {
         "Type" => Object::name("Annot"),
         "Rect" => pdf_rect(rect),
-        "NM" => pdf_text_string(&a.name()),
-        "T" => pdf_text_string(&a.author),
-        "M" => pdf_text_string(&a.modified),
+        "NM" => text::string(&a.name()),
+        "T" => text::string(&a.author),
+        "M" => text::string(&a.modified),
         "F" => i64::from(a.kind.flags()),
         "CA" => alpha,
     };
     if !a.contents.is_empty() {
-        dict.set("Contents", pdf_text_string(&a.contents));
+        dict.set("Contents", text::string(&a.contents));
     }
     if !a.created.is_empty() {
-        dict.set("CreationDate", pdf_text_string(&a.created));
+        dict.set("CreationDate", text::string(&a.created));
     }
     let c = a.color;
     let color = Color::rgb8(c);
@@ -1738,8 +1700,8 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
             dict.set("C", color_arr);
             dict.set("Open", false);
             if let AnnotKind::Status { model, state, .. } = &a.kind {
-                dict.set("StateModel", pdf_text_string(model));
-                dict.set("State", pdf_text_string(state));
+                dict.set("StateModel", text::string(model));
+                dict.set("State", text::string(state));
             }
         }
         AnnotKind::FileAttachment { icon, name, .. } => {
@@ -1747,7 +1709,7 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
             dict.set("Name", Object::name(icon.as_str()));
             dict.set("C", color_arr);
             if a.contents.is_empty() {
-                dict.set("Contents", pdf_text_string(name));
+                dict.set("Contents", text::string(name));
             }
         }
         AnnotKind::Note { pos } => {
@@ -1867,7 +1829,7 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
             // The value first, as Acrobat keeps it; then any note.
             dict.set(
                 "Contents",
-                pdf_text_string(&if a.contents.is_empty() {
+                text::string(&if a.contents.is_empty() {
                     label
                 } else {
                     format!("{label}\n{}", a.contents)
@@ -2007,7 +1969,7 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
         AnnotKind::PageStamp { name, .. } => {
             dict.set("Subtype", Object::name("Stamp"));
             if a.contents.is_empty() {
-                dict.set("Contents", pdf_text_string(name));
+                dict.set("Contents", text::string(name));
             }
         }
         AnnotKind::PageBorder { rect, status } => {
@@ -2015,7 +1977,7 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
             dict.set("C", color_arr);
             dict.set("BS", border_style(a));
             if a.contents.is_empty() {
-                dict.set("Contents", pdf_text_string(&format!("Status: {status}")));
+                dict.set("Contents", text::string(&format!("Status: {status}")));
             }
             // The family's, but one it has no frame for
             // (`family_drawing`).
@@ -2028,7 +1990,7 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
         AnnotKind::TextStamp { rect, text, .. } => {
             dict.set("Subtype", Object::name("Stamp"));
             if a.contents.is_empty() {
-                dict.set("Contents", pdf_text_string(text));
+                dict.set("Contents", text::string(text));
             }
             // A rounded frame, inset by half its line.
             let lw = text_stamp_line(*rect);

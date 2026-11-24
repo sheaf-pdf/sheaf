@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::pdf::{
-    Dictionary, Document as Pdf, Object, ObjectId, Stream, StreamExt, Value, dictionary, literal,
+    Dictionary, Document as Pdf, Object, ObjectId, Stream, StreamExt, Value, dictionary, text,
 };
 use anyhow::{Context, Result, bail};
 use sheaf_edit::{PageSize, Rotation};
@@ -312,7 +312,7 @@ pub fn build_collection(
         dict.set("Parent", pages_id);
         dict.remove(TEXT_KEY.as_bytes());
         if let Some(t) = text.as_ref().filter(|t| !t.is_empty()) {
-            dict.set(TEXT_KEY, text_string(t));
+            dict.set(TEXT_KEY, text::string(t));
         }
         let id = map[&page];
         out.objects.insert(id, Object::from(dict));
@@ -348,7 +348,7 @@ fn finish(
         names.sort_by(|a, b| a.0.cmp(&b.0));
         let arr: Vec<Object> = names
             .into_iter()
-            .flat_map(|(k, id)| [text_string(&k), Object::from(id)])
+            .flat_map(|(k, id)| [text::string(&k), Object::from(id)])
             .collect();
         catalog.set(
             "Names",
@@ -358,22 +358,10 @@ fn finish(
     let catalog = out.add_object(catalog);
     out.trailer.set("Root", catalog);
     if let Some(t) = title {
-        let info = out.add_object(dictionary! { "Title" => text_string(t) });
+        let info = out.add_object(dictionary! { "Title" => text::string(t) });
         out.trailer.set("Info", info);
     }
     crate::serialize::full::write_built(out)
-}
-
-pub(crate) fn text_string(s: &str) -> Object {
-    if s.is_ascii() {
-        literal(s)
-    } else {
-        let mut b = vec![0xFE, 0xFF];
-        for u in s.encode_utf16() {
-            b.extend(u.to_be_bytes());
-        }
-        Object::hex(b)
-    }
 }
 
 /// 22 letters and digits, the length of Acrobat's stamp ids.
@@ -640,6 +628,28 @@ mod tests {
         let again = build_collection("Review", &[("Rejected".into(), None, one)]).unwrap();
         let (_, stamps) = read_collection(&Pdf::load_mem(&again).unwrap());
         assert_eq!(stamps[0].name, "Rejected");
+    }
+
+    /// A title, a name and a dynamic text holding control characters that
+    /// PDFDocEncoding gives other characters (U+001A is `ˆ` there, U+001F
+    /// `˜`, DEL undefined) read back as themselves, by sheaf and as PDFium
+    /// reads the file: they're written in UTF-16BE, not as their bytes.
+    #[test]
+    fn a_title_with_a_control_character_reads_back_as_itself() {
+        let (title, name, template) = ("Review\u{1A}", "Paid\u{7F}", "<<date>>\u{1F}");
+        let stamps = [(name.into(), Some(template.into()), square("0 0 1"))];
+        let bytes = build_collection(title, &stamps).unwrap();
+        let pdf = Pdf::load_mem(&bytes).unwrap();
+        let (read, stamps) = read_collection(&pdf);
+        assert_eq!(read.as_deref(), Some(title));
+        assert_eq!(stamps[0].name, name);
+        assert_eq!(stamps[0].text.as_deref(), Some(template));
+        let info = pdf.trailer.get(b"Info").unwrap().as_reference().unwrap();
+        let written = pdf.get_dictionary(info).unwrap().get(b"Title").unwrap();
+        assert_eq!(text::of(written), title);
+        let page = *pdf.get_pages().values().next().unwrap();
+        let page = pdf.get_dictionary(page).unwrap();
+        assert_eq!(text::of(page.get(TEXT_KEY.as_bytes()).unwrap()), template);
     }
 
     #[test]

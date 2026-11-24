@@ -800,7 +800,7 @@ impl Fields {
             // A parent sheaf made for an instance whose names clashed.
             None => {
                 let mut out = Dictionary::new();
-                out.set("T", crate::save::text_string(&node.partial));
+                out.set("T", crate::pdf::text::string(&node.partial));
                 if !kids.is_empty() {
                     out.set("Kids", kids);
                 }
@@ -966,7 +966,7 @@ impl Fields {
             out.set("Kids", kids);
         }
         if let Some(tip) = tip {
-            out.set("TU", crate::save::text_string(tip));
+            out.set("TU", crate::pdf::text::string(tip));
         }
         if let Some(parent) = node.parent {
             out.set("Parent", cx.placeholder(ObjKey::Field(parent)));

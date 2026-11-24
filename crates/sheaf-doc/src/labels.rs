@@ -235,7 +235,7 @@ pub fn number_tree(ranges: &[LabelRange]) -> Dictionary {
             d.set("S", Object::name(s));
         }
         if !r.prefix.is_empty() {
-            d.set("P", crate::save::text_string(&r.prefix));
+            d.set("P", crate::pdf::text::string(&r.prefix));
         }
         if r.first != 1 {
             d.set("St", r.first as i64);

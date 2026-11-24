@@ -328,7 +328,7 @@ fn stale_mark_is_theirs(how: How) {
     let mut f = marked(90, &marks);
     let square = f.annots(0)[2];
     let case = "edited";
-    let edited = crate::save::text_string("Edited in Acrobat");
+    let edited = crate::pdf::text::string("Edited in Acrobat");
     f.dict(square).set("Contents", edited.clone());
     f.dict(square).set("M", literal("D:20261017090000Z"));
     let bytes = f.bytes();

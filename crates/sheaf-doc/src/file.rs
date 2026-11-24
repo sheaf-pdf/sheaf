@@ -383,15 +383,6 @@ pub fn text_string(bytes: &[u8]) -> String {
     }
 }
 
-/// Whether `s` reads back as itself written byte for byte, without a BOM:
-/// ASCII but for the bytes PDFDocEncoding gives other characters, the
-/// accents at 0x18–0x1F and the undefined 0x7F (see [`pdf_doc_char`]).
-/// Anything else is written as UTF-16BE.
-pub(crate) fn is_pdf_doc_ascii(s: &str) -> bool {
-    s.bytes()
-        .all(|b| b.is_ascii() && !matches!(b, 0x18..=0x1F | 0x7F))
-}
-
 /// A PDFDocEncoding byte's character: Latin-1's, but for the accents at
 /// 0x18–0x1F and the punctuation and letters at 0x80–0xA0, and NUL for
 /// the three bytes it leaves undefined (0x7F, 0x9F and 0xAD), as PDFium's

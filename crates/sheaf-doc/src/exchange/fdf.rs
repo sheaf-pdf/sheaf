@@ -78,7 +78,7 @@ pub fn write(comments: &Comments) -> Result<Vec<u8>> {
     }
     let mut fdf = dictionary! { "Annots" => annots };
     if let Some(f) = &comments.file {
-        fdf.set("F", crate::save::text_string(f));
+        fdf.set("F", crate::pdf::text::string(f));
     }
     let root = pdf.add_object(dictionary! { "FDF" => fdf });
     pdf.trailer = dictionary! { "Root" => root };
