@@ -554,7 +554,9 @@ not what's stored.
   `/Rect`'s corners swapped) keeps a mark sheaf's, and its edit doesn't.
   A text string is written as is only where every character is printable
   ASCII, a tab, a line feed or a carriage return (`pdf::text::string`);
-  any other is UTF-16BE. Left out:
+  any other is UTF-16BE, and a U+001B isn't written, since a reader
+  takes one for a language escape and shows none of the text after it.
+  Left out:
   `/IRT` and `/RT`, which the save sets after the mark is written, `/IRT`
   an object reference a rewrite renumbers; a reply's or a status's
   `/Rect`, its parent's, set later too; and `/AP`, which other tools

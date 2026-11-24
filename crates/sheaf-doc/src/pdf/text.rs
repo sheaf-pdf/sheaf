@@ -6,8 +6,10 @@
 //! **Written** ([`string`], [`encoded`]): the text's own bytes where every
 //! one is a tab, a line feed, a carriage return or printable ASCII, which
 //! PDFDocEncoding reads as themselves; otherwise UTF-16BE after its byte
-//! order mark. U+001B is written as it is, in UTF-16BE, where a reader
-//! takes it for a language escape.
+//! order mark. U+001B is left out: no text string holds one a reader gives
+//! back, PDFDocEncoding having none and a reader taking one after a mark
+//! for the start of a language escape, which hides the text after it. So
+//! what's written reads back as written but for that character.
 //!
 //! **Read** ([`decode`], [`of`]): as PDFium reads one (chromium/8152), the
 //! page view's engine: UTF-16BE after `FE FF`, UTF-16LE after `FF FE`
@@ -15,6 +17,8 @@
 //! that aren't UTF-8 read by PDFium's own state machine), each with its
 //! language escapes left out; else PDFDocEncoding, NUL for the three
 //! bytes it leaves undefined.
+
+use std::borrow::Cow;
 
 use pdf_objects::Rules;
 
@@ -24,14 +28,23 @@ use super::Object;
 /// written `(…)` when they are the text's own and `<…>` when UTF-16BE.
 #[must_use]
 pub fn string(text: &str) -> Object {
-    Object::text(text)
+    Object::text(&writable(text))
 }
 
 /// `text`'s bytes as a text string, as [`string`] holds them: for a name
 /// tree's key, which is a string with no form of its own.
 #[must_use]
 pub fn encoded(text: &str) -> Vec<u8> {
-    pdf_objects::text::encode(text)
+    pdf_objects::text::encode(&writable(text))
+}
+
+/// `text` without its U+001Bs, which no text string gives back.
+fn writable(text: &str) -> Cow<'_, str> {
+    if text.contains('\u{1B}') {
+        Cow::Owned(text.replace('\u{1B}', ""))
+    } else {
+        Cow::Borrowed(text)
+    }
 }
 
 /// The text a text string's `bytes` hold, as PDFium reads it.
@@ -138,7 +151,8 @@ mod tests {
     }
 
     /// Every character but U+001B, alone and between letters, reads back
-    /// as itself: U+001B starts a language escape.
+    /// as itself. U+001B would start a language escape and hide what
+    /// follows it, so it's left out, and the text around it reads back.
     #[test]
     fn every_character_but_an_escape_reads_back_as_itself() {
         let mut read = 0usize;
@@ -151,6 +165,19 @@ mod tests {
             }
         }
         assert_eq!(read, 2 * (0x11_0000 - 0x800 - 1));
+        // What a string would hold of one: the text after it hidden.
         assert_eq!(decode(&utf16be("a\u{1B}b")), "a");
+        let table = [
+            ("a\u{1B}b", literal("ab")),
+            ("\u{1B}", literal("")),
+            ("App\u{1B}endix-", literal("Appendix-")),
+            ("\u{1B}en\u{1B}é", Object::hex(utf16be("ené"))),
+        ];
+        for (text, written) in table {
+            assert_eq!(string(text), written, "{text:?}");
+            let bytes = written.as_bytes().unwrap();
+            assert_eq!(encoded(text), bytes, "{text:?}");
+            assert_eq!(decode(bytes), text.replace('\u{1B}', ""), "{text:?}");
+        }
     }
 }
