@@ -454,6 +454,8 @@ pub(crate) fn standalone(src: &Src, parts: &[&Part], numbers: &mut Numbers) -> R
         encrypt_at: ObjectId::new(0, 0),
         xref_from: 0,
         pack: None,
+        to: None,
+        from: None,
     };
     let bodies = (bodies.into_iter())
         .map(|(at, (key, obj))| Ok((at, full::Body::Object(Cow::Owned(obj), key))));

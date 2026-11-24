@@ -23,8 +23,14 @@
 //!    data, that it holds none ([`verify::private`]);
 //! 6. writes the file through [`serialize::full`](crate::serialize::full):
 //!    an object neither emitted nor changed by `keep_only` is copied as its
-//!    source has it, when the numbers are stable, the base sound and the
-//!    encryption the same (§11.6); everything else is written. A source
+//!    source has it, when the base is sound and the encryption the same
+//!    (§11.6): under stable numbers as its bytes, at its own number; under
+//!    dense ones by the family's writer, its header and each reference that
+//!    moved written anew in place, but one read at an offset whose number
+//!    moves under an encryption that keys by number (RC4, AES-128), which
+//!    is written anew. A write that refuses a copy is made again with
+//!    nothing copied ([`Output::copy_refused`]). Everything else is
+//!    written. A source
 //!    that used object streams (its cross-reference section is a stream,
 //!    or it's a hybrid, which becomes a stream file) is packed: what's
 //!    written anew that may go in one does, grouped by the pages that use
@@ -32,7 +38,10 @@
 //!    source's own were on a stable save, else after the objects. A
 //!    table's objects, and any under an encryption that leaves streams in
 //!    the clear but not strings, are written on their own, an object
-//!    stream's members too;
+//!    stream's members too. Under dense numbers ([`number::dense`]) the
+//!    graph is held at its own numbers through the write, which writes
+//!    each object at its dense number and every reference as it names it,
+//!    and is renumbered after, for the checks and the record;
 //! 7. checks what it wrote ([`verify::output`]): the form, and in debug
 //!    builds the encryption. A check that fails stops the save.
 //!
@@ -116,7 +125,8 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
-use crate::pdf::{ByteSource as _, Object, ObjectId, Stream, XrefKind};
+use crate::pdf::write::{Renumber, read_at_offset};
+use crate::pdf::{ByteSource as _, Handover, Object, ObjectId, Stream, XrefKind};
 use anyhow::{Context as _, Result};
 use in_progress::Progress;
 
@@ -161,6 +171,31 @@ pub struct Output {
     ///
     /// [`Emission::allowed_drops`]: emit::Emission::allowed_drops
     pub allowed_drops: emit::AllowedDrops,
+    /// For a whole file under dense numbers, why the writer refused a copy
+    /// (its bytes not those it was read from, say), which wrote the file
+    /// again with nothing copied: none where nothing was refused, and for
+    /// an Append.
+    pub copy_refused: Option<String>,
+}
+
+/// For tests: what a dense Rewrite copies from.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TestCopies {
+    /// The primary's objects as its reading read them, as a Rewrite does.
+    AsRead,
+    /// Those of a second reading of the primary's bytes, whose records the
+    /// writer refuses as another reading's.
+    ReadAgain,
+    /// Nothing: every object written anew, as before M18 slice 14.
+    Nothing,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What a dense Rewrite on this thread copies from ([`TestCopies`]).
+    pub(crate) static TEST_COPIES: std::cell::Cell<TestCopies> =
+        const { std::cell::Cell::new(TestCopies::AsRead) };
 }
 
 /// `plan`'s file of `input`, written as `target` says, `p` counting the
@@ -288,8 +323,24 @@ fn rewrite(
         }
     };
     let stable = target.profile.numbering == Numbering::Stable;
-    let raw = stable && src.base_sound() && same_crypt(crypt.as_ref(), src.crypt());
-    let (loaded, mut raw_copies) = graph::eager_with_raw(src, raw)?;
+    let raw = src.base_sound() && same_crypt(crypt.as_ref(), src.crypt());
+    #[cfg(test)]
+    let raw = raw && (stable || TEST_COPIES.get() != TestCopies::Nothing);
+    let want = match (raw, stable) {
+        (false, _) => Handover::None,
+        (true, true) => Handover::Stable,
+        (true, false) => Handover::Renumbered,
+    };
+    let (loaded, mut raw_copies) = graph::eager_with_raw(src, want)?;
+    #[cfg(test)]
+    if want == Handover::Renumbered && TEST_COPIES.get() == TestCopies::ReadAgain {
+        let again = crate::pdf::LazyPdf::open(
+            src.bytes().clone(),
+            src.password(),
+            &crate::source::Limits::DEFAULT.reader,
+        )?;
+        raw_copies = again.to_document_and_raw(want)?.1;
+    }
     let in_use: HashSet<u32> = src.pdf().ids().map(|id| id.number).collect();
     let numbers = number::stable(&e, &input.target, src, &loaded, &in_use, prev)?;
     let owned = std::mem::take(&mut e.owned);
@@ -384,6 +435,7 @@ fn rewrite(
     raw_copies
         .members
         .retain(|&id, _| keep_raw(id) && pack && objstm::packable(id, &graph.pdf.objects[&id]));
+    raw_copies.retain_as_read(keep_raw);
     if stable {
         let changed = |id| {
             changed(id)
@@ -397,62 +449,137 @@ fn rewrite(
         Private::Strip => verify::private(&graph)?,
         Private::Scrub => notes.extend(verify::private_left(&graph)),
     }
-    if !stable {
-        let dense = number::dense(&graph.pdf.objects, |id| graph.deferred.contains_key(&id));
-        graph.renumber(&dense, blob);
-    }
+    // Under dense numbers the graph is held at its own through the write,
+    // which writes each object at its dense number, and renumbered after.
+    let mut dense = (!stable).then(|| Dense::of(&graph));
     p.check()?;
-    let shape = written_tree(&graph.pdf);
+    // The page tree, in the numbers held, which the pages are walked from.
+    let held = written_tree(&graph.pdf);
     p.check()?;
-
-    let bytes = src.bytes();
-    let graph = &graph;
-    // Which pages use each object, which its container is grouped by.
-    let uses = || {
-        let pages = shape.pages();
-        let nodes = shape.nodes.iter().map(|node| node.id);
-        let stop: HashSet<ObjectId> = pages.iter().copied().chain(nodes).collect();
-        graph::page_uses(&pages, &stop, |id, to| {
-            if let Some(obj) = graph.pdf.objects.get(&id) {
-                append::refs(obj, to);
-            }
-        })
+    // Where each object held is written, and what a reference names.
+    let name = |dense: Option<&Dense>, id: ObjectId| match dense {
+        Some(d) => d.to.get(&id).copied(),
+        None => Some(id),
     };
-    let written = || (graph.pdf.objects.iter()).filter(|(_, obj)| !full::left_out(obj));
-    let bodies = written().map(|(&id, obj)| -> Result<(ObjectId, Body<'_>)> {
-        let key = graph.key(id, blob);
-        if let Some(d) = graph.deferred.get(&id) {
-            let dict = (obj.as_stream().map(|s| s.dict.clone())).unwrap_or_default();
-            let data = (d.data)().with_context(|| format!("making object {id}"))?;
-            let made = Object::from(Stream::new(dict, data));
-            return Ok((id, Body::Object(Cow::Owned(made), key)));
-        }
-        if let Some(span) = raw_copies.spans.get(&id) {
-            return Ok((id, Body::Raw(&bytes[span.clone()])));
-        }
-        if let Some(member) = raw_copies.members.get(&id) {
-            return Ok((id, Body::Member(member.as_slice(), Cow::Borrowed(obj), key)));
-        }
-        Ok((id, Body::Object(Cow::Borrowed(obj), key)))
-    });
-    let past = written().map(|(id, _)| id.number + 1).max().unwrap_or(1);
+    let past = (written(&graph, dense.as_ref()).filter_map(|(&id, _)| name(dense.as_ref(), id)))
+        .map(|at| at.number + 1)
+        .max()
+        .unwrap_or(1);
     let encrypt_at = match &crypt {
         Some(c) if stable && c.at().number < crate::serialize::NUMBERS => c.at(),
         _ => ObjectId::new(past, 0),
     };
-    let layout = Layout {
-        trailer: &graph.pdf.trailer,
-        kind,
-        version,
-        crypt: crypt.as_deref(),
-        encrypt_at,
-        xref_from: if stable { numbers.start() } else { 1 },
-        pack: pack.then_some(full::Pack {
-            uses: &uses,
-            reuse: &reuse,
-        }),
+    if let (Some(dense), Some(crypt)) = (&mut dense, &crypt) {
+        dense.encrypt(crypt.at(), encrypt_at);
+    }
+
+    let bytes = src.bytes();
+    let ((out, xref), copy_refused) = {
+        let graph = &graph;
+        let raw_copies = &raw_copies;
+        let dense = dense.as_ref();
+        let name = |id: ObjectId| name(dense, id);
+        // Which pages use each object, by number written, which its
+        // container is grouped by: the walk over the graph as written.
+        let uses = || {
+            let pages: Vec<ObjectId> = held.pages().into_iter().filter_map(name).collect();
+            let nodes = held.nodes.iter().filter_map(|node| name(node.id));
+            let stop: HashSet<ObjectId> = pages.iter().copied().chain(nodes).collect();
+            graph::page_uses(&pages, &stop, |id, to| {
+                let obj = match dense {
+                    Some(d) => d.held(id).and_then(|id| graph.pdf.objects.get(&id)),
+                    None => graph.pdf.objects.get(&id),
+                };
+                match (obj, dense) {
+                    (None, _) => {}
+                    (Some(obj), None) => append::refs(obj, to),
+                    (Some(obj), Some(d)) => append::refs(obj, &mut |r| {
+                        if let Some(&at) = d.to.get(&r) {
+                            to(at);
+                        }
+                    }),
+                }
+            })
+        };
+        // Under an encryption that keys by number, an object read at an
+        // offset whose number moves is given anew: its bytes wouldn't
+        // decrypt there, so the family would write it anew from the object
+        // as read, on its own, where given anew it's packed.
+        let by_number = crypt.as_deref().is_some_and(Crypt::keys_by_number);
+        // The bodies, made once a write, as read where `copy` says and a
+        // candidate is, a deferred stream's data made each time.
+        let bodies = |copy: bool| {
+            written(graph, dense).map(move |(&id, obj)| -> Result<(ObjectId, Body<'_>)> {
+                let key = graph.key(id, blob);
+                if let Some(d) = graph.deferred.get(&id) {
+                    let dict = (obj.as_stream().map(|s| s.dict.clone())).unwrap_or_default();
+                    let data = (d.data)().with_context(|| format!("making object {id}"))?;
+                    let made = Object::from(Stream::new(dict, data));
+                    return Ok((id, Body::Object(Cow::Owned(made), key)));
+                }
+                if let Some(span) = raw_copies.spans.get(&id) {
+                    return Ok((id, Body::Raw(&bytes[span.clone()])));
+                }
+                if let Some(member) = raw_copies.members.get(&id) {
+                    return Ok((id, Body::Member(member.as_slice(), Cow::Borrowed(obj), key)));
+                }
+                if copy
+                    && let Some((object, record)) = raw_copies.as_read(id)
+                    && !(by_number && read_at_offset(record) && name(id) != Some(id))
+                {
+                    let (object, record) = (Cow::Borrowed(object), Cow::Borrowed(record));
+                    return Ok((
+                        id,
+                        Body::Read {
+                            object,
+                            record,
+                            key,
+                        },
+                    ));
+                }
+                Ok((id, Body::Object(Cow::Borrowed(obj), key)))
+            })
+        };
+        let layout = |from| Layout {
+            trailer: &graph.pdf.trailer,
+            kind,
+            version,
+            crypt: crypt.as_deref(),
+            encrypt_at,
+            xref_from: if stable { numbers.start() } else { 1 },
+            pack: pack.then_some(full::Pack {
+                uses: &uses,
+                reuse: &reuse,
+            }),
+            to: dense.map(|_| &name as &(dyn Renumber + Sync)),
+            from,
+        };
+        // The reading the objects as read are copied from, when there are
+        // any.
+        let from = (raw_copies.as_read_ids().next()).map(|_| src.pdf().read_from());
+        match full::write_bodies(bodies(true), &layout(from), p) {
+            Ok(written) => (written, None),
+            // A refused copy doesn't stop the export: it's written as it was
+            // before copies under a renumbering, with none.
+            Err(e) if from.is_some() && refused_copy(&e) => {
+                let why = format!("{e:#}");
+                log::warn!("a copy was refused, so the file is written with nothing copied: {why}");
+                (
+                    full::write_bodies(bodies(false), &layout(None), p)?,
+                    Some(why),
+                )
+            }
+            Err(e) => return Err(e),
+        }
     };
-    let (out, xref) = full::write_bodies(bodies, &layout, p)?;
+    let shape = match dense {
+        Some(dense) => {
+            graph.renumber(&dense.to, blob);
+            written_tree(&graph.pdf)
+        }
+        None => held,
+    };
+    let graph = &graph;
     let inputs = emit::form::inputs(&input.target, src);
     let inputs: Vec<&crate::Source> = inputs.iter().map(|s| &**s).collect();
     let checked = verify::Written {
@@ -469,7 +596,7 @@ fn rewrite(
     verify::output(&checked, graph, &inputs)?;
 
     let present: BitSet = if stable {
-        (written().map(|(id, _)| id.number))
+        (written(graph, None).map(|(id, _)| id.number))
             .filter(|n| in_use.contains(n))
             .collect()
     } else {
@@ -525,6 +652,27 @@ fn rewrite(
         notes,
         unjudged: append::Unjudged::default(),
         allowed_drops,
+        copy_refused,
+    })
+}
+
+/// Whether `e`, why a write failed, is its refusal of a copy, which a write
+/// with nothing copied doesn't meet: an object as read whose record is
+/// another reading's or another object's, whose bytes aren't those it was
+/// read from or aren't there, or a stream's data that doesn't read where
+/// it was written.
+fn refused_copy(e: &anyhow::Error) -> bool {
+    use crate::pdf::write::StructureError as E;
+    (e.chain().filter_map(|c| c.downcast_ref::<E>())).any(|e| {
+        matches!(
+            e,
+            E::Elsewhere(_)
+                | E::Changed(_)
+                | E::Gone { .. }
+                | E::Uncontained { .. }
+                | E::Placed(_)
+                | E::Data { .. }
+        )
     })
 }
 
@@ -536,6 +684,71 @@ fn written_tree(pdf: &crate::pdf::Document) -> TreeShape {
         node.from = None;
     }
     tree
+}
+
+/// A dense write's numbers ([`number::dense`]): where each object of a
+/// Rewrite's graph, held at its own number, is written, and the source's
+/// encryption dictionary, which the graph hasn't, where the write puts it;
+/// and of each number written, which object held is written there, the
+/// first of the streams given it, as
+/// [`Graph::renumber`](graph::Graph::renumber) keeps.
+struct Dense {
+    to: BTreeMap<ObjectId, ObjectId>,
+    /// By number written: the object held that's written there.
+    first: Vec<Option<ObjectId>>,
+}
+
+impl Dense {
+    /// `graph`'s, a stream whose data is made as it's written kept apart.
+    fn of(graph: &graph::Graph) -> Dense {
+        let to = number::dense(&graph.pdf.objects, |id| graph.deferred.contains_key(&id));
+        let mut first: Vec<Option<ObjectId>> = Vec::new();
+        for (&id, at) in &to {
+            let n = at.number as usize;
+            if first.len() <= n {
+                first.resize(n + 1, None);
+            }
+            first[n].get_or_insert(id);
+        }
+        Dense { to, first }
+    }
+
+    /// The object held that's written at `at`.
+    fn held(&self, at: ObjectId) -> Option<ObjectId> {
+        let first = self.first.get(at.number as usize).copied().flatten()?;
+        (self.to.get(&first) == Some(&at)).then_some(first)
+    }
+
+    /// Whether object `id`, held, is written: the first given its number.
+    fn written(&self, id: ObjectId) -> bool {
+        self.to
+            .get(&id)
+            .is_some_and(|&at| self.held(at) == Some(id))
+    }
+
+    /// The source's encryption dictionary, which the graph hasn't, at `at`,
+    /// where the write puts it ([`Layout::to`]): what refers to it names it
+    /// there.
+    ///
+    /// It stands in for something the family's writer doesn't take: where
+    /// an encryption read from a file is written, apart from the
+    /// renumbering. Were the dictionary's place the layout's alone to say,
+    /// this map would hold the graph's objects and no more.
+    fn encrypt(&mut self, source: ObjectId, at: ObjectId) {
+        debug_assert!(!self.to.contains_key(&source), "{source} is the graph's");
+        self.to.entry(source).or_insert(at);
+    }
+}
+
+/// What a Rewrite writes of `graph`: every object but what a full write
+/// leaves out, and under dense numbers, of streams given one number, the
+/// first.
+fn written<'g>(
+    graph: &'g graph::Graph,
+    dense: Option<&'g Dense>,
+) -> impl Iterator<Item = (&'g ObjectId, &'g Object)> + 'g {
+    (graph.pdf.objects.iter())
+        .filter(move |(id, obj)| !full::left_out(obj) && dense.is_none_or(|d| d.written(**id)))
 }
 
 /// Whether a file encrypted with `a` is encrypted as one with `b` is,

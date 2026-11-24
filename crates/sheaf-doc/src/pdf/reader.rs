@@ -11,7 +11,7 @@ use pdf_filters::Backend;
 use pdf_objects::object::{Data, Dict, Object, ObjectId, Stream, Value};
 use pdf_objects::parse::Parser;
 use pdf_structure::read::{Fault, Options};
-use pdf_structure::write::Encryptor;
+use pdf_structure::write::{Encryptor, ReadFrom};
 use pdf_structure::{ByteSource, Encryption, Origin, Reading, Record, Unread};
 
 use super::{DecryptionError, Document, Error, Limit, Result};
@@ -76,13 +76,76 @@ pub struct XrefFacts {
     pub sections: usize,
 }
 
-/// First-parse verbatim copy candidates from [`LazyPdf::to_document_and_raw`]:
-/// outer-file byte spans (`Origin::File`) and decoded object-stream member
-/// slices (`Origin::Stream`).
+/// What [`LazyPdf::to_document_and_raw`] hands over beside the document, of
+/// the objects a writer may copy as they were read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handover {
+    /// Nothing: every object is written anew.
+    None,
+    /// A stable save's: each candidate's bytes at an offset, or as a member
+    /// of an object stream, copied at its own number ([`RawCopies::spans`],
+    /// [`RawCopies::members`]).
+    Stable,
+    /// A renumbered write's: each candidate as the family read it, with its
+    /// record ([`RawCopies::as_read`]), which its writer copies under a
+    /// renumbering from [`LazyPdf::read_from`].
+    Renumbered,
+}
+
+/// First-parse verbatim copy candidates from [`LazyPdf::to_document_and_raw`].
+/// A candidate is read at an offset its sections give, ending with `endobj`,
+/// a stream's `/Length` direct and holding (`Origin::File`), or is an object
+/// stream's member of generation 0 whose container leaves nothing in the
+/// clear (`Origin::Stream`); and isn't a stream whose data read only by
+/// falling back on its bytes as written, in an encrypted file. For a stable
+/// save, their outer-file byte spans and decoded member slices; for a
+/// renumbered write, the family's document as read, holding only them.
 #[derive(Debug, Default)]
 pub struct RawCopies {
     pub spans: HashMap<ObjectId, Range<usize>>,
     pub members: HashMap<ObjectId, Vec<u8>>,
+    /// Under [`Handover::Renumbered`], the candidates as read, each with its
+    /// record: what else the reading's document held removed.
+    read: Option<pdf_structure::Document>,
+}
+
+impl RawCopies {
+    /// Candidate `id` as the family read it, and its record: under
+    /// [`Handover::Renumbered`] alone.
+    #[must_use]
+    pub fn as_read(&self, id: ObjectId) -> Option<(&Object, &Record)> {
+        let read = self.read.as_ref()?;
+        let record = read.record(id)?;
+        let object = pdf_structure::Source::get(read, id).ok()?;
+        Some((object, record))
+    }
+
+    /// Each candidate held as read ([`RawCopies::as_read`]), by number.
+    pub fn as_read_ids(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        (self.read.iter()).flat_map(|read| read.objects().map(|(id, _)| id))
+    }
+
+    /// Keeps of the candidates held as read only those `keep` says.
+    pub fn retain_as_read(&mut self, mut keep: impl FnMut(ObjectId) -> bool) {
+        let Some(read) = &mut self.read else {
+            return;
+        };
+        let gone: Vec<ObjectId> = (read.objects())
+            .map(|(id, _)| id)
+            .filter(|&id| !keep(id))
+            .collect();
+        for id in gone {
+            read.remove(id);
+        }
+    }
+}
+
+/// What makes an object a copy candidate ([`RawCopies`]).
+enum Candidate<'d> {
+    /// Its span in the file, `n g obj` to past `endobj`.
+    At(Range<usize>),
+    /// Its bytes in its object stream's decoded data.
+    Member(&'d [u8]),
 }
 
 type Kept = std::result::Result<Arc<Object>, KeptError>;
@@ -560,14 +623,17 @@ impl LazyPdf {
         Ok(out)
     }
 
-    /// [`LazyPdf::to_document`], plus first-parse verbatim spans and decoded
-    /// object-stream member bytes when `want_raw` is `true` (M18 slice 9).
-    pub fn to_document_and_raw(&self, want_raw: bool) -> Result<(Document, RawCopies)> {
-        if !want_raw {
+    /// [`LazyPdf::to_document`], plus what `want` asks of the objects a
+    /// writer may copy as they were read ([`RawCopies`]): first-parse spans
+    /// and decoded member bytes for a stable save (M18 slice 9), or the
+    /// family's objects as read, with their records, for a renumbered write
+    /// (M18 slice 14). The candidates are the same either way.
+    pub fn to_document_and_raw(&self, want: Handover) -> Result<(Document, RawCopies)> {
+        if want == Handover::None {
             return Ok((self.to_document()?, RawCopies::default()));
         }
         let shift = |r: Range<usize>| (r.start + self.extra_header)..(r.end + self.extra_header);
-        let pdoc = self.reading.to_document().map_err(|e| match e {
+        let mut pdoc = self.reading.to_document().map_err(|e| match e {
             pdf_structure::Error::Io(io) => Error::IO(io),
             other => Error::Syntax(other.to_string()),
         })?;
@@ -582,32 +648,48 @@ impl LazyPdf {
         }
         out.trailer = trailer;
         let mut raw = RawCopies::default();
+        // What the renumbered write's document doesn't keep.
+        let mut unwanted = Vec::new();
         for (id, obj) in pdoc.objects() {
             if Some(id) == encrypt_id {
+                unwanted.push(id);
                 continue;
             }
             let Some((loaded, decrypt_fallback)) = self.load_doc_object(id, obj)? else {
+                unwanted.push(id);
                 continue;
             };
-            if !decrypt_fallback && let Some(rec) = pdoc.record(id) {
-                if let Some(span) = whole_span(rec) {
+            let candidate = (pdoc.record(id))
+                .filter(|_| !decrypt_fallback)
+                .and_then(|rec| candidate(&pdoc, id, rec));
+            match (want, candidate) {
+                (Handover::Stable, Some(Candidate::At(span))) => {
                     raw.spans.insert(id, shift(span));
-                } else if id.generation == 0
-                    && let Origin::Stream { stream, .. } = rec.origin
-                {
-                    let stm_id = ObjectId::new(stream, 0);
-                    if !pdoc.in_the_clear(stm_id)
-                        && let Some(held) = pdoc.held(stm_id)
-                        && let Some(slice) = rec.at.stream_slice_in(stm_id, held)
-                    {
-                        raw.members.insert(id, slice.to_vec());
-                    }
                 }
+                (Handover::Stable, Some(Candidate::Member(slice))) => {
+                    raw.members.insert(id, slice.to_vec());
+                }
+                (_, Some(_)) => {}
+                (_, None) => unwanted.push(id),
             }
             out.max_id = out.max_id.max(id.number);
             out.objects.insert(id, loaded);
         }
+        if want == Handover::Renumbered {
+            unwanted.extend(pdoc.unread().map(|(id, _)| id));
+            for id in unwanted {
+                pdoc.remove(id);
+            }
+            raw.read = Some(pdoc);
+        }
         Ok((out, raw))
+    }
+
+    /// The reading the objects [`Handover::Renumbered`] hands over were read
+    /// in, which their writer copies them from ([`RawCopies::as_read`]).
+    #[must_use]
+    pub fn read_from(&self) -> &dyn ReadFrom {
+        &self.reading
     }
 
     fn load_doc_object(&self, id: ObjectId, obj: &Object) -> Result<Option<(Object, bool)>> {
@@ -844,6 +926,37 @@ fn whole_span(rec: &Record) -> Option<Range<usize>> {
         return None;
     }
     Some(rec.at.range())
+}
+
+/// Whether object `id` of `pdoc`, read as `rec` says, is a copy candidate
+/// ([`RawCopies`]), and its bytes if it is: its span, by [`whole_span`]; or,
+/// of generation 0, its bytes in an object stream that leaves nothing in
+/// the clear.
+///
+/// These are the family's rules for a copy too (its writer asks them again
+/// of each object as read it's given, and may ask more: its rules narrow
+/// these, never widen them). A renumbered write's hand-over asks them here
+/// first for two things the family can't know: what isn't a candidate isn't
+/// held through the write, and is given to the writer anew, where it may go
+/// in an object stream; given as read and declined there, it would be
+/// written anew on its own.
+fn candidate<'d>(
+    pdoc: &'d pdf_structure::Document,
+    id: ObjectId,
+    rec: &Record,
+) -> Option<Candidate<'d>> {
+    if let Some(span) = whole_span(rec) {
+        return Some(Candidate::At(span));
+    }
+    let Origin::Stream { stream, .. } = rec.origin else {
+        return None;
+    };
+    let stm_id = ObjectId::new(stream, 0);
+    if id.generation != 0 || pdoc.in_the_clear(stm_id) {
+        return None;
+    }
+    let held = pdoc.held(stm_id)?;
+    rec.at.stream_slice_in(stm_id, held).map(Candidate::Member)
 }
 
 /// `ByteSource` wrapper stripping leading preamble bytes when `%PDF-` sits past

@@ -2881,13 +2881,29 @@ below).
   a widget a deleted page shared with a kept one isn't a dropped page's),
   `keep_only` runs against the pages and tree nodes, what nothing reaches
   is pruned, and `serialize::full::
-  write_bodies` writes each object either as the primary's bytes
-  (`Source::raw_span`, which keeps nothing it read) or anew. An object is
-  copied as it was only when the numbering is stable, it's the
-  primary's, the encryption is the same `Crypt` (`Profile.encryption`:
-  `Keep` keeps it, `None` writes none), neither the emitter nor
-  `keep_only` touched it, it isn't an object stream's member and its
-  generation is its header's, and the base is sound. A source that used
+  write_bodies` writes each object either as the primary's bytes or
+  anew. An object is copied as it was only when it's the primary's, the
+  encryption is the same `Crypt` (`Profile.encryption`: `Keep` keeps it,
+  `None` writes none), neither the emitter nor `keep_only` touched it,
+  the base is sound, and it was read at the offset its section gives,
+  `endobj` after it and a stream's `/Length` direct and holding, or as an
+  object stream's member of generation 0 (`pdf::RawCopies`). On a stable
+  save it's written as those bytes at its own number, a member into its
+  new container. Under dense numbers (M18 slice 14) the graph is held at
+  its own numbers through the write and renumbered after it, and such an
+  object is given as pdf-structure read it (`full::Body::Read`): its
+  writer (`Parts`) copies the bytes at the object's new number, its
+  header and each reference that moved written anew in place (one to
+  nothing `null`), or, where its rules for a copy decline, writes it anew
+  from the object as read. An object read at an offset is copied at
+  another number only under an encryption whose key isn't made of the
+  number (none, or AES-256); under RC4 or AES-128
+  (`Crypt::keys_by_number`) one whose number moves is given anew, as
+  before, while a member is copied at any number under any encryption. A
+  copy read at an offset is written at one, never packed, as on a stable
+  save. A write that refuses a copy (its bytes not those it was read
+  from, its record another reading's) is made again with nothing copied,
+  logged, and `Output::copy_refused` says why. A source that used
   object streams (its newest section a stream, or a hybrid, whose table
   goes) is packed again, its section a stream: an object stream's
   members, and whatever else is written anew, go in containers grouped

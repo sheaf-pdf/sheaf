@@ -12,9 +12,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::pdf::test_crypt::{CipherKind, TestEncryption};
+use crate::pdf::write::{ReadFrom, Renumber, StructureError};
 use crate::pdf::{
-    Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, StreamExt, Value, XrefKind,
-    deflate_options, dictionary, literal, resolve_fn,
+    Dictionary, Document as Pdf, Handover, LazyPdf, Object, ObjectId, RawCopies, Stream, StreamExt,
+    Value, XrefKind, deflate_options, dictionary, literal, resolve_fn,
 };
 use in_progress::NoProgress;
 use sheaf_edit::Rotation;
@@ -1143,7 +1144,7 @@ fn encrypted_by(crypt: &Crypt, plain: &Pdf, kind: XrefKind) -> Vec<u8> {
     let mut trailer = plain.trailer.clone();
     trailer.set("Encrypt", at);
     let resolve = resolve_fn(|id| plain.objects.get(&id));
-    let encrypting = crypt.laid_out(at, &trailer, &resolve).unwrap();
+    let encrypting = crypt.laid_out(None, at, &trailer, &resolve).unwrap();
     for (&id, obj) in &plain.objects {
         let offset = super::indirect_as(&mut out, id, obj, Some(&encrypting)).unwrap();
         section.insert(
@@ -2055,6 +2056,8 @@ fn packed(
         encrypt_at: ObjectId::new(6, 0),
         xref_from,
         pack: Some(Pack { uses: &uses, reuse }),
+        to: None,
+        from: None,
     };
     let bodies =
         (objects.iter()).map(|(&id, obj)| Ok((id, Body::Object(Cow::Borrowed(obj), key_of(id)))));
@@ -2189,12 +2192,676 @@ fn a_table_layout_refuses_to_pack() {
             uses: &HashMap::new,
             reuse: &[],
         }),
+        to: None,
+        from: None,
     };
     let e = write_bodies([], &layout, &NoProgress).unwrap_err();
     assert_eq!(
         e.to_string(),
         "a cross-reference table can't list objects in object streams"
     );
+}
+
+/// A renumbering of `objects`: each at twice its number and one,
+/// generation 0, in their order, and none for one they haven't.
+fn moved(objects: &BTreeMap<ObjectId, Object>) -> impl Fn(ObjectId) -> Option<ObjectId> + Sync {
+    move |id| (objects.contains_key(&id)).then(|| ObjectId::new(id.number * 2 + 1, 0))
+}
+
+/// A Rewrite's graph as held: [`with_many`]'s 300 more objects, its
+/// metadata stream with an `/Identity` crypt filter of its own, and an
+/// object of generation 1 that names an object there isn't and object 0.
+fn held() -> Pdf {
+    let mut pdf = with_many(300);
+    let metadata = (pdf.objects.values_mut())
+        .filter_map(Object::as_stream_mut)
+        .find(|s| s.dict.has_type(b"Metadata"))
+        .unwrap();
+    metadata.dict.set("Filter", vec![Object::name("Crypt")]);
+    let older = ObjectId::new(pdf.max_id + 1, 1);
+    let named = dictionary! {
+        "Generation" => 1,
+        "Gone" => ObjectId::new(9999, 0),
+        "Zero" => ObjectId::new(0, 0),
+    };
+    pdf.objects.insert(older, Object::from(named));
+    pdf.max_id = older.number;
+    pdf
+}
+
+/// `pdf` renumbered by `to` before it's written, as a Rewrite renumbered
+/// its graph before M18 slice 14: each object at its number, each
+/// reference following, one to nothing `null`.
+fn renumbered_first(pdf: &Pdf, to: &dyn Fn(ObjectId) -> Option<ObjectId>) -> Pdf {
+    let mut out = pdf.clone();
+    out.objects = (pdf.objects.iter())
+        .map(|(&id, obj)| {
+            let mut obj = obj.clone();
+            obj.renumber(to);
+            (to(id).unwrap(), obj)
+        })
+        .collect();
+    let mut trailer = Object::from(pdf.trailer.clone());
+    trailer.renumber(to);
+    out.trailer = trailer.as_dict().unwrap().clone();
+    out.max_id = out.objects.keys().map(|id| id.number).max().unwrap_or(0);
+    out
+}
+
+/// `pdf`'s objects, held at their numbers, written whole under `to` as
+/// [`whole`], and with `uses` [`whole_packed`], write them once renumbered:
+/// `/Encrypt` past the last object written, where `to` puts `crypt`'s too.
+fn whole_under(
+    pdf: &Pdf,
+    kind: XrefKind,
+    crypt: Option<&Crypt>,
+    uses: Option<&HashMap<u32, Use>>,
+    to: &(dyn Renumber + Sync),
+) -> anyhow::Result<Vec<u8>> {
+    use super::full::{Body, Layout, Pack, left_out, write_bodies};
+    use crate::materialize::emit::PdfVersion;
+
+    let written: Vec<(&ObjectId, &Object)> = (pdf.objects.iter())
+        .filter(|(_, obj)| !left_out(obj))
+        .collect();
+    let past = (written.iter())
+        .filter_map(|&(&id, _)| to.renumber(id))
+        .map(|at| at.number + 1)
+        .max()
+        .unwrap_or(1);
+    let encrypt_at = ObjectId::new(past, 0);
+    let to = |id| match crypt {
+        Some(c) if c.at() == id => Some(encrypt_at),
+        _ => to.renumber(id),
+    };
+    let walk = || uses.cloned().unwrap_or_default();
+    let layout = Layout {
+        trailer: &pdf.trailer,
+        kind,
+        version: PdfVersion::new(1, 7),
+        crypt,
+        encrypt_at,
+        xref_from: 1,
+        pack: uses.map(|_| Pack {
+            uses: &walk,
+            reuse: &[],
+        }),
+        to: Some(&to),
+        from: None,
+    };
+    let bodies = (written.into_iter())
+        .map(|(&id, obj)| Ok((id, Body::Object(Cow::Borrowed(obj), key_of(id)))));
+    Ok(write_bodies(bodies, &layout, &NoProgress)?.0)
+}
+
+/// Written under a renumbering, a graph held at its own numbers is the
+/// same bytes as the graph renumbered first and written at its new ones:
+/// in the clear and under RC4 and AES (the test's IVs), `/EncryptMetadata
+/// false` too, with a table, a stream, and packed; the metadata stream's
+/// own `/Identity` crypt filter kept, an object of generation 1 packed, now
+/// at 0, and a reference to nothing or to object 0 `null`. What's written
+/// reads back as the graph renumbered.
+#[test]
+fn a_layout_under_a_renumbering_writes_as_the_graph_renumbered_first() {
+    let pdf = held();
+    let to = moved(&pdf.objects);
+    let first = renumbered_first(&pdf, &to);
+    let uses = uses_of(&first);
+    let metadata =
+        TestEncryption::new(CipherKind::Aes128, USER, OWNER).with_encrypt_metadata(false);
+    let metadata = ("AES-128, metadata in the clear", metadata);
+    let states = [rc4_40(&pdf)]
+        .into_iter()
+        .chain(rc4_aes_128_and_aes_256(&pdf));
+    let crypts = (states.chain([metadata])).map(|(name, state)| {
+        let crypt = crypt_of(&encrypted(&pdf, &state, |_| {})[0]);
+        assert!(!pdf.objects.contains_key(&crypt.at()), "{name}");
+        (
+            name,
+            Some(if crypt.is_aes() {
+                crypt.with_test_ivs()
+            } else {
+                crypt
+            }),
+        )
+    });
+    for (name, crypt) in std::iter::once(("plain", None)).chain(crypts) {
+        let crypt = crypt.as_ref();
+        for kind in KINDS {
+            let want = whole(&first.objects, &first.trailer, kind, "1.7", crypt);
+            let got = whole_under(&pdf, kind, crypt, None, &to).unwrap();
+            assert!(got == want, "{name}, {kind:?}");
+        }
+        let want = whole_packed(&first.objects, &first.trailer, crypt, &uses);
+        let got = whole_under(&pdf, XrefKind::Stream, crypt, Some(&uses), &to).unwrap();
+        assert!(got == want, "{name}, packed");
+        assert!(holds(&got, b"/Type/ObjStm"), "{name}");
+        let back = match crypt {
+            Some(_) => open_as_user(&got).unwrap(),
+            None => open(&got),
+        };
+        assert!(back.base_sound(), "{name}");
+        for (&id, obj) in &first.objects {
+            assert!(same(back.get(id).unwrap(), obj), "{name}: {id:?}");
+        }
+    }
+}
+
+/// Under a renumbering, an `/Encrypt` dictionary that refers to an object
+/// (its `/CF`, which a reader reads before it has a key) is written naming
+/// it where it went, and that object is left in the clear there, as its
+/// reader reads it, a string of its crypt filter's too; nothing else is.
+/// Named where it was, a reader would take another object's for the crypt
+/// filters.
+#[test]
+fn an_encrypt_dictionary_names_its_object_where_it_went() {
+    const CLEAR: &[u8] = b"what the encryption dictionary names";
+    let plain = plaintext();
+    let mut tried = 0;
+    for (name, state) in rc4_aes_128_and_aes_256(&plain) {
+        let mut source = plain.clone();
+        source.encrypt(&state).unwrap();
+        let at = source
+            .trailer
+            .get(b"Encrypt")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let encrypt = source.get_dictionary(at).unwrap();
+        let Some(filters) = encrypt.get(b"CF").and_then(Object::as_dict) else {
+            continue;
+        };
+        let mut filters = filters.clone();
+        let std_cf = filters.get_mut(b"StdCF").unwrap().as_dict_mut().unwrap();
+        std_cf.set("Note", literal(CLEAR));
+        let named = source.add_object(filters.clone());
+        source.get_dictionary_mut(at).unwrap().set("CF", named);
+        let crypt = crypt_of(&crate::serialize::fixture::written(&source)[0]);
+        let cf = |crypt: &Crypt| crypt.dict().get(b"CF").and_then(Object::as_reference);
+        assert_eq!(cf(&crypt), Some(named), "{name}");
+
+        let mut held = plain.clone();
+        held.objects.insert(named, Object::from(filters));
+        let to = moved(&held.objects);
+        let first = renumbered_first(&held, &to);
+        let went = to(named).unwrap();
+        assert_ne!(went, named);
+        for kind in KINDS {
+            let bytes = whole_under(&held, kind, Some(&crypt), None, &to).unwrap();
+            let pdf = open_as_user(&bytes).unwrap();
+            assert!(pdf.base_sound(), "{name}, {kind:?}");
+            let now = Crypt::of(&pdf).unwrap().unwrap();
+            assert_eq!(cf(&now), Some(went), "{name}, {kind:?}");
+            assert!(holds(&bytes, CLEAR), "{name}, {kind:?}: in the clear");
+            for text in SECRETS {
+                let shown = String::from_utf8_lossy(text);
+                assert!(!in_clear(&bytes, text), "{name}, {kind:?}: {shown:?}");
+            }
+            for (&id, obj) in &first.objects {
+                assert!(same(pdf.get(id).unwrap(), obj), "{name}, {kind:?}: {id:?}");
+            }
+        }
+        tried += 1;
+    }
+    assert_eq!(tried, 2, "AES-128's and AES-256's crypt filters");
+}
+
+/// Under a renumbering, a stable save's copy, bytes at their own number,
+/// isn't taken, nor an object the renumbering gives no number, nor an
+/// encryption whose dictionary it doesn't put where it's written; an
+/// object it gives a number is written there.
+#[test]
+fn a_layout_under_a_renumbering_refuses_what_it_can_t_write() {
+    use super::full::{Body, Layout, write_bodies};
+    use crate::materialize::emit::PdfVersion;
+
+    let trailer = dictionary! { "Root" => ObjectId::new(1, 0) };
+    let to = |id: ObjectId| (id.number < 5).then(|| ObjectId::new(id.number + 1, 0));
+    let layout = Layout {
+        trailer: &trailer,
+        kind: XrefKind::Table,
+        version: PdfVersion::new(1, 7),
+        crypt: None,
+        encrypt_at: ObjectId::new(0, 0),
+        xref_from: 1,
+        pack: None,
+        to: Some(&to),
+        from: None,
+    };
+    let catalog = catalog();
+    let raw = b"1 0 obj\n<</Type/Catalog>>\nendobj";
+    let cases = [
+        (Body::Raw(raw), ObjectId::new(1, 0), "copied as it is"),
+        (
+            Body::Object(Cow::Borrowed(&catalog), key_of(ObjectId::new(7, 0))),
+            ObjectId::new(7, 0),
+            "has no number to be written at",
+        ),
+    ];
+    for (body, id, why) in cases {
+        let e = write_bodies([Ok((id, body))], &layout, &NoProgress).unwrap_err();
+        assert!(e.to_string().contains(why), "{why}: {e:#}");
+    }
+    let body = Body::Object(Cow::Borrowed(&catalog), key_of(ObjectId::new(1, 0)));
+    let one = [Ok((ObjectId::new(1, 0), body))];
+    let (bytes, _) = write_bodies(one, &layout, &NoProgress).unwrap();
+    assert!(holds(&bytes, b"2 0 obj"));
+    let pdf = open(&bytes);
+    let root = pdf.trailer().get(b"Root").and_then(Object::as_reference);
+    assert_eq!(root, Some(ObjectId::new(2, 0)));
+    // Encrypted, the renumbering puts the dictionary where it's written.
+    let plain = plaintext();
+    let crypt = crypt_of(&encrypted(&plain, &rc4_40(&plain).1, |_| {})[0]);
+    let encrypted = Layout {
+        crypt: Some(&crypt),
+        encrypt_at: ObjectId::new(6, 0),
+        ..layout
+    };
+    let body = Body::Object(Cow::Borrowed(&catalog), key_of(ObjectId::new(1, 0)));
+    let one = [Ok((ObjectId::new(1, 0), body))];
+    let e = write_bodies(one, &encrypted, &NoProgress).unwrap_err();
+    assert!(
+        e.to_string().contains("puts the encryption dictionary"),
+        "{e:#}"
+    );
+}
+
+/// A write refuses a reading to copy from that comes without a
+/// renumbering; two objects the renumbering gives one number, written on
+/// their own or in an object stream; and an object given the number the
+/// encryption dictionary is written at, under a renumbering or without one.
+#[test]
+fn a_write_refuses_a_number_twice_and_a_reading_without_a_renumbering() {
+    use super::full::{Body, Layout, Pack, write_bodies};
+    use crate::materialize::emit::PdfVersion;
+    use crate::pdf::write::ReadFrom;
+
+    type To<'a> = Option<&'a (dyn Renumber + Sync)>;
+    /// What a layout of the test's is, but a table's at the numbers given.
+    #[derive(Default, Clone, Copy)]
+    struct Is<'a> {
+        to: To<'a>,
+        from: Option<&'a dyn ReadFrom>,
+        packed: bool,
+        crypt: Option<(&'a Crypt, u32)>,
+    }
+    let trailer = dictionary! { "Root" => ObjectId::new(1, 0) };
+    let walk = HashMap::new;
+    let id = |n| ObjectId::new(n, 0);
+    let write = |bodies: [(u32, &Object); 2], is: Is<'_>| {
+        let layout = Layout {
+            trailer: &trailer,
+            kind: if is.packed {
+                XrefKind::Stream
+            } else {
+                XrefKind::Table
+            },
+            version: PdfVersion::new(1, 7),
+            crypt: is.crypt.map(|(crypt, _)| crypt),
+            encrypt_at: id(is.crypt.map_or(0, |(_, at)| at)),
+            xref_from: 1,
+            pack: is.packed.then_some(Pack {
+                uses: &walk,
+                reuse: &[],
+            }),
+            to: is.to,
+            from: is.from,
+        };
+        let bodies =
+            bodies.map(|(n, obj)| Ok((id(n), Body::Object(Cow::Borrowed(obj), key_of(id(n))))));
+        write_bodies(bodies, &layout, &NoProgress).map(|(bytes, _)| bytes)
+    };
+    let refused = |bodies, is| format!("{:#}", write(bodies, is).unwrap_err());
+    let catalog = catalog();
+    let other = Object::from(dictionary! { "Other" => Object::from(1) });
+    let two = [(1, &catalog), (2, &other)];
+
+    // A reading, and nothing renumbered: at the numbers given, both write.
+    let read = open(&odd_table());
+    write(two, Is::default()).unwrap();
+    let from = Some(read.read_from());
+    let why = refused(
+        two,
+        Is {
+            from,
+            ..Is::default()
+        },
+    );
+    assert!(
+        why.contains("a reading to copy from is for a write under a renumbering"),
+        "{why}"
+    );
+
+    // Two objects at one number: each on its own.
+    let one = |n: ObjectId| (n.number < 3).then(|| id(2));
+    let apart = |n: ObjectId| (n.number < 3).then(|| id(n.number + 1));
+    let (one, apart): (To<'_>, To<'_>) = (Some(&one), Some(&apart));
+    write(
+        two,
+        Is {
+            to: apart,
+            ..Is::default()
+        },
+    )
+    .unwrap();
+    let why = refused(
+        two,
+        Is {
+            to: one,
+            ..Is::default()
+        },
+    );
+    assert!(why.contains("object 2 is written twice"), "{why}");
+
+    // And both in an object stream.
+    let members = [(1, &other), (2, &other)];
+    let packed = Is {
+        packed: true,
+        ..Is::default()
+    };
+    let bytes = write(
+        members,
+        Is {
+            to: apart,
+            ..packed
+        },
+    )
+    .unwrap();
+    assert!(holds(&bytes, b"/ObjStm"), "the two are packed");
+    let why = refused(members, Is { to: one, ..packed });
+    assert!(why.contains("an object is written twice"), "{why}");
+
+    // An object at the encryption dictionary's number, under a renumbering
+    // that puts it there, and at the numbers given.
+    let source = plaintext();
+    let crypt = crypt_of(&encrypted(&source, &rc4_40(&source).1, |_| {})[0]);
+    let was = crypt.at();
+    assert!(was.number > 3, "the bodies' numbers aren't its own");
+    let onto = |n: ObjectId| match n {
+        n if n == was => Some(id(3)),
+        n if n.number < 3 => Some(id(n.number + 1)),
+        _ => None,
+    };
+    let aside = |n: ObjectId| match n {
+        n if n == was => Some(id(3)),
+        n if n.number < 3 => Some(n),
+        _ => None,
+    };
+    let (onto, aside): (To<'_>, To<'_>) = (Some(&onto), Some(&aside));
+    let at = |n| Is {
+        crypt: Some((&crypt, n)),
+        ..Is::default()
+    };
+    write(two, Is { to: aside, ..at(3) }).unwrap();
+    let why = refused(two, Is { to: onto, ..at(3) });
+    assert!(
+        why.contains("object 3 is the encryption dictionary's"),
+        "{why}"
+    );
+    write(two, at(3)).unwrap();
+    let why = refused(two, at(2));
+    assert!(
+        why.contains("object 2 is the encryption dictionary's"),
+        "{why}"
+    );
+}
+
+/// A page read with odd spacing, a comment, a string that reads like a
+/// reference, and references: to the pages (2), the content (4), an object
+/// there isn't (9), and the catalog (1), whose number stays, oddly spaced.
+const ODD_PAGE: &[u8] = b"<<  /Type   /Page  % a comment, kept\n  /Parent 2   0   R \
+    /Contents [4 0 R\n  ] /Gone 9 0 R /Text (4 0 R stays) /Kept 1  0  R >>";
+
+/// [`ODD_PAGE`] copied under [`spliced_to`]: each reference that moved
+/// written anew where it was, the one to nothing `null`, every other byte
+/// as it was.
+const ODD_PAGE_SPLICED: &[u8] = b"<<  /Type   /Page  % a comment, kept\n  /Parent 7 0 R \
+    /Contents [2 0 R\n  ] /Gone null /Text (4 0 R stays) /Kept 1  0  R >>";
+
+/// The renumbering the copies' tests write under: 1 stays, 2 goes to 7, 3
+/// to 5, 4 to 2 and 10 to 11; none for any other.
+fn spliced_to(id: ObjectId) -> Option<ObjectId> {
+    let at = match id.number {
+        1 => 1,
+        2 => 7,
+        3 => 5,
+        4 => 2,
+        10 => 11,
+        _ => return None,
+    };
+    (id.generation == 0).then(|| ObjectId::new(at, 0))
+}
+
+/// A file with a table of a catalog (1), its pages (2), [`ODD_PAGE`] (3)
+/// and its content (4), a stream whose data reads like a reference.
+fn odd_table() -> Vec<u8> {
+    use crate::source::lazy_tests::{stream, with_table};
+
+    with_table(&[
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (3, ODD_PAGE.to_vec()),
+        (4, stream("/Length 10 /Page 3 0 R", b"(3 0 R) Tj")),
+    ])
+}
+
+/// [`odd_table`]'s objects in a file with object streams, by a stable save:
+/// the catalog, the pages and [`ODD_PAGE`] in one, the page as its bytes;
+/// the content at an offset.
+fn odd_packed() -> Vec<u8> {
+    use super::full::{Body, Layout, Pack, write_bodies};
+    use crate::materialize::emit::PdfVersion;
+
+    let (doc, _) = (open(&odd_table()).to_document_and_raw(Handover::None)).unwrap();
+    let layout = Layout {
+        trailer: &doc.trailer,
+        kind: XrefKind::Stream,
+        version: PdfVersion::new(1, 7),
+        crypt: None,
+        encrypt_at: ObjectId::new(0, 0),
+        xref_from: 1,
+        pack: Some(Pack {
+            uses: &HashMap::new,
+            reuse: &[],
+        }),
+        to: None,
+        from: None,
+    };
+    let bodies = (doc.objects.iter()).map(|(&id, obj)| {
+        let obj = Cow::Borrowed(obj);
+        Ok(match id.number {
+            3 => (id, Body::Member(ODD_PAGE, obj, key_of(id))),
+            _ => (id, Body::Object(obj, key_of(id))),
+        })
+    });
+    write_bodies(bodies, &layout, &NoProgress).unwrap().0
+}
+
+/// Object `id` as `raw` holds it read, given to a write under a
+/// renumbering.
+fn as_read(raw: &RawCopies, id: ObjectId) -> super::full::Body<'_> {
+    let (object, record) = raw.as_read(id).unwrap();
+    super::full::Body::Read {
+        object: Cow::Borrowed(object),
+        record: Cow::Borrowed(record),
+        key: key_of(id),
+    }
+}
+
+/// `bodies` written whole under [`spliced_to`], copied from `from`: with a
+/// table, or, `packed`, with what goes in object streams there.
+fn written_under<'a>(
+    bodies: impl IntoIterator<Item = (ObjectId, super::full::Body<'a>)>,
+    trailer: &Dictionary,
+    packed: bool,
+    from: Option<&dyn ReadFrom>,
+) -> anyhow::Result<Vec<u8>> {
+    use super::full::{Layout, Pack, write_bodies};
+    use crate::materialize::emit::PdfVersion;
+
+    let layout = Layout {
+        trailer,
+        kind: match packed {
+            true => XrefKind::Stream,
+            false => XrefKind::Table,
+        },
+        version: PdfVersion::new(1, 7),
+        crypt: None,
+        encrypt_at: ObjectId::new(0, 0),
+        xref_from: 1,
+        pack: packed.then_some(Pack {
+            uses: &HashMap::new,
+            reuse: &[],
+        }),
+        to: Some(&spliced_to),
+        from,
+    };
+    Ok(write_bodies(bodies.into_iter().map(Ok), &layout, &NoProgress)?.0)
+}
+
+/// Bytes `bytes` of a file as a lossy string, to show where they differ.
+fn shown(bytes: &[u8]) -> Cow<'_, str> {
+    String::from_utf8_lossy(bytes)
+}
+
+/// Under a renumbering, an object given as read at an offset is copied as
+/// its bytes: its header written anew at the number it goes to, and each
+/// reference that moved, `null` where it names nothing; every other byte
+/// as it was, odd spacing, a comment, a string and a stream's data that
+/// read like references, and a reference whose number stays. Packed, it's
+/// written on its own still, where an object written anew beside it goes
+/// in an object stream. What's written reads back as the file renumbered.
+#[test]
+fn a_read_at_another_number_is_its_bytes_spliced() {
+    use super::full::Body;
+
+    let pdf = open(&odd_table());
+    let (doc, raw) = pdf.to_document_and_raw(Handover::Renumbered).unwrap();
+    let want: [(u32, &[u8]); 4] = [
+        (1, b"<< /Type /Catalog /Pages 7 0 R >>"),
+        (7, b"<< /Type /Pages /Kids [5 0 R] /Count 1 >>"),
+        (5, ODD_PAGE_SPLICED),
+        (
+            2,
+            b"<< /Length 10 /Page 5 0 R >>\nstream\n(3 0 R) Tj\nendstream",
+        ),
+    ];
+    let note = ObjectId::new(10, 0);
+    let mut renumbered = doc.clone();
+    let named = dictionary! { "Page" => ObjectId::new(3, 0) };
+    renumbered.objects.insert(note, Object::from(named));
+    let first = renumbered_first(&renumbered, &spliced_to);
+    for packed in [false, true] {
+        let bodies = (doc.objects.keys()).map(|&id| (id, as_read(&raw, id)));
+        let anew = Body::Object(Cow::Borrowed(&renumbered.objects[&note]), key_of(note));
+        let from = Some(pdf.read_from());
+        let bytes = written_under(bodies.chain([(note, anew)]), &doc.trailer, packed, from);
+        let bytes = bytes.unwrap();
+        let back = open(&bytes);
+        assert!(back.base_sound(), "packed: {packed}");
+        for (n, body) in want {
+            let at = ObjectId::new(n, 0);
+            let span = back.raw_span_whole(at).expect("at an offset");
+            let copy = [format!("{n} 0 obj\n").as_bytes(), body, b"\nendobj"].concat();
+            assert_eq!(shown(&bytes[span]), shown(&copy), "packed: {packed}");
+        }
+        let noted = ObjectId::new(11, 0);
+        assert_eq!(back.member_bytes(noted).is_some(), packed);
+        assert!(holds(&bytes, b"/ObjStm") == packed);
+        for (&id, obj) in &first.objects {
+            assert!(same(back.get(id).unwrap(), obj), "packed: {packed}, {id:?}");
+        }
+    }
+}
+
+/// Under a renumbering, an object given as read from an object stream goes
+/// in one of the write's as its bytes there, each reference that moved
+/// written anew where it was, and every other byte as it was: what a stable
+/// save copied as its bytes, odd as they are, and what it wrote anew alike.
+#[test]
+fn a_member_read_at_another_number_is_its_bytes_spliced() {
+    let pdf = open(&odd_packed());
+    let (mut doc, raw) = pdf.to_document_and_raw(Handover::Renumbered).unwrap();
+    let page = ObjectId::new(3, 0);
+    assert_eq!(pdf.member_bytes(page).unwrap().1, ODD_PAGE);
+    // What a whole file writes: not the object and cross-reference streams.
+    doc.objects.retain(|_, obj| !super::full::left_out(obj));
+    let ids: Vec<ObjectId> = doc.objects.keys().copied().collect();
+    let members = (ids.iter()).filter(|&&id| raw.as_read(id).unwrap().1.at.stream().is_some());
+    assert_eq!(members.count(), 3, "the catalog, the pages and the page");
+    let bodies = ids.iter().map(|&id| (id, as_read(&raw, id)));
+    let bytes = written_under(bodies, &doc.trailer, true, Some(pdf.read_from())).unwrap();
+    let back = open(&bytes);
+    assert!(back.base_sound());
+    let (_, at_5) = back
+        .member_bytes(ObjectId::new(5, 0))
+        .expect("in an object stream");
+    assert_eq!(shown(&at_5), shown(ODD_PAGE_SPLICED));
+    let (_, pages) = pdf.member_bytes(ObjectId::new(2, 0)).unwrap();
+    let pages = shown(&pages).replace("3 0 R", "5 0 R");
+    let (_, at_7) = back.member_bytes(ObjectId::new(7, 0)).unwrap();
+    assert_eq!(shown(&at_7), pages);
+    assert!(
+        back.raw_span_whole(ObjectId::new(2, 0)).is_some(),
+        "content"
+    );
+    for (&id, obj) in &renumbered_first(&doc, &spliced_to).objects {
+        assert!(same(back.get(id).unwrap(), obj), "{id:?}");
+    }
+}
+
+/// An object as read is refused from another reading than the one the
+/// write is given, though of the same bytes, at an offset and in an object
+/// stream; from its own it's written. And a write at the numbers the bodies
+/// are given at takes none.
+#[test]
+fn a_read_from_another_reading_is_refused() {
+    use super::full::{Layout, write_bodies};
+    use crate::materialize::emit::PdfVersion;
+
+    for (name, bytes, packed) in [
+        ("at an offset", odd_table(), false),
+        ("in an object stream", odd_packed(), true),
+    ] {
+        let given = open(&bytes);
+        let other = open(&bytes);
+        for refused in [true, false] {
+            let read = if refused { &other } else { &given };
+            let (doc, raw) = read.to_document_and_raw(Handover::Renumbered).unwrap();
+            // Of the packed file, its members alone, so that what's refused
+            // is a member's.
+            let bodies = (doc.objects.keys())
+                .filter(|&&id| !packed || raw.as_read(id).unwrap().1.at.stream().is_some())
+                .map(|&id| (id, as_read(&raw, id)));
+            let written = written_under(bodies, &doc.trailer, packed, Some(given.read_from()));
+            match refused {
+                true => {
+                    let e = written.unwrap_err();
+                    let elsewhere = e.downcast_ref::<StructureError>();
+                    let elsewhere = matches!(elsewhere, Some(StructureError::Elsewhere(_)));
+                    assert!(elsewhere, "{name}: {e:#}");
+                }
+                false => assert!(open(&written.unwrap()).base_sound(), "{name}"),
+            }
+        }
+    }
+    let pdf = open(&odd_table());
+    let (doc, raw) = pdf.to_document_and_raw(Handover::Renumbered).unwrap();
+    let layout = Layout {
+        trailer: &doc.trailer,
+        kind: XrefKind::Table,
+        version: PdfVersion::new(1, 7),
+        crypt: None,
+        encrypt_at: ObjectId::new(0, 0),
+        xref_from: 1,
+        pack: None,
+        to: None,
+        from: None,
+    };
+    let id = ObjectId::new(1, 0);
+    let e = write_bodies([Ok((id, as_read(&raw, id)))], &layout, &NoProgress).unwrap_err();
+    let why = "only a write under a renumbering takes";
+    assert!(e.to_string().contains(why), "{e:#}");
 }
 
 /// A file of `pages` pages ([`file`](crate::materialize::tests::file)),
@@ -2935,6 +3602,8 @@ fn a_number_past_what_a_file_may_use_isnt_written() {
         encrypt_at: ObjectId::new(0, 0),
         xref_from,
         pack: None,
+        to: None,
+        from: None,
     };
     let blob = BlobId { hash: 0, len: 0 };
     let catalog = catalog();

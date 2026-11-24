@@ -116,7 +116,7 @@ pub fn section(
             .or_else(|| crypt.and_then(|c| c.fallback_resolve(id)))
     });
     let encrypting = match crypt {
-        Some(c) => Some(c.laid_out(c.at(), &trailer, &resolve)?),
+        Some(c) => Some(c.laid_out(None, c.at(), &trailer, &resolve)?),
         None => None,
     };
 

@@ -3,6 +3,20 @@
 //! Encrypted, each object is encrypted under the number it's written at via
 //! `pdf_structure::write::Encrypting`, an object stream's members with it,
 //! and the source's `/Encrypt` and `/ID[0]` are kept.
+//!
+//! Under a renumbering ([`Layout::to`]) the objects are held at the numbers
+//! they were given at and written at those it gives them, each through the
+//! family's [`Parts`], which writes every reference as the renumbering
+//! names it and encrypts under the number written; the `/Encrypt`
+//! dictionary is the one laid out for the numbers written. An object given
+//! as read ([`Body::Read`]) is copied there by the family's rules, its
+//! header and each reference that moved written anew in place, or, where
+//! they decline (at another number under a key made of it, say), written
+//! anew from the object as read; a copy whose bytes or record aren't what
+//! the reading read fails the write, which a dense Rewrite then makes
+//! again with nothing given as read. Without a renumbering, each object is
+//! written at its own number by sheaf's writer, copies as [`Body::Raw`]
+//! and [`Body::Member`] say.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -17,7 +31,7 @@ use super::xref::{Entry, Section};
 use super::{object, objstm};
 use crate::materialize::ObjKey;
 use crate::materialize::emit::PdfVersion;
-use crate::pdf::write::Encrypting;
+use crate::pdf::write::{Encrypting, Packed, PartBody, Parts, ReadFrom, Record, Renumber};
 use crate::pdf::{
     Dictionary, Object, ObjectId, Value, XrefFacts, XrefKind, deflate_options, resolve_fn,
 };
@@ -58,6 +72,19 @@ pub enum Body<'a> {
     /// An object written anew (and encrypted when the file is) on its own
     /// or, when the layout packs it, with its object stream.
     Object(Cow<'a, Object>, ObjKey),
+    /// An object as the family read it, with where it was read
+    /// ([`RawCopies::as_read`](crate::pdf::RawCopies::as_read)), for a write
+    /// under a renumbering alone ([`Layout::to`]): the family's
+    /// [`PartBody::Read`], copied from [`Layout::from`] where its rules for a
+    /// copy hold, its header and each reference that moved written anew in
+    /// place, else written anew from `object`. One read from an object
+    /// stream goes in one where the layout packs it; one read at an offset is
+    /// written on its own, never packed, as a stable save's [`Body::Raw`] is.
+    Read {
+        object: Cow<'a, Object>,
+        record: Cow<'a, Record>,
+        key: ObjKey,
+    },
 }
 
 /// An object [`write_bodies`] packs: its id, its key, itself, and its
@@ -83,13 +110,32 @@ pub struct Layout<'a> {
     /// cross-reference stream can list their members, so a table's layout
     /// that packs is refused.
     pub pack: Option<Pack<'a>>,
+    /// Where each object is written, by the number it's given at, and what
+    /// each reference names: none for each at its own. Under one, each
+    /// body is given once, at the number it's held at, as a
+    /// [`Body::Object`] or [`Body::Read`], and written through [`Parts`];
+    /// `trailer` is in the numbers held too (what encryption reads its
+    /// `/Root` by), its section's copy written in those `to` gives;
+    /// `encrypt_at`, `xref_from`, [`Pack::uses`] and `reuse` are in the
+    /// numbers written.
+    /// With a `crypt`, `to` gives its dictionary's number ([`Crypt::at`])
+    /// `encrypt_at`, where it's written, so that the encryption is laid out
+    /// with it there, and what refers to it names it there: else the family
+    /// takes it for a new file's, which writes the document's metadata
+    /// stream without its own `/Identity` crypt filter.
+    pub to: Option<&'a (dyn Renumber + Sync)>,
+    /// The reading the bodies were read in, which [`Parts`] copies a
+    /// [`Body::Read`] from and reads a stream's data where it was written
+    /// from ([`LazyPdf::read_from`](crate::pdf::LazyPdf::read_from)): under
+    /// `to` alone.
+    pub from: Option<&'a dyn ReadFrom>,
 }
 
 /// How [`write_bodies`] packs what it writes anew that may go in an
 /// object stream ([`objstm::packable`]).
 pub struct Pack<'a> {
-    /// Which pages use each object, by number, which its container is
-    /// grouped by ([`group::group`]).
+    /// Which pages use each object, by number written, which its container
+    /// is grouped by ([`group::group`]).
     pub uses: &'a (dyn Fn() -> HashMap<u32, Use> + Sync),
     /// The numbers containers take first, in order: the source's own
     /// containers', now free.
@@ -105,10 +151,16 @@ pub fn write_bodies<'a>(
     if layout.pack.is_some() && layout.kind == XrefKind::Table {
         bail!("a cross-reference table can't list objects in object streams");
     }
+    if layout.from.is_some() && layout.to.is_none() {
+        bail!("a reading to copy from is for a write under a renumbering");
+    }
     let pack = (layout.pack.as_ref()).filter(|_| layout.crypt.is_none_or(Crypt::packs));
     std::thread::scope(|s| {
         let pack = pack.map(|pack| (pack.reuse, s.spawn(pack.uses)));
-        file(bodies, layout, pack, p)
+        match layout.to {
+            Some(to) => renumbered(bodies, to, layout, pack, p),
+            None => file(bodies, layout, pack, p),
+        }
     })
 }
 
@@ -139,7 +191,7 @@ fn file<'a>(
             .iter()
             .filter_map(|(id, body)| match body {
                 Body::Object(obj, _) | Body::Member(_, obj, _) => Some((*id, obj.as_ref())),
-                Body::Raw(_) => None,
+                Body::Raw(_) | Body::Read { .. } => None,
             })
             .collect();
         let resolve = resolve_fn(|id| {
@@ -148,7 +200,7 @@ fn file<'a>(
                 .copied()
                 .or_else(|| crypt.fallback_resolve(id))
         });
-        let encrypting = crypt.laid_out(layout.encrypt_at, layout.trailer, &resolve)?;
+        let encrypting = crypt.laid_out(None, layout.encrypt_at, layout.trailer, &resolve)?;
         for (id, body) in &collected {
             p.check()?;
             usable(id.number)?;
@@ -180,6 +232,7 @@ fn file<'a>(
                     continue;
                 }
                 Body::Object(obj, _) => super::indirect_as(&mut out, *id, obj, Some(&encrypting))?,
+                Body::Read { .. } => return Err(as_read_unrenumbered(*id)),
             };
             section.insert(
                 id.number,
@@ -223,6 +276,7 @@ fn file<'a>(
                     continue;
                 }
                 Body::Object(obj, _) => super::indirect_as(&mut out, id, &obj, None)?,
+                Body::Read { .. } => return Err(as_read_unrenumbered(id)),
             };
             section.insert(
                 id.number,
@@ -283,6 +337,19 @@ fn finish_file<'a>(
             p,
         )?;
     }
+    close(out, section, trailer, layout, next)
+}
+
+/// `out`, the file's objects written and listed in `section`, closed: the
+/// `/ID`, then the cross-reference section in `layout`'s kind, from
+/// `next` on for a stream's own number, with `trailer`'s keys.
+fn close(
+    mut out: Vec<u8>,
+    mut section: Section,
+    mut trailer: Dictionary,
+    layout: &Layout<'_>,
+    next: u32,
+) -> Result<(Vec<u8>, XrefFacts)> {
     let kept = (layout.crypt)
         .and_then(Crypt::first_id)
         .map(<[u8]>::to_vec)
@@ -327,6 +394,267 @@ fn finish_file<'a>(
     Ok((out, facts))
 }
 
+/// How many object streams [`Parts::containers`] is given at once, the
+/// write's progress checked between.
+const BATCH: usize = 32;
+
+/// [`file`] under the renumbering `to` ([`Layout::to`]): each body, held at
+/// the number it's given at, written at the one `to` gives it through the
+/// family's [`Parts`], on its own or, where the layout packs it, in an
+/// object stream, but one as read at an offset on its own; encrypted as
+/// [`Crypt::laid_out`] lays the file out under `to`, which `resolve`s by
+/// the numbers held, an object as read by its object as read.
+fn renumbered<'a>(
+    bodies: impl IntoIterator<Item = Result<(ObjectId, Body<'a>)>>,
+    to: &(dyn Renumber + Sync),
+    layout: &Layout<'_>,
+    pack: Option<(&[u32], Walk<'_>)>,
+    p: &dyn Progress,
+) -> Result<(Vec<u8>, XrefFacts)> {
+    let mut file = Under::new(layout, to);
+    let packs = pack.is_some();
+    if let Some(crypt) = layout.crypt {
+        let at = to.renumber(crypt.at());
+        if at != Some(layout.encrypt_at) {
+            bail!(
+                "the renumbering puts the encryption dictionary, object {}, at {at:?}, not {}",
+                crypt.at(),
+                layout.encrypt_at
+            );
+        }
+        // Collected, so that `Encryptor::laid_out` resolves `/Root` ->
+        // `/Metadata` and a stream's indirect `/Filter` by the numbers held.
+        let mut given = Vec::new();
+        for item in bodies {
+            p.check()?;
+            given.push(part(item?)?);
+        }
+        let by_id: HashMap<ObjectId, &Object> = (given.iter())
+            .map(|(id, body)| (*id, body.object()))
+            .collect();
+        let resolve = resolve_fn(|id| {
+            by_id
+                .get(&id)
+                .copied()
+                .or_else(|| crypt.fallback_resolve(id))
+        });
+        let encrypting = crypt.laid_out(Some(to), layout.encrypt_at, layout.trailer, &resolve)?;
+        let parts = Parts::new(&encrypting, layout.from)?;
+        let mut members = Vec::new();
+        for (id, body) in &given {
+            p.check()?;
+            let at = file.at(*id)?;
+            let packed = packs
+                && !read_at_offset(body)
+                && !encrypting.dictionary_object(at)
+                && objstm::packable(at, body.object());
+            match packed {
+                true => members.push((*id, at, body)),
+                false => file.on_its_own((*id, at, body), &parts)?,
+            }
+        }
+        file.finish(&members, pack, &parts, Some(&encrypting), p)
+    } else {
+        let parts = Parts::plain(layout.from, Some(to))?;
+        let mut held = Vec::new();
+        for item in bodies {
+            p.check()?;
+            let (id, body) = part(item?)?;
+            let at = file.at(id)?;
+            match packs && !read_at_offset(&body) && objstm::packable(at, body.object()) {
+                true => held.push((id, at, body)),
+                false => file.on_its_own((id, at, &body), &parts)?,
+            }
+        }
+        let members: Vec<Packed<'_>> = (held.iter())
+            .map(|(id, at, body)| (*id, *at, body))
+            .collect();
+        file.finish(&members, pack, &parts, None, p)
+    }
+}
+
+/// A body as [`Parts`] writes it: under a renumbering, an object written
+/// anew or one as read is given ([`Layout::to`]); a stable save's copies
+/// are bytes at their own numbers.
+fn part((id, body): (ObjectId, Body<'_>)) -> Result<(ObjectId, PartBody<'_>)> {
+    match body {
+        Body::Object(obj, _) => Ok((id, PartBody::New(obj))),
+        Body::Read { object, record, .. } => Ok((id, PartBody::Read { object, record })),
+        Body::Raw(_) | Body::Member(..) => {
+            bail!("object {id} is copied as it is, which a renumbered write doesn't take")
+        }
+    }
+}
+
+/// Whether `body` is an object as read at an offset in its file, which a
+/// write under a renumbering writes on its own, as a stable save writes
+/// its [`Body::Raw`]: where its rules hold, the family copies it there,
+/// and never in an object stream.
+fn read_at_offset(body: &PartBody<'_>) -> bool {
+    matches!(body, PartBody::Read { record, .. } if crate::pdf::write::read_at_offset(record))
+}
+
+/// The refusal of an object as read ([`Body::Read`]) given to a write at
+/// the numbers the bodies are given at: its copy is the family's, under a
+/// renumbering.
+fn as_read_unrenumbered(id: ObjectId) -> anyhow::Error {
+    anyhow::anyhow!("object {id} is given as read, which only a write under a renumbering takes")
+}
+
+/// A whole file being written under a renumbering ([`renumbered`]): what's
+/// written so far, what it lists, and past the last number written.
+struct Under<'l> {
+    layout: &'l Layout<'l>,
+    to: &'l (dyn Renumber + Sync),
+    out: Vec<u8>,
+    section: Section,
+    next: u32,
+}
+
+impl<'l> Under<'l> {
+    /// The header, for `layout` under `to`.
+    fn new(layout: &'l Layout<'l>, to: &'l (dyn Renumber + Sync)) -> Under<'l> {
+        let mut out = format!("%PDF-{}\n", layout.version).into_bytes();
+        out.extend_from_slice(BINARY);
+        Under {
+            layout,
+            to,
+            out,
+            section: Section::full(1),
+            next: 1,
+        }
+    }
+
+    /// Where object `id` is written: refused where the renumbering gives
+    /// it none, or one a file may not use.
+    fn at(&mut self, id: ObjectId) -> Result<ObjectId> {
+        let Some(at) = self.to.renumber(id) else {
+            bail!("object {id} has no number to be written at");
+        };
+        usable(at.number)?;
+        self.next = self.next.max(at.number + 1);
+        Ok(at)
+    }
+
+    /// Object `id`, written on its own at `at` through `parts`, and listed.
+    fn on_its_own(&mut self, (id, at, body): Packed<'_>, parts: &Parts<'_>) -> Result<()> {
+        if self.section.lists(at.number) {
+            bail!("object {} is written twice", at.number);
+        }
+        let offset = (parts.body(&mut self.out, id, at, body))
+            .with_context(|| format!("writing object {id} at {at}"))?;
+        let generation = at.generation;
+        (self.section).insert(at.number, Entry::InUse { offset, generation });
+        Ok(())
+    }
+
+    /// The file finished: the `/Encrypt` dictionary as `encrypting` lays it
+    /// out, `members` in object streams, and the section, its trailer in the
+    /// numbers written.
+    fn finish(
+        mut self,
+        members: &[Packed<'_>],
+        pack: Option<(&[u32], Walk<'_>)>,
+        parts: &Parts<'_>,
+        encrypting: Option<&Encrypting<'_>>,
+        p: &dyn Progress,
+    ) -> Result<(Vec<u8>, XrefFacts)> {
+        let layout = self.layout;
+        let mut trailer = Object::from(layout.trailer.clone());
+        trailer.renumber(|r| self.to.renumber(r));
+        let Value::Dict(mut trailer) = trailer.into_value() else {
+            unreachable!("a dictionary renumbered is one")
+        };
+        for key in SECTION_KEYS {
+            trailer.remove(key);
+        }
+        if let Some(encrypting) = encrypting {
+            let at = layout.encrypt_at;
+            usable(at.number)?;
+            let packed = members
+                .iter()
+                .any(|(_, written, _)| written.number == at.number);
+            if self.section.lists(at.number) || packed {
+                bail!("object {} is the encryption dictionary's", at.number);
+            }
+            let dict = Object::from(encrypting.dictionary().clone());
+            let offset = object::indirect(&mut self.out, at, &dict)?;
+            let generation = at.generation;
+            (self.section).insert(at.number, Entry::InUse { offset, generation });
+            trailer.set("Encrypt", Object::from(at));
+            self.next = self.next.max(at.number + 1);
+        }
+        if let Some((reuse, uses)) = pack {
+            let uses = uses.join().expect("the page walk doesn't panic");
+            self.packed(members, &uses, reuse, parts, p)?;
+        }
+        close(self.out, self.section, trailer, layout, self.next)
+    }
+
+    /// `members` in object streams through `parts`, grouped by `uses` and
+    /// numbered first from `reuse`, as [`packed`] packs: each written on its
+    /// own where there aren't numbers enough, or its object stream would be
+    /// more than a reader takes.
+    fn packed(
+        &mut self,
+        members: &[Packed<'_>],
+        uses: &HashMap<u32, Use>,
+        reuse: &[u32],
+        parts: &Parts<'_>,
+        p: &dyn Progress,
+    ) -> Result<()> {
+        let by_number: HashMap<u32, Packed<'_>> =
+            (members.iter()).map(|&m| (m.1.number, m)).collect();
+        if by_number.len() != members.len()
+            || members.iter().any(|m| self.section.lists(m.1.number))
+        {
+            bail!("an object is written twice");
+        }
+        let used = |n: &u32| uses.get(n).copied().unwrap_or(Use::None);
+        let grouped = group::group(
+            members
+                .iter()
+                .map(|(_, at, _)| (at.number, used(&at.number))),
+        );
+        let taken = |n| self.section.lists(n) || by_number.contains_key(&n);
+        let from = self.next.max(self.layout.xref_from);
+        let Some(numbers) = numbers(grouped.len(), reuse, from, taken) else {
+            for &member in members {
+                self.on_its_own(member, parts)?;
+            }
+            return Ok(());
+        };
+        let groups: Vec<(u32, Vec<Packed<'_>>)> = (numbers.into_iter().zip(grouped))
+            .map(|(n, group)| (n, group.iter().map(|m| by_number[m]).collect()))
+            .collect();
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
+        let deflate = deflate_options();
+        let mut built = Vec::with_capacity(groups.len());
+        for batch in groups.chunks(BATCH) {
+            p.check()?;
+            built.extend(parts.containers(batch, deflate, threads, None)?);
+        }
+        for ((n, group), container) in groups.iter().zip(built) {
+            let Some(container) = container else {
+                for &member in group {
+                    self.on_its_own(member, parts)?;
+                }
+                continue;
+            };
+            let offset = self.out.len();
+            self.out.extend_from_slice(&container);
+            let generation = 0;
+            (self.section).insert(*n, Entry::InUse { offset, generation });
+            for (index, (_, at, _)) in (0..).zip(group) {
+                let entry = Entry::Compressed { stream: *n, index };
+                self.section.insert(at.number, entry);
+            }
+            self.next = self.next.max(n + 1);
+        }
+        Ok(())
+    }
+}
+
 /// `pdf`, a document sheaf built in memory (blank pages, images as pages,
 /// the stamp library's files), as a whole file through [`write_bodies`].
 pub fn write_built(pdf: &crate::pdf::Document) -> Result<Vec<u8>> {
@@ -343,6 +671,8 @@ pub fn write_built(pdf: &crate::pdf::Document) -> Result<Vec<u8>> {
         encrypt_at: ObjectId::new(0, 0),
         xref_from: 0,
         pack: None,
+        to: None,
+        from: None,
     };
     Ok(write_bodies(bodies, &layout, &in_progress::NoProgress)?.0)
 }

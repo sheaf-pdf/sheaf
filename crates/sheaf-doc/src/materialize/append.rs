@@ -502,6 +502,7 @@ pub fn append(
         notes,
         unjudged,
         allowed_drops: e.allowed_drops,
+        copy_refused: None,
     })
 }
 

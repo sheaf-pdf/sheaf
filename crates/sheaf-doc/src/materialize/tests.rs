@@ -2,7 +2,9 @@
 //! copied byte for byte, copy 0 owning its page's object, the page-level
 //! `/StructParents` rule, object streams and encryption, raw passthrough
 //! off when the encryption changes, Dense numbering, labels after a
-//! reorder, determinism, and a second save keeping the first's numbers.
+//! reorder, determinism, and a second save keeping the first's numbers;
+//! and under Dense numbering, what's copied, at its new number, and what
+//! isn't, by each rule for a copy (M18 slice 14).
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -10,9 +12,10 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::pdf::content::{Content, Operation};
+use crate::pdf::test_crypt::{CipherKind, TestEncryption};
 use crate::pdf::{
-    Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, StreamExt, Value, dictionary,
-    literal,
+    Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, StreamExt, Value, XrefKind,
+    deflate_options, dictionary, literal, resolve_fn,
 };
 use in_progress::NoProgress;
 
@@ -22,7 +25,7 @@ use crate::labels::{LabelSpec, Style};
 use crate::model::{Document, OutlineId, PageId};
 use crate::serialize::durable::FileStamp;
 use crate::serialize::fixture::{
-    FORM_SECRETS, USER, encrypted, form, holds, in_clear, object_streams_encrypted,
+    FORM_SECRETS, OWNER, USER, encrypted, form, holds, in_clear, object_streams_encrypted,
     object_streams_of, rc4_40, rc4_aes_128_and_aes_256,
 };
 use crate::serialize::objstm;
@@ -1703,7 +1706,9 @@ fn first_parse_spans_equal_raw_span_whole_and_members_copy_verbatim() {
     let mut packed = Vec::new();
     form.pdf.save_modern(&mut packed).unwrap();
     let pdf = lazy(&packed, None);
-    let (_, raw) = pdf.to_document_and_raw(true).unwrap();
+    let (_, raw) = pdf
+        .to_document_and_raw(crate::pdf::Handover::Stable)
+        .unwrap();
     for id in pdf.ids() {
         assert_eq!(
             raw.spans.get(&id).cloned(),
@@ -1725,4 +1730,613 @@ fn first_parse_spans_equal_raw_span_whole_and_members_copy_verbatim() {
         }
     }
     assert!(copied_members > 0);
+}
+
+/// A comment a file made by hand writes after each of its dictionaries'
+/// `<<` ([`odd_file`]), which sheaf's writer doesn't: an object that holds
+/// it in a written file was copied.
+const ODD: &[u8] = b" % as read\n";
+
+/// `objects`, each its number and value, as a file of their own: each as
+/// sheaf writes it, encrypted by `state` where there's one, with [`ODD`]
+/// after its dictionary's `<<`; at an offset, or, those `members` names,
+/// in one object stream, as their bytes there; listed by a cross-reference
+/// `kind`, the encryption dictionary after the objects. Its trailer's
+/// `/Root` is the catalog, its `/Info` what has a `/Title`, and its `/ID`
+/// [`form`]'s.
+fn odd_file(
+    objects: &[(u32, Object)],
+    members: &[u32],
+    kind: XrefKind,
+    state: Option<&TestEncryption>,
+) -> Vec<u8> {
+    use crate::pdf::write::{Entry, Section};
+    use crate::serialize::object;
+
+    let mut pdf = Pdf::with_version("1.7");
+    pdf.objects = (objects.iter())
+        .map(|(n, obj)| (ObjectId::new(*n, 0), obj.clone()))
+        .collect();
+    pdf.max_id = objects.iter().map(|&(n, _)| n).max().unwrap();
+    let with = |has: &dyn Fn(&Dictionary) -> bool| {
+        (objects.iter())
+            .find_map(|(n, o)| o.as_dict().is_some_and(has).then(|| ObjectId::new(*n, 0)))
+    };
+    pdf.trailer
+        .set("Root", with(&|d| d.has_type(b"Catalog")).unwrap());
+    if let Some(info) = with(&|d| d.has(b"Title")) {
+        pdf.trailer.set("Info", info);
+    }
+    let id = literal("0123456789abcdef");
+    pdf.trailer.set("ID", vec![id.clone(), id]);
+    let (container, encrypt, xref) = (pdf.max_id + 1, pdf.max_id + 2, pdf.max_id + 3);
+    let encrypt = ObjectId::new(encrypt, 0);
+    let encryptor = state.map(|s| s.encryptor(&pdf));
+    let resolve = resolve_fn(|id| pdf.objects.get(&id));
+    let encrypting = (encryptor.as_ref())
+        .map(|e| (e.laid_out(None, Some(encrypt), &pdf.trailer, &resolve)).unwrap());
+    let write = |out: &mut Vec<u8>, id: ObjectId, obj: &Object| match &encrypting {
+        Some(e) => object::indirect_with(out, id, obj, e).unwrap(),
+        None => object::indirect(out, id, obj).unwrap(),
+    };
+    // ODD after the first `<<` from `from` on, of a dictionary or a stream.
+    let mark = |out: &mut Vec<u8>, from: usize, obj: &Object| {
+        if obj.as_dict().is_some() || obj.as_stream().is_some() {
+            let at = from + out[from..].windows(2).position(|w| w == b"<<").unwrap() + 2;
+            out.splice(at..at, ODD.iter().copied());
+        }
+    };
+    let mut out = b"%PDF-1.7\n".to_vec();
+    out.extend_from_slice(crate::serialize::full::BINARY);
+    let mut section = Section::full(1);
+    for (n, obj) in objects.iter().filter(|(n, _)| !members.contains(n)) {
+        let offset = write(&mut out, ObjectId::new(*n, 0), obj);
+        mark(&mut out, offset, obj);
+        section.insert(
+            *n,
+            Entry::InUse {
+                offset,
+                generation: 0,
+            },
+        );
+    }
+    if !members.is_empty() {
+        let (mut pairs, mut data) = (String::new(), Vec::new());
+        for (index, &n) in (0..).zip(members) {
+            pairs.push_str(&format!("{n} {} ", data.len()));
+            let (from, obj) = (data.len(), &pdf.objects[&ObjectId::new(n, 0)]);
+            object::write(&mut data, obj).unwrap();
+            mark(&mut data, from, obj);
+            data.push(b'\n');
+            let stream = container;
+            section.insert(n, Entry::Compressed { stream, index });
+        }
+        let dict = dictionary! {
+            "Type" => Object::name("ObjStm"),
+            "N" => members.len() as i64,
+            "First" => pairs.len() as i64,
+        };
+        let stream = Object::from(Stream::new(dict, [pairs.into_bytes(), data].concat()));
+        let offset = write(&mut out, ObjectId::new(container, 0), &stream);
+        section.insert(
+            container,
+            Entry::InUse {
+                offset,
+                generation: 0,
+            },
+        );
+    }
+    let mut trailer = pdf.trailer.clone();
+    if let Some(state) = state {
+        let dict = Object::from(state.encrypt_dict(&pdf));
+        let offset = object::indirect(&mut out, encrypt, &dict).unwrap();
+        section.insert(
+            encrypt.number,
+            Entry::InUse {
+                offset,
+                generation: 0,
+            },
+        );
+        trailer.set("Encrypt", encrypt);
+    }
+    let pos = out.len();
+    match kind {
+        XrefKind::Table => section.table(&mut out, trailer, pos).unwrap(),
+        XrefKind::Stream => {
+            (section.stream(&mut out, xref, trailer, pos, deflate_options())).unwrap()
+        }
+    }
+    out
+}
+
+/// A page's objects: its catalog (1), pages (2) and page (3), which a
+/// Rewrite writes anew; its resources (4), naming its font, and its
+/// content (5), whose numbers a dense Rewrite keeps; its font (8) and the
+/// document information (9), which it moves to 6 and 7 ([`MOVED`]). The
+/// content and the information hold strings.
+fn objects() -> Vec<(u32, Object)> {
+    let at = |n| ObjectId::new(n, 0);
+    let page = dictionary! {
+        "Type" => Object::name("Page"),
+        "Parent" => at(2),
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Resources" => at(4),
+        "Contents" => at(5),
+    };
+    let resources = dictionary! {
+        "Font" => dictionary! { "F1" => at(8) },
+        "ProcSet" => vec![Object::name("PDF"), Object::name("Text")],
+    };
+    let font = dictionary! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
+    };
+    vec![
+        (1, dictionary! { "Type" => Object::name("Catalog"), "Pages" => at(2) }.into()),
+        (
+            2,
+            dictionary! { "Type" => Object::name("Pages"), "Kids" => vec![at(3).into()], "Count" => 1 }
+                .into(),
+        ),
+        (3, page.into()),
+        (4, resources.into()),
+        (5, Stream::new(dictionary! {}, text("kept")).into()),
+        (8, font.into()),
+        (9, dictionary! { "Title" => literal("nine") }.into()),
+    ]
+}
+
+/// Where a dense Rewrite writes what it leaves alone of [`objects`].
+const MOVED: [(u32, u32); 4] = [(4, 4), (5, 5), (8, 6), (9, 7)];
+
+/// `objects`, each number and each reference `by` more.
+fn raised(objects: Vec<(u32, Object)>, by: u32) -> Vec<(u32, Object)> {
+    (objects.into_iter())
+        .map(|(n, mut obj)| {
+            obj.renumber(|r| Some(ObjectId::new(r.number + by, r.generation)));
+            (n + by, obj)
+        })
+        .collect()
+}
+
+/// Profile `profile`, under dense numbers.
+fn dense(profile: Profile) -> Profile {
+    Profile {
+        numbering: Numbering::Dense,
+        ..profile
+    }
+}
+
+/// `f`, a dense Rewrite on this thread copying from what `copies` says.
+fn copying<T>(copies: TestCopies, f: impl FnOnce() -> T) -> T {
+    TEST_COPIES.set(copies);
+    let out = f();
+    TEST_COPIES.set(TestCopies::AsRead);
+    out
+}
+
+/// Object `n` of `pdf`, read from `bytes`, as written: `n 0 obj` to
+/// `endobj` at an offset, or its bytes in its object stream.
+fn written_as(pdf: &LazyPdf, bytes: &[u8], n: u32) -> Vec<u8> {
+    let id = ObjectId::new(n, 0);
+    match pdf.raw_span(id) {
+        Some(span) => bytes[span].to_vec(),
+        None => pdf.member_bytes(id).expect("written").1,
+    }
+}
+
+/// `bytes`, each of `swaps` written in place of what it replaces, in turn.
+fn swapped(bytes: &[u8], swaps: &[(String, String)]) -> Vec<u8> {
+    let mut out = bytes.to_vec();
+    for (from, to) in swaps {
+        let (from, to) = (from.as_bytes(), to.as_bytes());
+        let mut next = Vec::with_capacity(out.len());
+        let mut at = 0;
+        while let Some(i) = out[at..].windows(from.len()).position(|w| w == from) {
+            next.extend_from_slice(&out[at..at + i]);
+            next.extend_from_slice(to);
+            at += i + from.len();
+        }
+        next.extend_from_slice(&out[at..]);
+        out = next;
+    }
+    out
+}
+
+/// That object `old` of `was` (a file read, and its bytes) is written at
+/// `new` in `now` as it was read, at an offset or in an object stream: its
+/// header and each reference that `refs` moves written anew, every other
+/// byte as it was.
+fn assert_copied(
+    was: (&LazyPdf, &[u8]),
+    now: (&LazyPdf, &[u8]),
+    (old, new): (u32, u32),
+    refs: &[(u32, u32)],
+    what: &str,
+) {
+    let mut swaps = vec![(format!("{old} 0 obj"), format!("{new} 0 obj"))];
+    swaps.extend((refs.iter()).map(|(a, b)| (format!("{a} 0 R"), format!("{b} 0 R"))));
+    let want = swapped(&written_as(was.0, was.1, old), &swaps);
+    let got = written_as(now.0, now.1, new);
+    assert!(
+        got == want,
+        "{what}: {old} at {new}:\n{}\nagainst\n{}",
+        String::from_utf8_lossy(&got),
+        String::from_utf8_lossy(&want)
+    );
+}
+
+/// That object `n` of `now` (a file written, and its bytes) was written
+/// anew: it doesn't hold [`ODD`].
+fn assert_anew(now: (&LazyPdf, &[u8]), n: u32, what: &str) {
+    let written = written_as(now.0, now.1, n);
+    assert!(!holds(&written, ODD), "{what}: {n} was copied");
+}
+
+/// That each object `map` names of `was` reads in `now` at its new number
+/// as it did, each reference it holds named by `map`.
+fn reads_as(was: &LazyPdf, now: &LazyPdf, map: &[(u32, u32)], what: &str) {
+    let to = |r: ObjectId| {
+        (map.iter())
+            .find(|&&(old, _)| old == r.number)
+            .map(|&(_, new)| ObjectId::new(new, 0))
+    };
+    for &(old, new) in map {
+        let mut obj = was.get(ObjectId::new(old, 0)).unwrap().clone();
+        obj.renumber(to);
+        let back = now.get(ObjectId::new(new, 0)).unwrap();
+        assert!(same(back, &obj), "{what}: {old} at {new}");
+    }
+}
+
+/// A dense Rewrite of a file in the clear copies each object it left alone
+/// as it was read, at its new number: its header and each reference that
+/// moved written anew, every other byte as it was, the comment sheaf's
+/// writer doesn't write among them; read at an offset (the content, whose
+/// number stays, and the information, which moves), and read from an
+/// object stream, a member, into the write's as its bytes (the resources,
+/// whose font moved, and the font). What's written reads as the file did.
+#[test]
+fn a_dense_rewrite_copies_what_it_left_alone() {
+    for (kind, members) in [(XrefKind::Table, &[][..]), (XrefKind::Stream, &[4, 8][..])] {
+        let what = format!("{kind:?}, members {members:?}");
+        let before = odd_file(&objects(), members, kind, None);
+        let out = rewrite(&open(&before, None), dense(Profile::default()));
+        assert_eq!(out.copy_refused, None, "{what}");
+        let (was, now) = (lazy(&before, None), lazy(&out.bytes, None));
+        let (was, now) = ((&was, &before[..]), (&now, &out.bytes[..]));
+        for moved in MOVED {
+            assert_copied(was, now, moved, &[(8, 6)], &what);
+        }
+        for (old, new) in MOVED {
+            let member = |pdf: &LazyPdf, n| pdf.member_bytes(ObjectId::new(n, 0)).is_some();
+            assert_eq!(member(now.0, new), member(was.0, old), "{what}: {old}");
+        }
+        reads_as(was.0, now.0, &MOVED, &what);
+    }
+}
+
+/// What a dense Rewrite changed, or can't copy, it writes anew: what the
+/// emitter wrote (the catalog, the pages and the page), what `keep_only`
+/// changed (the resources, which named a page deleted), an object without
+/// its `endobj`, a stream whose `/Length` is an object, and every object of
+/// a file whose sections don't read, read by scanning.
+#[test]
+fn a_dense_rewrite_writes_anew_what_it_can_t_copy() {
+    let at = |n| ObjectId::new(n, 0);
+    let mut two = objects();
+    let pages = dictionary! {
+        "Type" => Object::name("Pages"),
+        "Kids" => vec![at(3).into(), at(10).into()],
+        "Count" => 2,
+    };
+    two[1].1 = pages.into();
+    two[3].1.as_dict_mut().unwrap().set("Next", at(10));
+    let second = dictionary! {
+        "Type" => Object::name("Page"),
+        "Parent" => at(2),
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+    };
+    two.push((10, second.into()));
+    let before = odd_file(&two, &[], XrefKind::Table, None);
+    let mut d = open(&before, None);
+    let gone = d.page(1).unwrap();
+    d.commit_ops(vec![fx::delete(&[gone])], "delete").unwrap();
+    let out = rewrite(&d, dense(Profile::default()));
+    let (was, now) = (lazy(&before, None), lazy(&out.bytes, None));
+    let (was, now) = ((&was, &before[..]), (&now, &out.bytes[..]));
+    for n in [1, 2, 3, 4] {
+        assert_anew(now, n, "edited");
+    }
+    let resources = now.0.get_dictionary(at(4)).unwrap();
+    assert!(resources.get(b"Next").unwrap().is_null());
+    for moved in &MOVED[1..] {
+        assert_copied(was, now, *moved, &[], "edited");
+    }
+
+    // By hand: no `endobj` after the resources, the content's length an
+    // object of its own.
+    let content = text("held");
+    let body = |n: u32, body: &[u8], endobj: bool| Body {
+        entry: n,
+        header: n,
+        body: [b"<<".as_slice(), ODD, body].concat(),
+        endobj,
+    };
+    let stream = [
+        b"/Length 6 0 R >>\nstream\n".as_slice(),
+        &content,
+        b"\nendstream",
+    ]
+    .concat();
+    let before = by_hand_as(&[
+        body(1, b"/Type /Catalog /Pages 2 0 R >>", true),
+        body(2, b"/Type /Pages /Kids [3 0 R] /Count 1 >>", true),
+        body(
+            3,
+            b"/Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources 4 0 R \
+              /Contents 5 0 R >>",
+            true,
+        ),
+        body(4, b"/Font << /F1 8 0 R >> >>", false),
+        body(5, &stream, true),
+        Body {
+            entry: 6,
+            header: 6,
+            body: content.len().to_string().into_bytes(),
+            endobj: true,
+        },
+        body(
+            8,
+            b"/Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            true,
+        ),
+    ]);
+    let out = rewrite(&open(&before, None), dense(Profile::default()));
+    let (was, now) = (lazy(&before, None), lazy(&out.bytes, None));
+    let (was, now) = ((&was, &before[..]), (&now, &out.bytes[..]));
+    for n in [4, 5] {
+        assert_anew(now, n, "by hand");
+    }
+    assert_copied(was, now, (8, 6), &[], "by hand");
+    reads_as(was.0, now.0, &[(4, 4), (5, 5), (8, 6)], "by hand");
+
+    // Sections that don't read: the file is read by scanning, the object
+    // stream's members too.
+    let mut before = odd_file(&objects(), &[4, 8], XrefKind::Stream, None);
+    let tail = before.windows(9).rposition(|w| w == b"startxref").unwrap();
+    before.truncate(tail);
+    before.extend_from_slice(b"startxref\n1\n%%EOF\n");
+    assert!(!source(&before, None).base_sound());
+    let out = rewrite(&open(&before, None), dense(Profile::default()));
+    assert_eq!(out.copy_refused, None, "nothing is given to copy");
+    let now = lazy(&out.bytes, None);
+    for id in now.ids() {
+        assert_anew((&now, &out.bytes), id.number, "scanned");
+    }
+    reads_as(&lazy(&before, None), &now, &MOVED, "scanned");
+}
+
+/// Under RC4 and AES-128, whose keys are made of each object's number, a
+/// dense Rewrite copies an object read at an offset only where its number
+/// stays: the resources, their font's reference written anew, and the
+/// content, its data as it was encrypted. One whose number moves (the
+/// font, the information) it writes anew, encrypted at its number, in an
+/// object stream where the file packs, as it did before copies under a
+/// renumbering: where every number moves, the file is that one, byte for
+/// byte, under RC4. A member it copies whatever its number.
+#[test]
+fn under_a_key_of_each_number_only_what_stays_is_copied_at_an_offset() {
+    for kind in [CipherKind::Rc4_40, CipherKind::Rc4_128, CipherKind::Aes128] {
+        let state = TestEncryption::new(kind, USER, OWNER);
+        let what = format!("{kind:?}");
+        let before = odd_file(&objects(), &[], XrefKind::Stream, Some(&state));
+        let out = rewrite(&open(&before, Some(USER)), dense(Profile::default()));
+        assert_eq!(out.copy_refused, None, "{what}");
+        let (was, now) = (lazy(&before, Some(USER)), lazy(&out.bytes, Some(USER)));
+        assert!(now.is_encrypted(), "{what}");
+        let (was, now) = ((&was, &before[..]), (&now, &out.bytes[..]));
+        assert_copied(was, now, (4, 4), &[(8, 6)], &what);
+        assert_copied(was, now, (5, 5), &[], &what);
+        for n in [6, 7] {
+            assert_anew(now, n, &what);
+            let member = now.0.member_bytes(ObjectId::new(n, 0));
+            assert!(member.is_some(), "{what}: {n} isn't packed");
+        }
+        reads_as(was.0, now.0, &MOVED, &what);
+
+        let before = odd_file(&objects(), &[4, 8, 9], XrefKind::Stream, Some(&state));
+        let out = rewrite(&open(&before, Some(USER)), dense(Profile::default()));
+        let (was, now) = (lazy(&before, Some(USER)), lazy(&out.bytes, Some(USER)));
+        let (was, now) = ((&was, &before[..]), (&now, &out.bytes[..]));
+        for moved in [(4, 4), (8, 6), (9, 7)] {
+            assert!(
+                now.0.member_bytes(ObjectId::new(moved.1, 0)).is_some(),
+                "{what}"
+            );
+            assert_copied(was, now, moved, &[(8, 6)], &format!("{what}, members"));
+        }
+        reads_as(was.0, now.0, &MOVED, &what);
+
+        if kind != CipherKind::Aes128 {
+            let before = odd_file(&raised(objects(), 1), &[], XrefKind::Stream, Some(&state));
+            let d = open(&before, Some(USER));
+            let out = rewrite(&d, dense(Profile::default()));
+            let anew = copying(TestCopies::Nothing, || {
+                rewrite(&d, dense(Profile::default()))
+            });
+            assert!(out.bytes == anew.bytes, "{what}: every number moved");
+            assert!(!holds(&out.bytes, ODD), "{what}");
+        }
+    }
+}
+
+/// Under AES-256, whose key is the file's, a dense Rewrite copies an
+/// object read at an offset whatever its number: the font and the
+/// information at their new numbers, their bytes as they were read, the
+/// information's string its ciphertext and IV; and they decrypt there.
+#[test]
+fn under_aes_256_a_moved_object_is_copied() {
+    let state = TestEncryption::new(CipherKind::Aes256, USER, OWNER);
+    for kind in [XrefKind::Table, XrefKind::Stream] {
+        let what = format!("{kind:?}");
+        let before = odd_file(&objects(), &[], kind, Some(&state));
+        let out = rewrite(&open(&before, Some(USER)), dense(Profile::default()));
+        assert_eq!(out.copy_refused, None, "{what}");
+        let (was, now) = (lazy(&before, Some(USER)), lazy(&out.bytes, Some(USER)));
+        assert!(now.is_encrypted(), "{what}");
+        let (was, now) = ((&was, &before[..]), (&now, &out.bytes[..]));
+        for moved in MOVED {
+            assert_copied(was, now, moved, &[(8, 6)], &what);
+        }
+        reads_as(was.0, now.0, &MOVED, &what);
+    }
+}
+
+/// Written without encryption, an encrypted file's objects aren't copied,
+/// read at an offset or from an object stream, their numbers kept or not:
+/// each is written decrypted.
+#[test]
+fn a_dense_rewrite_without_encryption_copies_nothing() {
+    let unencrypted = Profile {
+        encryption: Encryption::None,
+        ..dense(Profile::default())
+    };
+    for kind in [CipherKind::Rc4_128, CipherKind::Aes256] {
+        let state = TestEncryption::new(kind, USER, OWNER);
+        let what = format!("{kind:?}");
+        let before = odd_file(&objects(), &[4, 8], XrefKind::Stream, Some(&state));
+        let out = rewrite(&open(&before, Some(USER)), unencrypted);
+        let now = lazy(&out.bytes, None);
+        assert!(!now.is_encrypted(), "{what}");
+        for id in now.ids() {
+            if !layout(now.get(id).unwrap()) {
+                assert_anew((&now, &out.bytes), id.number, &what);
+            }
+        }
+        reads_as(&lazy(&before, Some(USER)), &now, &MOVED, &what);
+    }
+}
+
+/// Under dense numbers a stream byte for byte like one before it is
+/// written once, and an object copied that names it names the first: the
+/// resources, naming two forms alike, name one, copied at the first's
+/// number.
+#[test]
+fn a_copy_names_the_first_of_streams_alike() {
+    let at = |n| ObjectId::new(n, 0);
+    let form = || {
+        let dict = dictionary! {
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
+            "BBox" => vec![0.into(), 0.into(), 10.into(), 10.into()],
+        };
+        Object::from(Stream::new(dict, b"0 0 10 10 re f".to_vec()))
+    };
+    let mut objects = objects();
+    objects.retain(|(n, _)| *n < 8);
+    let xobjects = dictionary! { "X1" => at(6), "X2" => at(7) };
+    objects[3].1 = dictionary! { "XObject" => xobjects }.into();
+    let drawn = b"q /X1 Do Q q /X2 Do Q".to_vec();
+    objects[4].1 = Stream::new(dictionary! {}, drawn).into();
+    objects.extend([(6, form()), (7, form())]);
+    let before = odd_file(&objects, &[], XrefKind::Table, None);
+    let out = rewrite(&open(&before, None), dense(Profile::default()));
+    let (was, now) = (lazy(&before, None), lazy(&out.bytes, None));
+    let forms = (now.ids())
+        .filter(|&id| (now.get(id).unwrap().as_stream()).is_some_and(|s| s.dict.has(b"BBox")))
+        .collect::<Vec<_>>();
+    assert_eq!(forms, [at(6)]);
+    let (was, now) = ((&was, &before[..]), (&now, &out.bytes[..]));
+    assert_copied(was, now, (4, 4), &[(7, 6)], "the resources");
+    assert_copied(was, now, (6, 6), &[], "the first form");
+    reads_as(was.0, now.0, &[(4, 4), (5, 5), (6, 6), (7, 6)], "alike");
+}
+
+/// A copy the writer refuses (here every one, its record another reading's,
+/// of the same bytes) doesn't stop a dense Rewrite: the file is written
+/// again with nothing copied, byte for byte as before copies under a
+/// renumbering, and the output says why.
+#[test]
+fn a_refused_copy_writes_the_file_anew() {
+    let before = odd_file(&objects(), &[4, 8], XrefKind::Stream, None);
+    let d = open(&before, None);
+    let copied = rewrite(&d, dense(Profile::default()));
+    assert!(holds(&copied.bytes, ODD) && copied.copy_refused.is_none());
+    let anew = copying(TestCopies::Nothing, || {
+        rewrite(&d, dense(Profile::default()))
+    });
+    assert!(anew.copy_refused.is_none());
+    let refused = copying(TestCopies::ReadAgain, || {
+        rewrite(&d, dense(Profile::default()))
+    });
+    assert!(refused.bytes == anew.bytes);
+    let why = refused.copy_refused.expect("refused");
+    assert!(why.contains("a record of another reading"), "{why}");
+    let now = lazy(&refused.bytes, None);
+    for id in now.ids() {
+        if !layout(now.get(id).unwrap()) {
+            assert_anew((&now, &refused.bytes), id.number, "refused");
+        }
+    }
+}
+
+/// Written without sheaf's private data (a clean copy's `Private::Strip`,
+/// print's `Private::Scrub`), a file whose objects a dense Rewrite copies
+/// holds none, in its bytes: sheaf's note, which holds it, is written anew
+/// without it, while the objects around it are copied.
+#[test]
+fn a_dense_rewrite_copies_no_private_data() {
+    use crate::annot::{AnnotKind, Pt};
+
+    let mut d = open(&odd_file(&objects(), &[], XrefKind::Table, None), None);
+    let page = d.page(0).unwrap();
+    let note = super::rewrite_tests::thread_mark(
+        AnnotKind::Note {
+            pos: Pt { x: 100.0, y: 500.0 },
+        },
+        "Why?",
+    );
+    d.commit_ops(vec![fx::add(page, &note)], "note").unwrap();
+    let saved = rewrite(&d, Profile::default()).bytes;
+    assert!(holds(&saved, b"/SHEF_Annot") && holds(&saved, b"(sheaf:"));
+    let d = open(&saved, None);
+    let clean = Profile {
+        private: Private::Strip,
+        ..dense(Profile::default())
+    };
+    let print = Profile {
+        encryption: Encryption::None,
+        private: Private::Scrub,
+        ..dense(Profile::default())
+    };
+    for (what, profile) in [("clean", clean), ("print", print)] {
+        let out = rewrite(&d, profile);
+        assert!(holds(&out.bytes, ODD), "{what}: nothing was copied");
+        for private in [&b"SHEF_"[..], b"sheaf:"] {
+            assert!(!holds(&out.bytes, private), "{what}");
+        }
+        let pdf = Pdf::load_mem(&out.bytes).unwrap();
+        assert_eq!(crate::private::found(&pdf), [], "{what}");
+    }
+}
+
+/// In a file that packs, an object a dense Rewrite copies from an offset
+/// is written at one, on its own, as a stable save writes its copies: the
+/// resources, the font and the information, which could go in an object
+/// stream. What it writes anew goes in one.
+#[test]
+fn a_copy_read_at_an_offset_isnt_packed() {
+    let before = odd_file(&objects(), &[], XrefKind::Stream, None);
+    let out = rewrite(&open(&before, None), dense(Profile::default()));
+    let (was, now) = (lazy(&before, None), lazy(&out.bytes, None));
+    for n in [1, 2, 3] {
+        assert!(now.member_bytes(ObjectId::new(n, 0)).is_some(), "{n}");
+    }
+    let (was, now) = ((&was, &before[..]), (&now, &out.bytes[..]));
+    for moved in [(4, 4), (8, 6), (9, 7)] {
+        assert!(now.0.raw_span_whole(ObjectId::new(moved.1, 0)).is_some());
+        assert_copied(was, now, moved, &[(8, 6)], "packing");
+    }
 }

@@ -1,5 +1,8 @@
 //! PDF serialization, cross-reference section, object-stream, and encryption
-//! primitives exposed through `sheaf_doc::pdf` (M18 slices 11–12).
+//! primitives exposed through `sheaf_doc::pdf` (M18 slices 11–12), and the
+//! family's per-body writer, [`Parts`], with what it writes ([`PartBody`],
+//! [`Packed`]) and reads from ([`ReadFrom`], [`Record`]), for a whole file
+//! written under a renumbering (M18 slice 14).
 
 use pdf_objects::Object;
 
@@ -8,10 +11,11 @@ pub use self::object::{
     indirect_stream, indirect_stream_with, indirect_with, real, write, write_renumbered,
 };
 pub use pdf_objects::serialize as object;
+pub use pdf_structure::Record;
 pub use pdf_structure::write::{
-    Deflate, Encrypting, Encryptor, Entry, Error as StructureError, KeptOut, MAX_DATA, MEMBERS,
-    NUMBERS, Section, Unencryptable, container, encryption as encryption_dict, fits, kept_out,
-    packable,
+    Body as PartBody, Deflate, Encrypting, Encryptor, Entry, Error as StructureError, KeptOut,
+    MAX_DATA, MEMBERS, NUMBERS, Packed, Parts, ReadFrom, Section, Unencryptable, container,
+    encryption as encryption_dict, fits, kept_out, packable,
 };
 
 /// Writes `/name` in canonical PDF name syntax (`#xx` escaping delimiters,
@@ -26,6 +30,17 @@ pub fn write_name(out: &mut Vec<u8>, name: &[u8]) {
 #[must_use]
 pub fn non_zero_ref(id: pdf_objects::ObjectId) -> Option<pdf_objects::ObjectId> {
     (id.number != 0).then_some(id)
+}
+
+/// Whether `record` is of an object read at an offset in its file, not in
+/// an object stream: where its rules hold, [`Parts`] copies such an object
+/// on its own at an offset, never in an object stream, so a writer that
+/// lays a file out asks this of each object as read ([`PartBody::Read`])
+/// it gives.
+#[inline]
+#[must_use]
+pub fn read_at_offset(record: &Record) -> bool {
+    record.at.stream().is_none()
 }
 
 /// Whether `obj` is an `/ObjStm` stream container (ISO 32000-2 §7.5.7).

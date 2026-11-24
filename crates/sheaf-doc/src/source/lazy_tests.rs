@@ -4,7 +4,7 @@
 //! error within the caps, and quickly.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -12,9 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::pdf::{
-    ByteSource, DecryptionError, Document as Pdf, Error, FileBytes, LazyPdf, Limit, Object,
-    ObjectId, ReadLimits, Stream, StreamExt, XrefKind, deflate_best, deflate_fast, dictionary,
-    literal,
+    ByteSource, DecryptionError, Document as Pdf, Error, FileBytes, Handover, LazyPdf, Limit,
+    Object, ObjectId, ReadLimits, Stream, StreamExt, XrefKind, deflate_best, deflate_fast,
+    dictionary, literal,
 };
 
 use super::Limits;
@@ -301,7 +301,7 @@ fn a_linearization_holds_while_its_length_is_the_file_s() {
 
 /// A file of `objects` (number, body) in a cross-reference table, the
 /// first of them the catalog.
-pub(super) fn with_table(objects: &[(u32, Vec<u8>)]) -> Vec<u8> {
+pub(crate) fn with_table(objects: &[(u32, Vec<u8>)]) -> Vec<u8> {
     let mut out = b"%PDF-1.7\n".to_vec();
     let mut offsets = BTreeMap::new();
     for (number, body) in objects {
@@ -339,7 +339,7 @@ fn deflated_zeros(n: usize) -> Vec<u8> {
 }
 
 /// A stream object's body: `dict` and `data`.
-pub(super) fn stream(dict: &str, data: &[u8]) -> Vec<u8> {
+pub(crate) fn stream(dict: &str, data: &[u8]) -> Vec<u8> {
     [
         format!("<< {dict} >>\nstream\n").as_bytes(),
         data,
@@ -744,6 +744,100 @@ fn a_raw_span_keeps_nothing_it_read() {
     let span = pdf.raw_span(s3).unwrap();
     assert!(bytes[span].starts_with(b"3 0 obj"));
     assert!(!pdf.is_read(s3) && !pdf.is_read(ObjectId::new(4, 0)));
+}
+
+/// What a renumbered write is handed as read ([`Handover::Renumbered`]) is
+/// what a stable save copies ([`Handover::Stable`]), each object as the
+/// family read it, with its record: at an offset, where the save's span
+/// is; in an object stream, where the save's member bytes are. The rest,
+/// a stream whose `/Length` is a reference among them, and the `/Encrypt`
+/// dictionary, aren't held. The document beside them is the one either
+/// way, and asked for nothing, there's nothing beside it. In the clear,
+/// with a table and with object streams, and encrypted.
+#[test]
+fn a_renumbered_write_is_handed_a_stable_save_s_candidates_as_read() {
+    let plain = plaintext();
+    let length = with_table(&[
+        catalog(),
+        pages(),
+        (3, stream("/Length 4 0 R", b"abc")),
+        (4, b"3".to_vec()),
+    ]);
+    let mut files = vec![
+        ("a table", written(true), None),
+        ("object streams", written(false), None),
+        ("an indirect /Length", length, None),
+    ];
+    for (name, state) in rc4_aes_128_and_aes_256(&plain) {
+        for bytes in encrypted(&plain, &state, |_| {}) {
+            files.push((name, bytes, Some(USER)));
+        }
+    }
+    let (mut members, mut left_out) = (0, 0);
+    for (name, bytes, password) in files {
+        let pdf = LazyPdf::open(Arc::<[u8]>::from(bytes), password, &Limits::DEFAULT.reader);
+        let pdf = pdf.unwrap();
+        let (doc, read) = pdf.to_document_and_raw(Handover::Renumbered).unwrap();
+        let (saved, stable) = pdf.to_document_and_raw(Handover::Stable).unwrap();
+        let (alone, none) = pdf.to_document_and_raw(Handover::None).unwrap();
+        for other in [&saved, &alone] {
+            assert!(doc.objects.keys().eq(other.objects.keys()), "{name}");
+            for (id, obj) in &doc.objects {
+                assert!(same(obj, &other.objects[id]), "{name}: {id:?}");
+            }
+        }
+        let candidates: BTreeSet<ObjectId> = (stable.spans.keys())
+            .chain(stable.members.keys())
+            .copied()
+            .collect();
+        let held: BTreeSet<ObjectId> = read.as_read_ids().collect();
+        assert!(!held.is_empty(), "{name}");
+        assert_eq!(held, candidates, "{name}");
+        assert!(read.spans.is_empty() && read.members.is_empty(), "{name}");
+        assert_eq!(stable.as_read_ids().count(), 0, "{name}");
+        assert!(none.spans.is_empty() && none.members.is_empty(), "{name}");
+        assert_eq!(none.as_read_ids().count(), 0, "{name}");
+        let encrypt = pdf.trailer().get(b"Encrypt").and_then(Object::as_reference);
+        assert_eq!(encrypt.is_some(), password.is_some(), "{name}");
+        assert!(
+            encrypt.is_none_or(|id| read.as_read(id).is_none()),
+            "{name}"
+        );
+        left_out += (pdf.ids())
+            .filter(|id| Some(*id) != encrypt && !held.contains(id))
+            .count();
+        for &id in &held {
+            let (object, record) = read.as_read(id).unwrap();
+            assert_eq!(record.id, id, "{name}");
+            let loaded = &doc.objects[&id];
+            match (object.as_stream(), loaded.as_stream()) {
+                (Some(_), Some(_)) => {}
+                (None, None) => assert!(same(object, loaded), "{name}: {id:?}"),
+                _ => panic!("{name}: {id:?} is a stream one way only"),
+            }
+            match stable.spans.get(&id) {
+                Some(span) => assert_eq!(record.at.range(), *span, "{name}: {id:?}"),
+                None => {
+                    assert!(record.at.stream().is_some(), "{name}: {id:?}");
+                    let (_, bytes) = pdf.member_bytes(id).unwrap();
+                    assert_eq!(bytes, stable.members[&id], "{name}: {id:?}");
+                    members += 1;
+                }
+            }
+        }
+        // Kept, of what's held, as asked.
+        let mut read = read;
+        let kept = |id: ObjectId| id.number.is_multiple_of(2);
+        read.retain_as_read(kept);
+        let now: BTreeSet<ObjectId> = read.as_read_ids().collect();
+        assert_eq!(now, held.iter().copied().filter(|&id| kept(id)).collect());
+        assert!(
+            held.iter()
+                .all(|&id| kept(id) || read.as_read(id).is_none())
+        );
+    }
+    assert!(members > 0, "members held as read");
+    assert!(left_out > 0, "what isn't a candidate left out");
 }
 
 #[test]

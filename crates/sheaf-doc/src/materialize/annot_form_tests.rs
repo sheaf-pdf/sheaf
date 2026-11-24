@@ -1334,6 +1334,8 @@ fn an_object_written_in_the_clear_doesnt_read_back() {
             encrypt_at: crypt.at(),
             xref_from: 1,
             pack: None,
+            to: None,
+            from: None,
         };
         write_bodies(bodies, &layout, &NoProgress).unwrap().0
     };

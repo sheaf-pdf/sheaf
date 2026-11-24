@@ -11,7 +11,13 @@
 //!   renumbers what it didn't make, so raw passthrough holds for what it
 //!   didn't touch.
 //! - **Dense,** for exports ([`dense`]): a finished file's objects from 1,
-//!   a stream byte-identical to one before it written once.
+//!   a stream byte-identical to one before it written once. A Rewrite
+//!   writes its graph under these numbers, held at its own, so what it
+//!   didn't touch is still copied as it was read, its header and each
+//!   reference that moved written anew in place
+//!   ([`serialize::full`](crate::serialize::full)); but one read at an
+//!   offset whose number moves, under an encryption whose keys are made of
+//!   the number, which is written anew.
 //! - **Appended,** for an Append's section ([`appended`]): a key the saved
 //!   file's map has keeps its number, so a changed object is written over
 //!   itself, unless that's the number of a primary object another key is;
