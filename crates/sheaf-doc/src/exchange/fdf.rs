@@ -34,9 +34,9 @@ pub fn read(bytes: &[u8]) -> Result<Comments> {
             Value::Dict(spec) => spec
                 .get(b"UF")
                 .or_else(|| spec.get(b"F"))
-                .map(crate::file::pdf_text)
+                .map(crate::pdf::text::of)
                 .unwrap_or_default(),
-            _ => crate::file::pdf_text(f),
+            _ => crate::pdf::text::of(f),
         })
         .filter(|f| !f.is_empty());
     let list = fdf
@@ -78,7 +78,7 @@ pub fn write(comments: &Comments) -> Result<Vec<u8>> {
     }
     let mut fdf = dictionary! { "Annots" => annots };
     if let Some(f) = &comments.file {
-        fdf.set("F", crate::save::text_string(f));
+        fdf.set("F", crate::pdf::text::string(f));
     }
     let root = pdf.add_object(dictionary! { "FDF" => fdf });
     pdf.trailer = dictionary! { "Root" => root };

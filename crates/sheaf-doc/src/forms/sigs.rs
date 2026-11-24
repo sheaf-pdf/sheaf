@@ -23,12 +23,11 @@ pub mod integrity;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, Value};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, Value, text};
 
 use super::{Field, FieldKind, FileForm};
 use crate::attachments::{Objects, resolve};
 use crate::effects::{AnnotOps, SigClass};
-use crate::file::pdf_text;
 use crate::source::{FormLimits, Source};
 use integrity::Check;
 pub use integrity::{Integrity, Unchecked};
@@ -495,7 +494,7 @@ impl Reader<'_> {
                 .map(|n| {
                     resolve(pdf, n)
                         .filter(|n| n.as_bytes().is_some())
-                        .map(pdf_text)
+                        .map(text::of)
                 })
                 .collect();
             let names = names?;

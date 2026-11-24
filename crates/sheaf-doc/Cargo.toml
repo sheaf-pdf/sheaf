@@ -43,6 +43,9 @@ pdf-annots.workspace = true
 # A text field's appearance, made from plain data in the font its `/DA`
 # names (M10 slice 6).
 pdf-forms.workspace = true
+# Dates, name and number trees, the page tree's walk and XMP's
+# conformance claims, as PDFium reads them (M18 slice 21).
+pdf-semantics.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 log.workspace = true
@@ -55,7 +58,8 @@ regex.workspace = true
 sheaf-image.workspace = true
 # Stamps from images keep their transparency (a soft mask).
 image.workspace = true
-# XFDF, comments as XML (M9 slice 18); XMP's conformance claims.
+# XFDF, comments as XML (M9 slice 18), and XFA's packets. (A file's XMP
+# is pdf-semantics' to read.)
 quick-xml = "0.41"
 # A file's password is wiped from memory when its blob goes.
 zeroize = "1.9"

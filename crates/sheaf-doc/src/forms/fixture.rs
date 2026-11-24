@@ -677,7 +677,7 @@ impl Form {
         let Ok(d) = self.pdf.get_dictionary(id) else {
             return;
         };
-        let name = d.get(b"T").map(crate::file::pdf_text).unwrap_or_default();
+        let name = d.get(b"T").map(crate::pdf::text::of).unwrap_or_default();
         let bare = name.split('[').next().unwrap_or_default().to_string();
         // Designer's names are XML names: they name the data's elements.
         assert!(
@@ -707,7 +707,7 @@ impl Form {
             Some((_, Value::Name(n))) if n.as_bytes() != b"Off" => {
                 String::from_utf8_lossy(n.as_bytes()).into_owned()
             }
-            Some((v, Value::String(..))) => crate::file::pdf_text(v),
+            Some((v, Value::String(..))) => crate::pdf::text::of(v),
             _ => String::new(),
         };
         let flags = d.get(b"Ff").and_then(Object::as_integer).unwrap_or(0);

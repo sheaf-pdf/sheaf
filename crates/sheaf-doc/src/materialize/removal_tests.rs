@@ -655,10 +655,20 @@ fn form_file(
     cmap: Option<&str>,
     shows: &str,
 ) -> (PathBuf, Document, ObjectId, ObjectId) {
+    form_file_with(dir, font, cmap, |font| form_stream(font, shows))
+}
+
+/// [`form_file`], its form whatever `form` makes of the font's number.
+fn form_file_with(
+    dir: &Path,
+    font: Dictionary,
+    cmap: Option<&str>,
+    form: impl FnOnce(ObjectId) -> Stream,
+) -> (PathBuf, Document, ObjectId, ObjectId) {
     let mut pdf = Pdf::with_version("1.7");
     let root = pdf.new_object_id();
     let font = with_cmap(&mut pdf, font, cmap);
-    let form = pdf.add_object(form_stream(font, shows));
+    let form = pdf.add_object(form(font));
     let content = pdf.add_object(Stream::new(dictionary! {}, b"q /Fm0 Do Q".to_vec()));
     let page = pdf.add_object(dictionary! {
         "Type" => Object::name("Page"), "Parent" => root, "Contents" => content,
@@ -861,6 +871,73 @@ fn an_unlinked_form_s_text_is_read() {
     assert_eq!(checked(&path, &doc, page, &again), None);
     let fewer = [(helvetica(), None, "(hidden)")];
     assert_eq!(checked(&path, &doc, page, &fewer), Some(gone));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A string's text counts whole, a language escape's and what follows one
+/// too: a reader shows none of that, but the bytes stay readable in the
+/// file. A form unlinked whose dictionary holds such a string isn't
+/// covered by a section that writes only what a reader shows of it.
+#[test]
+fn text_behind_a_language_escape_is_read() {
+    let utf16be = |text: &str| {
+        let units = text.encode_utf16().flat_map(u16::to_be_bytes);
+        [0xFE, 0xFF].into_iter().chain(units).collect::<Vec<u8>>()
+    };
+    let utf16le = |text: &str| {
+        let units = text.encode_utf16().flat_map(u16::to_le_bytes);
+        [0xFF, 0xFE].into_iter().chain(units).collect::<Vec<u8>>()
+    };
+    let utf8 = |text: &str| [b"\xEF\xBB\xBF", text.as_bytes()].concat();
+    let decode = crate::pdf::text::decode;
+    for text in [
+        "Hidden\u{1B}secret words",
+        "\u{1B}en\u{1B}Hi there",
+        "a\u{1B}\u{1B}b",
+        "ends\u{1B}",
+        "\u{1B}",
+        "😀\u{1B}é",
+    ] {
+        for bytes in [utf16be(text), utf16le(text), utf8(text)] {
+            assert_eq!(removal::held_text(&bytes), text, "{bytes:02X?}");
+            assert_ne!(decode(&bytes), text, "{bytes:02X?}");
+        }
+    }
+    // Without an escape, and without a mark, it's the string as read: an
+    // odd last byte left out, 0x1B PDFDocEncoding's ring.
+    for bytes in [
+        utf16be("no escape"),
+        utf16le("no escape"),
+        utf8("no escape"),
+        b"\xFE\xFF\x00A\x00".to_vec(),
+        b"\xFE\xFF\x00A\x00\x1B\x00".to_vec(),
+        b"plain \x1B ring".to_vec(),
+        Vec::new(),
+    ] {
+        let held = removal::held_text(&bytes).replace('\u{1B}', "");
+        assert_eq!(held, decode(&bytes), "{bytes:02X?}");
+    }
+
+    let dir = scratch();
+    let note = utf16be("Hidden\u{1B}secret words");
+    let (path, doc, page, form) = form_file_with(&dir, helvetica(), None, |font| {
+        let mut form = form_stream(font, "()");
+        form.dict.set("Note", Object::hex(note));
+        form
+    });
+    let primary = doc.primary().id();
+    let gone = Found {
+        key: ObjKey::Base {
+            blob: primary,
+            obj: form,
+            copy: 0,
+        },
+        derived: false,
+        said: false,
+    };
+    // What a reader shows of the string, drawn again: not all it held.
+    let shown = [(helvetica(), None, "(Hidden)")];
+    assert_eq!(checked(&path, &doc, page, &shown), Some(gone));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

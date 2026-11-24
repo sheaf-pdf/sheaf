@@ -230,7 +230,7 @@ boundaries:
     bad=$(cargo tree -p sheaf-edit -e normal --prefix none | awk '{print $1}' | sort -u \
       | grep -E '^sheaf-' | grep -vx 'sheaf-edit' || true)
     [ -z "$bad" ] || { echo "sheaf-edit depends on: $bad"; exit 1; }
-    for pkg in pdf-objects pdf-filters pdf-crypt pdf-structure pdf-content-streams pdf-fonts pdf-gfx pdf-forms; do
+    for pkg in pdf-objects pdf-filters pdf-crypt pdf-structure pdf-content-streams pdf-fonts pdf-gfx pdf-forms pdf-semantics; do
       bad=$(cargo tree --workspace -e all -i "$pkg" --prefix depth 2>/dev/null | awk '/^1sheaf-/ {print $1}' | sed 's/^1//' | sort -u \
         | grep -vx 'sheaf-doc' || true)
       [ -z "$bad" ] || { echo "crates outside sheaf-doc depend on $pkg directly: $bad"; exit 1; }
@@ -324,7 +324,7 @@ precommit: (_steps "precommit" "markers plan-check fmt-check locks corpus intero
 # about one of them.
 [doc("Before a PR merges: every ignored corpus tier (two hours or more)")]
 [group('local')]
-premerge: (_steps "premerge" "tier-append tier-exports tier-realize tier-watermark tier-lexer tier-interp tier-codes tier-arlington tier-size tier-fields _corpus-ran")
+premerge: (_steps "premerge" "tier-append tier-exports tier-realize tier-watermark tier-lexer tier-interp tier-codes tier-arlington tier-size tier-fields tier-pages _corpus-ran")
 
 [doc("The plan agrees with itself: tables against files, status lines, links, size budgets (AGENTS.md)")]
 [group('local')]
@@ -427,6 +427,16 @@ tier-realize:
 [group('corpus')]
 tier-fields:
     scripts/test-capped.sh cargo test -p sheaf-ops --release --test fields_corpus -- --ignored --nocapture
+
+# Every page of the scans, signatures and conformance suites and the pool
+# sample as the page table has it, against PDFium's count and sizes (M18
+# slice 21), beside source_corpus's test of forms/, which runs every
+# time: the files PDFium counts past their trees and those it numbers
+# otherwise are held by name, each to PDFium's own answer. A few minutes.
+[doc("The page table against PDFium's counts and sizes over the scans, signatures and conformance suites and the pool sample")]
+[group('corpus')]
+tier-pages:
+    scripts/test-capped.sh cargo test -p sheaf-ops --test source_corpus -- --ignored --nocapture
 
 # PDFium's resave of a watermark.
 [group('corpus')]
@@ -577,6 +587,26 @@ annots-dump out:
 [group('corpus')]
 fields-dump out:
     SHEAF_FIELDS_DUMP="{{ absolute_path(out) }}" scripts/test-capped.sh cargo test -p sheaf-doc --release --lib -- --ignored --nocapture --exact forms::dump::fields_dump
+
+# What sheaf reads of the common structures of every file of the forms,
+# scans, signatures and conformance manifests and the pool's sample,
+# written to `out`, counts and checksums only: a line a file, a column a
+# structure, each `name=count:checksum`. The page table (each page's
+# object, repeat, boxes, rotation, user unit, resources, contents,
+# annotation entries, struct parents and parents), `/PageLabels`' ranges,
+# the attachments, the whole `/Names /Dests` tree, the bookmarks, the
+# layers, a portfolio's fields, the form's terminal fields (full names,
+# tooltips and their values' lengths, never a value), the document scripts
+# as a combine copies them, and what its XMP claims. A file that doesn't
+# open is one line, and why. It asserts nothing: run it before and after
+# a change to what reads page or name trees, text strings or XMP, or a
+# move of the PDF layer's pin, over the same corpus, and `diff` the two
+# files; SHEAF_STRUCTURES_DUMP_ONLY=<a corpus path> prints that file's
+# records in full. Two runs over the same code write the same file.
+[doc("What sheaf reads of every corpus file's page tree, labels, attachments, dests, outline, layers, portfolio, fields, scripts and claims, a line each, written to a file: diff two runs across a change to them")]
+[group('corpus')]
+structures-dump out:
+    SHEAF_STRUCTURES_DUMP="{{ absolute_path(out) }}" scripts/test-capped.sh cargo test -p sheaf-doc --release --lib -- --ignored --nocapture --exact source::dump::structures_dump
 
 # ----- Gates ---------------------------------------------------------------
 

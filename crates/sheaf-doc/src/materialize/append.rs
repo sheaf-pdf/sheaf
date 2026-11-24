@@ -479,7 +479,7 @@ pub fn append(
     let record = OutputRecord {
         version: input.version,
         path: record.path.clone(),
-        at: crate::annot::pdf_date_now(),
+        at: crate::pdf::semantics::date::now(),
         strategy: StrategyKind::Append,
         sound: record.sound,
         signatures_hold: record.signatures_hold,

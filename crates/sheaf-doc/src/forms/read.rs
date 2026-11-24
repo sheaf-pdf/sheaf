@@ -38,14 +38,15 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use crate::pdf::{Dictionary, LazyPdf, Limit, Object, ObjectId, StreamExt, Value as PdfValue};
+use crate::pdf::{
+    Dictionary, LazyPdf, Limit, Object, ObjectId, StreamExt, Value as PdfValue, text,
+};
 
 use super::field::{
     Action, Border, BorderStyle, Choice, Color, Field, FieldId, FieldKind, Mk, Trigger, Value,
     Widget,
 };
 use crate::attachments::{Objects, once, resolve};
-use crate::file::pdf_text_bytes;
 use crate::source::{FormLimits, PageFacts, Source};
 
 /// The most of `/MaxLen` layout uses: comb cells and character limits.
@@ -534,7 +535,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         let part = dict.get(b"T").and_then(|t| resolve(pdf, t));
         let partial = match part.and_then(Object::as_bytes) {
             Some(t) if t.len() > limits.name => None,
-            Some(t) => Some(pdf_text_bytes(t)),
+            Some(t) => Some(text::decode(t)),
             None => Some(String::new()),
         };
         let name = partial.as_deref().map(|t| super::full_name_of(up_name, t));
@@ -745,8 +746,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             self.damage(too_long());
             return None;
         }
-        self.spend(bytes.len())
-            .then(|| pdf_text_bytes(&bytes).into())
+        self.spend(bytes.len()).then(|| text::decode(&bytes).into())
     }
 
     /// A dictionary's `/DA`, unless it's longer than [`FormLimits::da`].

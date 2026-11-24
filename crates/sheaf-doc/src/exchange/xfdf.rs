@@ -6,13 +6,12 @@
 //! Only `<annots>` (and `<f>`, the file they're on) for now; M10's form
 //! data goes beside them as `<fields>`.
 
-use crate::pdf::{Dictionary, LazyPdf, Object, Value, literal};
+use crate::pdf::{Dictionary, LazyPdf, Object, Value, literal, text};
 use anyhow::{Context, Result, bail};
 use quick_xml::escape::{escape, resolve_predefined_entity};
 use quick_xml::events::Event;
 
 use super::Comments;
-use crate::file::pdf_text;
 use crate::serialize::built::Built;
 
 const NS: &str = "http://ns.adobe.com/xfdf/";
@@ -76,7 +75,11 @@ pub fn write(comments: &Comments) -> Result<Vec<u8>> {
         };
         let mut attrs: Vec<(&str, String)> = vec![("page", page.to_string())];
         let nums = |key: &[u8]| numbers(pdf, d, key);
-        let text = |key: &[u8]| d.get(key).map(pdf_text).filter(|t| !t.is_empty());
+        // Without the NUL a byte PDFDocEncoding leaves undefined reads as
+        // (0x7F, 0x9F, 0xAD), which no XML holds, escaped or not.
+        let text = |key: &[u8]| {
+            (d.get(key).map(|o| text::of(o).replace('\0', ""))).filter(|t| !t.is_empty())
+        };
         let name = |key: &[u8]| {
             d.get(key)
                 .and_then(Object::as_name)
@@ -328,9 +331,9 @@ pub fn read(bytes: &[u8]) -> Result<Comments> {
                     if let Some((_, dict)) = &mut current {
                         let value = std::mem::take(&mut buf);
                         match tag.as_str() {
-                            "contents" => dict.set("Contents", crate::save::text_string(&value)),
+                            "contents" => dict.set("Contents", crate::pdf::text::string(&value)),
                             "defaultappearance" => dict.set("DA", literal(value.into_bytes())),
-                            "defaultstyle" => dict.set("DS", crate::save::text_string(&value)),
+                            "defaultstyle" => dict.set("DS", crate::pdf::text::string(&value)),
                             "vertices" => dict.set("Vertices", reals(&value)),
                             "gesture" => strokes.push(reals(&value)),
                             _ => {}
@@ -371,7 +374,7 @@ fn annotation(subtype: &str, attrs: &[(String, String)]) -> (u32, Dictionary) {
     let mut bs = Dictionary::new();
     let mut ends: (Option<String>, Option<String>) = (None, None);
     let (mut start, mut end) = (None, None);
-    let text = |v: &str| crate::save::text_string(v);
+    let text = |v: &str| crate::pdf::text::string(v);
     let name = |v: &str| Object::name(v);
     for (k, v) in attrs {
         match k.as_str() {

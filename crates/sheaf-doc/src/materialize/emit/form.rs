@@ -69,6 +69,7 @@ use crate::pdf::{
 
 use super::Cx;
 use crate::annot::AnnotId;
+use crate::attachments::tree_names;
 use crate::content::{Res, sink};
 use crate::forms::appearance::{self, FontAt, TextLook};
 use crate::forms::{FieldId, FieldKind, Value};
@@ -800,7 +801,7 @@ impl Fields {
             // A parent sheaf made for an instance whose names clashed.
             None => {
                 let mut out = Dictionary::new();
-                out.set("T", crate::save::text_string(&node.partial));
+                out.set("T", crate::pdf::text::string(&node.partial));
                 if !kids.is_empty() {
                     out.set("Kids", kids);
                 }
@@ -966,7 +967,7 @@ impl Fields {
             out.set("Kids", kids);
         }
         if let Some(tip) = tip {
-            out.set("TU", crate::save::text_string(tip));
+            out.set("TU", crate::pdf::text::string(tip));
         }
         if let Some(parent) = node.parent {
             out.set("Parent", cx.placeholder(ObjKey::Field(parent)));
@@ -1106,6 +1107,9 @@ pub(crate) fn scripts(cx: &mut Cx) -> Option<Object> {
         taken.insert(key.clone());
         all.push((key, script));
     }
+    // Written here, not by the family's `write_names`, which refuses a
+    // name given twice: the primary's tree may list one twice, and PDFium
+    // runs both scripts, so both are kept, in the order the tree had them.
     all.sort_by(|a, b| a.0.cmp(&b.0));
     let pairs: Vec<Object> = (all.into_iter())
         .flat_map(|(k, v)| [literal(k), v])
@@ -1118,55 +1122,19 @@ pub(crate) fn scripts(cx: &mut Cx) -> Option<Object> {
 }
 
 /// `src`'s document scripts (`/Names /JavaScript`), by name, at most
-/// [`MAX_SCRIPTS`], each node of the tree read once.
-fn document_scripts(src: &Src) -> Vec<(Vec<u8>, Object)> {
+/// [`MAX_SCRIPTS`], in the tree's order, each node of the tree read once
+/// ([`tree_names`]). A name the tree lists twice is given twice: PDFium
+/// runs both.
+pub(crate) fn document_scripts(src: &Src) -> Vec<(Vec<u8>, Object)> {
     let pdf = src.pdf();
-    let mut found = Vec::new();
     let tree = (pdf.catalog().ok())
         .and_then(|c| dict_at(pdf, c, b"Names"))
         .and_then(|n| n.get(b"JavaScript"));
-    if let Some(tree) = tree {
-        name_tree(pdf, tree, &mut found, &mut HashSet::new(), 0);
-    }
-    found
-}
-
-/// A name tree's entries, at most [`MAX_SCRIPTS`], each node read once.
-fn name_tree(
-    pdf: &LazyPdf,
-    node: &Object,
-    out: &mut Vec<(Vec<u8>, Object)>,
-    seen: &mut HashSet<ObjectId>,
-    depth: u32,
-) {
-    if depth > 32 || out.len() >= MAX_SCRIPTS {
-        return;
-    }
-    if let Some(id) = node.as_reference()
-        && !seen.insert(id)
-    {
-        return;
-    }
-    let Some(d) = (pdf.dereference(node).ok()).and_then(|(_, n)| plain_dict(n)) else {
-        return;
-    };
-    let pairs = (d.get(b"Names"))
-        .and_then(|n| pdf.dereference(n).ok())
-        .and_then(|(_, n)| n.as_array());
-    for pair in pairs.into_iter().flat_map(|p| p.chunks(2)) {
-        if let [k, v] = pair
-            && let Some(kb) = k.as_bytes()
-            && out.len() < MAX_SCRIPTS
-        {
-            out.push((kb.to_vec(), v.clone()));
-        }
-    }
-    let kids = (d.get(b"Kids"))
-        .and_then(|k| pdf.dereference(k).ok())
-        .and_then(|(_, k)| k.as_array());
-    for kid in kids.into_iter().flatten() {
-        name_tree(pdf, kid, out, seen, depth + 1);
-    }
+    (tree.into_iter())
+        .flat_map(|tree| tree_names(pdf, tree))
+        .take(MAX_SCRIPTS)
+        .map(|(name, script)| (name.to_vec(), script.clone()))
+        .collect()
 }
 
 /// `/Perms` as a save writes it, `perms` the primary's: without Reader's

@@ -22,15 +22,16 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::pdf::{
-    Dictionary, Document as Pdf, Object, ObjectId, Stream, StreamExt, Value, dictionary, literal,
+    Dictionary, Document as Pdf, Object, ObjectId, Stream, StreamExt, Value, dictionary, text,
 };
 use anyhow::{Context, Result, bail};
 use sheaf_edit::{PageSize, Rotation};
 
-use crate::attachments::Objects;
+use crate::attachments::{Objects, tree_names};
 use crate::content::PageContent;
 use crate::geom::{Affine, Geom, Rect};
 use crate::materialize::copy::remap;
+use crate::pdf::semantics::tree::write_names;
 use crate::serialize::built::{Built, StampForm};
 use crate::store::Src;
 
@@ -66,7 +67,7 @@ pub fn read_collection(pdf: &Pdf) -> (Option<String>, Vec<StampPage>) {
         .and_then(|i| pdf.dereference(i).ok())
         .and_then(|(_, i)| i.as_dict())
         .and_then(|i| i.get(b"Title"))
-        .map(crate::file::pdf_text)
+        .map(text::of)
         .filter(|t| !t.trim().is_empty());
     let names = page_names(pdf);
     let stamps = pdf
@@ -83,7 +84,7 @@ pub fn read_collection(pdf: &Pdf) -> (Option<String>, Vec<StampPage>) {
                     .unwrap_or_else(|| format!("Stamp {}", i + 1)),
                 text: dict
                     .and_then(|d| d.get(TEXT_KEY.as_bytes()))
-                    .map(crate::file::pdf_text)
+                    .map(text::of)
                     .filter(|t| !t.is_empty()),
                 size: geom.shown(),
             }
@@ -93,51 +94,27 @@ pub fn read_collection(pdf: &Pdf) -> (Option<String>, Vec<StampPage>) {
 }
 
 /// Each page's name from the `/Names /Pages` tree: what follows `=` in
-/// `#<id>=<name>`, else the key without its `#`.
+/// `#<id>=<name>`, else the key without its `#`. The tree is walked by
+/// [`tree_names`]; an entry whose value isn't a reference names no page.
 fn page_names(pdf: &Pdf) -> HashMap<ObjectId, String> {
-    let mut out = HashMap::new();
-    let Some(root) = pdf
+    let root = pdf
         .catalog()
         .ok()
         .and_then(|c| c.get(b"Names"))
         .and_then(|n| pdf.dereference(n).ok())
         .and_then(|(_, n)| n.as_dict())
-        .and_then(|n| n.get(b"Pages"))
-        .and_then(|p| pdf.dereference(p).ok())
-        .and_then(|(_, p)| p.as_dict())
-    else {
-        return out;
-    };
-    let mut todo = vec![root.clone()];
-    let mut seen = 0;
-    while let Some(node) = todo.pop() {
-        seen += 1;
-        if seen > 10_000 {
-            break;
-        }
-        if let Some(names) = node.get(b"Names").and_then(Object::as_array) {
-            for pair in names.chunks(2) {
-                let [key, value] = pair else { continue };
-                let Some(id) = value.as_reference() else {
-                    continue;
-                };
-                let key = crate::file::pdf_text(key);
-                let name = match key.split_once('=') {
-                    Some((_, n)) => n.to_string(),
-                    None => key.trim_start_matches('#').to_string(),
-                };
-                out.insert(id, name);
-            }
-        }
-        if let Some(kids) = node.get(b"Kids").and_then(Object::as_array) {
-            for k in kids {
-                if let Ok((_, o)) = pdf.dereference(k)
-                    && let Value::Dict(d) = o.value()
-                {
-                    todo.push(d.clone());
-                }
-            }
-        }
+        .and_then(|n| n.get(b"Pages"));
+    let mut out = HashMap::new();
+    for (key, value) in root.into_iter().flat_map(|root| tree_names(pdf, root)) {
+        let Some(id) = value.as_reference() else {
+            continue;
+        };
+        let key = text::decode(key);
+        let name = match key.split_once('=') {
+            Some((_, n)) => n.to_string(),
+            None => key.trim_start_matches('#').to_string(),
+        };
+        out.insert(id, name);
     }
     out
 }
@@ -312,7 +289,7 @@ pub fn build_collection(
         dict.set("Parent", pages_id);
         dict.remove(TEXT_KEY.as_bytes());
         if let Some(t) = text.as_ref().filter(|t| !t.is_empty()) {
-            dict.set(TEXT_KEY, text_string(t));
+            dict.set(TEXT_KEY, text::string(t));
         }
         let id = map[&page];
         out.objects.insert(id, Object::from(dict));
@@ -343,37 +320,20 @@ fn finish(
     );
     let mut catalog = dictionary! { "Type" => Object::name("Catalog"), "Pages" => pages_id };
     if !names.is_empty() {
-        // A name tree's keys are sorted.
-        let mut names = names;
-        names.sort_by(|a, b| a.0.cmp(&b.0));
-        let arr: Vec<Object> = names
+        // One root, its keys text strings sorted by their bytes.
+        let names = names
             .into_iter()
-            .flat_map(|(k, id)| [text_string(&k), Object::from(id)])
-            .collect();
-        catalog.set(
-            "Names",
-            dictionary! { "Pages" => dictionary! { "Names" => arr } },
-        );
+            .map(|(k, id)| (text::encoded(&k), Object::from(id)));
+        let tree = write_names(names).context("naming the stamps")?;
+        catalog.set("Names", dictionary! { "Pages" => tree });
     }
     let catalog = out.add_object(catalog);
     out.trailer.set("Root", catalog);
     if let Some(t) = title {
-        let info = out.add_object(dictionary! { "Title" => text_string(t) });
+        let info = out.add_object(dictionary! { "Title" => text::string(t) });
         out.trailer.set("Info", info);
     }
     crate::serialize::full::write_built(out)
-}
-
-fn text_string(s: &str) -> Object {
-    if s.is_ascii() {
-        literal(s)
-    } else {
-        let mut b = vec![0xFE, 0xFF];
-        for u in s.encode_utf16() {
-            b.extend(u.to_be_bytes());
-        }
-        Object::hex(b)
-    }
 }
 
 /// 22 letters and digits, the length of Acrobat's stamp ids.
@@ -642,6 +602,28 @@ mod tests {
         assert_eq!(stamps[0].name, "Rejected");
     }
 
+    /// A title, a name and a dynamic text holding control characters that
+    /// PDFDocEncoding gives other characters (U+001A is `ˆ` there, U+001F
+    /// `˜`, DEL undefined) read back as themselves, by sheaf and as PDFium
+    /// reads the file: they're written in UTF-16BE, not as their bytes.
+    #[test]
+    fn a_title_with_a_control_character_reads_back_as_itself() {
+        let (title, name, template) = ("Review\u{1A}", "Paid\u{7F}", "<<date>>\u{1F}");
+        let stamps = [(name.into(), Some(template.into()), square("0 0 1"))];
+        let bytes = build_collection(title, &stamps).unwrap();
+        let pdf = Pdf::load_mem(&bytes).unwrap();
+        let (read, stamps) = read_collection(&pdf);
+        assert_eq!(read.as_deref(), Some(title));
+        assert_eq!(stamps[0].name, name);
+        assert_eq!(stamps[0].text.as_deref(), Some(template));
+        let info = pdf.trailer.get(b"Info").unwrap().as_reference().unwrap();
+        let written = pdf.get_dictionary(info).unwrap().get(b"Title").unwrap();
+        assert_eq!(text::of(written), title);
+        let page = *pdf.get_pages().values().next().unwrap();
+        let page = pdf.get_dictionary(page).unwrap();
+        assert_eq!(text::of(page.get(TEXT_KEY.as_bytes()).unwrap()), template);
+    }
+
     #[test]
     fn an_acrobat_style_name_reads_as_its_name() {
         let bytes = build_collection("x", &[("Paid".into(), None, square("0 0 1"))]).unwrap();
@@ -662,9 +644,43 @@ mod tests {
             .unwrap()
             .as_array()
             .unwrap();
-        let key = crate::file::pdf_text(&names[0]);
+        let key = text::of(&names[0]);
         assert!(key.starts_with('#') && key.ends_with("=Paid"), "{key}");
         assert_eq!(read_collection(&pdf).1[0].name, "Paid");
+    }
+
+    /// A stamp named outside ASCII reads back as its name. The names'
+    /// tree is one root whose keys are sorted by their bytes, as 7.9.6
+    /// has a name tree's: such a name's key is UTF-16BE, after every
+    /// ASCII one, wherever its page is.
+    #[test]
+    fn a_name_outside_ascii_reads_back_its_tree_sorted_by_bytes() {
+        let stamps = [
+            ("Größe ✓".into(), None, square("0 0 1")),
+            ("Approved".into(), None, square("0 1 0")),
+            ("Zed".into(), None, square("1 0 0")),
+        ];
+        let bytes = build_collection("x", &stamps).unwrap();
+        let pdf = Pdf::load_mem(&bytes).unwrap();
+        let (_, read) = read_collection(&pdf);
+        let names: Vec<&str> = read.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["Größe ✓", "Approved", "Zed"]);
+        let catalog = pdf.catalog().unwrap();
+        let tree = (catalog.get(b"Names").and_then(Object::as_dict))
+            .and_then(|n| n.get(b"Pages"))
+            .and_then(Object::as_dict)
+            .unwrap();
+        assert!(tree.get(b"Kids").is_none());
+        let entries = tree.get(b"Names").and_then(Object::as_array).unwrap();
+        let keys: Vec<&[u8]> = (entries.chunks(2))
+            .map(|pair| pair[0].as_bytes().unwrap())
+            .collect();
+        assert_eq!(keys.len(), 3);
+        assert!(keys.is_sorted(), "{keys:?}");
+        assert!(keys[..2].iter().all(|k| k.is_ascii()), "{keys:?}");
+        assert!(keys[2].starts_with(b"\xFE\xFF"), "{:?}", keys[2]);
+        let key = text::decode(keys[2]);
+        assert!(key.starts_with('#') && key.ends_with("=Größe ✓"), "{key}");
     }
 
     /// A stamp page is sized as its form draws it: its geometry read as

@@ -55,7 +55,7 @@ pub mod tx;
 
 pub use sheaf_edit::{DestView, PageSize, Rotation, tape};
 
-pub use annot::{Annot, AnnotId, AnnotKind, Box2, Pt, default_author, pdf_date_now};
+pub use annot::{Annot, AnnotId, AnnotKind, Box2, Pt, default_author};
 pub use change::{Cause, ChangeSet};
 pub use history::{AllOf, FixedCount, HistoryPolicy, HistoryStats, MemoryBudget};
 pub use model::{

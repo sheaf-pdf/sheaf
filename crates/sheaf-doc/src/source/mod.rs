@@ -14,6 +14,8 @@
 
 pub(crate) mod annots;
 mod conformance;
+#[cfg(test)]
+mod dump;
 #[doc(hidden)]
 pub mod fuzz;
 #[cfg(test)]
@@ -44,7 +46,7 @@ use crate::pdf::forms::FieldFont;
 use crate::serialize::crypt::Crypt;
 use crate::store::{Blob, BlobCollision, BlobId, BlobKind, MemoryKind, Origin, Src};
 
-pub use conformance::{Conformance, PdfA};
+pub use crate::pdf::semantics::xmp::{Conformance, PdfA, PdfUa};
 pub use limits::{ContentLimits, FormLimits, Limits, PageTreeLimits};
 pub use pages::{PageFacts, Parent};
 
@@ -186,7 +188,7 @@ impl Source {
                 ..
             }
         );
-        let pages: Arc<[PageFacts]> = match pages::table(&pdf, &limits.page_tree) {
+        let pages: Arc<[PageFacts]> = match pages::table(&pdf, limits) {
             Err(OpenError::PageTree(PageTreeError::NoPages)) if pageless => Arc::new([]),
             pages => pages?.into(),
         };

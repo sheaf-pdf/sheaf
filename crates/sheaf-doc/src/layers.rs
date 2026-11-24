@@ -5,10 +5,9 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use crate::pdf::{Dictionary, Object, ObjectId, Value};
+use crate::pdf::{Dictionary, Object, ObjectId, Value, text};
 
 use crate::attachments::{Objects, once, resolve};
-use crate::file::pdf_text;
 use crate::source::Source;
 
 /// An optional content group of a source: sheaf's name for a layer. It is
@@ -93,7 +92,7 @@ pub fn layers_in<P: Objects + ?Sized>(pdf: &P) -> Vec<Layer> {
             .ok()
             .and_then(|g| g.get(b"Name"))
             .and_then(|o| resolve(pdf, o))
-            .map(pdf_text)
+            .map(text::of)
             .unwrap_or_default()
     };
 
@@ -159,7 +158,7 @@ fn walk_order<P: Objects + ?Sized>(
         && let Some(o) = it.peek()
         && let Some(s) = resolve(pdf, o).filter(|o| o.as_bytes().is_some())
     {
-        f(None, pdf_text(s), depth - 1);
+        f(None, text::of(s), depth - 1);
         it.next();
     }
     for o in it {

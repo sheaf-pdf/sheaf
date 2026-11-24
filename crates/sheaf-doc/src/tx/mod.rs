@@ -159,7 +159,7 @@ impl HostAttrs {
         HostAttrs {
             person: who.person.clone(),
             initials: who.initials.clone(),
-            now: crate::annot::pdf_date_now().into(),
+            now: crate::pdf::semantics::date::now().into(),
             date: written(&who.date_format, DATE),
             time: written(&who.time_format, TIME),
             file,

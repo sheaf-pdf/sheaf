@@ -1,13 +1,22 @@
-//! The single door to the PDF layer (M18 slices 1 and 8–13): every module in
-//! `sheaf-doc` and every other crate in the workspace reaches the PDF
-//! object, structure, filter and encryption types through here
-//! (`pdf-objects`, `pdf-structure`, `pdf-filters`, `pdf-crypt`), and
-//! content's (`content`: `pdf-content-streams`, M18 slice 19), fonts'
-//! (`fonts`: `pdf-fonts` and `pdf-gfx`, M18 slice 22), and content
-//! interpreted and written again (`gfx`: `pdf-gfx`, M18 slice 23),
-//! annotations' (`annots`: `pdf-annots`, M18 slice 24), and text fields'
-//! appearances (`forms`: `pdf-forms`, M10 slice 6), with where its readers
-//! tell what they read past (`fault`).
+//! The single door to the PDF layer (M18): every module in `sheaf-doc` and
+//! every other crate in the workspace reaches the `pdf-*` crates through
+//! here, and names none of them itself.
+//!
+//! - The objects, a file's structure read lazily or whole, its filters and
+//!   its encryption: `pdf-objects`, `pdf-structure`, `pdf-filters` and
+//!   `pdf-crypt` (M18 slices 1 and 8–13), at this module's top.
+//! - Text strings, the one place sheaf encodes and decodes them ([`text`]:
+//!   `pdf-objects`, M18 slice 21).
+//! - Content read and written ([`content`]: `pdf-content-streams`, M18
+//!   slice 19), fonts ([`fonts`]: `pdf-fonts` and `pdf-gfx`, M18 slice 22),
+//!   and content interpreted and written again ([`gfx`]: `pdf-gfx`, M18
+//!   slice 23).
+//! - Annotations ([`annots`]: `pdf-annots`, M18 slice 24) and text fields'
+//!   appearances ([`forms`]: `pdf-forms`, M10 slice 6).
+//! - The common structures ([`semantics`]: `pdf-semantics`, M18 slice 21):
+//!   the date a mark is made at, name and number trees, the page tree's
+//!   walk and what a file's XMP claims it conforms to.
+//! - Where the family's readers tell what they read past ([`fault`]).
 
 pub mod annots;
 pub mod content;
@@ -17,9 +26,11 @@ pub mod fonts;
 pub mod forms;
 pub mod gfx;
 mod reader;
+pub mod semantics;
 mod stream;
 #[cfg(any(test, feature = "fixtures"))]
 pub mod test_crypt;
+pub mod text;
 pub mod write;
 
 pub use document::Document;

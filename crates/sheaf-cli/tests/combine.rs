@@ -82,7 +82,7 @@ fn sheaf(args: &[&str]) -> std::process::Output {
 fn outline(path: &Path) -> Vec<(String, Vec<String>)> {
     let pdf = Pdf::load(path).unwrap();
     let title = |d: &sheaf_doc::pdf::Dictionary| {
-        sheaf_doc::file::text_string(d.get(b"Title").unwrap().as_bytes().unwrap())
+        sheaf_doc::pdf::text::decode(d.get(b"Title").unwrap().as_bytes().unwrap())
     };
     let kids = |parent: &sheaf_doc::pdf::Dictionary| {
         let mut out = Vec::new();

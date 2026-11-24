@@ -1309,6 +1309,7 @@ name = "pdf-semantics"
 version = "0.1.0-alpha.1"
 source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#9e6bfb2eb4e19bdc1308f61f26d0930c17ebe6a6"
 dependencies = [
+ "chrono",
  "pdf-objects",
  "quick-xml",
  "thiserror",
@@ -1887,6 +1888,7 @@ dependencies = [
  "pdf-forms",
  "pdf-gfx",
  "pdf-objects",
+ "pdf-semantics",
  "pdf-structure",
  "quick-xml",
  "regex",

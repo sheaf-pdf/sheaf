@@ -328,7 +328,7 @@ fn stale_mark_is_theirs(how: How) {
     let mut f = marked(90, &marks);
     let square = f.annots(0)[2];
     let case = "edited";
-    let edited = crate::save::text_string("Edited in Acrobat");
+    let edited = crate::pdf::text::string("Edited in Acrobat");
     f.dict(square).set("Contents", edited.clone());
     f.dict(square).set("M", literal("D:20261017090000Z"));
     let bytes = f.bytes();
@@ -493,7 +493,7 @@ fn a_reserialized_mark_stays_a_mark() {
         }
         if let Some(contents) = d.get(b"Contents").and_then(Object::as_bytes) {
             let mut utf16 = vec![0xFE, 0xFF];
-            for u in crate::file::text_string(contents)
+            for u in crate::pdf::text::decode(contents)
                 .nfd()
                 .collect::<String>()
                 .encode_utf16()
@@ -528,7 +528,7 @@ fn a_mark_s_text_reads_back_as_written() {
     let dict = f.dict(f.annots(0)[0]).clone();
     for (key, want) in [(&b"Contents"[..], &n.contents), (b"T", &n.author)] {
         let text = dict.get(key).and_then(Object::as_bytes).unwrap();
-        assert_eq!(crate::file::text_string(text), *want);
+        assert_eq!(crate::pdf::text::decode(text), *want);
     }
     let facts = finish(&f.source(), &NoProgress);
     let foreign = theirs(&facts.annots);

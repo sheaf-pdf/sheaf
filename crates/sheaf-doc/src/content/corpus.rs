@@ -124,7 +124,7 @@ fn office(src: &crate::store::Src) -> bool {
         [b"Producer".as_slice(), b"Creator"].iter().any(|key| {
             info.get(key)
                 .and_then(Object::as_bytes)
-                .is_some_and(|v| made_by(&crate::file::text_string(v).into_bytes()))
+                .is_some_and(|v| made_by(&crate::pdf::text::decode(v).into_bytes()))
         })
     });
     let in_xmp = || {

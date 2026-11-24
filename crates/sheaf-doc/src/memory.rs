@@ -81,9 +81,9 @@ pub fn empty(store: &Store) -> Result<Src> {
 /// each time, so not the same bytes twice.
 pub fn titled(store: &Store, title: &str) -> Result<Src> {
     let info = dictionary! {
-        "Title" => crate::save::text_string(title),
+        "Title" => crate::pdf::text::string(title),
         "Producer" => literal("sheaf"),
-        "CreationDate" => literal(crate::annot::pdf_date_now()),
+        "CreationDate" => literal(crate::pdf::semantics::date::now()),
     };
     let pdf = pages_pdf(0.0, 0.0, 0, Some(info))?;
     Ok(store.open(pdf.into(), BlobKind::memory(MemoryKind::Blank))?)

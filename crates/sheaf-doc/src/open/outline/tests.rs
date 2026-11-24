@@ -477,6 +477,47 @@ fn titles_decode_as_pdfium_shows_them() {
     assert_eq!(title(&high), "•†‡…—–ƒ⁄‹›−‰„“”‘’‚™ﬁﬂŁŒŠŸŽıłœšž €");
 }
 
+/// A bookmark's title from a file, and the name of the destination it
+/// goes to, read by the one text reader, PDFium's: 0x90 and 0x85 are
+/// PDFDocEncoding's ’ and –, so a name written in PDFDocEncoding finds
+/// the tree's key that holds the same text in UTF-16, either way round,
+/// and not the key holding what Latin-1 reads its bytes as, as PDFium
+/// looks a named destination up.
+#[test]
+fn a_title_and_a_destination_s_name_read_as_pdfdocencoding() {
+    let mut f = Form::new(3);
+    let p = f.pages.clone();
+    let utf16 = |text: &str, unit: fn(u16) -> [u8; 2], mark: [u8; 2]| {
+        let units = text.encode_utf16().flat_map(unit);
+        Object::hex(mark.into_iter().chain(units).collect::<Vec<u8>>())
+    };
+    let kid = f.pdf.add_object(dictionary! {
+        "Names" => vec![
+            utf16("Ann\u{90}s \u{85} notes", u16::to_be_bytes, [0xFE, 0xFF]), fit(p[0]),
+            utf16("Ann’s – notes", u16::to_be_bytes, [0xFE, 0xFF]), fit(p[1]),
+            utf16("Bob’s – notes", u16::to_le_bytes, [0xFF, 0xFE]), fit(p[2]),
+        ],
+    });
+    let catalog = f.catalog;
+    f.dict(catalog).set(
+        "Names",
+        dictionary! { "Dests" => dictionary! { "Kids" => vec![kid.into()] } },
+    );
+    let item = |bytes: &[u8]| {
+        (
+            0,
+            dictionary! { "Title" => literal(bytes), "Dest" => literal(bytes) },
+        )
+    };
+    outline_tree(
+        &mut f,
+        vec![item(b"Ann\x90s \x85 notes"), item(b"Bob\x90s \x85 notes")],
+    );
+    let got = outline(&f.source());
+    assert_eq!(titles(&got), ["Ann’s – notes", "Bob’s – notes"]);
+    assert_eq!(pages(&got), [Some(1), Some(2)]);
+}
+
 #[test]
 fn a_negative_count_is_closed() {
     let mut f = Form::new(1);

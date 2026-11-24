@@ -142,7 +142,7 @@ impl SaveRecord {
         SaveRecord {
             version,
             path,
-            at: crate::annot::pdf_date_now(),
+            at: crate::pdf::semantics::date::now(),
             strategy: StrategyKind::Opened,
             stamp,
             content_hash: None,

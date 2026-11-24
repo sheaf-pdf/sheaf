@@ -2,12 +2,11 @@
 //! shows instead of its position. Read from files, kept in the model by
 //! page id ([`LabelSpec`]) so they survive reorders, and written back.
 
-use std::collections::HashSet;
-
-use crate::pdf::{Dictionary, Object, ObjectId, Value};
+use crate::pdf::semantics::tree::write_numbers;
+use crate::pdf::{Dictionary, Object};
 use serde::{Deserialize, Serialize};
 
-use crate::attachments::{Objects, once, resolve};
+use crate::attachments::{Objects, resolve, tree_numbers};
 use crate::model::PageId;
 
 /// How a range numbers its pages (`/S`).
@@ -24,15 +23,12 @@ pub struct LabelRange {
 }
 
 /// The label ranges in the catalog's `/PageLabels`, sorted by start page.
+/// A start that's no page position (below 0, past `u32::MAX`) is passed.
 pub fn label_ranges<P: Objects + ?Sized>(pdf: &P) -> Option<Vec<LabelRange>> {
-    let catalog = pdf.catalog().ok()?;
-    let mut seen = HashSet::new();
-    let tree = once(pdf, &mut seen, catalog.get(b"PageLabels")?)?.as_dict()?;
-    let mut nums = Vec::new();
-    collect_nums(pdf, tree, &mut nums, 0, &mut seen);
-    let mut ranges: Vec<LabelRange> = nums
-        .into_iter()
+    let tree = pdf.catalog().ok()?.get(b"PageLabels")?;
+    let mut ranges: Vec<LabelRange> = tree_numbers(pdf, tree)
         .filter_map(|(start, o)| {
+            let start = u32::try_from(start).ok()?;
             let d = resolve(pdf, o)?.as_dict()?;
             Some(range_from(pdf, start, d))
         })
@@ -218,34 +214,43 @@ pub fn apply(
     out
 }
 
-/// The `/PageLabels` number tree for `ranges`.
+/// The `/PageLabels` number tree for `ranges`, one root holding every
+/// range by its start (`write_numbers`). Each range must start at a page
+/// of its own, as [`resolve_specs`] and [`apply`] give them: a number
+/// tree can't hold a key twice.
+///
+/// # Panics
+///
+/// Where two of `ranges` start at the same page.
 pub fn number_tree(ranges: &[LabelRange]) -> Dictionary {
-    let mut nums = Vec::with_capacity(ranges.len() * 2);
-    for r in ranges {
-        let mut d = Dictionary::new();
-        let s: Option<&[u8]> = match r.style {
-            Style::Decimal => Some(b"D"),
-            Style::UpperRoman => Some(b"R"),
-            Style::LowerRoman => Some(b"r"),
-            Style::UpperLetters => Some(b"A"),
-            Style::LowerLetters => Some(b"a"),
-            Style::None => None,
-        };
-        if let Some(s) = s {
-            d.set("S", Object::name(s));
-        }
-        if !r.prefix.is_empty() {
-            d.set("P", crate::save::text_string(&r.prefix));
-        }
-        if r.first != 1 {
-            d.set("St", r.first as i64);
-        }
-        nums.push(Object::from(r.start as i64));
-        nums.push(Object::from(d));
+    let nums = ranges
+        .iter()
+        .map(|r| (i64::from(r.start), Object::from(range_dict(r))));
+    write_numbers(nums).expect("label ranges start at pages of their own")
+}
+
+/// A range's dictionary, as a number tree holds it: `/S`, `/P` and `/St`
+/// where they aren't the defaults.
+fn range_dict(r: &LabelRange) -> Dictionary {
+    let mut d = Dictionary::new();
+    let s: Option<&[u8]> = match r.style {
+        Style::Decimal => Some(b"D"),
+        Style::UpperRoman => Some(b"R"),
+        Style::LowerRoman => Some(b"r"),
+        Style::UpperLetters => Some(b"A"),
+        Style::LowerLetters => Some(b"a"),
+        Style::None => None,
+    };
+    if let Some(s) = s {
+        d.set("S", Object::name(s));
     }
-    let mut tree = Dictionary::new();
-    tree.set("Nums", nums);
-    tree
+    if !r.prefix.is_empty() {
+        d.set("P", crate::pdf::text::string(&r.prefix));
+    }
+    if r.first != 1 {
+        d.set("St", r.first as i64);
+    }
+    d
 }
 
 /// The label of the page `offset` pages into range `r`.
@@ -278,7 +283,7 @@ fn range_from<P: Objects + ?Sized>(pdf: &P, start: u32, d: &Dictionary) -> Label
     let prefix = d
         .get(b"P")
         .and_then(|o| resolve(pdf, o))
-        .map(crate::file::pdf_text)
+        .map(crate::pdf::text::of)
         .unwrap_or_default();
     let first = d
         .get(b"St")
@@ -291,44 +296,6 @@ fn range_from<P: Objects + ?Sized>(pdf: &P, start: u32, d: &Dictionary) -> Label
         style,
         prefix,
         first,
-    }
-}
-
-/// Walk a number tree: `/Nums [key value …]` at leaves, `/Kids` above,
-/// each node or array reached by reference once.
-fn collect_nums<'a, P: Objects + ?Sized>(
-    pdf: &'a P,
-    node: &'a Dictionary,
-    out: &mut Vec<(u32, &'a Object)>,
-    depth: u8,
-    seen: &mut HashSet<ObjectId>,
-) {
-    if depth > 32 {
-        return;
-    }
-    if let Some(Value::Array(nums)) = node
-        .get(b"Nums")
-        .and_then(|o| once(pdf, seen, o))
-        .map(Object::value)
-    {
-        for pair in nums.as_chunks::<2>().0 {
-            if let Some(k) = resolve(pdf, &pair[0]).and_then(Object::as_integer)
-                && (0..=u32::MAX as i64).contains(&k)
-            {
-                out.push((k as u32, &pair[1]));
-            }
-        }
-    }
-    if let Some(Value::Array(kids)) = node
-        .get(b"Kids")
-        .and_then(|o| once(pdf, seen, o))
-        .map(Object::value)
-    {
-        for kid in kids {
-            if let Some(d) = once(pdf, seen, kid).and_then(Object::as_dict) {
-                collect_nums(pdf, d, out, depth + 1, seen);
-            }
-        }
     }
 }
 
@@ -436,6 +403,24 @@ mod tests {
         assert_eq!(label_ranges(src.pdf()), label_ranges(&pdf));
     }
 
+    /// A prefix is a text string, read as PDFium reads one: 0x90 and 0x85
+    /// are PDFDocEncoding's ’ and –, not Latin-1's control characters.
+    #[test]
+    fn a_prefix_reads_as_pdfdocencoding() {
+        let mut pdf = Pdf::with_version("1.7");
+        let prefix = crate::pdf::literal(b"Part\x90s \x85 ");
+        let style = dictionary! { "S" => Object::name("D"), "P" => prefix };
+        let tree = pdf.add_object(dictionary! { "Nums" => vec![0.into(), style.into()] });
+        let catalog = pdf.add_object(dictionary! {
+            "Type" => Object::name("Catalog"),
+            "PageLabels" => tree,
+        });
+        pdf.trailer.set("Root", catalog);
+        let ranges = label_ranges(&pdf).unwrap();
+        assert_eq!(ranges[0].prefix, "Part’s – ");
+        assert_eq!(labels_for(&ranges, 2), ["Part’s – 1", "Part’s – 2"]);
+    }
+
     #[test]
     fn no_labels_is_none() {
         let mut pdf = Pdf::with_version("1.7");
@@ -510,5 +495,34 @@ mod edit_tests {
         );
         pdf.trailer.set("Root", catalog);
         assert_eq!(label_ranges(&pdf).unwrap(), ranges);
+    }
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+
+    /// `/PageLabels` as a save writes it, for three ranges: one with no
+    /// prefix, one numbered from 5, and one with no numbers whose prefix
+    /// is outside ASCII. The bytes are those `number_tree` wrote before
+    /// it wrote through the family's `write_numbers`.
+    #[test]
+    fn a_number_tree_is_written_as_before() {
+        let range = |start, style, prefix: &str, first| LabelRange {
+            start,
+            style,
+            prefix: prefix.into(),
+            first,
+        };
+        let ranges = [
+            range(0, Style::LowerRoman, "", 1),
+            range(4, Style::Decimal, "A-", 5),
+            range(9, Style::None, "Back’s", 1),
+        ];
+        let mut bytes = Vec::new();
+        crate::pdf::write::write(&mut bytes, &Object::from(number_tree(&ranges))).unwrap();
+        let before = "<</Nums[0<</S/r>> 4<</S/D/P(A-)/St 5>> \
+                      9<</P<FEFF004200610063006B20190073>>>]>>";
+        assert_eq!(String::from_utf8(bytes).unwrap(), before);
     }
 }

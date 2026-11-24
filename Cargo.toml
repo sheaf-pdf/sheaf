@@ -114,6 +114,11 @@ pdf-annots = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", d
 # pdf-gfx's on, as pdf-annots' would; `text-layout`, which makes them, is
 # pdf-annots' and pdf-gfx's, which sheaf takes already.
 pdf-forms = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", default-features = false, features = ["text-layout"] }
+# And pdf-semantics, for the common structures sheaf reads and writes
+# (the page tree's walk, name and number trees, XMP's conformance claims,
+# the date a mark is made at): without its defaults, as the family's own
+# crates take it, but with `clock`, for that date.
+pdf-semantics = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", default-features = false, features = ["clock"] }
 
 # Zed's workspace patches for crates GPUI uses, mirrored from the
 # [patch.crates-io] of Zed's Cargo.toml at the snapshot's rev.

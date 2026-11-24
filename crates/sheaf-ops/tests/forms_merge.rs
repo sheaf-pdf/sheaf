@@ -624,6 +624,61 @@ fn scripts_from_two_forms_are_off_and_kept_apart_by(how: How) {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The document scripts in the file, each its name and its script, in
+/// the order its tree lists them.
+fn scripts_written(bytes: &[u8]) -> Vec<(String, String)> {
+    let pdf = Pdf::load_mem(bytes).unwrap();
+    let names = pdf.catalog().unwrap().get(b"Names").unwrap();
+    let names = pdf.dereference(names).unwrap().1.as_dict().unwrap();
+    let tree = pdf.dereference(names.get(b"JavaScript").unwrap());
+    let entries = tree.unwrap().1.as_dict().unwrap().get(b"Names").unwrap();
+    let text = |o: &Object| String::from_utf8_lossy(o.as_bytes().unwrap()).into_owned();
+    (entries.as_array().unwrap().chunks(2))
+        .map(|pair| {
+            let action = pdf.dereference(&pair[1]).unwrap().1.as_dict().unwrap();
+            (text(&pair[0]), text(action.get(b"JS").unwrap()))
+        })
+        .collect()
+}
+
+sheaf_doc::both_ways!(
+    a_script_name_the_primary_lists_twice_keeps_both,
+    a_script_name_the_primary_lists_twice_keeps_both_appended: a_script_name_the_primary_lists_twice_keeps_both_by
+);
+
+/// A primary whose scripts' tree lists a name twice, both of which PDFium
+/// runs, combined with a file that has a script of that name: the save
+/// keeps both of the primary's, in their order, and the other file's
+/// comes in renamed.
+fn a_script_name_the_primary_lists_twice_keeps_both_by(how: How) {
+    let dir = scratch(&format!("merge-scripts-twice-{how:?}"));
+    let mut a = form_a();
+    document_script(&mut a, &[("Init", "var a = 1;"), ("Init", "var a = 2;")]);
+    let mut b = form_b();
+    document_script(&mut b, &[("Init", "var b = 3;")]);
+    let pa = write(&dir, "a.pdf", &mut a);
+    let pb = write(&dir, "b.pdf", &mut b);
+    let mut doc = open(&pa);
+    insert(&mut doc, &pb, None, None);
+    let (strategy, bytes) = (how.strategy(), written(&doc, how));
+    let what = format!("{strategy:?}");
+    clean(&bytes, &what);
+    let scripts = scripts_written(&bytes);
+    let scripts: Vec<(&str, &str)> = (scripts.iter())
+        .map(|(name, js)| (name.as_str(), js.as_str()))
+        .collect();
+    assert_eq!(
+        scripts,
+        [
+            ("Init", "var a = 1;"),
+            ("Init", "var a = 2;"),
+            ("Init 2", "var b = 3;"),
+        ],
+        "{what}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_files_pages_in_runs_join_one_form() {
     // B's pages 1 and 3 combined after A: `both` has widgets on both, as

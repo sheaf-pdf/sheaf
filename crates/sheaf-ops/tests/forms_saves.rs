@@ -67,7 +67,7 @@ fn tooltips(bytes: &[u8]) -> Vec<(String, Option<String>)> {
                 .get_dictionary(f.object)
                 .unwrap()
                 .get(b"TU")
-                .map(sheaf_doc::file::pdf_text);
+                .map(sheaf_doc::pdf::text::of);
             (f.name, tu)
         })
         .collect()

@@ -36,7 +36,7 @@ fn sample() -> Comments {
         0,
         dictionary! {
             "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"), "Rect" => r(100, 600), "NM" => literal("n1"),
-            "T" => literal("Ann"), "Contents" => crate::save::text_string("Tie <&> “foot”"),
+            "T" => literal("Ann"), "Contents" => crate::pdf::text::string("Tie <&> “foot”"),
             "M" => literal("D:20261001120000"), "C" => vec![1.into(), 1.into(), 0.into()],
             "F" => 28, "Name" => Object::name("Comment"), "Open" => false,
         },
@@ -134,6 +134,44 @@ fn xfdf_and_fdf_carry_every_kind_through() {
     let back = read(&fdf, None).unwrap();
     assert_eq!(back.file.as_deref(), Some("review.pdf"));
     assert_eq!(marks(&back), want);
+}
+
+/// A string's bytes that PDFDocEncoding leaves undefined read as NUL,
+/// which XML can't hold: XFDF is written without them, and stays XML.
+#[test]
+fn xfdf_leaves_out_what_an_undefined_byte_reads_as() {
+    let mut c = Making::default();
+    c.add(
+        0,
+        dictionary! {
+            "Type" => Object::name("Annot"), "Subtype" => Object::name("Text"),
+            "Rect" => vec![100.into(), 600.into(), 120.into(), 620.into()],
+            "NM" => literal("n1"), "T" => literal(b"Ann\xADMarie".as_slice()),
+            "Subj" => literal(b"\x7F".as_slice()),
+            "Contents" => literal(b"co\xADoperate re\x7Fd\x9F".as_slice()),
+        },
+    );
+    let xfdf = xfdf::write(&c.comments(None)).unwrap();
+    let text = String::from_utf8(xfdf.clone()).unwrap();
+    assert!(!text.contains('\0'), "{text:?}");
+    assert!(text.contains(r#"title="AnnMarie""#), "{text}");
+    assert!(!text.contains("subject="), "{text}");
+    assert!(
+        text.contains("<contents>cooperate red</contents>"),
+        "{text}"
+    );
+    let back = xfdf::read(&xfdf).unwrap();
+    let note = crate::import::convert(
+        back.src.pdf(),
+        back.dict(0).unwrap(),
+        Rotation::R0,
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        (note.author.as_str(), note.contents.as_str()),
+        ("AnnMarie", "cooperate red")
+    );
 }
 
 #[test]
@@ -378,7 +416,7 @@ fn imports_match_by_name_and_report_the_rest() {
     // sheaf can't hold; one past the last page.
     c.add(
         0,
-        dictionary! { "Subtype" => Object::name("Text"), "Rect" => r(), "NM" => crate::save::text_string(&ours.name()), "Contents" => literal("ours, edited") },
+        dictionary! { "Subtype" => Object::name("Text"), "Rect" => r(), "NM" => crate::pdf::text::string(&ours.name()), "Contents" => literal("ours, edited") },
     );
     c.add(
         0,

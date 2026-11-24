@@ -11,7 +11,7 @@ use crate::pdf::{Object, ObjectId, Value, deflate};
 use sheaf_edit::{PageSize, Rotation};
 
 use super::lazy_tests::{QUICK, catalog, plaintext, stream, with_table};
-use super::{Conformance, Limits, OpenError, PageTreeError, PageTreeLimits, PdfA};
+use super::{Conformance, Limits, OpenError, PageTreeError, PageTreeLimits, PdfA, PdfUa};
 use crate::geom::Rect;
 use crate::serialize::fixture::{
     USER, attachment_only, encrypt_dict_for, encrypted, rc4_aes_128_and_aes_256,
@@ -146,6 +146,29 @@ fn a_10000_deep_page_tree_is_a_typed_error() {
     assert!(started.elapsed() < QUICK, "{:?}", started.elapsed());
 }
 
+/// What pdf-semantics is given is what sheaf reads with: its defaults
+/// under sheaf's caps on the page tree and on what a stream decodes to.
+#[test]
+fn the_familys_limits_are_sheafs() {
+    use crate::pdf::semantics as family;
+    // The page tree's defaults are the same caps already.
+    let mut want = family::Limits::DEFAULT;
+    want.xmp_bytes = Limits::DEFAULT.reader.max_decompressed;
+    assert_eq!(Limits::DEFAULT.semantics(), want);
+    let limits = Limits {
+        reader: crate::pdf::ReadLimits {
+            max_decompressed: 3002,
+            ..Limits::DEFAULT.reader
+        },
+        page_tree: PageTreeLimits { depth: 5, pages: 7 },
+        ..Limits::DEFAULT
+    };
+    want.page_depth = 5;
+    want.pages = 7;
+    want.xmp_bytes = 3002;
+    assert_eq!(limits.semantics(), want);
+}
+
 #[test]
 fn too_many_pages_or_none_are_typed_errors() {
     let limits = Limits {
@@ -216,10 +239,13 @@ fn a_page_listed_twice_is_two_pages() {
             (ObjectId::new(6, 0), 1)
         ]
     );
-    // A kid with /Kids is a node whatever its /Type, and any other a page.
-    // A kid that names no dictionary keeps its place as a Letter page, as
-    // PDFium and `Document::get_pages` keep it; one written in place, which
-    // has no object to be, is skipped, as `get_pages` skips it.
+    // A kid with /Kids is a node whatever its /Type, and any other a page,
+    // but where its /Type isn't /Page: object 4, /Type /Pages without
+    // /Kids, is a place where PDFium loads no page, Letter, though it names
+    // a media box. A kid that names no dictionary keeps its place as a
+    // Letter page, as PDFium numbers it. One written in place, which has
+    // no object to be, takes the fourth of the root's /Count, where the
+    // walk ends, and is left out: three pages, 5 0 R unlisted.
     let objects = [
         catalog(),
         object(
@@ -236,13 +262,12 @@ fn a_page_listed_twice_is_two_pages() {
         [
             (ObjectId::new(4, 0), 0),
             (ObjectId::new(4, 0), 1),
-            (ObjectId::new(9, 0), 0),
-            (ObjectId::new(5, 0), 0)
+            (ObjectId::new(9, 0), 0)
         ]
     );
-    assert_eq!(src.page_size(1), size(10.0, 10.0));
+    assert_eq!(src.page_size(1), size(612.0, 792.0));
     assert_eq!(src.page_size(2), size(612.0, 792.0));
-    assert!(src.page(3).unwrap().parent.is_none());
+    assert!(src.page(1).unwrap().parent.is_none());
     // A root without /Kids is the one page.
     let one = [
         catalog(),
@@ -253,6 +278,164 @@ fn a_page_listed_twice_is_two_pages() {
     assert_eq!(src.page_size(0), size(10.0, 20.0));
     // Past the last page, Letter.
     assert_eq!(src.page_size(1), size(612.0, 792.0));
+}
+
+/// The two rules the second fixture of
+/// [`a_page_listed_twice_is_two_pages`] holds together, apart.
+#[test]
+fn a_leaf_of_another_type_and_a_kid_in_place_are_two_rules() {
+    // A leaf whose /Type is something other than /Page is a place where
+    // PDFium loads no page: Letter, and holding nothing, though it names a
+    // box, contents and a /Parent. A leaf with no /Type is a page.
+    let objects = [
+        catalog(),
+        object(2, "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>"),
+        object(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 200] >>"),
+        object(
+            4,
+            "<< /Type /Template /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 6 0 R >>",
+        ),
+        object(5, "<< /Parent 2 0 R /MediaBox [0 0 10 20] >>"),
+    ];
+    let src = open(&objects).unwrap();
+    let all = [3, 4, 5].map(|n| (ObjectId::new(n, 0), 0));
+    assert_eq!(ids(&src), all);
+    assert_eq!(src.page_size(0), size(100.0, 200.0));
+    assert_eq!(src.page_size(1), size(612.0, 792.0));
+    let place = src.page(1).unwrap();
+    assert!(place.parent.is_none() && place.contents.is_empty());
+    assert_eq!(src.page_size(2), size(10.0, 20.0));
+
+    // A kid written in place takes its place in PDFium's numbering, the
+    // second of three, but has no object number, and is left out: the page
+    // after it is the table's second, which PDFium numbers third.
+    let objects = [
+        catalog(),
+        object(
+            2,
+            "<< /Type /Pages /Kids [3 0 R << /Type /Page /MediaBox [0 0 50 50] >> 4 0 R] \
+             /Count 3 >>",
+        ),
+        object(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 200] >>"),
+        object(4, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 20] >>"),
+    ];
+    let src = open(&objects).unwrap();
+    let all = [3, 4].map(|n| (ObjectId::new(n, 0), 0));
+    assert_eq!(ids(&src), all);
+    assert_eq!(src.page_size(1), size(10.0, 20.0));
+}
+
+#[test]
+fn a_root_count_of_0_counts_the_tree_by_its_nodes_counts() {
+    // PDFium doesn't count by a /Count of 0: it counts the tree, trusting
+    // each node's own /Count as it would the root's, 1 and 1, though the
+    // nodes list 2 and 1. The table ends at that count, 2: the first node's
+    // pages, and 7 isn't reached.
+    let objects = [
+        catalog(),
+        object(2, "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 0 >>"),
+        object(
+            3,
+            "<< /Type /Pages /Parent 2 0 R /Kids [5 0 R 6 0 R] /Count 1 >>",
+        ),
+        object(4, "<< /Type /Pages /Parent 2 0 R /Kids [7 0 R] /Count 1 >>"),
+        object(5, "<< /Type /Page /Parent 3 0 R >>"),
+        object(6, "<< /Type /Page /Parent 3 0 R >>"),
+        object(7, "<< /Type /Page /Parent 4 0 R >>"),
+    ];
+    let all = [5, 6].map(|n| (ObjectId::new(n, 0), 0));
+    assert_eq!(ids(&open(&objects).unwrap()), all);
+}
+
+#[test]
+fn a_page_tree_written_in_place_or_behind_two_references_is_walked() {
+    let pages = |root: &str| {
+        [
+            object(1, &format!("<< /Type /Catalog /Pages {root} >>")),
+            object(2, "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>"),
+            object(3, "<< /Type /Page /MediaBox [0 0 100 200] >>"),
+            object(4, "<< /Type /Page >>"),
+            object(5, "2 0 R"),
+        ]
+    };
+    let in_place = "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>";
+    for root in [in_place, "5 0 R"] {
+        let src = open(&pages(root)).unwrap();
+        let all = [3, 4].map(|n| (ObjectId::new(n, 0), 0));
+        assert_eq!(ids(&src), all, "{root}");
+        assert_eq!(src.page_size(0), size(100.0, 200.0), "{root}");
+    }
+}
+
+/// A file of one page, object 3, whose `/MediaBox` is object 5, `media`.
+fn media_behind(media: &str) -> [(u32, Vec<u8>); 4] {
+    [
+        catalog(),
+        object(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+        object(3, "<< /Type /Page /Parent 2 0 R /MediaBox 5 0 R >>"),
+        object(5, media),
+    ]
+}
+
+#[test]
+fn a_media_box_behind_two_references_is_letter() {
+    // PDFium follows one reference to a page's box: what it finds there
+    // is another, which is no box.
+    let mut objects = media_behind("6 0 R").to_vec();
+    objects.push(object(6, "[0 0 100 200]"));
+    assert_eq!(open(&objects).unwrap().page_size(0), size(612.0, 792.0));
+    let objects = media_behind("[0 0 100 200]");
+    assert_eq!(open(&objects).unwrap().page_size(0), size(100.0, 200.0));
+}
+
+#[test]
+fn a_media_box_naming_itself_opens_as_letter() {
+    // One reference followed, a loop of them is never met.
+    let src = open(&media_behind("5 0 R")).unwrap();
+    assert_eq!(src.page_size(0), size(612.0, 792.0));
+}
+
+#[test]
+fn inherited_resources_are_one_arc_across_pages() {
+    // Pages 3 and 6 inherit the root's /Resources, 6 through node 4; page 5
+    // has its own.
+    let objects = [
+        catalog(),
+        object(
+            2,
+            "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 \
+             /Resources << /Font << /F1 9 0 R >> >> >>",
+        ),
+        object(3, "<< /Type /Page /Parent 2 0 R >>"),
+        object(4, "<< /Type /Pages /Parent 2 0 R /Kids [6 0 R] >>"),
+        object(5, "<< /Type /Page /Parent 2 0 R /Resources << >> >>"),
+        object(6, "<< /Type /Page /Parent 4 0 R >>"),
+    ];
+    let src = open(&objects).unwrap();
+    let all = [3, 6, 5].map(|n| (ObjectId::new(n, 0), 0));
+    assert_eq!(ids(&src), all);
+    let resources = |i| src.page(i).unwrap().resources.clone().unwrap();
+    assert!(matches!(resources(0).value(), Value::Dict(d) if d.has(b"Font")));
+    assert!(Arc::ptr_eq(&resources(0), &resources(1)));
+    assert!(!Arc::ptr_eq(&resources(0), &resources(2)));
+}
+
+#[test]
+fn a_cap_broken_reading_a_kid_is_the_reader_s_own_error() {
+    // The kid nests arrays past what the reader parses: the open fails
+    // with the reader's error, not a page tree's.
+    let nested = format!("{}{}", "[".repeat(300), "]".repeat(300));
+    let objects = [
+        catalog(),
+        object(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+        object(3, &format!("<< /Type /Page /Parent 2 0 R /A {nested} >>")),
+    ];
+    let result = open(&objects);
+    assert!(
+        matches!(result, Err(OpenError::Pdf(crate::pdf::Error::Limit(_)))),
+        "{:?}",
+        result.map(|src| src.page_count())
+    );
 }
 
 /// The root's `/Kids`, `n` pages from object `first` on, under a root
@@ -529,11 +712,12 @@ fn per_page_annots_are_listed() {
 
 /// A file whose catalog has XMP `xml` as its `/Metadata`, deflated when
 /// `deflate`.
-fn with_xmp(xml: &str, deflate_xmp: bool) -> Result<Src, OpenError> {
+fn with_xmp(xml: impl AsRef<[u8]>, deflate_xmp: bool) -> Result<Src, OpenError> {
+    let xml = xml.as_ref();
     let (filter, data) = if deflate_xmp {
-        ("/Filter /FlateDecode ", deflate(xml.as_bytes()))
+        ("/Filter /FlateDecode ", deflate(xml))
     } else {
-        ("", xml.as_bytes().to_vec())
+        ("", xml.to_vec())
     };
     let metadata = stream(
         &format!(
@@ -560,22 +744,30 @@ pub(crate) fn xmp(description: &str) -> String {
     )
 }
 
+/// The claims `pdfa` and `pdfua`, as [`Source::conformance`] gives them.
+///
+/// [`Source::conformance`]: super::Source::conformance
+fn claimed(pdfa: Option<PdfA>, pdfua: Option<PdfUa>) -> Conformance {
+    let mut claims = Conformance::default();
+    (claims.pdfa, claims.pdfua) = (pdfa, pdfua);
+    claims
+}
+
+/// A file whose packet has `description` as its `rdf:Description`s, read
+/// for its claims.
+fn claims(description: &str, deflate: bool) -> anyhow::Result<Conformance> {
+    with_xmp(xmp(description), deflate).unwrap().conformance()
+}
+
 #[test]
 fn conformance_reads_pdfa_and_pdfua_claims() {
-    let claims =
-        |description: &str, deflate| with_xmp(&xmp(description), deflate).unwrap().conformance();
     // Attributes.
     let attributes = "<rdf:Description rdf:about=\"\" \
          xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" pdfaid:part=\"2\" pdfaid:conformance=\"b\"/>";
-    let pdfa_2b = Conformance {
-        pdfa: Some(PdfA {
-            part: 2,
-            level: Some('B'),
-        }),
-        pdfua: None,
-    };
+    let pdfa_2b = claimed(Some(PdfA::new(2, Some('B'))), None);
     assert_eq!(claims(attributes, false).unwrap(), pdfa_2b);
     assert_eq!(claims(attributes, true).unwrap(), pdfa_2b);
+    assert_eq!(pdfa_2b.pdfa.unwrap().level, Some('B'));
     assert_eq!(pdfa_2b.pdfa.unwrap().to_string(), "PDF/A-2b");
     // Elements, under any prefix, and PDF/UA beside PDF/A.
     let elements = "<rdf:Description rdf:about=\"\" xmlns:a=\"http://www.aiim.org/pdfa/ns/id/\">\
@@ -584,13 +776,7 @@ fn conformance_reads_pdfa_and_pdfua_claims() {
          <pdfuaid:part> 1 </pdfuaid:part></rdf:Description>";
     assert_eq!(
         claims(elements, false).unwrap(),
-        Conformance {
-            pdfa: Some(PdfA {
-                part: 3,
-                level: Some('A'),
-            }),
-            pdfua: Some(1),
-        }
+        claimed(Some(PdfA::new(3, Some('A'))), Some(PdfUa::new(1)))
     );
     // PDF/A-4 gives no level; a part in another namespace is no claim.
     let pdfa_4 = "<rdf:Description xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" \
@@ -598,18 +784,9 @@ fn conformance_reads_pdfa_and_pdfua_claims() {
          </rdf:Description>";
     assert_eq!(
         claims(pdfa_4, false).unwrap(),
-        Conformance {
-            pdfa: Some(PdfA {
-                part: 4,
-                level: None,
-            }),
-            pdfua: None,
-        }
+        claimed(Some(PdfA::new(4, None)), None)
     );
-    let named = PdfA {
-        part: 4,
-        level: None,
-    };
+    let named = PdfA::new(4, None);
     assert_eq!(named.to_string(), "PDF/A-4");
     assert_eq!(claims("", false).unwrap(), Conformance::default());
     let unreadable =
@@ -623,6 +800,135 @@ fn conformance_reads_pdfa_and_pdfua_claims() {
     ])
     .unwrap();
     assert_eq!(src.conformance().unwrap(), Conformance::default());
+}
+
+/// An attribute that doesn't read, or a claim's value that doesn't, is read
+/// past: a claim elsewhere in the packet counts, and a value after one that
+/// doesn't read is the claim's.
+#[test]
+fn a_claim_counts_past_what_doesn_t_read_elsewhere_in_the_packet() {
+    // Unquoted, and given twice, before the claims and among them.
+    let attributes = "<rdf:Description rdf:about=\"\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
+         dc:format=application/pdf/>\
+         <rdf:Description rdf:about=\"\" rdf:about=\"\" \
+         xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" pdfaid:part=\"2\" pdfaid:conformance=\"B\"/>\
+         <rdf:Description rdf:about=\"\" xmlns:pdfuaid=\"http://www.aiim.org/pdfua/ns/id/\">\
+         <pdfuaid:part>1</pdfuaid:part></rdf:Description>";
+    let both = claimed(Some(PdfA::new(2, Some('B'))), Some(PdfUa::new(1)));
+    assert_eq!(claims(attributes, false).unwrap(), both);
+    assert_eq!(claims(attributes, true).unwrap(), both);
+    // A part with an entity no DOCTYPE declares, then one that reads.
+    let value = "<rdf:Description rdf:about=\"\" xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\">\
+         <pdfaid:part>&two;</pdfaid:part><pdfaid:part>3</pdfaid:part>\
+         <pdfaid:conformance>u</pdfaid:conformance></rdf:Description>";
+    assert_eq!(
+        claims(value, false).unwrap(),
+        claimed(Some(PdfA::new(3, Some('U'))), None)
+    );
+}
+
+/// A catalog `/Metadata` that names a dictionary, or nothing, has no
+/// packet: no claims, and no error.
+#[test]
+fn metadata_that_s_no_stream_claims_nothing() {
+    for metadata in [
+        "<< /Type /Metadata /Subtype /XML >>",
+        "(pdfaid:part=\"2\")",
+        "null",
+    ] {
+        let src = open(&[
+            object(1, "<< /Type /Catalog /Pages 2 0 R /Metadata 4 0 R >>"),
+            object(2, "<< /Type /Pages /Kids [3 0 R] >>"),
+            object(3, "<< /Type /Page /Parent 2 0 R >>"),
+            object(4, metadata),
+        ])
+        .unwrap();
+        assert_eq!(
+            src.conformance().unwrap(),
+            Conformance::default(),
+            "{metadata}"
+        );
+    }
+    // One written in the catalog, and a reference to an object that isn't
+    // there.
+    for metadata in ["<< /Type /Metadata /Subtype /XML >>", "9 0 R"] {
+        let src = open(&[
+            object(
+                1,
+                &format!("<< /Type /Catalog /Pages 2 0 R /Metadata {metadata} >>"),
+            ),
+            object(2, "<< /Type /Pages /Kids [3 0 R] >>"),
+            object(3, "<< /Type /Page /Parent 2 0 R >>"),
+        ])
+        .unwrap();
+        assert_eq!(
+            src.conformance().unwrap(),
+            Conformance::default(),
+            "{metadata}"
+        );
+    }
+}
+
+/// A packet in UTF-16 or UTF-32, which XMP allows and the reader reads
+/// none of, can't be read: it isn't taken for one that claims nothing.
+#[test]
+fn a_packet_that_isn_t_utf8_can_t_be_read() {
+    let packet = xmp("<rdf:Description rdf:about=\"\" \
+         xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" pdfaid:part=\"1\" pdfaid:conformance=\"B\"/>");
+    let utf16 = |be: bool, mark: bool| -> Vec<u8> {
+        let units = (mark.then_some(0xFEFF).into_iter()).chain(packet.encode_utf16());
+        units
+            .flat_map(|u| if be { u.to_be_bytes() } else { u.to_le_bytes() })
+            .collect()
+    };
+    let utf32le: Vec<u8> = (packet.chars())
+        .flat_map(|c| u32::from(c).to_le_bytes())
+        .collect();
+    let encoded = [
+        utf16(true, true),
+        utf16(true, false),
+        utf16(false, true),
+        utf16(false, false),
+        utf32le,
+    ];
+    for (i, xml) in encoded.into_iter().enumerate() {
+        let error = with_xmp(xml, false).unwrap().conformance().unwrap_err();
+        assert!(
+            format!("{error:#}").contains("isn't UTF-8"),
+            "{i}: {error:#}"
+        );
+    }
+    // The same packet in UTF-8, after its mark or not, claims PDF/A-1b.
+    let pdfa_1b = claimed(Some(PdfA::new(1, Some('B'))), None);
+    assert_eq!(
+        with_xmp(&packet, false).unwrap().conformance().unwrap(),
+        pdfa_1b
+    );
+    let marked = [&[0xEF, 0xBB, 0xBF][..], packet.as_bytes()].concat();
+    assert_eq!(
+        with_xmp(marked, false).unwrap().conformance().unwrap(),
+        pdfa_1b
+    );
+}
+
+/// XML that breaks off after a claim is an error, though the claim before
+/// it was read: none is taken from a packet that doesn't read to its end.
+#[test]
+fn xml_that_breaks_off_after_a_claim_is_an_error() {
+    let claim = "<rdf:Description rdf:about=\"\" \
+         xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" pdfaid:part=\"2\" pdfaid:conformance=\"B\"/>";
+    // A tag left open where the packet ends, and an end tag that closes
+    // another element.
+    let whole = xmp(claim);
+    let open = &whole[..whole.find("</rdf:RDF>").unwrap()];
+    let broken = [
+        format!("{open}<rdf:Description rdf:about="),
+        xmp(&format!("{claim}</rdf:Description>")),
+    ];
+    for xml in broken {
+        let error = with_xmp(xml, false).unwrap().conformance().unwrap_err();
+        assert!(format!("{error:#}").contains("XMP metadata"), "{error:#}");
+    }
 }
 
 #[test]

@@ -58,6 +58,22 @@ lists them):
   never a value): run before and after a change to what reads a form or
   makes a text field's appearance, or a move of the PDF layer's pin, and
   `diff` the two files.
+- `just structures-dump <file>` writes what sheaf reads of every corpus
+  file's common structures (its page table, labels, attachments, named
+  destinations, bookmarks, layers, portfolio, form fields, document
+  scripts and XMP claims, a column each, never a value, a line a file):
+  run before and after a change to what reads page or name trees, text
+  strings or XMP, or a move of the PDF layer's pin, and `diff` the two
+  files.
+- `just tier-pages` sets the page table beside PDFium over the scans,
+  signatures and conformance suites and the pool sample: each file PDFium
+  opens opens as a source, with PDFium's count of pages, each at
+  PDFium's size where PDFium loads one and the table's stand-in where it
+  doesn't, but for the files the test names, each held to PDFium's own
+  answer (those PDFium counts past their trees, those it numbers
+  otherwise, and those the source doesn't open). `forms/` is held to
+  PDFium's counts and sizes in every corpus run (`source_corpus`). It's
+  in `just premerge`.
 - `just tier-fields` fills every corpus form's text fields through the
   model, saves, and sets each widget's appearance beside the one PDFium
   makes for the same value, inside its box; each widget that differs is

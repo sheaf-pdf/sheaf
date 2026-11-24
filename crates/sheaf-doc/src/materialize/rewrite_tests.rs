@@ -20,7 +20,7 @@ use crate::history::FixedCount;
 use crate::materialize::{self, AskAnswers, Came, How, SaveHow, StrategyKind, Why};
 use crate::model::{Document, Mark, PageId};
 use crate::open::FlatOutlineItem;
-use crate::save::{rewrite, rewrite_to_path, text_string};
+use crate::save::{rewrite, rewrite_to_path};
 use crate::serialize::crypt::Crypt;
 use crate::store::{BlobKind, Src, Store};
 use crate::tx::fixture as fx;
@@ -865,7 +865,7 @@ fn closed_bookmark_stays_closed(how: How) {
     let mut f = crate::forms::fixture::Form::new(3);
     let p = f.pages.clone();
     let item = |title: &str, page: usize| {
-        dictionary! { "Title" => text_string(title), "Dest" => vec![p[page].into(), Object::name("Fit")] }
+        dictionary! { "Title" => crate::pdf::text::string(title), "Dest" => vec![p[page].into(), Object::name("Fit")] }
     };
     let mut closed = item("Closed", 0);
     closed.set("Count", -2);
@@ -890,7 +890,7 @@ fn closed_bookmark_stays_closed(how: How) {
         while let Some(id) = next {
             let d = pdf.get_dictionary(id).unwrap();
             let count = d.get(b"Count").and_then(Object::as_integer);
-            out.push((crate::file::pdf_text(d.get(b"Title").unwrap()), count));
+            out.push((crate::pdf::text::of(d.get(b"Title").unwrap()), count));
             counts(pdf, d.get(b"First").and_then(Object::as_reference), out);
             next = d.get(b"Next").and_then(Object::as_reference);
         }
@@ -1195,7 +1195,7 @@ fn replies_follow_our_marks(how: How) {
         .unwrap();
     let (_, reply) = list
         .iter()
-        .find(|(_, d)| d.get(b"NM").map(crate::file::pdf_text).as_deref() == Some("acro-reply"))
+        .find(|(_, d)| d.get(b"NM").map(crate::pdf::text::of).as_deref() == Some("acro-reply"))
         .unwrap();
     assert_eq!(
         reply.get(b"IRT").unwrap().as_reference().unwrap(),
@@ -1619,7 +1619,7 @@ fn deleted_comments_stay_out(how: How) {
             .iter()
             .map(|(_, d)| {
                 d.get(b"Contents")
-                    .map(crate::file::pdf_text)
+                    .map(crate::pdf::text::of)
                     .unwrap_or_default()
             })
             .collect()
@@ -1808,7 +1808,7 @@ fn dup_without_theirs(how: How) {
         let list = list.map(|l| l.as_array().unwrap()).unwrap_or_default();
         for e in list {
             let d = pdf.get_dictionary(e.as_reference().unwrap()).unwrap();
-            let text = d.get(b"Contents").map(crate::file::pdf_text);
+            let text = d.get(b"Contents").map(crate::pdf::text::of);
             assert_ne!(text.as_deref(), Some("No name"), "{how:?}");
         }
     }
@@ -1871,15 +1871,15 @@ fn a_reply_names_a_comment(how: How) {
     let list = page_annots(&out);
     let (theirs_id, theirs) = list
         .iter()
-        .find(|(_, d)| d.get(b"Contents").map(crate::file::pdf_text).as_deref() == Some("No name"))
+        .find(|(_, d)| d.get(b"Contents").map(crate::pdf::text::of).as_deref() == Some("No name"))
         .unwrap();
     assert_eq!(
-        crate::file::pdf_text(theirs.get(b"NM").unwrap()),
+        crate::pdf::text::of(theirs.get(b"NM").unwrap()),
         unnamed.name
     );
     let (_, reply) = list
         .iter()
-        .find(|(_, d)| d.get(b"Contents").map(crate::file::pdf_text).as_deref() == Some("Answered"))
+        .find(|(_, d)| d.get(b"Contents").map(crate::pdf::text::of).as_deref() == Some("Answered"))
         .unwrap();
     assert_eq!(
         reply.get(b"IRT").unwrap().as_reference().unwrap(),
@@ -2309,7 +2309,7 @@ fn caret_and_strikeout(how: How) {
     // The names the renderer hides are exactly what was written.
     let names: Vec<String> = list
         .iter()
-        .map(|d| crate::file::pdf_text(d.get(b"NM").unwrap()))
+        .map(|d| crate::pdf::text::of(d.get(b"NM").unwrap()))
         .collect();
     let mut expected: Vec<String> = want.iter().flat_map(|a| a.pdf_names()).collect();
     expected.sort();

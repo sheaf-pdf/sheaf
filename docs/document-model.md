@@ -197,18 +197,29 @@ blob, and a source parses the blob in place:
   stream is decoded once. `XrefFacts` records what a later
   append needs: the newest section's kind and start, `/Size`, the largest
   cross-reference stream number, `/ID` and where the header starts.
-- **The page table** numbers pages as PDFium does (a kid with `/Kids` is
-  a node, any other a page) and reads the inheritable keys up `/Parent`
-  as it does. Each page's `Geom` is its boxes and rotation as PDFium
-  sizes them: an empty media box is Letter, the crop box is clipped to the
-  media box (one outside it shows nothing), `/Rotate` is whole quarter
-  turns, `(degrees / 90) mod 4`, and `/UserUnit` doesn't scale the size.
-  The layout's page sizes are `Geom::shown()` from the first paint, and
-  equal PDFium's on every corpus page; PDFium isn't asked for sizes. A
-  page the tree lists twice is two entries, which share what the page
-  holds, as pages naming one `/Annots` array share it. The table ends at
-  the root's `/Count` when PDFium counts by it, since PDFium loads no
-  page past it.
+- **The page table** is pdf-semantics' walk of the page tree by PDFium's
+  rules, so pages are numbered as PDFium numbers them: a kid with `/Kids`
+  is a node whatever its `/Type`, any other dictionary a page, and the
+  inheritable keys come up `/Parent` as PDFium reads them, each reference
+  on the way followed as far as PDFium follows it (one, or two for
+  `/Pages`, `/Parent` and `/Rotate`). A leaf whose `/Type` PDFium loads
+  no page of, and a kid that names no dictionary, keep their places as
+  Letter pages holding nothing. A kid that isn't a reference has no
+  object number for sheaf to name a page by, and is left out, so the
+  pages after it are numbered one lower than PDFium numbers them. The
+  table ends at the count PDFium gives, since PDFium loads no page past
+  it: the root's `/Count` where PDFium counts by it, and otherwise its
+  count of the tree, which trusts a node's `/Count` the same way. Each
+  page's `Geom` is its boxes and rotation as PDFium sizes them: an empty
+  media box is Letter, the crop box is clipped to the media box (one
+  outside it shows nothing), `/Rotate` is whole quarter turns,
+  `(degrees / 90) mod 4`, and `/UserUnit` doesn't scale the size. The
+  layout's page sizes are `Geom::shown()` from the first paint, and equal
+  PDFium's on every page of the corpus's forms, scans, signatures and
+  conformance suites and pool sample, but for the files `just tier-pages`
+  names; PDFium isn't asked for sizes. A page the tree lists twice is two
+  entries, which share what the page holds, as the pages under a node
+  share what they inherit and pages naming one `/Annots` array share it.
 - **One `Limits`** caps every reader of a source: `LazyPdf`'s (256 MiB a
   stream decompressed, 1,024 sections, 8,388,607 objects and twice as
   many cross-reference stream entries, references 64 deep), the page
@@ -406,7 +417,9 @@ Session and `sheaf edit`):
   first asks; see Page content). Each reader passes over what it can't read,
   so `finish` doesn't fail once the source has opened, and reads a tree a
   node at a time however often the file lists a node (a name or number tree,
-  the layers' order, a portfolio's folders, the outline), so it ends. It
+  the layers' order, a portfolio's folders, the outline), so it ends: a name
+  or number tree is `pdf-semantics`' walk, 32 levels and 100,000 nodes at
+  most. Text strings are read as PDFium reads them (`pdf::text`). It
   counts the pages of its first pass to the progress it's given. The
   outline's destinations (`/Dest`, named destinations, a GoTo action's `/D`)
   are found through the page table, and their views are read as PDFium reads
@@ -539,8 +552,11 @@ not what's stored.
   program's re-serialization (`100` as `100.0`, reals written to three
   decimals or more, two for geometry alone, `/Contents` in UTF-16BE,
   `/Rect`'s corners swapped) keeps a mark sheaf's, and its edit doesn't.
-  A text string is written as is only where PDFDocEncoding reads it back
-  so: one with a DEL or a byte from 0x18 to 0x1F is UTF-16BE. Left out:
+  A text string is written as is only where every character is printable
+  ASCII, a tab, a line feed or a carriage return (`pdf::text::string`);
+  any other is UTF-16BE, and a U+001B isn't written, since a reader
+  takes one for a language escape and shows none of the text after it.
+  Left out:
   `/IRT` and `/RT`, which the save sets after the mark is written, `/IRT`
   an object reference a rewrite renumbers; a reply's or a status's
   `/Rect`, its parent's, set later too; and `/AP`, which other tools
@@ -1641,8 +1657,8 @@ of this, and a user sees nothing new.
   PDFium's form filler makes an appearance from `/V` for a widget with
   none, so such a widget would show its file's old value there and
   nothing in a viewer that draws appearances alone; before slice 9 only
-  a test reaches it. Of the corpus's 229,351 text widgets on pages, 942
-  are unmade for a sample value: 497 have no box and 445 have a
+  a test reaches it. Of the corpus's 229,351 text widgets on pages, 744
+  are unmade for a sample value: 497 have no box and 247 have a
   character their font can't encode (a fallback font draws these: M10
   slice 7).
 - **No save writes `/V` yet.** The emitter writes a stale widget's
@@ -1687,9 +1703,9 @@ of this, and a user sees nothing new.
   flattened page. An ignored test in `interop.rs` runs `qpdf --check` on
   each case's output and draws it with `pdftoppm`. `just tier-fields`
   fills every corpus form's text fields: 220,981 fields and their
-  229,351 widgets, 228,409 made, each overlay's form the save's, and each
-  made one drawn beside PDFium's. The 12,908 widgets that differ by a
-  pixel are each in one of 17 classes held by count: 6,174 draw alike
+  229,351 widgets, 228,607 made, each overlay's form the save's, and each
+  made one drawn beside PDFium's. The 13,028 widgets that differ by a
+  pixel are each in one of 18 classes held by count: 6,172 draw alike
   within 0.001 pt and differ by PDFium's rasterizing alone, 4,538 are a
   missing font's fallback by name, 1,865 PDFium's font map for CJK
   fonts, and the rest pdf-forms' other stated differences and readings
@@ -4904,8 +4920,14 @@ moved them onto `Generator` as fields, with `frozen`, for both kinds;
   gets a Note when a save draws a generator: a Rewrite for each it
   draws, an Append for those its path changes (the header and footer
   counted too): "This file claims PDF/A-2b; the watermark sheaf draws on
-  it isn't made to conform, so the saved file no longer does". A claim
-  that can't be read is logged, with no Note.
+  it isn't made to conform, so the saved file no longer does". The claims
+  are `pdf-semantics`' reading of the catalog's `/Metadata` packet: an
+  attribute or a value that doesn't read is read past, so a claim
+  elsewhere counts, and `/Metadata` that names no stream claims nothing. A
+  claim that can't be read (a packet in UTF-16 or UTF-32, which the
+  reader reads none of, a part that's no number, a level that's no
+  letter, or XML that breaks off, whatever it claimed before there) is
+  logged, with no Note.
 
 ### Drawn on screen
 

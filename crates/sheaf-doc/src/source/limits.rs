@@ -1,6 +1,7 @@
 //! The caps every reader of a source runs under: one value for all of
 //! them, given to the PDF layer's crates in their own terms at one place
-//! each ([`ContentLimits::family`], [`Limits::fonts`], [`Limits::gfx`]).
+//! each ([`ContentLimits::family`], [`Limits::fonts`], [`Limits::gfx`],
+//! [`Limits::semantics`]).
 
 /// The caps on reading a source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,8 +22,9 @@ pub struct PageTreeLimits {
     /// Levels of nodes under the root, and nodes on a `/Parent` chain:
     /// PDFium's `kMaxPageLevel`.
     pub depth: usize,
-    /// Pages the tree lists, and nodes the walk visits: PDFium opens
-    /// fewer than its `kPageMaxNum`, 0xFFFFF.
+    /// Pages the tree lists, nodes the walk visits, and a quarter of the
+    /// kids it looks at: PDFium opens fewer than its `kPageMaxNum`,
+    /// 0xFFFFF.
     pub pages: usize,
 }
 
@@ -172,6 +174,25 @@ impl Limits {
         limits.marked = c.depth;
         limits.interpreted = c.interpreted;
         limits.decompressed = c.decompressed;
+        limits
+    }
+
+    /// These caps as pdf-semantics reads the common structures under
+    /// them: its defaults, with the page tree's levels and pages as
+    /// [`PageTreeLimits`] has them and an XMP packet's bytes as the
+    /// reader's `max_decompressed`, the most any stream of a source
+    /// decodes to. A name or number tree is read under pdf-semantics'
+    /// own caps (32 levels, 100,000 nodes), which sheaf has none of its
+    /// own for. Every read through pdf-semantics that takes limits takes
+    /// them from here: the page table and the conformance claims from
+    /// the source's, and a tree's walk, which has no source's to hand,
+    /// from sheaf's defaults.
+    #[must_use]
+    pub const fn semantics(&self) -> crate::pdf::semantics::Limits {
+        let mut limits = crate::pdf::semantics::Limits::DEFAULT;
+        limits.page_depth = self.page_tree.depth;
+        limits.pages = self.page_tree.pages;
+        limits.xmp_bytes = self.reader.max_decompressed;
         limits
     }
 

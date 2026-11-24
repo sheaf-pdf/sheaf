@@ -4,10 +4,9 @@
 
 use std::collections::HashSet;
 
-use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, text};
 
 use crate::attachments::resolve;
-use crate::file::pdf_text;
 use crate::source::{PageFacts, Source};
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -78,7 +77,7 @@ pub fn read(src: &Source) -> Properties {
     let text = |k: &[u8]| {
         info.and_then(|d| d.get(k))
             .and_then(|o| resolve(pdf, o))
-            .map(pdf_text)
+            .map(text::of)
             .unwrap_or_default()
     };
     let catalog = pdf.catalog().ok();
