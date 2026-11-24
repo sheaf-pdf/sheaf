@@ -2710,7 +2710,7 @@ fn digest<'a>(
             }
             (b"Contents" | b"T" | b"M" | b"NM", Some(Value::String(text, _))) => {
                 if let Some(bytes) = text.as_bytes() {
-                    let text: String = crate::file::text_string(bytes).nfc().collect();
+                    let text: String = crate::pdf::text::decode(bytes).nfc().collect();
                     out.extend_from_slice(text.as_bytes());
                 }
             }
@@ -3237,7 +3237,7 @@ mod tests {
         assert_eq!(main.get(b"Subtype").unwrap().as_name().unwrap(), b"Stamp");
         assert_eq!(main.get(b"Name").unwrap().as_name().unwrap(), b"Tick");
         let json = main.get(b"SHEF_Annot").unwrap().as_bytes().unwrap();
-        let json = crate::file::text_string(json);
+        let json = crate::pdf::text::decode(json);
         assert_eq!(from_json(json.as_bytes()).unwrap().mark.id, tick.id);
     }
 

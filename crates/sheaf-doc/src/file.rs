@@ -55,7 +55,7 @@ impl PdfFile {
 use std::collections::HashMap;
 
 use crate::pdf::annots::{self, AnnotFlags, TypedAnnot};
-use crate::pdf::{Dictionary, Object, ObjectId, Value};
+use crate::pdf::{Dictionary, Object, ObjectId, Value, text};
 use sheaf_edit::Rotation;
 
 use crate::annot::{Annot, AnnotKind, Box2, Pt, from_json};
@@ -75,7 +75,7 @@ pub(crate) fn sheaf_mark<P: Objects + ?Sized>(pdf: &P, entry: &Object) -> Option
         return None;
     };
     let (_, json) = pdf.dereference(dict.get(b"SHEF_Annot")?).ok()?;
-    let payload = from_json(text_string(json.as_bytes()?).as_bytes())?;
+    let payload = from_json(text::decode(json.as_bytes()?).as_bytes())?;
     if payload.v != crate::annot::VERSION {
         return None;
     }
@@ -248,7 +248,7 @@ pub fn anon_name(dict: &crate::pdf::Dictionary) -> String {
                 }
             }
             Some(Value::Name(n)) => eat(n.as_bytes()),
-            Some(_) => eat(pdf_text(v.unwrap()).as_bytes()),
+            Some(_) => eat(text::of(v.unwrap()).as_bytes()),
             None => eat(b""),
         }
     }
@@ -258,7 +258,7 @@ pub fn anon_name(dict: &crate::pdf::Dictionary) -> String {
 /// What an annotation is called in threads: its `/NM`, else [`anon_name`].
 pub fn thread_name(dict: &crate::pdf::Dictionary) -> String {
     dict.get(b"NM")
-        .map(pdf_text)
+        .map(text::of)
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| anon_name(dict))
 }
@@ -363,63 +363,6 @@ pub fn load_pdf(path: &Path, password: Option<&str>) -> Result<crate::pdf::Docum
             }
             Ok(pdf)
         }
-    }
-}
-
-/// A text string's text, as PDFium decodes one: UTF-16 (a last odd byte
-/// left out) or UTF-8 after their byte order marks, PDFDocEncoding
-/// without one. ([`pdf_text`] reads PDFDocEncoding as Latin-1, which most
-/// of it is, but not its quotes and dashes.)
-pub fn text_string(bytes: &[u8]) -> String {
-    let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| {
-        let units: Vec<u16> = rest.as_chunks::<2>().0.iter().map(|&c| unit(c)).collect();
-        String::from_utf16_lossy(&units)
-    };
-    match bytes {
-        [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes),
-        [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes),
-        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8_lossy(rest).into_owned(),
-        _ => bytes.iter().map(|&b| pdf_doc_char(b)).collect(),
-    }
-}
-
-/// A PDFDocEncoding byte's character: Latin-1's, but for the accents at
-/// 0x18–0x1F and the punctuation and letters at 0x80–0xA0, and NUL for
-/// the three bytes it leaves undefined (0x7F, 0x9F and 0xAD), as PDFium's
-/// table has them.
-fn pdf_doc_char(b: u8) -> char {
-    const ACCENTS: [char; 8] = ['˘', 'ˇ', 'ˆ', '˙', '˝', '˛', '˚', '˜'];
-    const HIGH: [char; 33] = [
-        '•', '†', '‡', '…', '—', '–', 'ƒ', '⁄', '‹', '›', '−', '‰', '„', '“', '”', '‘', '’', '‚',
-        '™', 'ﬁ', 'ﬂ', 'Ł', 'Œ', 'Š', 'Ÿ', 'Ž', 'ı', 'ł', 'œ', 'š', 'ž', '\0', '€',
-    ];
-    match b {
-        0x18..=0x1F => ACCENTS[usize::from(b - 0x18)],
-        0x80..=0xA0 => HIGH[usize::from(b - 0x80)],
-        0x7F | 0xAD => '\0',
-        b => char::from(b),
-    }
-}
-
-/// Decode a PDF text string: UTF-16BE with BOM, else PDFDoc/Latin-1.
-pub fn pdf_text(o: &crate::pdf::Object) -> String {
-    match o.as_bytes() {
-        Some(bytes) => pdf_text_bytes(bytes),
-        None => String::new(),
-    }
-}
-
-/// [`pdf_text`] for a string's bytes (or a stream's, which hold text the
-/// same way).
-pub fn pdf_text_bytes(bytes: &[u8]) -> String {
-    if bytes.starts_with(&[0xFE, 0xFF]) {
-        let units: Vec<u16> = bytes[2..]
-            .chunks(2)
-            .map(|c| u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)]))
-            .collect();
-        String::from_utf16_lossy(&units)
-    } else {
-        bytes.iter().map(|&b| b as char).collect()
     }
 }
 
@@ -576,7 +519,7 @@ fn foreign<P: Objects + ?Sized>(
         return None;
     }
     let [x0, y0, x1, y1] = a.raw_rect();
-    let text = |key: &[u8]| dict.get(key).map(pdf_text).unwrap_or_default();
+    let text = |key: &[u8]| dict.get(key).map(text::of).unwrap_or_default();
     let name_of = |key: &[u8]| -> Option<String> {
         let (_, o) = pdf.dereference(dict.get(key)?).ok()?;
         let Value::Dict(d) = o.value() else {
@@ -606,7 +549,7 @@ fn foreign<P: Objects + ?Sized>(
         author: (markup.and_then(|m| m.author.clone()))
             .or_else(|| {
                 let (_, t) = pdf.dereference(dict.get(b"T")?).ok()?;
-                Some(text_string(t.as_bytes()?))
+                Some(text::decode(t.as_bytes()?))
             })
             .unwrap_or_default(),
         contents: a.contents().unwrap_or_default().to_string(),
@@ -856,7 +799,7 @@ mod tests {
         };
         let main = crate::serialize::built::to_pdf(&ours, &mut pdf).main;
         let mut other_version = main.clone();
-        let json = text_string(main.get(b"SHEF_Annot").unwrap().as_bytes().unwrap());
+        let json = text::decode(main.get(b"SHEF_Annot").unwrap().as_bytes().unwrap());
         let version = format!("\"v\":{}", crate::annot::VERSION);
         assert!(json.contains(&version), "{json}");
         let json = json.replace(&version, "\"v\":999");

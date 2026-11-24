@@ -278,7 +278,7 @@ fn range_from<P: Objects + ?Sized>(pdf: &P, start: u32, d: &Dictionary) -> Label
     let prefix = d
         .get(b"P")
         .and_then(|o| resolve(pdf, o))
-        .map(crate::file::pdf_text)
+        .map(crate::pdf::text::of)
         .unwrap_or_default();
     let first = d
         .get(b"St")
@@ -434,6 +434,24 @@ mod tests {
         // Read from a source, as a file opens: the same ranges.
         let src = crate::open::tests::lazily(&mut pdf);
         assert_eq!(label_ranges(src.pdf()), label_ranges(&pdf));
+    }
+
+    /// A prefix is a text string, read as PDFium reads one: 0x90 and 0x85
+    /// are PDFDocEncoding's ’ and –, not Latin-1's control characters.
+    #[test]
+    fn a_prefix_reads_as_pdfdocencoding() {
+        let mut pdf = Pdf::with_version("1.7");
+        let prefix = crate::pdf::literal(b"Part\x90s \x85 ");
+        let style = dictionary! { "S" => Object::name("D"), "P" => prefix };
+        let tree = pdf.add_object(dictionary! { "Nums" => vec![0.into(), style.into()] });
+        let catalog = pdf.add_object(dictionary! {
+            "Type" => Object::name("Catalog"),
+            "PageLabels" => tree,
+        });
+        pdf.trailer.set("Root", catalog);
+        let ranges = label_ranges(&pdf).unwrap();
+        assert_eq!(ranges[0].prefix, "Part’s – ");
+        assert_eq!(labels_for(&ranges, 2), ["Part’s – 1", "Part’s – 2"]);
     }
 
     #[test]

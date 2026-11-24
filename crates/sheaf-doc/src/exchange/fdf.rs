@@ -34,9 +34,9 @@ pub fn read(bytes: &[u8]) -> Result<Comments> {
             Value::Dict(spec) => spec
                 .get(b"UF")
                 .or_else(|| spec.get(b"F"))
-                .map(crate::file::pdf_text)
+                .map(crate::pdf::text::of)
                 .unwrap_or_default(),
-            _ => crate::file::pdf_text(f),
+            _ => crate::pdf::text::of(f),
         })
         .filter(|f| !f.is_empty());
     let list = fdf

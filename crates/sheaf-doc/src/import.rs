@@ -29,13 +29,13 @@ use crate::pdf::annots::{
     ShapeKind, StampName, TextMarkupKind, TypedAnnot,
 };
 use crate::pdf::gfx::Rect;
-use crate::pdf::{Dictionary, Object, ObjectId, StreamExt, Value};
+use crate::pdf::{Dictionary, Object, ObjectId, StreamExt, Value, text};
 use sheaf_edit::Rotation;
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Box2, Pt, REVIEW};
 use crate::attachments::Objects;
 use crate::content::{ReadObjects, Unkept};
-use crate::file::{pdf_text, thread_name};
+use crate::file::thread_name;
 use crate::store::{Blob, BlobKind, Store};
 
 /// What a conversion may do beyond reading the dictionary.
@@ -346,7 +346,7 @@ fn convert_read<P: Objects + ?Sized>(
     };
     let fillable = kind.fillable();
     let markup = a.markup();
-    let text = |key: &[u8]| dict.get(key).map(pdf_text).unwrap_or_default();
+    let text = |key: &[u8]| dict.get(key).map(text::of).unwrap_or_default();
     Ok(Annot {
         id: AnnotId(0),
         kind,
@@ -509,7 +509,7 @@ pub fn irt_name<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<Strin
     let o = dict.get(b"IRT")?;
     match o.value() {
         Value::Ref(id) => pdf.get_dictionary(*id).ok().map(thread_name),
-        Value::String(..) => Some(pdf_text(o)).filter(|n| !n.is_empty()),
+        Value::String(..) => Some(text::of(o)).filter(|n| !n.is_empty()),
         _ => None,
     }
 }

@@ -66,7 +66,7 @@ pub fn read_collection(pdf: &Pdf) -> (Option<String>, Vec<StampPage>) {
         .and_then(|i| pdf.dereference(i).ok())
         .and_then(|(_, i)| i.as_dict())
         .and_then(|i| i.get(b"Title"))
-        .map(crate::file::pdf_text)
+        .map(text::of)
         .filter(|t| !t.trim().is_empty());
     let names = page_names(pdf);
     let stamps = pdf
@@ -83,7 +83,7 @@ pub fn read_collection(pdf: &Pdf) -> (Option<String>, Vec<StampPage>) {
                     .unwrap_or_else(|| format!("Stamp {}", i + 1)),
                 text: dict
                     .and_then(|d| d.get(TEXT_KEY.as_bytes()))
-                    .map(crate::file::pdf_text)
+                    .map(text::of)
                     .filter(|t| !t.is_empty()),
                 size: geom.shown(),
             }
@@ -121,7 +121,7 @@ fn page_names(pdf: &Pdf) -> HashMap<ObjectId, String> {
                 let Some(id) = value.as_reference() else {
                     continue;
                 };
-                let key = crate::file::pdf_text(key);
+                let key = text::of(key);
                 let name = match key.split_once('=') {
                     Some((_, n)) => n.to_string(),
                     None => key.trim_start_matches('#').to_string(),
@@ -672,7 +672,7 @@ mod tests {
             .unwrap()
             .as_array()
             .unwrap();
-        let key = crate::file::pdf_text(&names[0]);
+        let key = text::of(&names[0]);
         assert!(key.starts_with('#') && key.ends_with("=Paid"), "{key}");
         assert_eq!(read_collection(&pdf).1[0].name, "Paid");
     }

@@ -4,11 +4,10 @@
 
 use std::collections::HashSet;
 
-use crate::pdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, StreamExt, Value};
+use crate::pdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, StreamExt, Value, text};
 use anyhow::{Context, Result, bail};
 
 use crate::annot::AnnotId;
-use crate::file::pdf_text;
 use crate::{DocState, Source};
 
 /// Where an attachment lives, stable across reloads of the same file.
@@ -100,7 +99,7 @@ pub fn attachments_in<P: Objects + ?Sized>(
             };
             let mut a = describe(pdf, at, fs);
             if a.description.is_empty() {
-                a.description = annot.get(b"Contents").map(pdf_text).unwrap_or_default();
+                a.description = annot.get(b"Contents").map(text::of).unwrap_or_default();
             }
             out.push(a);
         }
@@ -191,7 +190,7 @@ fn describe<P: Objects + ?Sized>(pdf: &P, at: AttachmentRef, fs: &Dictionary) ->
     let text = |d: &Dictionary, k: &[u8]| {
         d.get(k)
             .and_then(|o| resolve(pdf, o))
-            .map(pdf_text)
+            .map(text::of)
             .unwrap_or_default()
     };
     let name = [b"UF".as_slice(), b"F"]
@@ -289,7 +288,7 @@ fn walk_names<'a, P: Objects + ?Sized>(
     {
         for pair in names.as_chunks::<2>().0 {
             if let Some(k) = resolve(pdf, &pair[0]).filter(|o| o.as_bytes().is_some()) {
-                out.push((pdf_text(k), &pair[1]));
+                out.push((text::of(k), &pair[1]));
             }
         }
     }
@@ -538,6 +537,59 @@ pub(crate) mod tests {
                 a.name
             );
         }
+    }
+
+    /// An attachment's name, key and description are text strings, read
+    /// as PDFium reads one: 0x90 and 0x85 are PDFDocEncoding's ’ and –,
+    /// not Latin-1's control characters. The file by such a key is found.
+    #[test]
+    fn a_name_and_description_read_as_pdfdocencoding() {
+        let mut pdf = Pdf::with_version("1.7");
+        let file = pdf.add_object(Stream::new(dictionary! {}, b"minutes".to_vec()));
+        let spec = pdf.add_object(dictionary! {
+            "Type" => Object::name("Filespec"),
+            "UF" => literal(b"Ann\x90s \x85 minutes.txt"),
+            "Desc" => literal(b"Ann\x90s notes \x85 May"),
+            "EF" => dictionary! { "F" => file },
+        });
+        // An annotation's description is its `/Contents` where its file
+        // specification has none.
+        let sheet = pdf.add_object(Stream::new(dictionary! {}, b"sheet".to_vec()));
+        let annot = pdf.add_object(dictionary! {
+            "Type" => Object::name("Annot"),
+            "Subtype" => Object::name("FileAttachment"),
+            "Rect" => vec![0.into(), 0.into(), 10.into(), 10.into()],
+            "Contents" => literal(b"Bob\x90s \x85 sheet"),
+            "FS" => dictionary! { "F" => literal("sheet.csv"), "EF" => dictionary! { "F" => sheet } },
+        });
+        let pages_id = pdf.new_object_id();
+        let page = pdf.add_object(dictionary! {
+            "Type" => Object::name("Page"),
+            "Parent" => pages_id,
+            "Annots" => vec![annot.into()],
+        });
+        pdf.objects.insert(
+            pages_id,
+            dictionary! { "Type" => Object::name("Pages"), "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        );
+        let catalog = pdf.add_object(dictionary! {
+            "Type" => Object::name("Catalog"),
+            "Pages" => pages_id,
+            "Names" => dictionary! {
+                "EmbeddedFiles" => dictionary! {
+                    "Names" => vec![literal(b"Ann\x90s \x85 key"), spec.into()],
+                },
+            },
+        });
+        pdf.trailer.set("Root", catalog);
+        let list = attachments_in(&pdf, pdf.page_iter());
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].at, AttachmentRef::Named("Ann’s – key".into()));
+        assert_eq!(list[0].name, "Ann’s – minutes.txt");
+        assert_eq!(list[0].description, "Ann’s notes – May");
+        assert_eq!(list[1].description, "Bob’s – sheet");
+        let bytes = attachment_bytes(&pdf, pdf.page_iter(), &list[0].at).unwrap();
+        assert_eq!(bytes, b"minutes");
     }
 
     #[test]

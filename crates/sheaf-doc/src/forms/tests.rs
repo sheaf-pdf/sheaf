@@ -691,7 +691,12 @@ fn names_past_the_limit_are_damage() {
 #[test]
 fn text_from_the_file_prints_escaped() {
     let mut f = Form::new(1);
-    let sig = f.signature("sig\u{1b}[2J", 0, row(0));
+    // A field's name is a text string, which PDFium reads no ESC from
+    // (0x1B is PDFDocEncoding's ˙, and a language escape after a mark):
+    // its control sequence starts with CSI, U+009B, ESC [ in one.
+    let sig = f.signature("sig", 0, row(0));
+    f.dict(sig)
+        .set("T", crate::pdf::text::string("sig\u{9b}2J"));
     f.sign(sig);
     let text = f.text("text", 0, row(1));
     f.dict(text).set("DA", literal("/F#1B 10 Tf 0 g"));
@@ -705,10 +710,10 @@ fn text_from_the_file_prints_escaped() {
     let mut rewritten = Vec::new();
     pdf.save_to(&mut rewritten).unwrap();
     let out = checked(&rewritten).to_string();
-    assert!(!out.contains('\u{1b}'), "{out:?}");
+    assert!(!out.contains(['\u{1b}', '\u{9b}']), "{out:?}");
     for shown in [
         r"XFA: pre\u{1b}[31mamble",
-        r#"the signature in "sig\u{1b}[2J""#,
+        r#"the signature in "sig\u{9b}2J""#,
         r"F\u{1b} ×1",
     ] {
         assert!(out.contains(shown), "{shown} in {out}");

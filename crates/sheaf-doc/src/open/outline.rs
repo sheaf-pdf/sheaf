@@ -11,12 +11,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, Value};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, Value, text};
 use sheaf_edit::{DestView, TextStyle};
 
 use crate::Source;
 use crate::attachments::{name_tree, resolve};
-use crate::file::{pdf_text_bytes, text_string};
 
 #[cfg(test)]
 mod tests;
@@ -115,9 +114,9 @@ impl<'a> Dests<'a> {
 }
 
 /// A title's text, as PDFium shows it: the text string's
-/// ([`text_string`]), control characters as spaces.
+/// ([`text::decode`]), control characters as spaces.
 fn title(bytes: &[u8]) -> String {
-    shown_title(&text_string(bytes))
+    shown_title(&text::decode(bytes))
 }
 
 /// Title `title` as the walk reads it back: control characters as
@@ -244,14 +243,10 @@ impl<'a> Walk<'a> {
             _ => return None,
         };
         let pdf = self.pdf;
-        let named = self
-            .names()
-            .get(&pdf_text_bytes(name))
-            .copied()
-            .or_else(|| {
-                let dests = resolve(pdf, pdf.catalog().ok()?.get(b"Dests")?)?;
-                dests.as_dict()?.get(name)
-            })?;
+        let named = self.names().get(&text::decode(name)).copied().or_else(|| {
+            let dests = resolve(pdf, pdf.catalog().ok()?.get(b"Dests")?)?;
+            dests.as_dict()?.get(name)
+        })?;
         match resolve(pdf, named)?.value() {
             Value::Array(dest) => Some(dest),
             Value::Dict(d) => resolve(pdf, d.get(b"D")?)?.as_array(),

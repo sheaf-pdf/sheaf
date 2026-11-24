@@ -4,10 +4,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::pdf::{Dictionary, Object, ObjectId, Value};
+use crate::pdf::{Dictionary, Object, ObjectId, Value, text};
 
 use crate::attachments::{Objects, once, resolve};
-use crate::file::pdf_text;
 
 /// One metadata column of the portfolio (`/Schema`).
 #[derive(Debug, Clone, PartialEq)]
@@ -72,7 +71,7 @@ pub fn collection<P: Objects + ?Sized>(pdf: &P) -> Option<Collection> {
     let initial = c
         .get(b"D")
         .and_then(|o| resolve(pdf, o))
-        .map(pdf_text)
+        .map(text::of)
         .filter(|s| !s.is_empty());
     Some(Collection { fields, initial })
 }
@@ -92,7 +91,7 @@ fn field<P: Objects + ?Sized>(pdf: &P, key: String, d: &Dictionary) -> Field {
     let name = d
         .get(b"N")
         .and_then(|o| resolve(pdf, o))
-        .map(pdf_text)
+        .map(text::of)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| key.clone());
     let order = d
@@ -158,7 +157,7 @@ fn walk_folders<P: Objects + ?Sized>(
         let name = f
             .get(b"Name")
             .and_then(|o| resolve(pdf, o))
-            .map(pdf_text)
+            .map(text::of)
             .unwrap_or_default();
         let here = if path.is_empty() {
             name
@@ -191,7 +190,7 @@ pub fn field_text<P: Objects + ?Sized>(pdf: &P, v: &Object) -> String {
     match v.value() {
         Value::Integer(n) => n.to_string(),
         Value::Real(r) => r.to_string(),
-        Value::String(..) => pdf_text(v),
+        Value::String(..) => text::of(v),
         Value::Name(n) => String::from_utf8_lossy(n.as_bytes()).into_owned(),
         Value::Dict(d) => {
             let prefix = d.get(b"P").map(|o| field_text(pdf, o)).unwrap_or_default();

@@ -28,14 +28,13 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
-use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, StreamExt, Value};
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, StreamExt, Value, text};
 use anyhow::{Context, Result};
 use quick_xml::events::{BytesStart, Event};
 
 use super::read::FormClass;
 use crate::attachments::resolve;
 use crate::content::{ResCx, operations};
-use crate::file::pdf_text;
 use crate::source::{FormLimits, Limits};
 
 /// How much of a widget's name, read up its `/Parent` chain, a finding
@@ -610,8 +609,8 @@ impl<'a> Tree<'a> {
         };
         let name = match dict.get(b"T").and_then(|t| resolve(pdf, t)) {
             Some(t) if t.as_bytes().is_some_and(|s| s.len() > LIMITS.name) => None,
-            Some(t) if up_name.is_empty() => Some(pdf_text(t)),
-            Some(t) => Some(format!("{up_name}.{}", pdf_text(t))),
+            Some(t) if up_name.is_empty() => Some(text::of(t)),
+            Some(t) => Some(format!("{up_name}.{}", text::of(t))),
             None => Some(up_name.to_string()),
         };
         let Some(name) = name.filter(|n| n.len() <= LIMITS.name) else {
@@ -712,7 +711,7 @@ impl<'a> Tree<'a> {
             return text;
         }
         let text = resolve(pdf, o).and_then(|s| match s.value() {
-            Value::String(..) => hash(pdf_text(s).as_bytes()),
+            Value::String(..) => hash(text::of(s).as_bytes()),
             Value::Name(n) => hash(n.as_bytes()),
             Value::Stream(st) => hash(st.raw_bytes()),
             _ => None,
@@ -855,7 +854,7 @@ fn name_up(pdf: &Pdf, id: ObjectId) -> String {
         if let Some(t) = d.get(b"T").and_then(|t| resolve(pdf, t)) {
             let part = match t.as_bytes() {
                 Some(s) if s.len() > SHOWN_NAME => "…".to_string(),
-                _ => pdf_text(t),
+                _ => text::of(t),
             };
             len += part.len() + 1;
             parts.push(part);

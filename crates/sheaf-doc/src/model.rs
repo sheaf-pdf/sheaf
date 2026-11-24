@@ -4747,7 +4747,7 @@ mod tests {
             let uri = |id| {
                 let item = pdf.get_dictionary(id).ok()?;
                 let action = pdf.get_dictionary(item.get(b"A")?.as_reference()?).ok()?;
-                Some(crate::file::pdf_text(action.get(b"URI")?))
+                Some(crate::pdf::text::of(action.get(b"URI")?))
             };
             (crate::open::outline(&src).into_iter())
                 .map(|i| {
@@ -4828,7 +4828,7 @@ mod tests {
             let item = pdf.get_dictionary(item.object.unwrap()).unwrap();
             let action = item.get(b"A")?.as_reference()?;
             let action = pdf.get_dictionary(action).ok()?;
-            Some(crate::file::pdf_text(action.get(b"URI")?))
+            Some(crate::pdf::text::of(action.get(b"URI")?))
         };
         let first = saved(&mut d);
         assert_eq!(

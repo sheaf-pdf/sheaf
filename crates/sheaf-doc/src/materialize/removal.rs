@@ -61,7 +61,6 @@ use super::key::ObjKey;
 use super::record::SavedSide;
 use crate::annot::{AnnotId, AnnotKind};
 use crate::content::{Concat, Fonts, GenId, Marker, ReadObjects, TextBag, text_bag};
-use crate::file::text_string;
 use crate::model::{
     AnnotBody, AnnotRec, DocState, FormRef, GenSpec, ImageRef, Mark, PageForm, PageId, Static,
     WatermarkContent, WatermarkGen,
@@ -681,7 +680,7 @@ fn stream_text(
         Some(res) => {
             bag = text_bag(objects, &Concat::new(&[&data]), res.as_ref(), lim, fonts).ok()?;
         }
-        None => bag.add(&text_string(&data)),
+        None => bag.add(&crate::pdf::text::decode(&data)),
     }
     Some(bag)
 }
@@ -692,7 +691,7 @@ fn strings(obj: &Object, bag: &mut TextBag) {
     match obj.value() {
         Value::String(s, _) => {
             if let Some(bytes) = s.as_bytes() {
-                bag.add(&text_string(bytes));
+                bag.add(&crate::pdf::text::decode(bytes));
             }
         }
         Value::Array(items) => items.iter().for_each(|o| strings(o, bag)),

@@ -6,13 +6,12 @@
 //! Only `<annots>` (and `<f>`, the file they're on) for now; M10's form
 //! data goes beside them as `<fields>`.
 
-use crate::pdf::{Dictionary, LazyPdf, Object, Value, literal};
+use crate::pdf::{Dictionary, LazyPdf, Object, Value, literal, text};
 use anyhow::{Context, Result, bail};
 use quick_xml::escape::{escape, resolve_predefined_entity};
 use quick_xml::events::Event;
 
 use super::Comments;
-use crate::file::pdf_text;
 use crate::serialize::built::Built;
 
 const NS: &str = "http://ns.adobe.com/xfdf/";
@@ -76,7 +75,7 @@ pub fn write(comments: &Comments) -> Result<Vec<u8>> {
         };
         let mut attrs: Vec<(&str, String)> = vec![("page", page.to_string())];
         let nums = |key: &[u8]| numbers(pdf, d, key);
-        let text = |key: &[u8]| d.get(key).map(pdf_text).filter(|t| !t.is_empty());
+        let text = |key: &[u8]| d.get(key).map(text::of).filter(|t| !t.is_empty());
         let name = |key: &[u8]| {
             d.get(key)
                 .and_then(Object::as_name)

@@ -1049,6 +1049,31 @@ fn an_empty_partial_name_is_passed_over() {
     assert_eq!(partials, ["top", "", "a", "", "b"]);
 }
 
+/// A partial name is a text string, read as PDFium reads one: 0x90 and
+/// 0x85 are PDFDocEncoding's ’ and –, not Latin-1's control characters,
+/// and UTF-16LE after its mark (PDFium's, which ISO's table hasn't) is
+/// read too, a parent's as a field's own.
+#[test]
+fn a_partial_name_reads_as_pdfium_reads_it() {
+    let utf16le = |text: &str| {
+        let units = text.encode_utf16().flat_map(u16::to_le_bytes);
+        Object::hex([0xFF, 0xFE].into_iter().chain(units).collect::<Vec<u8>>())
+    };
+    let mut f = Form::new(1);
+    let quoted = f.text("quoted", 0, row(0));
+    f.dict(quoted).set("T", literal(b"Ann\x90s \x85 name"));
+    let le = f.text("le", 0, row(1));
+    f.dict(le).set("T", utf16le("Łódź"));
+    let kid = f.text("kid", 0, row(2));
+    let parent = f.group("parent", &[kid]);
+    f.dict(parent).set("T", utf16le("Straße"));
+    let form = read_back(&mut f);
+    let names: Vec<&str> = form.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["Ann’s – name", "Łódź", "Straße.kid"]);
+    let partials: Vec<&str> = form.nodes.iter().map(|n| &*n.partial).collect();
+    assert_eq!(partials, ["Ann’s – name", "Łódź", "Straße", "kid"]);
+}
+
 #[test]
 fn a_parent_loop_alone_isnt_damage() {
     // /Parent isn't followed, so a field that's its own parent, but not its

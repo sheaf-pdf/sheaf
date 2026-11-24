@@ -207,7 +207,7 @@ pub fn scale_of<P: Objects + ?Sized>(pdf: &P, measure: &Dictionary) -> Option<Sc
     let f = first.as_dict()?;
     let unit = f
         .get(b"U")
-        .map(crate::file::pdf_text)
+        .map(crate::pdf::text::of)
         .unwrap_or_else(|| "pt".into());
     let c = f.get(b"C")?.as_number()?;
     let precision = f
