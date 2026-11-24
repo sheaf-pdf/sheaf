@@ -43,6 +43,9 @@ pdf-annots.workspace = true
 # A text field's appearance, made from plain data in the font its `/DA`
 # names (M10 slice 6).
 pdf-forms.workspace = true
+# Dates, name and number trees, the page tree's walk and XMP's
+# conformance claims, as PDFium reads them (M18 slice 21).
+pdf-semantics.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 log.workspace = true

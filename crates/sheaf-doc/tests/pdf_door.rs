@@ -5,8 +5,8 @@
 //!    `sheaf_doc::pdf` (`crates/sheaf-doc/src/pdf/`). No `.rs` file outside
 //!    that door may name `pdf_tokenizer`, `pdf_objects`, `pdf_filters`,
 //!    `pdf_crypt`, `pdf_structure`, `pdf_content_streams`, `pdf_fonts`,
-//!    `pdf_gfx`, `pdf_annots` (M18 slice 24) or `pdf_forms` (M10 slice 6)
-//!    in a `use`, path or macro body.
+//!    `pdf_gfx`, `pdf_annots` (M18 slice 24), `pdf_forms` (M10 slice 6) or
+//!    `pdf_semantics` (M18 slice 21) in a `use`, path or macro body.
 
 use std::path::{Path, PathBuf};
 
@@ -30,6 +30,7 @@ const DOOR_ONLY: &[&str] = &[
     "pdf_gfx",
     "pdf_annots",
     "pdf_forms",
+    "pdf_semantics",
 ];
 
 #[test]
@@ -75,6 +76,7 @@ const ALL_BANNED: &[&str] = &[
     "pdf_gfx",
     "pdf_annots",
     "pdf_forms",
+    "pdf_semantics",
 ];
 
 #[test]

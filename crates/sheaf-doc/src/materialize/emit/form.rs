@@ -1119,7 +1119,7 @@ pub(crate) fn scripts(cx: &mut Cx) -> Option<Object> {
 
 /// `src`'s document scripts (`/Names /JavaScript`), by name, at most
 /// [`MAX_SCRIPTS`], each node of the tree read once.
-fn document_scripts(src: &Src) -> Vec<(Vec<u8>, Object)> {
+pub(crate) fn document_scripts(src: &Src) -> Vec<(Vec<u8>, Object)> {
     let pdf = src.pdf();
     let mut found = Vec::new();
     let tree = (pdf.catalog().ok())

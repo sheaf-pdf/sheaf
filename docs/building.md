@@ -58,6 +58,13 @@ lists them):
   never a value): run before and after a change to what reads a form or
   makes a text field's appearance, or a move of the PDF layer's pin, and
   `diff` the two files.
+- `just structures-dump <file>` writes what sheaf reads of every corpus
+  file's common structures (its page table, labels, attachments, named
+  destinations, bookmarks, layers, portfolio, form fields, document
+  scripts and XMP claims, a column each, never a value, a line a file):
+  run before and after a change to what reads page or name trees, text
+  strings or XMP, or a move of the PDF layer's pin, and `diff` the two
+  files.
 - `just tier-fields` fills every corpus form's text fields through the
   model, saves, and sets each widget's appearance beside the one PDFium
   makes for the same value, inside its box; each widget that differs is

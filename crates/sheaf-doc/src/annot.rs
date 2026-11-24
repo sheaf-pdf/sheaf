@@ -1359,7 +1359,7 @@ fn ellipse_path(w: &mut ContentWriter, [x0, y0, x1, y1]: [f32; 4]) {
 /// ([`crate::file::is_pdf_doc_ascii`]), else UTF-16BE with its BOM. The
 /// `/SHEF_Annot` JSON is one too: a DEL in a mark's text, written as is,
 /// would read back as a NUL, which no JSON string holds.
-fn pdf_text_string(s: &str) -> Object {
+pub(crate) fn pdf_text_string(s: &str) -> Object {
     if crate::file::is_pdf_doc_ascii(s) {
         literal(s.as_bytes())
     } else {

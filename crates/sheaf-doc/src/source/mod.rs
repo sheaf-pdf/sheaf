@@ -14,6 +14,8 @@
 
 pub(crate) mod annots;
 mod conformance;
+#[cfg(test)]
+mod dump;
 #[doc(hidden)]
 pub mod fuzz;
 #[cfg(test)]

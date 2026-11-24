@@ -364,7 +364,7 @@ fn finish(
     crate::serialize::full::write_built(out)
 }
 
-fn text_string(s: &str) -> Object {
+pub(crate) fn text_string(s: &str) -> Object {
     if s.is_ascii() {
         literal(s)
     } else {

@@ -5,9 +5,12 @@
 //! content's (`content`: `pdf-content-streams`, M18 slice 19), fonts'
 //! (`fonts`: `pdf-fonts` and `pdf-gfx`, M18 slice 22), and content
 //! interpreted and written again (`gfx`: `pdf-gfx`, M18 slice 23),
-//! annotations' (`annots`: `pdf-annots`, M18 slice 24), and text fields'
-//! appearances (`forms`: `pdf-forms`, M10 slice 6), with where its readers
-//! tell what they read past (`fault`).
+//! annotations' (`annots`: `pdf-annots`, M18 slice 24), text fields'
+//! appearances (`forms`: `pdf-forms`, M10 slice 6), and text strings
+//! (`text`: `pdf-objects`) and the common structures (`semantics`: dates,
+//! name and number trees, the page tree's walk and XMP's claims,
+//! `pdf-semantics`, M18 slice 21), with where its readers tell what they
+//! read past (`fault`).
 
 pub mod annots;
 pub mod content;
@@ -17,9 +20,11 @@ pub mod fonts;
 pub mod forms;
 pub mod gfx;
 mod reader;
+pub mod semantics;
 mod stream;
 #[cfg(any(test, feature = "fixtures"))]
 pub mod test_crypt;
+pub mod text;
 pub mod write;
 
 pub use document::Document;
