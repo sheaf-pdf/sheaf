@@ -680,9 +680,40 @@ fn stream_text(
         Some(res) => {
             bag = text_bag(objects, &Concat::new(&[&data]), res.as_ref(), lim, fonts).ok()?;
         }
-        None => bag.add(&crate::pdf::text::decode(&data)),
+        None => bag.add(&held_text(&data)),
     }
     Some(bag)
+}
+
+/// The text `bytes` hold, for a bag: as a text string reads
+/// ([`text::decode`](crate::pdf::text::decode)), but with every U+001B
+/// kept, and the text around it. A reader takes one in a string marked
+/// UTF-16 or UTF-8 for the start of a language escape and shows none of
+/// the escape, nor of what follows one that isn't closed; another tool
+/// reads those bytes as the text they are, so here they count as text the
+/// object holds. The text is read piece by piece between the escapes, each
+/// under the string's mark.
+pub(super) fn held_text(bytes: &[u8]) -> String {
+    use crate::pdf::text::decode;
+    let (mark, escape): (&[u8], &[u8]) = match bytes {
+        [0xFE, 0xFF, ..] => (&bytes[..2], &[0x00, 0x1B]),
+        [0xFF, 0xFE, ..] => (&bytes[..2], &[0x1B, 0x00]),
+        [0xEF, 0xBB, 0xBF, ..] => (&bytes[..3], &[0x1B]),
+        _ => return decode(bytes),
+    };
+    let mut text = String::new();
+    let mut piece = mark.to_vec();
+    for unit in bytes[mark.len()..].chunks(escape.len()) {
+        if unit == escape {
+            text.push_str(&decode(&piece));
+            text.push('\u{1B}');
+            piece.truncate(mark.len());
+        } else {
+            piece.extend_from_slice(unit);
+        }
+    }
+    text.push_str(&decode(&piece));
+    text
 }
 
 /// Adds the text of every string in `obj` to `bag`, a stream's
@@ -691,7 +722,7 @@ fn strings(obj: &Object, bag: &mut TextBag) {
     match obj.value() {
         Value::String(s, _) => {
             if let Some(bytes) = s.as_bytes() {
-                bag.add(&crate::pdf::text::decode(bytes));
+                bag.add(&held_text(bytes));
             }
         }
         Value::Array(items) => items.iter().for_each(|o| strings(o, bag)),
