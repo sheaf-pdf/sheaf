@@ -188,7 +188,7 @@ impl Source {
                 ..
             }
         );
-        let pages: Arc<[PageFacts]> = match pages::table(&pdf, &limits.page_tree) {
+        let pages: Arc<[PageFacts]> = match pages::table(&pdf, limits) {
             Err(OpenError::PageTree(PageTreeError::NoPages)) if pageless => Arc::new([]),
             pages => pages?.into(),
         };

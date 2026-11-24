@@ -146,6 +146,29 @@ fn a_10000_deep_page_tree_is_a_typed_error() {
     assert!(started.elapsed() < QUICK, "{:?}", started.elapsed());
 }
 
+/// What pdf-semantics is given is what sheaf reads with: its defaults
+/// under sheaf's caps on the page tree and on what a stream decodes to.
+#[test]
+fn the_familys_limits_are_sheafs() {
+    use crate::pdf::semantics as family;
+    // The page tree's defaults are the same caps already.
+    let mut want = family::Limits::DEFAULT;
+    want.xmp_bytes = Limits::DEFAULT.reader.max_decompressed;
+    assert_eq!(Limits::DEFAULT.semantics(), want);
+    let limits = Limits {
+        reader: crate::pdf::ReadLimits {
+            max_decompressed: 3002,
+            ..Limits::DEFAULT.reader
+        },
+        page_tree: PageTreeLimits { depth: 5, pages: 7 },
+        ..Limits::DEFAULT
+    };
+    want.page_depth = 5;
+    want.pages = 7;
+    want.xmp_bytes = 3002;
+    assert_eq!(limits.semantics(), want);
+}
+
 #[test]
 fn too_many_pages_or_none_are_typed_errors() {
     let limits = Limits {

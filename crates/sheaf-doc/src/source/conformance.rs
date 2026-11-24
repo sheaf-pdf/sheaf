@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use crate::content::{Objects, Unkept};
 use crate::pdf::LazyPdf;
 use crate::pdf::fault::{Place, Sink};
-use crate::pdf::semantics::{self, Fault, xmp};
+use crate::pdf::semantics::{Fault, xmp};
 
 use super::Limits;
 
@@ -30,8 +30,7 @@ use super::Limits;
 pub(super) fn read(pdf: &LazyPdf, limits: &Limits) -> Result<xmp::Conformance> {
     let catalog = pdf.catalog()?;
     let unkept = Unkept::default();
-    let mut caps = semantics::Limits::DEFAULT;
-    caps.xmp_bytes = limits.reader.max_decompressed;
+    let caps = limits.semantics();
     let mut unread = NotUtf8::default();
     let claims = xmp::claims(Objects::new(pdf, &unkept), catalog, &caps, &mut unread)
         .context("reading the XMP metadata")?;

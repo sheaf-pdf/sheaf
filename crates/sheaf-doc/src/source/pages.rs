@@ -19,6 +19,15 @@
 //! it's listed, and each reference on the way is followed as far as PDFium
 //! follows it: one hop, two for `/Pages`, `/Parent` and `/Rotate`.
 //!
+//! That holds of what the walk reads: the tree, and a page's
+//! `/MediaBox`, `/CropBox`, `/Rotate`, `/UserUnit` and `/Resources`. A
+//! page's `/TrimBox`, `/BleedBox` and `/ArtBox`, which pdf-semantics
+//! doesn't give, and its `/Annots` are still read here, from the page's
+//! own dictionary by the reader's rules and not PDFium's: a reference is
+//! followed however many hops it takes, so a `/TrimBox` behind two reads
+//! where a `/MediaBox` behind two is none, and a loop of references in
+//! one fails the open where the walk reads past it.
+//!
 //! What sheaf keeps of each page is its own ([`PageFacts`]): its boxes as
 //! PDFium sizes them, what it inherits, and what it holds, which a page
 //! object listed twice, the pages under one node and the pages naming one
@@ -26,20 +35,19 @@
 //!
 //! Where PDFium stops quietly, the walk fails: a node met again on its
 //! own path, a `/Parent` chain that loops, and a tree past the caps
-//! ([`PageTreeLimits`]) are [`PageTreeError`]s; an object on the way that
-//! breaks one of the reader's caps or doesn't decrypt fails the open with
-//! the reader's own error. The walk is iterative, so a deep tree is never
+//! ([`PageTreeLimits`](super::PageTreeLimits)) are [`PageTreeError`]s; an
+//! object on the way that breaks one of the reader's caps or doesn't
+//! decrypt fails the open with the reader's own error. The walk is iterative, so a deep tree is never
 //! deep on the stack.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::pdf::semantics::Limits;
 use crate::pdf::semantics::pages::{self, Inheritable, Origin, Page, PdfBox, Sourced};
 use crate::pdf::{Dictionary, Error, LazyPdf, Object, ObjectId, Resolve, Unreadable, Value, Why};
 
-use super::{OpenError, PageTreeError, PageTreeLimits};
+use super::{Limits, OpenError, PageTreeError};
 use crate::geom::{Geom, Rect};
 
 /// A page, as the tree lists it.
@@ -99,17 +107,14 @@ pub struct Parent {
 }
 
 /// `pdf`'s pages.
-pub(super) fn table(pdf: &LazyPdf, limits: &PageTreeLimits) -> Result<Vec<PageFacts>, OpenError> {
+pub(super) fn table(pdf: &LazyPdf, limits: &Limits) -> Result<Vec<PageFacts>, OpenError> {
     let catalog = pdf.catalog()?;
     let failed = RefCell::new(None);
     let objects = OneHop {
         pdf,
         failed: &failed,
     };
-    let mut caps = Limits::DEFAULT;
-    caps.page_depth = limits.depth;
-    caps.pages = limits.pages;
-    let walked = match pages::table(objects, catalog, &caps) {
+    let walked = match pages::table(objects, catalog, &limits.semantics()) {
         Ok(walked) => walked,
         Err(error) => return Err(tree_error(error, failed.borrow_mut().take())),
     };
@@ -196,9 +201,8 @@ fn tree_error(error: pages::Error, kept: Option<Error>) -> OpenError {
 struct Table<'a> {
     pdf: &'a LazyPdf,
     pages: Vec<PageFacts>,
-    /// Each page object listed: where the table first has it, and how
-    /// often it's been listed.
-    listed: HashMap<ObjectId, (usize, u32)>,
+    /// Where the table first has each page object listed.
+    listed: HashMap<ObjectId, usize>,
     /// The `/Resources` pages inherit, by the address of the object as
     /// written in the node that has it: one `Arc` each.
     resources: HashMap<*const Object, Arc<Object>>,
@@ -211,23 +215,19 @@ struct Table<'a> {
 impl<'a> Table<'a> {
     /// The walk's `page`, object `id`, added to the table: the facts it was
     /// first read with, shared, if it was listed before, numbered by how
-    /// often it was.
+    /// often it was, which the walk counts ([`Page::repeat`]).
     fn push(&mut self, id: ObjectId, page: &Page<'a>) -> Result<(), OpenError> {
-        let at = self.pages.len();
-        let page = match self.listed.get_mut(&id) {
-            Some((first, listed)) => {
-                let mut again = self.pages[*first].clone();
-                again.repeat = *listed;
-                *listed += 1;
-                again
-            }
+        let facts = match self.listed.get(&id) {
+            Some(&first) => self.pages[first].clone(),
             None => {
-                let page = self.facts(id, page)?;
-                self.listed.insert(id, (at, 1));
-                page
+                self.listed.insert(id, self.pages.len());
+                self.facts(id, page)?
             }
         };
-        self.pages.push(page);
+        self.pages.push(PageFacts {
+            repeat: page.repeat,
+            ..facts
+        });
         Ok(())
     }
 

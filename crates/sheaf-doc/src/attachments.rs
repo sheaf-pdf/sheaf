@@ -270,9 +270,14 @@ pub(crate) fn name_tree<'a, P: Objects + ?Sized>(
         .collect()
 }
 
+/// The caps a name or number tree is walked under: sheaf's defaults as
+/// pdf-semantics takes them, a tree's walk having no source's to hand.
+const TREES: Limits = crate::source::Limits::DEFAULT.semantics();
+
 /// The entries of the name tree at `root`, each key's bytes and its value
 /// as written, in the tree's order: the family's walk
-/// ([`tree::names`]), under its default caps (32 levels, 100,000 nodes).
+/// ([`tree::names`]), under its default caps (32 levels, 100,000 nodes;
+/// [`TREES`]).
 /// Each node and each array of one is read once, however often it's
 /// listed, so a loop ends; a key is followed through its references; a
 /// node is a dictionary, never a stream. Passed, the walk going on: an
@@ -286,7 +291,7 @@ pub(crate) fn tree_names<'a, P: Objects + ?Sized>(
     root: &'a Object,
 ) -> impl Iterator<Item = (&'a [u8], &'a Object)> + 'a {
     let objects = resolve_fn(move |id: ObjectId| pdf.object(id));
-    tree::names(objects, root, &Limits::DEFAULT, ()).map_while(Result::ok)
+    tree::names(objects, root, &TREES, ()).map_while(Result::ok)
 }
 
 /// The entries of the number tree at `root`, as [`tree_names`] gives a
@@ -296,7 +301,7 @@ pub(crate) fn tree_numbers<'a, P: Objects + ?Sized>(
     root: &'a Object,
 ) -> impl Iterator<Item = (i64, &'a Object)> + 'a {
     let objects = resolve_fn(move |id: ObjectId| pdf.object(id));
-    tree::numbers(objects, root, &Limits::DEFAULT, ()).map_while(Result::ok)
+    tree::numbers(objects, root, &TREES, ()).map_while(Result::ok)
 }
 
 fn page_annots<P: Objects + ?Sized>(pdf: &P, page: ObjectId) -> Vec<&Dictionary> {
