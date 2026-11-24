@@ -117,25 +117,26 @@ const ROWS: &str = "SHEAF_FIELDS_ROWS";
 const MAKING_WIDTH: u32 = 16;
 
 /// Each class of rows past [`TOLERANCE`] ([`class`]), and how many widgets
-/// it holds over the whole corpus: 12,908 of the 227,379 compared
+/// it holds over the whole corpus: 13,028 of the 227,577 compared
 /// ([`TOTALS`]).
 const CLASSES: &[(&str, usize)] = &[
     (FALLBACK, 4538),
-    (ALIKE, 2938),
+    (ALIKE, 2929),
     (ALIKE_EDGE, 2145),
     (CJK, 1865),
-    (ALIKE_BESIDE, 1091),
+    (ALIKE_BESIDE, 1098),
+    (OWN_FONT, 131),
     (WIDGET_MAX_LEN, 91),
     (NAMELESS, 71),
     (FRACTION, 68),
     (CLIP, 50),
-    (FEWER, 20),
     (BEVEL_CMYK, 14),
+    (EURO, 9),
+    (FEWER, 4),
     (HEIGHTS, 4),
     (BORDER_ARRAY, 4),
     (OTHER_FIELD, 3),
     (EXACT_FIT, 3),
-    (DROID, 2),
     (TYPE_UP, 1),
 ];
 
@@ -149,10 +150,10 @@ const TOTALS: Totals = Totals {
     no_text: 1577,
     fields: 220_981,
     filled: 229_351,
-    made: 228_409,
-    overlaid: 228_409,
-    pages: 8426,
-    compared: 227_379,
+    made: 228_607,
+    overlaid: 228_607,
+    pages: 8428,
+    compared: 227_577,
     off_page: 1030,
 };
 
@@ -182,11 +183,11 @@ struct Totals {
 const UNMADE: &[(&str, usize)] = &[
     // A box of no width or height (494 of them 0 by 0), in the file.
     ("no-box", 497),
-    // A character the font has no code for: 199 of them a text string
-    // sheaf reads a byte a character, where PDFDocEncoding gives another
-    // (M18 slice 21's); the rest the field's own value, which a fallback
-    // font would draw (M10 slice 7).
-    ("unencodable", 445),
+    // A character of the field's own value the font has no code for, which
+    // a fallback font would draw (M10 slice 7): one of them a letter the
+    // value has in PDFDocEncoding and a MacRoman font hasn't (`š`, in
+    // `forms/safedocs/0410532.pdf`).
+    ("unencodable", 247),
 ];
 
 /// The forms whose text fields can't be filled, a line each: its path and
@@ -242,13 +243,20 @@ const WIDGET_MAX_LEN: &str = "a widget's /MaxLen: PDFium cuts at it";
 /// character in a font of its own; pdf-forms draws it in the font the
 /// `/DA` names.
 const CJK: &str = "CJK font: PDFium's font map";
-/// PDFium's font map draws characters of the value in a font of its own
-/// (DroidSansFallback), whose heights move the lines after them; pdf-forms
-/// draws them in the `/DA`'s font, which has them.
-const DROID: &str = "PDFium's own font for some characters";
+/// PDFium's font map draws characters of the value in a font of its own,
+/// which it takes for a charset other than the `/DA` font's:
+/// DroidSansFallback, a face of the machine's, for the quotes and dashes
+/// it counts as Chinese (‘ ’ “ ” – —); ChromeSansMM, its own, where the
+/// machine has no face of the charset, for Eastern European letters (Š š
+/// ž) and ƒ. Their heights move the lines after them; and where that font
+/// has no code for one (a bullet, in DroidSansFallback's GBK), PDFium
+/// writes its two UTF-16 bytes, which the font reads as two other
+/// characters (a space and a quote). pdf-forms draws them in the `/DA`'s
+/// font, which has them.
+const OWN_FONT: &str = "PDFium's own font for some characters";
 /// PDFium's appearance leaves out a character of the value that the font
-/// has a code for, which pdf-forms draws (a no-break space at WinAnsi's
-/// 0xA0, a euro sign at 0x80).
+/// has a code for, which pdf-forms draws (a no-break space, at WinAnsi's
+/// 0xA0).
 const FEWER: &str = "PDFium leaves out a character";
 /// PDFium shows another value: it reads the widget as another field's
 /// (the tree read otherwise: in `forms/safedocs/2429543.pdf`, widget kids
@@ -264,6 +272,13 @@ const BEVEL_CMYK: &str = "beveled over CMYK: the dark band";
 /// (an embedded program's own, or the face it takes for one not embedded),
 /// beside pdf-fonts' reading of the font.
 const HEIGHTS: &str = "the font's heights: PDFium's";
+/// The same glyphs, a centered line set further left or a line broken a
+/// word sooner: a euro sign in a standard 14 font drawn without a program
+/// or `/Widths`, which pdf-forms measures by Adobe's metrics (556 a
+/// thousand in Helvetica) and PDFium by the face it draws in (667, and 722
+/// in Helvetica-Bold and Times, whose metrics have 556 and 500): pdf-fonts
+/// says its width is guessed (`Font::width_guessed`).
+const EURO: &str = "a euro sign: PDFium's width";
 /// A line whose glyphs' widths come to the box's width exactly: pdf-forms
 /// keeps them on one line, PDFium's sum of them in `f32`s passes it and
 /// breaks the line a glyph sooner.
@@ -311,6 +326,9 @@ fn class(f: &Facts) -> Option<&'static str> {
     let multiline = f.flags & sheaf_doc::forms::field::flags::MULTILINE != 0;
     let broke = moved.is_some_and(|(i, dx, dy)| i > 0 && dx < 0.0 && dy < 0.0);
     let painted = f.drawn.starts_with("paint") && f.drawn.ends_with(":color");
+    let own_font = ["DroidSansFallback", "ChromeSansMM"]
+        .iter()
+        .any(|font| f.pdfium_tf.contains(font));
     Some(match () {
         _ if f.pdfium_tf == "none" && f.nameless => NAMELESS,
         _ if f.pdfium_tf == "none" && f.ft_up.is_some_and(|up| up >= 2) => TYPE_UP,
@@ -319,11 +337,12 @@ fn class(f: &Facts) -> Option<&'static str> {
         _ if f.border_array.is_some_and(|w| w as f32 != f.border.0) => BORDER_ARRAY,
         _ if f.widget_max_len.is_some_and(cut_at) => WIDGET_MAX_LEN,
         _ if cjk && !alike => CJK,
-        _ if f.pdfium_tf.contains("DroidSansFallback") && !alike => DROID,
+        _ if own_font && !alike => OWN_FONT,
         _ if f.text_vs == "fewer" && !f.ascii => FEWER,
         _ if f.text_vs == "other" => OTHER_FIELD,
         _ if painted && f.border.1 == 'B' && f.bg == "cmyk" => BEVEL_CMYK,
         _ if f.text_vs == "same" && (lower || (f.drawn == "glyph0:size" && f.auto)) => HEIGHTS,
+        _ if f.euro && f.kind == "Type1/None" && f.text_vs == "same" && moved.is_some() => EURO,
         _ if multiline && f.text_vs == "same" && broke => EXACT_FIT,
         _ if alike && f.overlap_differs => ALIKE_BESIDE,
         _ if alike && f.edge_only => ALIKE_EDGE,
@@ -368,9 +387,11 @@ struct Facts {
     /// where PDFium made no appearance.
     ours_tf: String,
     pdfium_tf: String,
-    /// The sample's length, in characters, and whether it's ASCII.
+    /// The sample's length, in characters, whether it's ASCII, and whether
+    /// it holds a euro sign.
     chars: usize,
     ascii: bool,
+    euro: bool,
     /// Whether the two forms draw alike within a rounding
     /// ([`drawn::alike`]): `alike`, or the first thing that differs.
     drawn: String,
@@ -413,7 +434,7 @@ impl std::fmt::Display for Facts {
         write!(
             f,
             "font={} kind={} da={} ff={:x} q={} maxlen={} w={} h={} r={} bw={} bs={} dash={} \
-             bg={} bc={} size={} ovf={} ours.tf={} pdfium.tf={} chars={} ascii={} drawn={} \
+             bg={} bc={} size={} ovf={} ours.tf={} pdfium.tf={} chars={} ascii={} euro={} drawn={} \
              nameless={} f={} overlaps={} overlap_differs={} text={} wmaxlen={} border_array={} \
              ft_up={} auto={} edge_only={} levels={}",
             self.font,
@@ -440,6 +461,7 @@ impl std::fmt::Display for Facts {
             self.pdfium_tf,
             self.chars,
             u8::from(self.ascii),
+            u8::from(self.euro),
             self.drawn,
             u8::from(self.nameless),
             self.annot_flags,
@@ -1422,6 +1444,7 @@ fn facts_of(w: &Filled, saved: &Pdf, copy: &Pdf) -> Facts {
         pdfium_tf,
         chars: w.look.text.chars().count(),
         ascii: w.look.text.is_ascii(),
+        euro: w.look.text.contains('€'),
         drawn: alike,
         nameless: w.nameless,
         annot_flags: w.annot_flags,
