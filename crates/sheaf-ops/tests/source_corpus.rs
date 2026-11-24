@@ -212,7 +212,17 @@ struct Held {
 }
 
 /// Six files whose page trees the walk before M18 slice 21 read otherwise
-/// than PDFium does, by path, where the corpus has them.
+/// than PDFium does, by path; the corpus has each, and the test fails
+/// without one. Two kinds. The first three are read as PDFium reads them
+/// now: every place PDFium counts is in the table (`table` names each),
+/// a stand-in where PDFium loads no page. The last three are where the
+/// table still departs from PDFium, held so the departure can't grow: an
+/// object the reader doesn't read and PDFium does (`bug_1314658.pdf`,
+/// which opened as one blank page before that slice and has no pages
+/// since), and kids written in place, which the table leaves out
+/// (`direct-pages.pdf`, `page-tree-direct-kid.pdf`). A change that reads
+/// such a kid or such an object tightens those three rows to PDFium's
+/// own places.
 const HELD: [Held; 6] = [
     Held {
         path: "parsing/pdfium/resources/bad_page_type.pdf",
@@ -476,6 +486,11 @@ fn every_page_of_the_other_suites_is_pdfium_s() {
         );
     }
     assert!(opened > 0, "PDFium and the source opened nothing");
+    assert_eq!(
+        held,
+        HELD.len(),
+        "the files held by name, each of which the corpus has: not in it, {absent:?}"
+    );
     let held_unopened: Vec<&str> = UNOPENED.iter().map(|(path, _)| *path).collect();
     assert_eq!(
         unopened.keys().copied().collect::<Vec<_>>(),
