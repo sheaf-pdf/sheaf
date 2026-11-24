@@ -21,8 +21,9 @@ pub struct PageTreeLimits {
     /// Levels of nodes under the root, and nodes on a `/Parent` chain:
     /// PDFium's `kMaxPageLevel`.
     pub depth: usize,
-    /// Pages the tree lists, and nodes the walk visits: PDFium opens
-    /// fewer than its `kPageMaxNum`, 0xFFFFF.
+    /// Pages the tree lists, nodes the walk visits, and a quarter of the
+    /// kids it looks at: PDFium opens fewer than its `kPageMaxNum`,
+    /// 0xFFFFF.
     pub pages: usize,
 }
 

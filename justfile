@@ -324,7 +324,7 @@ precommit: (_steps "precommit" "markers plan-check fmt-check locks corpus intero
 # about one of them.
 [doc("Before a PR merges: every ignored corpus tier (two hours or more)")]
 [group('local')]
-premerge: (_steps "premerge" "tier-append tier-exports tier-realize tier-watermark tier-lexer tier-interp tier-codes tier-arlington tier-size tier-fields _corpus-ran")
+premerge: (_steps "premerge" "tier-append tier-exports tier-realize tier-watermark tier-lexer tier-interp tier-codes tier-arlington tier-size tier-fields tier-pages _corpus-ran")
 
 [doc("The plan agrees with itself: tables against files, status lines, links, size budgets (AGENTS.md)")]
 [group('local')]
@@ -427,6 +427,16 @@ tier-realize:
 [group('corpus')]
 tier-fields:
     scripts/test-capped.sh cargo test -p sheaf-ops --release --test fields_corpus -- --ignored --nocapture
+
+# Every page of the scans, signatures and conformance suites and the pool
+# sample as the page table has it, against PDFium's count and sizes (M18
+# slice 21), beside source_corpus's test of forms/, which runs every
+# time: the files PDFium counts past their trees and those it numbers
+# otherwise are held by name, each to PDFium's own answer. A few minutes.
+[doc("The page table against PDFium's counts and sizes over the scans, signatures and conformance suites and the pool sample")]
+[group('corpus')]
+tier-pages:
+    scripts/test-capped.sh cargo test -p sheaf-ops --test source_corpus -- --ignored --nocapture
 
 # PDFium's resave of a watermark.
 [group('corpus')]

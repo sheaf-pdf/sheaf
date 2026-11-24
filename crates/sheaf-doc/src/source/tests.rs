@@ -216,10 +216,13 @@ fn a_page_listed_twice_is_two_pages() {
             (ObjectId::new(6, 0), 1)
         ]
     );
-    // A kid with /Kids is a node whatever its /Type, and any other a page.
-    // A kid that names no dictionary keeps its place as a Letter page, as
-    // PDFium and `Document::get_pages` keep it; one written in place, which
-    // has no object to be, is skipped, as `get_pages` skips it.
+    // A kid with /Kids is a node whatever its /Type, and any other a page,
+    // but where its /Type isn't /Page: object 4, /Type /Pages without
+    // /Kids, is a place where PDFium loads no page, Letter, though it names
+    // a media box. A kid that names no dictionary keeps its place as a
+    // Letter page, as PDFium numbers it. One written in place, which has
+    // no object to be, takes the fourth of the root's /Count, where the
+    // walk ends, and is left out: three pages, 5 0 R unlisted.
     let objects = [
         catalog(),
         object(
@@ -236,13 +239,12 @@ fn a_page_listed_twice_is_two_pages() {
         [
             (ObjectId::new(4, 0), 0),
             (ObjectId::new(4, 0), 1),
-            (ObjectId::new(9, 0), 0),
-            (ObjectId::new(5, 0), 0)
+            (ObjectId::new(9, 0), 0)
         ]
     );
-    assert_eq!(src.page_size(1), size(10.0, 10.0));
+    assert_eq!(src.page_size(1), size(612.0, 792.0));
     assert_eq!(src.page_size(2), size(612.0, 792.0));
-    assert!(src.page(3).unwrap().parent.is_none());
+    assert!(src.page(1).unwrap().parent.is_none());
     // A root without /Kids is the one page.
     let one = [
         catalog(),
@@ -253,6 +255,164 @@ fn a_page_listed_twice_is_two_pages() {
     assert_eq!(src.page_size(0), size(10.0, 20.0));
     // Past the last page, Letter.
     assert_eq!(src.page_size(1), size(612.0, 792.0));
+}
+
+/// The two rules the second fixture of
+/// [`a_page_listed_twice_is_two_pages`] holds together, apart.
+#[test]
+fn a_leaf_of_another_type_and_a_kid_in_place_are_two_rules() {
+    // A leaf whose /Type is something other than /Page is a place where
+    // PDFium loads no page: Letter, and holding nothing, though it names a
+    // box, contents and a /Parent. A leaf with no /Type is a page.
+    let objects = [
+        catalog(),
+        object(2, "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>"),
+        object(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 200] >>"),
+        object(
+            4,
+            "<< /Type /Template /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 6 0 R >>",
+        ),
+        object(5, "<< /Parent 2 0 R /MediaBox [0 0 10 20] >>"),
+    ];
+    let src = open(&objects).unwrap();
+    let all = [3, 4, 5].map(|n| (ObjectId::new(n, 0), 0));
+    assert_eq!(ids(&src), all);
+    assert_eq!(src.page_size(0), size(100.0, 200.0));
+    assert_eq!(src.page_size(1), size(612.0, 792.0));
+    let place = src.page(1).unwrap();
+    assert!(place.parent.is_none() && place.contents.is_empty());
+    assert_eq!(src.page_size(2), size(10.0, 20.0));
+
+    // A kid written in place takes its place in PDFium's numbering, the
+    // second of three, but has no object number, and is left out: the page
+    // after it is the table's second, which PDFium numbers third.
+    let objects = [
+        catalog(),
+        object(
+            2,
+            "<< /Type /Pages /Kids [3 0 R << /Type /Page /MediaBox [0 0 50 50] >> 4 0 R] \
+             /Count 3 >>",
+        ),
+        object(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 200] >>"),
+        object(4, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 20] >>"),
+    ];
+    let src = open(&objects).unwrap();
+    let all = [3, 4].map(|n| (ObjectId::new(n, 0), 0));
+    assert_eq!(ids(&src), all);
+    assert_eq!(src.page_size(1), size(10.0, 20.0));
+}
+
+#[test]
+fn a_root_count_of_0_counts_the_tree_by_its_nodes_counts() {
+    // PDFium doesn't count by a /Count of 0: it counts the tree, trusting
+    // each node's own /Count as it would the root's, 1 and 1, though the
+    // nodes list 2 and 1. The table ends at that count, 2: the first node's
+    // pages, and 7 isn't reached.
+    let objects = [
+        catalog(),
+        object(2, "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 0 >>"),
+        object(
+            3,
+            "<< /Type /Pages /Parent 2 0 R /Kids [5 0 R 6 0 R] /Count 1 >>",
+        ),
+        object(4, "<< /Type /Pages /Parent 2 0 R /Kids [7 0 R] /Count 1 >>"),
+        object(5, "<< /Type /Page /Parent 3 0 R >>"),
+        object(6, "<< /Type /Page /Parent 3 0 R >>"),
+        object(7, "<< /Type /Page /Parent 4 0 R >>"),
+    ];
+    let all = [5, 6].map(|n| (ObjectId::new(n, 0), 0));
+    assert_eq!(ids(&open(&objects).unwrap()), all);
+}
+
+#[test]
+fn a_page_tree_written_in_place_or_behind_two_references_is_walked() {
+    let pages = |root: &str| {
+        [
+            object(1, &format!("<< /Type /Catalog /Pages {root} >>")),
+            object(2, "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>"),
+            object(3, "<< /Type /Page /MediaBox [0 0 100 200] >>"),
+            object(4, "<< /Type /Page >>"),
+            object(5, "2 0 R"),
+        ]
+    };
+    let in_place = "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>";
+    for root in [in_place, "5 0 R"] {
+        let src = open(&pages(root)).unwrap();
+        let all = [3, 4].map(|n| (ObjectId::new(n, 0), 0));
+        assert_eq!(ids(&src), all, "{root}");
+        assert_eq!(src.page_size(0), size(100.0, 200.0), "{root}");
+    }
+}
+
+/// A file of one page, object 3, whose `/MediaBox` is object 5, `media`.
+fn media_behind(media: &str) -> [(u32, Vec<u8>); 4] {
+    [
+        catalog(),
+        object(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+        object(3, "<< /Type /Page /Parent 2 0 R /MediaBox 5 0 R >>"),
+        object(5, media),
+    ]
+}
+
+#[test]
+fn a_media_box_behind_two_references_is_letter() {
+    // PDFium follows one reference to a page's box: what it finds there
+    // is another, which is no box.
+    let mut objects = media_behind("6 0 R").to_vec();
+    objects.push(object(6, "[0 0 100 200]"));
+    assert_eq!(open(&objects).unwrap().page_size(0), size(612.0, 792.0));
+    let objects = media_behind("[0 0 100 200]");
+    assert_eq!(open(&objects).unwrap().page_size(0), size(100.0, 200.0));
+}
+
+#[test]
+fn a_media_box_naming_itself_opens_as_letter() {
+    // One reference followed, a loop of them is never met.
+    let src = open(&media_behind("5 0 R")).unwrap();
+    assert_eq!(src.page_size(0), size(612.0, 792.0));
+}
+
+#[test]
+fn inherited_resources_are_one_arc_across_pages() {
+    // Pages 3 and 6 inherit the root's /Resources, 6 through node 4; page 5
+    // has its own.
+    let objects = [
+        catalog(),
+        object(
+            2,
+            "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 \
+             /Resources << /Font << /F1 9 0 R >> >> >>",
+        ),
+        object(3, "<< /Type /Page /Parent 2 0 R >>"),
+        object(4, "<< /Type /Pages /Parent 2 0 R /Kids [6 0 R] >>"),
+        object(5, "<< /Type /Page /Parent 2 0 R /Resources << >> >>"),
+        object(6, "<< /Type /Page /Parent 4 0 R >>"),
+    ];
+    let src = open(&objects).unwrap();
+    let all = [3, 6, 5].map(|n| (ObjectId::new(n, 0), 0));
+    assert_eq!(ids(&src), all);
+    let resources = |i| src.page(i).unwrap().resources.clone().unwrap();
+    assert!(matches!(resources(0).value(), Value::Dict(d) if d.has(b"Font")));
+    assert!(Arc::ptr_eq(&resources(0), &resources(1)));
+    assert!(!Arc::ptr_eq(&resources(0), &resources(2)));
+}
+
+#[test]
+fn a_cap_broken_reading_a_kid_is_the_reader_s_own_error() {
+    // The kid nests arrays past what the reader parses: the open fails
+    // with the reader's error, not a page tree's.
+    let nested = format!("{}{}", "[".repeat(300), "]".repeat(300));
+    let objects = [
+        catalog(),
+        object(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+        object(3, &format!("<< /Type /Page /Parent 2 0 R /A {nested} >>")),
+    ];
+    let result = open(&objects);
+    assert!(
+        matches!(result, Err(OpenError::Pdf(crate::pdf::Error::Limit(_)))),
+        "{:?}",
+        result.map(|src| src.page_count())
+    );
 }
 
 /// The root's `/Kids`, `n` pages from object `first` on, under a root

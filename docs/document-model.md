@@ -197,18 +197,29 @@ blob, and a source parses the blob in place:
   stream is decoded once. `XrefFacts` records what a later
   append needs: the newest section's kind and start, `/Size`, the largest
   cross-reference stream number, `/ID` and where the header starts.
-- **The page table** numbers pages as PDFium does (a kid with `/Kids` is
-  a node, any other a page) and reads the inheritable keys up `/Parent`
-  as it does. Each page's `Geom` is its boxes and rotation as PDFium
-  sizes them: an empty media box is Letter, the crop box is clipped to the
-  media box (one outside it shows nothing), `/Rotate` is whole quarter
-  turns, `(degrees / 90) mod 4`, and `/UserUnit` doesn't scale the size.
-  The layout's page sizes are `Geom::shown()` from the first paint, and
-  equal PDFium's on every corpus page; PDFium isn't asked for sizes. A
-  page the tree lists twice is two entries, which share what the page
-  holds, as pages naming one `/Annots` array share it. The table ends at
-  the root's `/Count` when PDFium counts by it, since PDFium loads no
-  page past it.
+- **The page table** is pdf-semantics' walk of the page tree by PDFium's
+  rules, so pages are numbered as PDFium numbers them: a kid with `/Kids`
+  is a node whatever its `/Type`, any other dictionary a page, and the
+  inheritable keys come up `/Parent` as PDFium reads them, each reference
+  on the way followed as far as PDFium follows it (one, or two for
+  `/Pages`, `/Parent` and `/Rotate`). A leaf whose `/Type` PDFium loads
+  no page of, and a kid that names no dictionary, keep their places as
+  Letter pages holding nothing. A kid that isn't a reference has no
+  object number for sheaf to name a page by, and is left out, so the
+  pages after it are numbered one lower than PDFium numbers them. The
+  table ends at the count PDFium gives, since PDFium loads no page past
+  it: the root's `/Count` where PDFium counts by it, and otherwise its
+  count of the tree, which trusts a node's `/Count` the same way. Each
+  page's `Geom` is its boxes and rotation as PDFium sizes them: an empty
+  media box is Letter, the crop box is clipped to the media box (one
+  outside it shows nothing), `/Rotate` is whole quarter turns,
+  `(degrees / 90) mod 4`, and `/UserUnit` doesn't scale the size. The
+  layout's page sizes are `Geom::shown()` from the first paint, and equal
+  PDFium's on every page of the corpus's forms, scans, signatures and
+  conformance suites and pool sample, but for the files `just tier-pages`
+  names; PDFium isn't asked for sizes. A page the tree lists twice is two
+  entries, which share what the page holds, as the pages under a node
+  share what they inherit and pages naming one `/Annots` array share it.
 - **One `Limits`** caps every reader of a source: `LazyPdf`'s (256 MiB a
   stream decompressed, 1,024 sections, 8,388,607 objects and twice as
   many cross-reference stream entries, references 64 deep), the page
