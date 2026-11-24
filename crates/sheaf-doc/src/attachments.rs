@@ -4,7 +4,10 @@
 
 use std::collections::HashSet;
 
-use crate::pdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, StreamExt, Value, text};
+use crate::pdf::semantics::{Limits, tree};
+use crate::pdf::{
+    Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, StreamExt, resolve_fn, text,
+};
 use anyhow::{Context, Result, bail};
 
 use crate::annot::AnnotId;
@@ -248,61 +251,52 @@ fn describe<P: Objects + ?Sized>(pdf: &P, at: AttachmentRef, fs: &Dictionary) ->
 }
 
 /// One of the catalog's `/Names` trees, flattened: (key, value) in tree
-/// order. `/EmbeddedFiles` maps names to file specs, `/Dests` to
-/// destinations. A node or array the tree reaches again is read once.
+/// order, each key read as a text string. `/EmbeddedFiles` maps names to
+/// file specs, `/Dests` to destinations. Walked by [`tree_names`].
 pub(crate) fn name_tree<'a, P: Objects + ?Sized>(
     pdf: &'a P,
     tree: &[u8],
 ) -> Vec<(String, &'a Object)> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    let tree = pdf
+    let root = pdf
         .catalog()
         .ok()
         .and_then(|c| c.get(b"Names"))
         .and_then(|o| resolve(pdf, o))
         .and_then(Object::as_dict)
-        .and_then(|n| n.get(tree))
-        .and_then(|o| once(pdf, &mut seen, o))
-        .and_then(Object::as_dict);
-    if let Some(t) = tree {
-        walk_names(pdf, t, &mut out, 0, &mut seen);
-    }
-    out
+        .and_then(|n| n.get(tree));
+    (root.into_iter())
+        .flat_map(|root| tree_names(pdf, root))
+        .map(|(key, value)| (text::decode(key), value))
+        .collect()
 }
 
-fn walk_names<'a, P: Objects + ?Sized>(
+/// The entries of the name tree at `root`, each key's bytes and its value
+/// as written, in the tree's order: the family's walk
+/// ([`tree::names`]), under its default caps (32 levels, 100,000 nodes).
+/// Each node and each array of one is read once, however often it's
+/// listed, so a loop ends; a key is followed through its references; a
+/// node is a dictionary, never a stream. Passed, the walk going on: an
+/// object `pdf` gives none for (not there, damaged, past its caps, a loop
+/// of references), a kid that's no dictionary, a key that's no string, an
+/// odd last key. `pdf` follows a chain of references itself, so the
+/// family's walk sees one hop of any and never fails over it; should it
+/// fail, what it gave before is kept and it ends there.
+pub(crate) fn tree_names<'a, P: Objects + ?Sized>(
     pdf: &'a P,
-    node: &'a Dictionary,
-    out: &mut Vec<(String, &'a Object)>,
-    depth: u8,
-    seen: &mut HashSet<ObjectId>,
-) {
-    if depth > 32 {
-        return;
-    }
-    if let Some(Value::Array(names)) = node
-        .get(b"Names")
-        .and_then(|o| once(pdf, seen, o))
-        .map(Object::value)
-    {
-        for pair in names.as_chunks::<2>().0 {
-            if let Some(k) = resolve(pdf, &pair[0]).filter(|o| o.as_bytes().is_some()) {
-                out.push((text::of(k), &pair[1]));
-            }
-        }
-    }
-    if let Some(Value::Array(kids)) = node
-        .get(b"Kids")
-        .and_then(|o| once(pdf, seen, o))
-        .map(Object::value)
-    {
-        for kid in kids {
-            if let Some(d) = once(pdf, seen, kid).and_then(Object::as_dict) {
-                walk_names(pdf, d, out, depth + 1, seen);
-            }
-        }
-    }
+    root: &'a Object,
+) -> impl Iterator<Item = (&'a [u8], &'a Object)> + 'a {
+    let objects = resolve_fn(move |id: ObjectId| pdf.object(id));
+    tree::names(objects, root, &Limits::DEFAULT, ()).map_while(Result::ok)
+}
+
+/// The entries of the number tree at `root`, as [`tree_names`] gives a
+/// name tree's: each key, an integer, and its value.
+pub(crate) fn tree_numbers<'a, P: Objects + ?Sized>(
+    pdf: &'a P,
+    root: &'a Object,
+) -> impl Iterator<Item = (i64, &'a Object)> + 'a {
+    let objects = resolve_fn(move |id: ObjectId| pdf.object(id));
+    tree::numbers(objects, root, &Limits::DEFAULT, ()).map_while(Result::ok)
 }
 
 fn page_annots<P: Objects + ?Sized>(pdf: &P, page: ObjectId) -> Vec<&Dictionary> {
@@ -596,5 +590,207 @@ pub(crate) mod tests {
     fn portfolio_keys_split() {
         assert_eq!(folder_key("<3>a.pdf"), Some((3, "a.pdf")));
         assert_eq!(folder_key("a.pdf"), None);
+    }
+}
+
+/// The walk of a name or number tree ([`tree_names`], [`tree_numbers`]),
+/// over a document held whole and over the same file read as a source.
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+    use crate::pdf::{Stream, dictionary, literal};
+
+    fn id(n: u32) -> ObjectId {
+        ObjectId::new(n, 0)
+    }
+
+    fn r(n: u32) -> Object {
+        Object::from(id(n))
+    }
+
+    /// A file whose catalog holds `tree` as `/Tree`, with `objects` by
+    /// number (from 10, past what the file's own take).
+    fn file(objects: Vec<(u32, Object)>, tree: Object) -> Pdf {
+        let mut pdf = Pdf::with_version("1.7");
+        let catalog =
+            pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Tree" => tree });
+        pdf.trailer.set("Root", catalog);
+        for (n, o) in objects {
+            assert!(n >= 10);
+            pdf.objects.insert(id(n), o);
+        }
+        pdf
+    }
+
+    fn root<P: Objects + ?Sized>(pdf: &P) -> &Object {
+        pdf.catalog().unwrap().get(b"Tree").unwrap()
+    }
+
+    /// Each entry as `key=value`, the value an integer or `?`.
+    fn shown(key: String, value: &Object) -> String {
+        let value = value.as_integer().map_or("?".into(), |n| n.to_string());
+        format!("{key}={value}")
+    }
+
+    /// What `tree_names` gives of the file's `/Tree`, the same from the
+    /// document and from its source.
+    fn names(mut pdf: Pdf) -> Vec<String> {
+        fn of<P: Objects + ?Sized>(pdf: &P) -> Vec<String> {
+            (tree_names(pdf, root(pdf)))
+                .map(|(k, v)| shown(String::from_utf8_lossy(k).into_owned(), v))
+                .collect()
+        }
+        let whole = of(&pdf);
+        let src = crate::open::tests::lazily(&mut pdf);
+        assert_eq!(of(src.pdf()), whole, "read as a source");
+        whole
+    }
+
+    /// What `tree_numbers` gives, as [`names`].
+    fn numbers(mut pdf: Pdf) -> Vec<String> {
+        fn of<P: Objects + ?Sized>(pdf: &P) -> Vec<String> {
+            (tree_numbers(pdf, root(pdf)))
+                .map(|(k, v)| shown(k.to_string(), v))
+                .collect()
+        }
+        let whole = of(&pdf);
+        let src = crate::open::tests::lazily(&mut pdf);
+        assert_eq!(of(src.pdf()), whole, "read as a source");
+        whole
+    }
+
+    /// A leaf holding `/Names [(key) value]`.
+    fn leaf(key: &str, value: i64) -> Object {
+        Object::from(dictionary! { "Names" => vec![literal(key), value.into()] })
+    }
+
+    /// A chain of nodes, each one level below the last, each with a key
+    /// of its depth: the nodes 32 levels below the root are read, and the
+    /// one 33 below isn't.
+    #[test]
+    fn a_tree_is_read_to_32_levels_below_its_root() {
+        let objects = (0..=33u32)
+            .map(|depth| {
+                let mut node = dictionary! {
+                    "Names" => vec![literal(format!("d{depth:02}")), i64::from(depth).into()],
+                };
+                if depth < 33 {
+                    node.set("Kids", vec![r(10 + depth + 1)]);
+                }
+                (10 + depth, Object::from(node))
+            })
+            .collect();
+        let read = names(file(objects, r(10)));
+        let want: Vec<String> = (0..=32).map(|d| format!("d{d:02}={d}")).collect();
+        assert_eq!(read, want);
+    }
+
+    /// A node the tree lists twice, and an array of entries two nodes
+    /// share, are each read once.
+    #[test]
+    fn a_node_listed_twice_and_an_array_two_share_are_read_once() {
+        let objects = vec![
+            (10, leaf("a", 1)),
+            (11, Object::from(vec![literal("b"), 2.into()])),
+            (12, Object::from(dictionary! { "Names" => r(11) })),
+            (13, Object::from(dictionary! { "Names" => r(11) })),
+        ];
+        let tree = Object::from(dictionary! { "Kids" => vec![r(10), r(10), r(12), r(13)] });
+        assert_eq!(names(file(objects, tree)), ["a=1", "b=2"]);
+    }
+
+    /// A node among its own descendants: the walk ends, each node read
+    /// once.
+    #[test]
+    fn a_loop_ends() {
+        let objects = vec![
+            (
+                10,
+                Object::from(
+                    dictionary! { "Names" => vec![literal("a"), 1.into()], "Kids" => vec![r(11)] },
+                ),
+            ),
+            (
+                11,
+                Object::from(
+                    dictionary! { "Names" => vec![literal("b"), 2.into()], "Kids" => vec![r(10), r(11)] },
+                ),
+            ),
+        ];
+        assert_eq!(names(file(objects, r(10))), ["a=1", "b=2"]);
+    }
+
+    /// A key that's no string (a name, an integer) is passed and the walk
+    /// goes on; a key behind a reference is followed; an odd last key is
+    /// passed. In a number tree, a key that's no integer is passed.
+    #[test]
+    fn an_odd_last_key_and_a_key_that_s_no_string_are_passed() {
+        let tree = Object::from(dictionary! {
+            "Names" => vec![
+                literal("a"), 1.into(),
+                Object::name("b"), 2.into(),
+                3.into(), 3.into(),
+                literal("c"), 4.into(),
+                r(10), 5.into(),
+                literal("d"),
+            ],
+        });
+        let objects = vec![(10, literal("e"))];
+        assert_eq!(names(file(objects, tree)), ["a=1", "c=4", "e=5"]);
+
+        let tree = Object::from(dictionary! {
+            "Nums" => vec![
+                0.into(), 1.into(),
+                literal("x"), 2.into(),
+                Object::from(2.0), 3.into(),
+                r(10), 4.into(),
+                7.into(),
+            ],
+        });
+        let objects = vec![(10, Object::from(4))];
+        assert_eq!(numbers(file(objects, tree)), ["0=1", "4=4"]);
+    }
+
+    /// A stream holding a node's entries in its dictionary is no node,
+    /// as a kid or as the root.
+    #[test]
+    fn a_stream_isn_t_a_node() {
+        let stream = |key: &str| {
+            let dict = dictionary! { "Names" => vec![literal(key), 9.into()] };
+            Object::from(Stream::new(dict, b"x".to_vec()))
+        };
+        let objects = vec![(10, stream("s")), (11, leaf("a", 1))];
+        let tree = Object::from(dictionary! { "Kids" => vec![r(10), r(11)] });
+        assert_eq!(names(file(objects, tree)), ["a=1"]);
+
+        let objects = vec![(10, stream("s"))];
+        assert!(names(file(objects, r(10))).is_empty());
+    }
+
+    /// An object that's a reference to itself, listed among the kids,
+    /// names nothing `pdf` can read: it's passed, as any kid that doesn't
+    /// read is, and the walk goes on to the kids after it. So is a kid at
+    /// the end of a chain of 40 references, which `pdf` follows: the
+    /// family's walk sees one hop of it.
+    #[test]
+    fn a_reference_to_itself_among_the_kids_is_passed() {
+        let objects = vec![(10, leaf("a", 1)), (11, r(11)), (12, leaf("b", 2))];
+        let tree = Object::from(dictionary! { "Kids" => vec![r(10), r(11), r(12)] });
+        assert_eq!(names(file(objects, tree)), ["a=1", "b=2"]);
+
+        let mut objects: Vec<(u32, Object)> = (20..60).map(|n| (n, r(n + 1))).collect();
+        objects.push((60, leaf("c", 3)));
+        let tree = Object::from(dictionary! { "Kids" => vec![r(20), r(10)] });
+        objects.push((10, leaf("a", 1)));
+        assert_eq!(names(file(objects, tree)), ["c=3", "a=1"]);
+    }
+
+    /// A tree that isn't there, or a root that's null or no dictionary,
+    /// gives no entries.
+    #[test]
+    fn no_tree_is_no_entries() {
+        assert!(names(file(Vec::new(), r(10))).is_empty());
+        assert!(names(file(Vec::new(), Object::null())).is_empty());
+        assert!(names(file(Vec::new(), 7.into())).is_empty());
     }
 }
