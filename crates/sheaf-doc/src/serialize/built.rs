@@ -51,19 +51,16 @@ struct Subset {
     at: Option<ObjectId>,
     /// Every glyph joined: what content bound through it draws.
     joined: Glyphs,
-    /// What was written at `at`, and each of its objects' numbers, `at`
-    /// first: none until [`ResObjects::finish`].
-    written: Option<(Glyphs, Vec<ObjectId>)>,
+    /// The glyphs the subset written at `at` holds: none until
+    /// [`ResObjects::finish`].
+    written: Option<Glyphs>,
 }
 
 impl Subset {
-    /// Whether nothing reserved is left unwritten.
+    /// Whether nothing reserved is left unwritten: nothing bound, or the
+    /// subset written of every glyph joined.
     fn finished(&self) -> bool {
-        self.at.is_none()
-            || self
-                .written
-                .as_ref()
-                .is_some_and(|(g, _)| *g == self.joined)
+        self.at.is_none() || self.written.as_ref() == Some(&self.joined)
     }
 }
 
@@ -99,12 +96,13 @@ impl ResObjects {
 
     /// Writes the fallback font's subset, of every glyph joined, at the
     /// number content binds it by, where content bound it: its owner calls
-    /// it once its content is bound, before its PDF is written. Called
-    /// again, it writes nothing, unless more was joined since: then the
-    /// subset is written again at the same numbers. The fallback bound with
-    /// no glyph joined (content that missed its join, a bug) is said, and
-    /// its subset written of none, so nothing dangles; glyphs joined with
-    /// nothing bound are said, and nothing written.
+    /// it once, when all its content is bound, before its PDF is written.
+    /// Called again with nothing joined since, it writes nothing. Content
+    /// bound after it (a bug: the subset is written, and lacks what that
+    /// draws) is said, and a debug build panics when the owner drops. The
+    /// fallback bound with no glyph joined (content that missed its join,
+    /// a bug) is said, and its subset written of none, so nothing dangles;
+    /// glyphs joined with nothing bound are said, and nothing written.
     pub fn finish(&mut self, pdf: &mut Pdf) {
         let sub = &mut self.fallback;
         let Some(at) = sub.at else {
@@ -117,7 +115,15 @@ impl ResObjects {
             }
             return;
         };
-        if sub.finished() {
+        if let Some(written) = &sub.written {
+            if *written != sub.joined {
+                log::error!(
+                    "content drew in the fallback font after its subset was written: \
+                     the subset holds {} glyphs of the {} drawn",
+                    written.len(),
+                    sub.joined.len()
+                );
+            }
             return;
         }
         if sub.joined.is_empty() {
@@ -130,28 +136,24 @@ impl ResObjects {
         let ResBody::Objects(objects) = subset.body() else {
             unreachable!("a subset is its objects")
         };
-        let mut ids = sub.written.take().map_or_else(|| vec![at], |(_, ids)| ids);
-        for gone in ids.drain(objects.len().min(ids.len())..) {
-            pdf.objects.remove(&gone);
-        }
-        while ids.len() < objects.len() {
-            ids.push(pdf.new_object_id());
-        }
+        let mut ids = vec![at];
+        ids.extend((1..objects.len()).map(|_| pdf.new_object_id()));
         add_at(pdf, objects, &ids);
-        sub.written = Some((sub.joined.clone(), ids));
+        sub.written = Some(sub.joined.clone());
     }
 }
 
 /// A [`ResObjects`] dropped with the fallback bound and its subset not
-/// written, or not of every glyph joined since, is a reference left
-/// dangling: a debug build panics (not while panicking already).
+/// written is a reference left dangling, and one whose content drew in
+/// the fallback after its subset was written draws glyphs the subset
+/// lacks: a debug build panics (not while panicking already).
 impl Drop for ResObjects {
     fn drop(&mut self) {
         if cfg!(debug_assertions) && !std::thread::panicking() {
             assert!(
                 self.fallback.finished(),
-                "the fallback font was bound in a built PDF, and its subset never written: \
-                 its owner didn't finish"
+                "the fallback font was bound in a built PDF, and its subset not written of \
+                 every glyph drawn: its owner didn't finish, or bound content after it did"
             );
         }
     }
@@ -750,9 +752,8 @@ mod tests {
         assert_eq!(subsets_hold(&bytes), 6 + 5);
     }
 
-    /// A subset is written once its owner finishes, again at the same
-    /// numbers only once more is joined; bound with nothing joined, it's
-    /// written of no glyph rather than left dangling.
+    /// A subset is written once, when its owner finishes; bound with
+    /// nothing joined, it's written of no glyph rather than left dangling.
     #[test]
     fn a_subset_is_written_when_its_owner_finishes() {
         let sans = Fallback::SANS;
@@ -769,6 +770,21 @@ mod tests {
             (pdf.objects.len(), pdf.get_dictionary(at).unwrap()),
             (count, &empty)
         );
+    }
+
+    /// Content bound after its owner finished draws glyphs the subset
+    /// written lacks: a second finish writes nothing, and a debug build
+    /// says so when the owner drops.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "bound content after it did")]
+    fn content_bound_after_the_finish_panics_in_a_debug_build() {
+        let sans = Fallback::SANS;
+        let mut pdf = Pdf::with_version("1.7");
+        let mut res = ResObjects::default();
+        let at = res.object(&mut pdf, &sans.res());
+        res.finish(&mut pdf);
+        let written = pdf.get_dictionary(at).unwrap().clone();
         let mut glyphs = Glyphs::new();
         glyphs.add(sans.program(), "\u{141}").unwrap();
         Graph {
@@ -777,8 +793,8 @@ mod tests {
         }
         .fallback(&glyphs);
         res.finish(&mut pdf);
-        assert_eq!(pdf.objects.len(), count, "the same numbers");
-        assert_ne!(pdf.get_dictionary(at).unwrap(), &empty);
+        assert_eq!(pdf.get_dictionary(at).unwrap(), &written, "written once");
+        drop(res);
     }
 
     /// An owner dropped with the fallback bound and its subset never
