@@ -11,8 +11,10 @@
 //!   slice 19), fonts ([`fonts`]: `pdf-fonts` and `pdf-gfx`, M18 slice 22),
 //!   and content interpreted and written again ([`gfx`]: `pdf-gfx`, M18
 //!   slice 23).
-//! - Annotations ([`annots`]: `pdf-annots`, M18 slice 24) and text fields'
-//!   appearances ([`forms`]: `pdf-forms`, M10 slice 6).
+//! - Annotations ([`annots`]: `pdf-annots`, M18 slice 24) and form fields'
+//!   appearances, a text field's (M10 slice 6) and a button's and a
+//!   choice's, and a check box or radio group's rules (M10 slice 8)
+//!   ([`forms`]: `pdf-forms`).
 //! - The common structures ([`semantics`]: `pdf-semantics`, M18 slice 21):
 //!   the date a mark is made at, name and number trees, the page tree's
 //!   walk and what a file's XMP claims it conforms to.

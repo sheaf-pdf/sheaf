@@ -65,6 +65,15 @@
 //! note back from their appearances. The map's size after Flate is held
 //! under a bound.
 //!
+//! From M10 slice 8 a check box's and a radio button's appearances sheaf
+//! makes, off and on, a combo box's, a list box's and a push button's, in
+//! each case the pixel checks (`tests/buttons.rs`) hold to PDFium's own,
+//! pass `qpdf --check`; pdftoppm draws each where it draws PDFium's, a
+//! mark loosely (poppler draws ZapfDingbats in a face of its own) and an
+//! `Off` with no frame not at all; and pdf.js reads each and warns of
+//! nothing, but that it doesn't support a push button with no action,
+//! which each push button here is.
+//!
 //! qpdf is `$SHEAF_QPDF`, else `qpdf` on the PATH; pdf.js is `node` on the
 //! PATH with `$SHEAF_PDFJS`, pdfjs-dist's `legacy/build/pdf.mjs`, which
 //! draws through the canvas pdfjs-dist installs beside it
@@ -1640,6 +1649,229 @@ fn text_field_appearances_pass_qpdf_and_poppler_draws_them_where_pdfium_s() {
     println!(
         "qpdf --check and pdftoppm: {} outputs, {} fail",
         pairs.len(),
+        failed.len()
+    );
+    assert!(failed.is_empty(), "{failed:#?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What pdf.js makes of each file given after pdf.js's `pdf.mjs`: `file`
+/// and its path, then each warning pdf.js gives while it reads and draws
+/// it (a line `Warning: …` of its own; pdf.js says them through
+/// `console.warn`, which node writes to stderr, so the script says them
+/// on stdout instead, under the file they're of), the first page drawn at
+/// two pixels a point with its annotations' appearances, and each
+/// annotation's subtype, field type and the text pdf.js reads of its
+/// appearance, as JSON.
+const PDFJS_WARNED: &str = r#"
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+console.warn = (...said) => console.log(said.join(" "));
+const [lib, ...files] = process.argv.slice(2);
+const pdfjs = await import(pathToFileURL(lib).href);
+const standardFontDataUrl = new URL("../../standard_fonts/", pathToFileURL(lib)).pathname;
+for (const file of files) {
+  console.log(`file ${file}`);
+  const data = new Uint8Array(readFileSync(file));
+  const verbosity = pdfjs.VerbosityLevel.WARNINGS;
+  const task = pdfjs.getDocument({ data, standardFontDataUrl, verbosity });
+  const doc = await task.promise;
+  const page = await doc.getPage(1);
+  const viewport = page.getViewport({ scale: 2 });
+  const { canvas, context } = doc.canvasFactory.create(viewport.width, viewport.height);
+  await page.render({ canvas, canvasContext: context, viewport }).promise;
+  for (const a of await page.getAnnotations()) {
+    const text = (a.textContent ?? []).join("\n");
+    console.log(`annotation ${JSON.stringify([a.subtype, a.fieldType ?? null, text])}`);
+  }
+  await task.destroy();
+}
+"#;
+
+/// What pdf.js 6.4.299 warns of a push button that has no action (`/A` or
+/// `/AA`) and no tooltip: it draws the button's appearance and gives it
+/// nothing to do. The pixel checks' push buttons have none.
+const PDFJS_NO_ACTION: &str = "Warning: Push buttons without action dictionaries are not supported";
+
+/// The warnings among `lines`, what [`PDFJS_WARNED`] printed under one
+/// file: how many are the one a push button with no action gets
+/// ([`PDFJS_NO_ACTION`]), counted only for a file that `has_push`, and
+/// every other line that says `Warning`.
+fn warned<'a>(lines: &[&'a str], has_push: bool) -> (usize, Vec<&'a str>) {
+    let warnings = lines.iter().filter(|l| l.contains("Warning"));
+    let (allowed, other): (Vec<&str>, Vec<&str>) =
+        warnings.partition(|&&l| has_push && l == PDFJS_NO_ACTION);
+    (allowed.len(), other)
+}
+
+/// A warning is any line that says so; only a push button's file may have
+/// the one of no action, and that line exactly.
+#[test]
+fn pdfjs_warnings_are_told_from_the_one_a_push_button_gets() {
+    let lines = [
+        "annotation [\"Widget\",\"Btn\",\"\"]",
+        PDFJS_NO_ACTION,
+        "Warning: Indexing all PDF objects",
+        PDFJS_NO_ACTION,
+    ];
+    assert_eq!(
+        warned(&lines, true),
+        (2, vec!["Warning: Indexing all PDF objects"])
+    );
+    let (allowed, other) = warned(&lines, false);
+    assert_eq!((allowed, other.len()), (0, 3));
+    assert_eq!(warned(&lines[..1], true), (0, vec![]));
+    let longer = format!("{PDFJS_NO_ACTION} here");
+    assert_eq!(warned(&[&longer], true), (0, vec![&*longer]));
+}
+
+/// From M10 slice 8 a check box's and a radio button's appearances sheaf
+/// makes, in each case the pixel checks (`tests/buttons.rs`) hold to
+/// PDFium's own (each frame off, framed and not, and each mark on), a combo
+/// box's, a list box's and a push button's, each saved: every file passes
+/// `qpdf --check`; pdftoppm draws each where it draws PDFium's, its ink in
+/// the box PDFium's is in and none outside it (but where it draws the page
+/// pixel for pixel as PDFium's: a round frame's ring meeting the box's
+/// side, which its anti-aliasing takes a pixel past for both), a mark (the
+/// pixels its on state draws otherwise than its `Off`) within the pixel
+/// checks' tolerance of where PDFium's reaches and [`INK_APART`] more on
+/// each edge, as poppler draws ZapfDingbats in a face of its own, and
+/// nothing at all for an `Off` with no frame; and pdf.js reads every file,
+/// draws its page and lists its widget, and warns of nothing ([`warned`])
+/// but, of each push button, that it supports none without an action
+/// ([`PDFJS_NO_ACTION`]): these have none, and it says so of each, which
+/// also shows its warnings are heard.
+#[test]
+#[ignore = "needs qpdf, pdftoppm, or node and pdf.js"]
+fn button_and_choice_appearances_pass_qpdf_and_other_readers_draw_them() {
+    use common::buttons::{self, Shows};
+
+    let (qpdf, pdftoppm, pdfjs) = (qpdf(), pdftoppm(), pdfjs());
+    if qpdf.is_none() && pdftoppm.is_none() && pdfjs.is_none() {
+        return;
+    }
+    let dir = scratch("buttons-interop");
+    let cases: Vec<buttons::Case> = [
+        buttons::toggle_frames(),
+        buttons::marks(),
+        buttons::choices(),
+        buttons::pushes(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|(case, _, _)| case)
+    .collect();
+    let mut failed = Vec::new();
+    let mut files = Vec::new();
+    let mut pushes = std::collections::HashSet::new();
+    let (mut bare, mut marked, mut boxed) = (0, 0, 0);
+    for case in &cases {
+        let (name, px) = (case.file_name(), case.pixels());
+        let saved = buttons::ours(case).saved;
+        let copy = buttons::theirs(case);
+        let [ours, pdfium] = [("sheaf", &saved), ("pdfium", &copy)].map(|(what, bytes)| {
+            let path = dir.join(format!("{name}.{what}.pdf"));
+            std::fs::write(&path, bytes).unwrap();
+            path
+        });
+        files.push(ours.clone());
+        if matches!(case.shows, Shows::Push { .. }) {
+            pushes.insert(ours.display().to_string());
+        }
+        if let Some(qpdf) = &qpdf
+            && let Err(e) = run(Command::new(qpdf).arg("--check").arg(&ours))
+        {
+            failed.push(format!("{name}: qpdf --check: {e}"));
+        }
+        let Some(pdftoppm) = &pdftoppm else {
+            continue;
+        };
+        let drew = |path: &Path| poppler_drew(pdftoppm, path);
+        let [drawn, theirs] = [&ours, &pdfium].map(|p| drew(p));
+        let outside = fields::ink(&drawn, px, false);
+        let on = matches!(case.shows, Shows::Toggle { on: true, .. });
+        if !case.paints() {
+            bare += 1;
+            let inside = fields::ink(&drawn, px, true);
+            println!("{name}\tpdftoppm inks {inside} px in the box, {outside} outside");
+            if inside + outside != 0 {
+                failed.push(format!(
+                    "{name}: pdftoppm inks {inside} px, {outside} outside"
+                ));
+            }
+        } else if on {
+            marked += 1;
+            // Each side's mark: its on state drawn against its `Off`.
+            let mark = |path: &Path, drawn: &Raster| {
+                let off = path.with_extension("off.pdf");
+                std::fs::write(&off, buttons::showing(&std::fs::read(path).unwrap(), "Off"))
+                    .unwrap();
+                buttons::differing_box(drawn, &drew(&off), px)
+            };
+            let [ours_mark, pdfium_mark] =
+                [(&ours, &drawn), (&pdfium, &theirs)].map(|(p, r)| mark(p, r));
+            let apart = (ours_mark.zip(pdfium_mark))
+                .map(|(a, b)| buttons::mark_apart(case, a, b, INK_APART as f32));
+            println!("{name}\tpdftoppm's mark {ours_mark:?}, PDFium's {pdfium_mark:?}: {apart:?}");
+            let near = apart.is_some_and(|a| a.iter().all(|(d, allowed)| d <= allowed));
+            if !near || outside != 0 {
+                failed.push(format!(
+                    "{name}: mark {ours_mark:?} ({outside} px outside), PDFium's {pdfium_mark:?}"
+                ));
+            }
+        } else {
+            boxed += 1;
+            let [inked, pdfium_inked] = [&drawn, &theirs].map(|r| fields::ink_box(r, px));
+            // Ink outside the box is held where pdftoppm draws the page as
+            // it draws PDFium's, pixel for pixel: a round frame's ring
+            // meeting the box's side, which its anti-aliasing takes a pixel
+            // past, as it does PDFium's.
+            let whole = [0, 0, drawn.width as usize, drawn.height as usize];
+            let alike = fields::differing_in(&drawn, &theirs, whole) == 0;
+            let outside = if alike { 0 } else { outside };
+            println!("{name}\tink {inked:?}, PDFium's {pdfium_inked:?}; the page alike: {alike}");
+            if inked.is_none() || inked != pdfium_inked || outside != 0 {
+                failed.push(format!(
+                    "{name}: ink {inked:?} ({outside} px outside), PDFium's {pdfium_inked:?}"
+                ));
+            }
+        }
+    }
+    if let Some(pdfjs) = &pdfjs {
+        let script = dir.join("warned.mjs");
+        std::fs::write(&script, PDFJS_WARNED).unwrap();
+        let said = run(Command::new("node").arg(&script).arg(pdfjs).args(&files))
+            .unwrap_or_else(|e| panic!("pdf.js: {e}"));
+        let (mut read, mut no_action) = (0, 0);
+        for block in said.split("file ").skip(1) {
+            let (path, lines) = block.split_once('\n').unwrap();
+            let lines: Vec<&str> = lines.lines().collect();
+            let widgets = (lines.iter())
+                .filter(|l| l.starts_with("annotation [\"Widget\""))
+                .count();
+            read += 1;
+            let push = pushes.contains(path);
+            let (allowed, other) = warned(&lines, push);
+            no_action += allowed;
+            // A push button's one warning is said, so warnings are heard.
+            if !other.is_empty() || widgets != 1 || (push && allowed == 0) {
+                failed.push(format!(
+                    "pdf.js, {path}: {widgets} widgets, {allowed} warnings of no action, \
+                     warned {other:?}"
+                ));
+            }
+        }
+        println!(
+            "pdf.js read {read} files, {no_action} warnings of a push button with no action; \
+             its annotations:\n{said}"
+        );
+        assert_eq!(read, files.len(), "pdf.js read every file");
+    }
+    println!(
+        "qpdf --check and pdftoppm: {} outputs ({bare} Off with no frame, {marked} marks, \
+         {boxed} by their ink's box), {} fail",
+        cases.len(),
         failed.len()
     );
     assert!(failed.is_empty(), "{failed:#?}");

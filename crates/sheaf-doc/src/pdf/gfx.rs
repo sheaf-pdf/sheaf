@@ -31,8 +31,10 @@ pub use pdf_gfx::{
 /// the first that has all of it ([`face_for`]), or the character none
 /// draws ([`UnencodableChar`]). An embedded program is a
 /// [`LayoutFont`](super::fonts::LayoutFont) too
-/// ([`Program`](super::fonts::Program)).
-pub use pdf_gfx::{UnencodableChar, WithFallback, face_for};
+/// ([`Program`](super::fonts::Program)), and one that records each glyph
+/// it draws as it's laid out ([`ProgramFont`], M10 slice 8), for a drawing
+/// that gives back no glyphs of its own.
+pub use pdf_gfx::{ProgramFont, UnencodableChar, WithFallback, face_for};
 
 /// A box's border as a [`Canvas`] draws it ([`BoxBorder`], its
 /// [`BoxBorderStyle`]), and a default appearance string parsed

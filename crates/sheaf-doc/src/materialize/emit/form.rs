@@ -27,6 +27,28 @@
 //!   streams. One that can't be made leaves the widget with no `/AP`. Its
 //!   `/V` is written as the file has it: no save writes a value before M10
 //!   slice 9.
+//! - **A check box's or radio button's widget whose state changed**
+//!   ([`appearance::state_changed`]) gets its `/AS` written from the model.
+//!   Where its file's normal appearance has no on state
+//!   ([`appearance::stale`]), its appearances are made anew too, each form
+//!   under its part (`Part::Ap`, `ApOff`, `ApDown`, `ApDownOff`), its `/AP`
+//!   `<< /N << /on … /Off … >> /D << /on … /Off … >> >>`, no `/Off` where
+//!   the maker made none, `on` the name a press puts in `/AS`; the mark
+//!   drawn in ZapfDingbats as the standard 14 font is written by name, one
+//!   dictionary a file however many forms name it. One whose file's has
+//!   keeps it, and only `/AS` moves. Its field's `/V` is the file's, as a
+//!   text field's is, until M10 slice 9.
+//! - **A combo box's or list box's widget whose value changed**
+//!   ([`appearance::stale`]) gets its appearance made anew as a text
+//!   field's is, in the field's font and the fallback: one form under
+//!   `Part::Ap`, `<< /N … >>`. Its field's `/V` and `/I` are the file's
+//!   until M10 slice 9.
+//! - **A push button's widget whose captions changed**
+//!   ([`appearance::stale`]) gets its appearances made anew from them, in
+//!   the field's font and the fallback: `/N` under `Part::Ap`, and where its
+//!   `/H` is `/P` or `/T` `/R` under `ApRollover` and `/D` under `ApDown`,
+//!   `<< /N … /R … /D … >>`. One nothing changed keeps its own, and one with
+//!   none stays so. Its `/MK` is the file's, as a field's `/V` is.
 //! - **Widgets on page templates** (`/Names /Templates`) aren't records: a
 //!   primary field's kids the records don't account for and no page shows
 //!   stay in its `/Kids`, as the file has them.
@@ -62,16 +84,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::pdf::forms::{FieldFont, MadeWithFallback, Unmade};
-use crate::pdf::{
-    Dictionary, LazyPdf, Object, ObjectId, StringFormat, Value as PdfValue, dictionary, literal,
-};
+use crate::pdf::forms::FieldFont;
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, StringFormat, Value as PdfValue, literal};
 
 use super::Cx;
 use crate::annot::AnnotId;
 use crate::attachments::tree_names;
-use crate::content::{Res, sink};
-use crate::forms::appearance::{self, FontAt, TextLook};
+use crate::content::{Fallback, Glyphs, Res, sink};
+use crate::forms::appearance::{self, DaFont, FontAt, Look, Made, Slot};
 use crate::forms::{FieldId, FieldKind, Value};
 use crate::materialize::copy::Scope;
 use crate::materialize::key::{NameTree, ObjKey, Part};
@@ -443,8 +463,12 @@ pub(crate) fn widget(
     };
     let split = cx.form.split.contains(&w.field);
     let key = ObjKey::Annot(aid);
-    // Its text field's value changed: its appearance is made anew.
+    // Its text or choice field's value changed, its check box's or radio
+    // button's state where its file has no appearance of it, or its push
+    // button's captions: its appearance is made anew.
     let stale = appearance::stale(st, aid);
+    // Its button's state changed: its `/AS` is the model's.
+    let changed = appearance::state_changed(st, aid);
     // Nothing of it changes: the file's object as it is, unbuilt.
     let named = |k: &[u8], to: Option<ObjectId>| {
         dict.get(k)
@@ -456,6 +480,7 @@ pub(crate) fn widget(
     if tags
         && !split
         && !stale
+        && changed.is_none()
         && cx.owned_at(key) == Some(r.id)
         && named(b"Parent", field)
         && (!dict.has(b"P") || named(b"P", page_at))
@@ -480,6 +505,7 @@ pub(crate) fn widget(
             // Never through `sym`, which would copy the old appearance's
             // streams for nothing to name.
             b"AP" if stale => {}
+            b"AS" if let Some(state) = changed => out.set("AS", state_name(state)),
             _ => {
                 let v = cx.sym(v, &scope);
                 out.set(k, v);
@@ -489,6 +515,9 @@ pub(crate) fn widget(
     if stale && let Some(ap) = appearance(cx, aid, &r.src) {
         out.set("AP", ap);
     }
+    if let Some(state) = changed.filter(|_| !dict.has(b"AS")) {
+        out.set("AS", state_name(state));
+    }
     if st.field(w.field).is_some() {
         out.set("Parent", cx.placeholder(ObjKey::Field(w.field)));
     }
@@ -497,64 +526,110 @@ pub(crate) fn widget(
     Some(cx.placeholder(key))
 }
 
-/// Widget `aid`'s appearance, made anew for its text field's value as the
-/// model holds it ([`appearance::stale`]) and bound as a mark's is: made
-/// by pdf-forms from the model's plain data ([`appearance::text_look`]) in
-/// the font its `/DA` names in `src`'s `/DR`, `src` the source the widget
-/// was read from, under that source's name (a merged `/DR` may have
-/// renamed it; it's still the same object), and the fallback font for
-/// what that can't draw, pushed under `AnnotPart(aid, Ap)` where the
-/// emission writes it, the fallback's glyphs it draws joined there and
-/// only there, as what's written is what binds them. The widget's `/AP`:
-/// `<< /N … >>`, nothing else of the file's (its `/D` and `/R` would show
-/// the old value). None where none can be made: the widget is written
-/// with no `/AP`, so no file shows a value the field no longer holds, and
-/// a warning says which kind, never the text.
+/// Widget `aid`'s appearance, made anew for its field as the model holds
+/// it ([`appearance::stale`]: a text or choice field's value, a check box's
+/// or radio button's state, a push button's captions) and bound as a
+/// mark's is: made by pdf-forms from the model's plain data
+/// ([`appearance::look`]) in the font its `/DA` names in `src`'s `/DR`,
+/// `src` the source the widget was read from, under that source's name (a
+/// merged `/DR` may have renamed it; it's still the same object), and the
+/// fallback font for what that can't draw, or a check box's or radio
+/// button's mark in ZapfDingbats, whose `/DA` font isn't read; each form it
+/// makes ([`Made`]) pushed under its part of `AnnotPart(aid, …)` where the
+/// emission writes it (a text's or a choice's one form, `/N`'s, under
+/// `Part::Ap`; a check box's or radio button's on state's and `Off`'s
+/// normal and down forms under `Ap`, `ApOff`, `ApDown` and `ApDownOff`; a
+/// push button's normal, rollover and down forms under `Ap`, `ApRollover`
+/// and `ApDown`), the fallback's glyphs joined to a form that draws in it
+/// and only there, as what's written is what binds them. The widget's
+/// `/AP`: a key for each form (`<< /N … >>` for a text field's, `<< /N …
+/// /R … /D … >>` for a push button's with all three), a check box's or
+/// radio button's in state dictionaries (`<< /N << /on … /Off … >> /D <<
+/// … >> >>`, `on` its look's on state's name, no `/Off` where none was
+/// made), nothing else of the file's (its `/D` and `/R` would show the old
+/// value or caption). None where none can be made: the widget is written with no
+/// `/AP`, so no file shows a value the field no longer holds, and a
+/// warning says which kind, never the text.
 fn appearance(cx: &mut Cx, aid: AnnotId, src: &Src) -> Option<Object> {
-    let made = (appearance::text_look(cx.st, aid).ok_or(Unmade::NotText)).and_then(|look| {
-        let font = appearance::font(src, &look)?;
-        let res = font_res(cx, &font, src, &look);
-        appearance::make(&look, &font, res)
+    let look = appearance::look(cx.st, aid).map_err(|why| why.kind());
+    let made = look.and_then(|look| {
+        let made = appearance::make(&look, |name| {
+            let font = appearance::font(src, name)?;
+            let res = font_res(cx, &font, src, name.unwrap_or_default());
+            Ok(DaFont { font, res })
+        });
+        match made {
+            Ok(made) => Ok((look, made)),
+            Err(why) => Err(appearance::unmade_kind(&why)),
+        }
     });
-    let made = match made {
+    let (look, Made { forms, glyphs }) = match made {
         Ok(made) => made,
         Err(why) => {
-            let why = appearance::unmade_kind(&why);
-            log::warn!("a text field's appearance can't be made ({why}): its widget has none");
+            log::warn!("a widget's appearance can't be made ({why}): it has none");
             return None;
         }
     };
-    let ap = ObjKey::AnnotPart(aid, Part::Ap);
-    if cx.writes(&ap) {
-        let MadeWithFallback {
-            appearance, glyphs, ..
-        } = made;
-        let (bbox, matrix) = (appearance.bbox, appearance.matrix);
-        let form = sink::form(
-            cx,
-            bbox,
-            matrix,
-            appearance.content,
-            &appearance.needs,
-            &glyphs,
-        );
-        cx.push(ap, Object::from(form));
+    // A check box's or radio button's forms go in state dictionaries.
+    let on = match &look {
+        Look::Toggle(toggle) => Some(toggle.on_state.as_slice()),
+        Look::Text(_) | Look::Choice(_) | Look::Push(_) => None,
+    };
+    let none = Glyphs::new();
+    let mut ap = Dictionary::new();
+    let (mut normal, mut down) = (Dictionary::new(), Dictionary::new());
+    for (slot, form) in forms {
+        let (part, name, off) = match slot {
+            Slot::Normal => (Part::Ap, "N", false),
+            Slot::NormalOff => (Part::ApOff, "N", true),
+            Slot::Down => (Part::ApDown, "D", false),
+            Slot::DownOff => (Part::ApDownOff, "D", true),
+            Slot::Rollover => (Part::ApRollover, "R", false),
+        };
+        let key = ObjKey::AnnotPart(aid, part);
+        if cx.writes(&key) {
+            let draws = (form.needs.0.iter()).any(|need| Fallback::SANS.is(&need.res));
+            let glyphs = if draws { &glyphs } else { &none };
+            let (bbox, matrix) = (form.bbox, form.matrix);
+            let form = sink::form(cx, bbox, matrix, form.content, &form.needs, glyphs);
+            cx.push(key, Object::from(form));
+        }
+        let form = cx.placeholder(key);
+        match on {
+            None => ap.set(name, form),
+            Some(on) => {
+                let states = if name == "N" { &mut normal } else { &mut down };
+                states.set(if off { b"Off".as_slice() } else { on }, form);
+            }
+        }
     }
-    Some(Object::from(dictionary! { "N" => cx.placeholder(ap) }))
+    for (name, states) in [("N", normal), ("D", down)] {
+        if !states.is_empty() {
+            ap.set(name, states);
+        }
+    }
+    Some(Object::from(ap))
 }
 
-/// The resource a made appearance names `font` by, `font` the one
-/// `look`'s `/DA` names in `src`'s `/DR` ([`appearance::font_res`]): its
-/// own where it reaches nothing else (a fallback, or a direct entry with
-/// no reference), written once a file; else named by where it is in
-/// `src` and bound to that, copy 0 of it as `/DR` is written, so an
-/// appearance of any copy of the form names the font `/DR` names and no
-/// copy of it: a font `/DR` holds by reference, that object; a direct
-/// entry that holds references, the dictionary the font lends
-/// (`FieldFont::direct`, pdf-forms': the one it read) written as an
-/// object of its own, once, under [`ObjKey::Res`].
-fn font_res(cx: &mut Cx, font: &FieldFont, src: &Src, look: &TextLook) -> Res {
-    let name = look.font_name().unwrap_or_default();
+/// A button's state as the name `/AS` writes: its bytes as the model holds
+/// them, a character a byte ([`appearance::state_changed`] gives none
+/// other).
+fn state_name(state: &str) -> Object {
+    let bytes = crate::forms::group::name_bytes(state).unwrap_or_default();
+    Object::name(bytes)
+}
+
+/// The resource a made appearance names `font` by, `font` the one `name`,
+/// its widget's `/DA`'s font, names in `src`'s `/DR`
+/// ([`appearance::font_res`]): its own where it reaches nothing else (a
+/// fallback, or a direct entry with no reference), written once a file;
+/// else named by where it is in `src` and bound to that, copy 0 of it as
+/// `/DR` is written, so an appearance of any copy of the form names the
+/// font `/DR` names and no copy of it: a font `/DR` holds by reference,
+/// that object; a direct entry that holds references, the dictionary the
+/// font lends (`FieldFont::direct`, pdf-forms': the one it read) written
+/// as an object of its own, once, under [`ObjKey::Res`].
+fn font_res(cx: &mut Cx, font: &FieldFont, src: &Src, name: &[u8]) -> Res {
     let scope = Scope { src, copy: 0 };
     let written = |at: FontAt<'_>| match at {
         FontAt::Object(id) => (cx.sym(&Object::from(id), &scope).as_reference())
@@ -566,7 +641,7 @@ fn font_res(cx: &mut Cx, font: &FieldFont, src: &Src, look: &TextLook) -> Res {
             cx.push_once(key, |cx| cx.sym(&Object::from(entry), &scope))
         }
     };
-    appearance::font_res(font, src.id(), 0, &name, written)
+    appearance::font_res(font, src.id(), 0, name, written)
 }
 
 /// `out`, built from `read`, object `r`, pushed under `key`: as the file
@@ -882,9 +957,12 @@ impl Fields {
             .copied();
         let one = merged.and_then(|w| Some(st.annot(w)?.page));
         let tags = one.is_some_and(|page| cx.keeps_tags(page));
-        // That widget's text field's value changed: its appearance is made
-        // anew.
+        // That widget's text or choice field's value changed, its check
+        // box's or radio button's state where its file has no appearance of
+        // it, or its push button's captions: its appearance is made anew.
         let stale = merged.is_some_and(|w| appearance::stale(st, w));
+        // That widget's button's state changed: its `/AS` is the model's.
+        let changed = merged.and_then(|w| appearance::state_changed(st, w));
         let mut kids = kids;
         for &w in term.into_iter().flat_map(|t| t.widgets.iter()) {
             // An overlay's are those on its pages.
@@ -938,6 +1016,7 @@ impl Fields {
         if cx.owned_at(key) == Some(r.id)
             && !split
             && !stale
+            && changed.is_none()
             && tip.is_none()
             && defaults_kept
             && (one.is_none() || tags)
@@ -965,6 +1044,7 @@ impl Fields {
                 // Never through `sym`, which would copy the old
                 // appearance's streams for nothing to name.
                 b"AP" if stale => {}
+                b"AS" if let Some(state) = changed => out.set("AS", state_name(state)),
                 _ => {
                     let v = cx.sym(v, &scope);
                     out.set(k, v);
@@ -975,6 +1055,9 @@ impl Fields {
             && let Some(ap) = appearance(cx, w, &r.src)
         {
             out.set("AP", ap);
+        }
+        if let Some(state) = changed.filter(|_| !read.has(b"AS")) {
+            out.set("AS", state_name(state));
         }
         if !kids.is_empty() {
             out.set("Kids", kids);

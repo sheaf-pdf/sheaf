@@ -5300,7 +5300,7 @@ dependencies = [
 [[package]]
 name = "pdf-annots"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#4604faedafd49e38b5048a8f587354853d1b2497"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#9c03d0aaf21daba14e4f9d7bc7b851a93c100bd6"
 dependencies = [
  "pdf-content-streams",
  "pdf-fonts",
@@ -5313,7 +5313,7 @@ dependencies = [
 [[package]]
 name = "pdf-color"
 version = "0.1.0-alpha.2"
-source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#4604faedafd49e38b5048a8f587354853d1b2497"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#9c03d0aaf21daba14e4f9d7bc7b851a93c100bd6"
 dependencies = [
  "pdf-objects",
  "thiserror 2.0.21",
@@ -5322,7 +5322,7 @@ dependencies = [
 [[package]]
 name = "pdf-content-streams"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#4604faedafd49e38b5048a8f587354853d1b2497"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#9c03d0aaf21daba14e4f9d7bc7b851a93c100bd6"
 dependencies = [
  "memchr",
  "pdf-color",
@@ -5337,7 +5337,7 @@ dependencies = [
 [[package]]
 name = "pdf-crypt"
 version = "0.1.0-alpha.3"
-source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#4604faedafd49e38b5048a8f587354853d1b2497"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#9c03d0aaf21daba14e4f9d7bc7b851a93c100bd6"
 dependencies = [
  "aes 0.9.3",
  "cbc 0.2.1",
@@ -5356,7 +5356,7 @@ dependencies = [
 [[package]]
 name = "pdf-filters"
 version = "0.1.0-alpha.3"
-source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#4604faedafd49e38b5048a8f587354853d1b2497"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#9c03d0aaf21daba14e4f9d7bc7b851a93c100bd6"
 dependencies = [
  "miniz_oxide 0.9.1",
  "thiserror 2.0.21",
@@ -5366,7 +5366,7 @@ dependencies = [
 [[package]]
 name = "pdf-fonts"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#4604faedafd49e38b5048a8f587354853d1b2497"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#9c03d0aaf21daba14e4f9d7bc7b851a93c100bd6"
 dependencies = [
  "hayro-cmap",
  "pdf-content-streams",
@@ -5380,7 +5380,7 @@ dependencies = [
 [[package]]
 name = "pdf-forms"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#4604faedafd49e38b5048a8f587354853d1b2497"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#9c03d0aaf21daba14e4f9d7bc7b851a93c100bd6"
 dependencies = [
  "pdf-annots",
  "pdf-content-streams",
@@ -5396,7 +5396,7 @@ dependencies = [
 [[package]]
 name = "pdf-gfx"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#4604faedafd49e38b5048a8f587354853d1b2497"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#9c03d0aaf21daba14e4f9d7bc7b851a93c100bd6"
 dependencies = [
  "pdf-color",
  "pdf-content-streams",
@@ -5411,7 +5411,7 @@ dependencies = [
 [[package]]
 name = "pdf-objects"
 version = "0.1.0-alpha.3"
-source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#4604faedafd49e38b5048a8f587354853d1b2497"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#9c03d0aaf21daba14e4f9d7bc7b851a93c100bd6"
 dependencies = [
  "memchr",
  "pdf-tokenizer",
@@ -5421,7 +5421,7 @@ dependencies = [
 [[package]]
 name = "pdf-semantics"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#4604faedafd49e38b5048a8f587354853d1b2497"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#9c03d0aaf21daba14e4f9d7bc7b851a93c100bd6"
 dependencies = [
  "chrono",
  "pdf-objects",
@@ -5432,7 +5432,7 @@ dependencies = [
 [[package]]
 name = "pdf-structure"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#4604faedafd49e38b5048a8f587354853d1b2497"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#9c03d0aaf21daba14e4f9d7bc7b851a93c100bd6"
 dependencies = [
  "libc",
  "pdf-crypt",
@@ -5447,7 +5447,7 @@ dependencies = [
 [[package]]
 name = "pdf-tokenizer"
 version = "0.2.2"
-source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#4604faedafd49e38b5048a8f587354853d1b2497"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#9c03d0aaf21daba14e4f9d7bc7b851a93c100bd6"
 dependencies = [
  "memchr",
  "thiserror 2.0.21",

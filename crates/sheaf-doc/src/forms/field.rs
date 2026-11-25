@@ -186,10 +186,31 @@ pub struct Field {
     /// `/MaxLen`, as the file has it. Layout uses at most
     /// [`super::read::MAX_LAYOUT_LEN`] of it.
     pub max_len: Option<u32>,
+    /// `/TI`: the index in [`options`](Self::options) of the first option
+    /// a list box shows at its top, its own or a parent field's; 0 where
+    /// it has none, or gives no integer within `u32` (less than 0 too), as
+    /// the family reads it.
+    pub top: u32,
     /// `/Opt`: a choice field's items, or a check box's or radio group's
-    /// export values (one per widget). Shared with the fields that inherit
-    /// it.
+    /// export values (one per widget, by its [`index`](Widget::index)).
+    /// Shared with the fields that inherit it. A choice field's leaves
+    /// out an item that is no text (a string or a stream, or an array
+    /// that starts with two of them); a check box's or radio group's is
+    /// read as the family reads an option, a string or an array of
+    /// exactly two strings, and keeps the place of anything else, as an
+    /// option of empty text, so each widget's entry is still at its
+    /// index.
     pub options: Arc<[Choice]>,
+    /// `/Opt` is an array, its own or a parent field's, an empty one too:
+    /// a check box's or radio group's widgets with no on state of their
+    /// own are named by their indexes (`pdf::forms::group::on_state_name`).
+    pub has_opt: bool,
+    /// A check box's or radio group's widgets' on states, by their
+    /// [`index`](Widget::index): each one's [`on_state`](Widget::on_state),
+    /// a widget's on no page too, which no [`Widget`] is read for, so the
+    /// group names every one of its widgets as its file does. Empty for a
+    /// field of any other kind.
+    pub on_states: Vec<Option<String>>,
     /// `/TU`: what the field is for, in words.
     pub tooltip: Option<String>,
     /// Its own `/AA`: keystroke, format, validate and calculate.
@@ -229,6 +250,14 @@ pub struct Widget {
     /// Its place in its page's `/Annots`, which is how PDFium counts
     /// annotations.
     pub slot: usize,
+    /// Its place among its field's widgets, from 0: its kids that are
+    /// widgets, in `/Kids` order, then the field's own dictionary when
+    /// it's a widget too, as the field tree is read. PDFium, and the
+    /// family, count a field's own dictionary only where it has no such
+    /// kids, so every kid's place is theirs. What its field's `/Opt`
+    /// entry, and a check box's or radio button's on state made under
+    /// `/Opt`, go by.
+    pub index: u32,
     /// `/Rect` in the page's own space (before `/Rotate`): left, bottom,
     /// right, top, in order, finite and within [`super::read::MAX_COORD`],
     /// each number followed where it's a reference.
@@ -249,8 +278,17 @@ pub struct Widget {
     /// The states `/AP /N` has, when it has several: a check box's on state
     /// and `Off`.
     pub states: Vec<String>,
+    /// The name of its normal appearance's on state: of the names of
+    /// `/AP /N`'s states that are streams, not empty and not `Off`, the
+    /// least by its bytes, as the family reads one under PDFium's rules.
+    /// None where `/N` is a stream, or none.
+    pub on_state: Option<String>,
     /// It has a normal appearance: a stream, or states.
     pub has_appearance: bool,
+    /// `/H` is `/P` (push) or `/T` (toggle), a name or, as PDFium reads
+    /// one, a string: a push button's rollover and down appearances are
+    /// made.
+    pub pressed: bool,
     /// `/A` and its own `/AA` (enter, exit, down, up, focus, blur).
     pub actions: Vec<(Trigger, Action)>,
 }
@@ -275,6 +313,18 @@ pub struct Mk {
     pub rotation: u16,
     /// `/CA`: a check box's glyph (in ZapfDingbats), or a button's caption.
     pub caption: Option<String>,
+    /// `/RC`: a push button's rollover caption.
+    pub rollover: Option<String>,
+    /// `/AC`: a push button's down caption.
+    pub down: Option<String>,
+    /// `/TP`: where a push button's caption goes beside its icon, 0 the
+    /// caption alone, 1 the icon alone: an integer, or a real taken toward
+    /// 0, its low 32 bits, as the family reads it; none where it's
+    /// neither.
+    pub text_position: Option<i32>,
+    /// `/I` is a stream: a push button's normal icon, which sheaf doesn't
+    /// draw.
+    pub icon: bool,
 }
 
 /// A color in `/MK`, each part within 0–1.

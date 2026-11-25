@@ -70,14 +70,16 @@ impl Place {
         Place::TurnedR90,
     ];
 
-    fn page_rotate(self) -> i64 {
+    /// The page's `/Rotate`.
+    pub fn page_rotate(self) -> i64 {
         match self {
             Place::Turned | Place::TurnedR90 => 90,
             Place::Upright | Place::UprightR90 => 0,
         }
     }
 
-    fn mk_r(self) -> Option<i64> {
+    /// The widget's `/MK /R`, where it has one.
+    pub fn mk_r(self) -> Option<i64> {
         matches!(self, Place::UprightR90 | Place::TurnedR90).then_some(90)
     }
 
@@ -90,6 +92,44 @@ impl Place {
         }
     }
 }
+
+/// The `/Rect` of a widget whose box is `size` (its width and height as
+/// its text runs) at `place`: turned with it where `/MK /R` is 90, its
+/// lower left corner [`ORIGIN`] points from the page's.
+pub fn rect_at(size: [f32; 2], place: Place) -> Rect {
+    let [w, h] = match place.mk_r() {
+        Some(_) => [size[1], size[0]],
+        None => size,
+    };
+    [ORIGIN, ORIGIN, ORIGIN + w, ORIGIN + h]
+}
+
+/// `rect`, on a page at `place`, in the page drawn at [`SCALE`]: its left,
+/// top, right and bottom pixels, the last two past it. A `/Rotate 90` page
+/// is shown turned a quarter clockwise, so its user space's y runs right
+/// and its x down.
+pub fn pixels_of(rect: Rect, place: Place) -> [usize; 4] {
+    let [x0, y0, x1, y1] = rect;
+    let shown = match place.page_rotate() {
+        0 => [x0, SIDE - y1, x1, SIDE - y0],
+        _ => [y0, x0, y1, x1],
+    };
+    shown.map(|v| (v * SCALE as f32).round() as usize)
+}
+
+/// The pixels inside a widget's box ours may differ from PDFium's by, in
+/// the pixel checks of text fields (`fields.rs`) and of a button's frame
+/// and caption and a choice's text (`buttons.rs`). Measured: none, in
+/// every case. pdf-forms writes PDFium's numbers (its layout was held to
+/// PDFium's own appearances), so the two draw the same glyphs and paths at
+/// the same places, and anti-aliasing at an edge has nothing to blend
+/// otherwise; the smallest twin of a text field, one glyph of 10-point text
+/// other, is past it by more than a hundred, and of a button, a beveled
+/// check box's `Off` against its on state, by 77. That holds where PDFium
+/// draws the standard 14 in the faces it's built with: its font info maps
+/// Helvetica to an installed Arial, on Linux too, whose heights would move
+/// PDFium's layout.
+pub const TOLERANCE: usize = 0;
 
 /// One text field: its value, `/DA`, `/Q`, `/Ff`, `/MaxLen`, box, `/MK`
 /// colors, `/BS`, and the fonts its form's `/DR` has besides the
@@ -154,24 +194,12 @@ impl Case {
 
     /// The widget's `/Rect`.
     pub fn rect(&self) -> Rect {
-        let [w, h] = match self.place.mk_r() {
-            Some(_) => [self.size[1], self.size[0]],
-            None => self.size,
-        };
-        [ORIGIN, ORIGIN, ORIGIN + w, ORIGIN + h]
+        rect_at(self.size, self.place)
     }
 
-    /// The widget's box in the page drawn at [`SCALE`]: its left, top,
-    /// right and bottom pixels, the last two past it. A `/Rotate 90` page
-    /// is shown turned a quarter clockwise, so its user space's y runs
-    /// right and its x down.
+    /// The widget's box in the page drawn at [`SCALE`] ([`pixels_of`]).
     pub fn pixels(&self) -> [usize; 4] {
-        let [x0, y0, x1, y1] = self.rect();
-        let shown = match self.place.page_rotate() {
-            0 => [x0, SIDE - y1, x1, SIDE - y0],
-            _ => [y0, x0, y1, x1],
-        };
-        shown.map(|v| (v * SCALE as f32).round() as usize)
+        pixels_of(self.rect(), self.place)
     }
 
     /// The case's file, with its value as `/V` where `with_value`, and no
@@ -726,9 +754,13 @@ fn out() -> Option<std::path::PathBuf> {
 
 /// `bytes` kept as `<case>.<what>`, where [`out`] says.
 pub fn keep(case: &Case, what: &str, bytes: &[u8]) {
+    keep_as(&case.file_name(), what, bytes);
+}
+
+/// `bytes` kept as `<name>.<what>`, where [`out`] says.
+pub fn keep_as(name: &str, what: &str, bytes: &[u8]) {
     if let Some(dir) = out() {
-        let path = dir.join(format!("{}.{what}", case.file_name()));
-        std::fs::write(path, bytes).unwrap();
+        std::fs::write(dir.join(format!("{name}.{what}")), bytes).unwrap();
     }
 }
 
@@ -746,12 +778,17 @@ pub fn keep_saved(case: &Case, what: &str, saved: &[u8]) {
 
 /// `r` kept as `<what>.ppm`, where [`out`] says.
 pub fn keep_drawn(case: &Case, what: &str, r: &Raster) {
+    keep_drawn_as(&case.file_name(), what, r);
+}
+
+/// `r` kept as `<name>.<what>.ppm`, where [`out`] says.
+pub fn keep_drawn_as(name: &str, what: &str, r: &Raster) {
     if out().is_none() {
         return;
     }
     let mut ppm = format!("P6 {} {} 255\n", r.width, r.height).into_bytes();
     ppm.extend(r.data.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
-    keep(case, &format!("{what}.ppm"), &ppm);
+    keep_as(name, &format!("{what}.ppm"), &ppm);
 }
 
 /// The box of a render's pixels inside `px` that aren't white: left, top,

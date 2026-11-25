@@ -80,6 +80,8 @@ pub mod append;
 mod append_rewrite_tests;
 #[cfg(test)]
 mod append_tests;
+#[cfg(test)]
+mod choice_ap_tests;
 pub mod copy;
 pub mod deps;
 pub mod emit;
@@ -107,6 +109,8 @@ mod plan_tests;
 #[cfg(test)]
 mod private_tests;
 #[cfg(test)]
+mod push_ap_tests;
+#[cfg(test)]
 mod recognized_tests;
 pub mod record;
 pub mod removal;
@@ -119,6 +123,8 @@ mod saving;
 mod saving_tests;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod toggle_ap_tests;
 pub mod verify;
 #[cfg(test)]
 pub(crate) mod watermark_tests;

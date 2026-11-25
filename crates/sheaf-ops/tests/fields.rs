@@ -228,21 +228,10 @@ mod against_pdfium {
     use sheaf_render::pdfium::PdfiumEngine;
 
     use super::common::fields::{
-        COMB, Case, MULTILINE, Place, SIDE_PX, Stated, Twinned, alignments, appearance, auto_sizes,
-        borders, combs, dash_array, differing_in, draw, ink, keep, keep_drawn, keep_saved, live_in,
-        max_len, missing_fonts, multiline, navy, ours, theirs,
+        COMB, Case, MULTILINE, Place, SIDE_PX, Stated, TOLERANCE, Twinned, alignments, appearance,
+        auto_sizes, borders, combs, dash_array, differing_in, draw, ink, keep, keep_drawn,
+        keep_saved, live_in, max_len, missing_fonts, multiline, navy, ours, theirs,
     };
-
-    /// The pixels inside a widget's box ours may differ from PDFium's by.
-    /// Measured: none, in every case. pdf-forms writes PDFium's numbers
-    /// (its layout was held to PDFium's own appearances), so the two draw
-    /// the same glyphs at the same places, and anti-aliasing at a glyph's
-    /// edge has nothing to blend otherwise; the smallest twin, one glyph
-    /// of 10-point text other, is past it by more than a hundred. That
-    /// holds where PDFium draws the standard 14 in the faces it's built
-    /// with: its font info maps Helvetica to an installed Arial, on Linux
-    /// too, whose heights would move PDFium's layout.
-    const TOLERANCE: usize = 0;
 
     /// What a count past [`TOLERANCE`] may say of the system.
     const FACES: &str = "is an Arial installed? PDFium draws Helvetica in it";

@@ -1,7 +1,7 @@
 //! The retired-symbols ledger (M10.5 §17): every name the edit API took
 //! out, with the slice that took it out ([`RETIRED`]), and every name a
 //! later milestone's slice, or an item's between milestones, took out, in
-//! a table of its own ([`RETIRED_M5`], [`RETIRED_M11`],
+//! a table of its own ([`RETIRED_M5`], [`RETIRED_M10`], [`RETIRED_M11`],
 //! [`RETIRED_OBJECT_STREAMS`], [`RETIRED_PDF_LINT`], [`RETIRED_M18`]).
 //! Nothing under
 //! `crates/` may define one again or refer to it. Each slice adds its rows
@@ -1056,6 +1056,14 @@ const RETIRED_M5: &[(&str, u8)] = &[
     ("scan_dialog::ScanEvent::Created", 2),
 ];
 
+/// Every name M10 retired, with the slice that retired it.
+const RETIRED_M10: &[(&str, u8)] = &[
+    // A widget's plain data is read for its kind by `forms::appearance::look`
+    // (`Look::Text` for a text field's widget, over the `Frame` every kind
+    // shares): no reader for text alone beside it.
+    ("forms::appearance::text_look", 8),
+];
+
 /// Every name M11 retired, with the slice of `plan/m11-security/README.md` that retired
 /// it.
 const RETIRED_M11: &[(&str, u8)] = &[
@@ -1267,6 +1275,7 @@ const RETIRED_M18: &[(&str, u8)] = &[
 const LEDGERS: &[(&[(&str, u8)], &str)] = &[
     (RETIRED, "slice"),
     (RETIRED_M5, "M5 slice"),
+    (RETIRED_M10, "M10 slice"),
     (RETIRED_M11, "M11 slice"),
     (RETIRED_OBJECT_STREAMS, "object streams slice"),
     (RETIRED_PDF_LINT, "pdf-lint slice"),

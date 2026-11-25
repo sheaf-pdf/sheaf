@@ -63,7 +63,7 @@ use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
-use sheaf_doc::forms::appearance::{self, TextLook};
+use sheaf_doc::forms::appearance::{self, DaFont, Look, Slot, TextLook};
 use sheaf_doc::forms::corpus::Corpus;
 use sheaf_doc::forms::fixture::{sample, try_append_revision};
 use sheaf_doc::forms::{Field, FieldId, FieldKind, FormClass, Value};
@@ -610,7 +610,8 @@ fn made_by_sheaf(
     src: &Src,
     look: &TextLook,
 ) -> (Result<Appearance, Unmade>, usize, (String, String)) {
-    let font = match appearance::font(src, look) {
+    let name = look.frame.font_name();
+    let font = match appearance::font(src, name.as_deref()) {
         Ok(font) => font,
         Err(e) => {
             let kind = appearance::error_kind(&e);
@@ -618,10 +619,18 @@ fn made_by_sheaf(
         }
     };
     let said = font_said(&font, look);
-    let name = look.font_name().unwrap_or_default();
+    let name = name.unwrap_or_default();
     let res = appearance::font_res(&font, src.id(), 0, &name, |_| ObjectId::new(1, 0));
-    match appearance::make(look, &font, res) {
-        Ok(made) => (Ok(made.appearance), made.glyphs.len(), said),
+    let da_font = DaFont {
+        font: font.clone(),
+        res,
+    };
+    let made = appearance::make(&Look::Text(look.clone()), |_| Ok(da_font));
+    match made {
+        Ok(made) => {
+            let form = made.form(Slot::Normal).expect("a text widget's /N");
+            (Ok(form.clone()), made.glyphs.len(), said)
+        }
         Err(why) => (Err(why), 0, said),
     }
 }
@@ -630,7 +639,7 @@ fn made_by_sheaf(
 /// [`Facts::kind`] say it.
 fn font_said(font: &FieldFont, look: &TextLook) -> (String, String) {
     let class = match font.res().as_ref().map(Res::body) {
-        _ if look.font_name().is_none() => "none".to_string(),
+        _ if look.frame.font_name().is_none() => "none".to_string(),
         _ if font.is_fallback() => {
             let base = match font.res().as_ref().map(Res::body) {
                 Some(ResBody::Objects(objects)) => (objects.first())
@@ -1052,12 +1061,13 @@ fn fill_and_compare(
             .filter(|w| w.page == page)
             .map(|w| (w.aid, w))
             .collect();
-        let mut overlay: HashMap<AnnotId, Stream> = overlay_appearances(&st, page, &inputs)?
-            .into_iter()
-            .collect();
+        let mut overlay: HashMap<(AnnotId, Part), Stream> =
+            (overlay_appearances(&st, page, &inputs)?.into_iter())
+                .map(|(aid, part, form)| ((aid, part), form))
+                .collect();
         for (aid, w) in &made_here {
             let at = format!("page {}, widget {}", index + 1, w.object.number);
-            match (forms.get(aid), overlay.remove(aid)) {
+            match (forms.get(aid), overlay.remove(&(*aid, Part::Ap))) {
                 (Some(saved), Some(over)) => match Form::of(&over)? == *saved {
                     true => out.overlaid += 1,
                     false => out
@@ -1073,9 +1083,9 @@ fn fill_and_compare(
                 (None, Some(_)) => {}
             }
         }
-        for aid in overlay.keys() {
+        for (aid, part) in overlay.keys() {
             out.failed.push(format!(
-                "page {}: the overlay makes a form for {aid:?}, not filled",
+                "page {}: the overlay makes a form for {aid:?} ({part:?}), not filled",
                 index + 1
             ));
         }
@@ -1147,7 +1157,9 @@ fn filled(
                 ));
                 continue;
             }
-            let look = appearance::text_look(st, aid).context("a text widget's look")?;
+            let Ok(Look::Text(look)) = appearance::look(st, aid) else {
+                anyhow::bail!("a text widget's look");
+            };
             let (made, fallback, font) = made_by_sheaf(&r.src, &look);
             widgets.push(Filled {
                 aid,
@@ -1409,7 +1421,7 @@ fn keep_row(
 /// Whether `look`'s `/DA` asks for an automatic size: `0 Tf`, or no size.
 fn auto_size(look: &TextLook) -> bool {
     let limits = appearance::limits();
-    let da = DefaultAppearance::parse(&look.da, &limits.annots.content);
+    let da = DefaultAppearance::parse(&look.frame.da, &limits.annots.content);
     da.is_none_or(|da| da.font_size.is_none_or(|size| size == 0.0))
 }
 
@@ -1449,7 +1461,8 @@ fn facts_of(w: &Filled, saved: &Pdf, copy: &Pdf) -> Facts {
             tfs(&content, fonts.map(|f| (copy, f)))
         }
     };
-    let style = match w.look.border.style {
+    let look_frame = &w.look.frame;
+    let style = match look_frame.border.style {
         sheaf_doc::forms::field::BorderStyle::Solid => 'S',
         sheaf_doc::forms::field::BorderStyle::Dashed => 'D',
         sheaf_doc::forms::field::BorderStyle::Beveled => 'B',
@@ -1459,22 +1472,22 @@ fn facts_of(w: &Filled, saved: &Pdf, copy: &Pdf) -> Facts {
     Facts {
         font: w.font.0.clone(),
         kind: w.font.1.clone(),
-        da: escaped(&w.look.da),
+        da: escaped(&look_frame.da),
         flags: w.look.flags,
         align: w.look.align,
         max_len: w.look.max_len,
-        width: w.look.width,
-        height: w.look.height,
-        rotation: w.look.rotation,
-        border: (w.look.border.width, style),
-        dash: w.look.border.dash.clone(),
-        bg: match w.look.background {
+        width: look_frame.width,
+        height: look_frame.height,
+        rotation: look_frame.rotation,
+        border: (look_frame.border.width, style),
+        dash: look_frame.border.dash.clone(),
+        bg: match look_frame.background {
             None => "-",
             Some(sheaf_doc::forms::field::Color::Gray(_)) => "g",
             Some(sheaf_doc::forms::field::Color::Rgb(_)) => "rgb",
             Some(sheaf_doc::forms::field::Color::Cmyk(_)) => "cmyk",
         },
-        bc: w.look.border_color.is_some(),
+        bc: look_frame.border_color.is_some(),
         size: made.font_size,
         overflowed: made.overflowed,
         fallback: w.fallback,

@@ -9,14 +9,16 @@
 //! Bates numbers, and a recognized word. And qpdf, for the tests that ask
 //! it what it makes of a file, and the pool's sample, for the tiers that
 //! take it. And text fields drawn by sheaf and by PDFium, for the pixel
-//! checks and the other renderers ([`fields`]), and what an appearance
-//! draws, set beside another's within a rounding ([`drawn`]).
+//! checks and the other renderers ([`fields`]), and buttons and choices
+//! so ([`buttons`]), and what an appearance draws, set beside another's
+//! within a rounding ([`drawn`]).
 
 #![allow(dead_code)]
 // The tests' scratch files go in the temp directory, which clippy.toml
 // bans outside tests; each test that includes this is a crate of its own.
 #![allow(clippy::disallowed_methods)]
 
+pub mod buttons;
 pub mod drawn;
 pub mod fields;
 
@@ -286,12 +288,22 @@ pub fn planned(doc: &mut Document, path: &Path) -> (StrategyKind, Vec<u8>) {
 /// [`planned`]'s save, or why it wrote nothing: for a corpus tier, which
 /// counts a file's failure rather than stop at it.
 pub fn planned_or_why(doc: &mut Document, path: &Path) -> Result<(StrategyKind, Vec<u8>), String> {
+    saved_or_why(doc, path, sheaf_doc::materialize::SaveHow::Planned)
+}
+
+/// [`planned_or_why`]'s save made `how` (`SaveHow::Rewrite`: a Rewrite,
+/// whatever the plan would decide), a signature or an XFA part's values
+/// given up when it asks; or why it wrote nothing.
+pub fn saved_or_why(
+    doc: &mut Document,
+    path: &Path,
+    how: sheaf_doc::materialize::SaveHow,
+) -> Result<(StrategyKind, Vec<u8>), String> {
     let answers = sheaf_doc::materialize::AskAnswers {
         break_signatures: true,
         drop_xfa_values: true,
         ..Default::default()
     };
-    let how = sheaf_doc::materialize::SaveHow::Planned;
     let report =
         sheaf_doc::materialize::save_with(doc, path, how, &answers, &sheaf_ops::NoProgress)
             .map_err(|stop| format!("the save stopped: {stop}"))?;

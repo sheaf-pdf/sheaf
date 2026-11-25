@@ -1,14 +1,46 @@
-//! Every text widget of the corpus's forms, as sheaf reads it and as the
-//! family's read layer (`pdf-forms`) reads it, set beside each other, and
-//! the appearance each makes of it for a sample value ([`fields_dump`]): a
-//! line a widget, numbers, names and checksums only. A value is never
-//! printed, only its length, and the sample's. It asserts nothing: it is
-//! for setting a change to what reads a form, or makes a text field's
-//! appearance, beside what was there (M10 slice 6).
+//! Every text, button and choice widget of the corpus's forms, as sheaf
+//! reads it and as the family's read layer (`pdf-forms`) reads it, set
+//! beside each other, and the appearances each makes of it
+//! ([`fields_dump`]): a line a widget, numbers, names and checksums only. A
+//! value is never printed, only its length, and the sample's. It asserts
+//! nothing: it is for setting a change to what reads a form, or makes a
+//! widget's appearance, beside what was there (M10 slices 6 and 8).
+//!
+//! **Text widgets** (a line of kind `text`, and the file's line, `file`)
+//! are as below. **Buttons and choices** (M10 slice 8) are lines of kinds
+//! of their own, so the text and file lines are as they were without them:
+//! `toggle` for a check box's or radio button's widget, `choice` for a
+//! combo box's or list box's, `push` for a push button's, each in its
+//! place among the text widgets' (page order, then each page's `/Annots`
+//! order), and a file with any has a line of kind `buttons` after its
+//! `file` line, which counts them as `file` counts the text widgets.
+//! sheaf's reading of each is its [`Look`] ([`appearance::look`]): its own
+//! kind's parts (a toggle's `radio`, `caption` and the name its on state
+//! goes under, `on`; a choice's `combo`, and a combo box's text, `shows`,
+//! or a list box's labels, the indexes `selected` and `top`; a push
+//! button's `caption`, `rc`, `ac` and `pressed`), each text by its length
+//! and checksum, then its frame's, as a text widget's (its `/DA` a push
+//! button's at 12 points where it has none at all); and for a toggle
+//! whether its file's normal appearance has an on state (`file_on`), which
+//! is when sheaf makes none for it. **The family's** is its read layer's
+//! (`widget_toggle`, `widget_push`, `field_choice` and `widget_choice`,
+//! under PDFium's rules), `=` or the parts that differ and the family's
+//! value of each; or the kind it reads the field as (`kind:`), or why it
+//! read none (`unmade:`), or `-` where it reads no field of the widget.
+//! sheaf's look refused is `look=unmade:` and why. The appearances are
+//! each slot's form (`N`, `N.Off`, `D`, `D.Off`, `R`, `;` apart), as a
+//! text widget's one form is said, or why none was made: of a toggle its
+//! on state's and `Off`'s, whatever state it shows, the mark in
+//! ZapfDingbats as the standard 14 font is written; of a choice its value
+//! as it is; of a push button its captions as they are, a choice's and a
+//! push button's in the font its `/DA` names and the fallback, named as
+//! for a text widget. `ours.vs` sets sheaf's, its fonts named as the
+//! family names them, beside the family's: `=`, `slots` where they make
+//! other slots, or each slot's parts that differ (`D.Off:content`).
 //!
 //! **sheaf's reading** is the plain data its model holds for the widget
-//! ([`TextLook`], as [`text_look`] reads it from the file opened as a
-//! document): its text, flags, `/MaxLen` and justification (its own, else
+//! ([`TextLook`], as [`appearance::look`] reads it from the file opened as
+//! a document): its text, flags, `/MaxLen` and justification (its own, else
 //! its field's, else the form's); its box, `/MK` colors and rotation, and
 //! its border and dashes (none is the width of 1, solid, that a widget
 //! with no `/BS` and no `/Border` has); and its effective `/DA` (its own,
@@ -46,27 +78,30 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use in_progress::NoProgress;
 
 use crate::annot::AnnotId;
 use crate::content::corpus::{each_path, written};
-use crate::content::{Fallback, Objects, Unkept};
+use crate::content::{Fallback, Glyphs, Objects, Unkept};
 use crate::forms::FormClass;
-use crate::forms::appearance::{self, FontAt, TextLook, text_look};
+use crate::forms::appearance::{
+    self, ChoiceShows, DaFont, FontAt, Frame, Look, NoLook, Slot, TextLook,
+};
 use crate::forms::corpus::Corpus;
 use crate::forms::field::{self, Field, FieldKind};
 use crate::forms::fixture::sample;
 use crate::history::FixedCount;
-use crate::model::Document;
+use crate::model::{DocState, Document};
 use crate::pdf::content::{Color, Res, ResBody};
-use crate::pdf::fonts::{Descendant, FontKind, FontProgram};
+use crate::pdf::fonts::{Descendant, FontKind, FontProgram, Std14};
 use crate::pdf::forms::{
-    self, Appearance, Error, FieldFont, Limits, MadeWithFallback, Quadding, Unmade,
+    self, Appearance, Error, FieldFont, Limits, MadeWithFallback, PushAppearances, Quadding,
+    ToggleAppearances, Unmade, WidgetLook,
 };
-use crate::pdf::gfx::{BoxBorderStyle, DefaultAppearance};
+use crate::pdf::gfx::{BoxBorderStyle, DefaultAppearance, WithFallback};
 use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, Resolve, Value as PdfValue};
 use crate::source::Source;
 use crate::store::{BlobKind, Src, Store};
@@ -84,14 +119,21 @@ const DUMP_ONLY: &str = "SHEAF_FIELDS_DUMP_ONLY";
 const LIMITS: Limits = Limits::DEFAULT;
 
 /// One text widget's appearance as plain data: what the field shows and
-/// how, the widget's box and what's drawn around it, and its effective
-/// `/DA` parsed. Either reading gives one.
+/// how, and its frame. Either reading gives one.
 #[derive(Debug, Clone, PartialEq)]
 struct Plain {
     text: String,
     flags: u32,
     max_len: Option<u32>,
     quadding: Quadding,
+    frame: FramePlain,
+}
+
+/// What every kind of widget's appearance is drawn around and in, as plain
+/// data: the widget's box and what's drawn around it, and its effective
+/// `/DA` parsed. Either reading gives one.
+#[derive(Debug, Clone, PartialEq)]
+struct FramePlain {
     width: f32,
     height: f32,
     background: Option<Color>,
@@ -102,45 +144,36 @@ struct Plain {
     da: DefaultAppearance,
 }
 
-impl Plain {
-    /// What sheaf's model gives of a text widget ([`TextLook`], as
-    /// [`text_look`] reads it from the opened document), as [`Plain`]
-    /// says, its `/DA` parsed as the family parses one.
-    fn of_look(look: &TextLook) -> Plain {
-        let da = match look.da.is_empty() {
+impl FramePlain {
+    /// What sheaf's model gives of a widget's frame ([`Frame`], as
+    /// [`appearance::look`] reads it from the opened document), its `/DA`
+    /// parsed as the family parses one.
+    fn of_frame(frame: &Frame) -> FramePlain {
+        let da = match frame.da.is_empty() {
             true => DefaultAppearance::default(),
             false => {
-                (DefaultAppearance::parse(&look.da, &LIMITS.annots.content)).unwrap_or_default()
+                (DefaultAppearance::parse(&frame.da, &LIMITS.annots.content)).unwrap_or_default()
             }
         };
-        Plain {
-            text: look.text.to_string(),
-            flags: look.flags,
-            max_len: look.max_len,
-            quadding: appearance::quadding(look.align),
-            width: look.width,
-            height: look.height,
-            background: look.background.map(appearance::color),
-            border_color: look.border_color.map(appearance::color),
-            rotation: i32::from(look.rotation),
+        FramePlain {
+            width: frame.width,
+            height: frame.height,
+            background: frame.background.map(appearance::color),
+            border_color: frame.border_color.map(appearance::color),
+            rotation: i32::from(frame.rotation),
             border: (
-                look.border.width,
-                appearance::box_style(look.border.style),
-                look.border.dash.clone(),
+                frame.border.width,
+                appearance::box_style(frame.border.style),
+                frame.border.dash.clone(),
             ),
             da,
         }
     }
 
-    /// What the family's read layer gives of a widget, as [`Plain`] says.
-    fn of_family(read: &forms::WidgetText<'_>) -> Plain {
-        let field = read.field();
-        let look = read.look();
-        Plain {
-            text: field.text.to_string(),
-            flags: field.flags.bits(),
-            max_len: field.max_len,
-            quadding: field.quadding,
+    /// What the family's read layer gives of a widget's box, border and
+    /// `/MK` (`look`) and its `/DA` parsed (`da`).
+    fn of_family(look: &WidgetLook<'_>, da: &DefaultAppearance) -> FramePlain {
+        FramePlain {
             width: look.width,
             height: look.height,
             background: look.background,
@@ -151,18 +184,13 @@ impl Plain {
                 look.border.style,
                 look.border.dash.to_vec(),
             ),
-            da: read.default_appearance().clone(),
+            da: da.clone(),
         }
     }
 
     /// Each part, by the name the dump gives it, as the dump writes it.
-    /// The text is its length and checksum: never the value.
-    fn parts(&self) -> [(&'static str, String); 13] {
+    fn parts(&self) -> [(&'static str, String); 9] {
         [
-            ("text", text_sum(&self.text)),
-            ("ff", format!("{:x}", self.flags)),
-            ("maxlen", self.max_len.map_or("-".into(), |n| n.to_string())),
-            ("q", quadding_name(self.quadding).into()),
             ("w", self.width.to_string()),
             ("h", self.height.to_string()),
             ("bg", color_name(self.background)),
@@ -173,6 +201,208 @@ impl Plain {
             ("dash", numbers(&self.border.2)),
             ("da", escaped(&self.da.to_bytes())),
         ]
+    }
+}
+
+impl Plain {
+    /// What sheaf's model gives of a text widget ([`TextLook`], as
+    /// [`appearance::look`] reads it from the opened document), as
+    /// [`Plain`] says, its `/DA` parsed as the family parses one.
+    fn of_look(look: &TextLook) -> Plain {
+        Plain {
+            text: look.text.to_string(),
+            flags: look.flags,
+            max_len: look.max_len,
+            quadding: appearance::quadding(look.align),
+            frame: FramePlain::of_frame(&look.frame),
+        }
+    }
+
+    /// What the family's read layer gives of a widget, as [`Plain`] says.
+    fn of_family(read: &forms::WidgetText<'_>) -> Plain {
+        let field = read.field();
+        Plain {
+            text: field.text.to_string(),
+            flags: field.flags.bits(),
+            max_len: field.max_len,
+            quadding: field.quadding,
+            frame: FramePlain::of_family(&read.look(), read.default_appearance()),
+        }
+    }
+
+    /// Each part, by the name the dump gives it, as the dump writes it:
+    /// the field's, then the frame's. The text is its length and
+    /// checksum: never the value.
+    fn parts(&self) -> Vec<(&'static str, String)> {
+        let own = [
+            ("text", text_sum(&self.text)),
+            ("ff", format!("{:x}", self.flags)),
+            ("maxlen", self.max_len.map_or("-".into(), |n| n.to_string())),
+            ("q", quadding_name(self.quadding).into()),
+        ];
+        own.into_iter().chain(self.frame.parts()).collect()
+    }
+}
+
+/// One button's or choice's widget as plain data: its own kind's parts,
+/// as [`fields_dump`] names them, and its frame. Either reading gives one.
+#[derive(Debug, Clone, PartialEq)]
+struct KindPlain {
+    own: Vec<(&'static str, String)>,
+    frame: FramePlain,
+}
+
+impl KindPlain {
+    /// What sheaf's model gives of a button's or choice's widget (its
+    /// [`Look`], as [`appearance::look`] reads it from the opened document),
+    /// as [`KindPlain`] says; none for a text field's. A push button's
+    /// `/DA` is drawn at 12 points where it has none at all, as its look
+    /// draws it.
+    fn of_look(look: &Look) -> Option<KindPlain> {
+        let (own, frame) = match look {
+            Look::Text(_) => return None,
+            Look::Toggle(t) => {
+                let own = toggle_parts(t.radio, t.caption.as_deref(), &t.on_state);
+                (own, FramePlain::of_frame(&t.frame))
+            }
+            Look::Choice(c) => {
+                let own = match &c.shows {
+                    ChoiceShows::Combo { text } => combo_parts(text),
+                    ChoiceShows::List {
+                        options,
+                        selected,
+                        top,
+                    } => list_parts(options.iter().map(|o| &*o.shown), selected, *top),
+                };
+                (own, FramePlain::of_frame(&c.frame))
+            }
+            Look::Push(p) => {
+                let own = push_parts(
+                    &p.caption,
+                    p.rollover.as_deref(),
+                    p.down.as_deref(),
+                    p.pressed,
+                );
+                let mut frame = FramePlain::of_frame(&p.frame);
+                if !p.has_da {
+                    frame.da.font_size = Some(12.0);
+                }
+                (own, frame)
+            }
+        };
+        Some(KindPlain { own, frame })
+    }
+
+    /// What the family's read layer gives of a widget, as [`KindPlain`]
+    /// says.
+    fn of_family(read: &FamilyRead<'_>) -> KindPlain {
+        match read {
+            FamilyRead::Toggle(t) => KindPlain {
+                own: toggle_parts(t.is_radio(), t.button().caption, t.on_state()),
+                frame: FramePlain::of_family(&t.look(), t.default_appearance()),
+            },
+            FamilyRead::Choice(c) => {
+                let shows = c.choice();
+                let own = match shows.combo() {
+                    Some(combo) => combo_parts(combo.text),
+                    None => list_parts(
+                        shows.labels().iter().map(String::as_str),
+                        shows.selected(),
+                        shows.top(),
+                    ),
+                };
+                KindPlain {
+                    own,
+                    frame: FramePlain::of_family(&c.look(), c.default_appearance()),
+                }
+            }
+            FamilyRead::Push(p) => {
+                let b = p.button();
+                KindPlain {
+                    own: push_parts(
+                        b.caption,
+                        b.rollover_caption,
+                        b.down_caption,
+                        b.pressed_states,
+                    ),
+                    frame: FramePlain::of_family(&p.look(), p.default_appearance()),
+                }
+            }
+        }
+    }
+
+    /// Each part, by the name the dump gives it: its own kind's, then the
+    /// frame's.
+    fn parts(&self) -> Vec<(&'static str, String)> {
+        (self.own.iter().cloned())
+            .chain(self.frame.parts())
+            .collect()
+    }
+}
+
+/// A check box's or radio button's parts: whether it's a radio button's,
+/// its `/MK /CA` and the name its on state goes under, each by its length
+/// and checksum.
+fn toggle_parts(radio: bool, caption: Option<&str>, on: &[u8]) -> Vec<(&'static str, String)> {
+    vec![
+        ("radio", u8::from(radio).to_string()),
+        ("caption", text_or_none(caption)),
+        ("on", bytes_sum(on)),
+    ]
+}
+
+/// A combo box's parts: the text it shows, by its length and checksum.
+fn combo_parts(text: &str) -> Vec<(&'static str, String)> {
+    vec![("combo", "1".into()), ("shows", text_sum(text))]
+}
+
+/// A list box's parts: its options' labels, by their count and checksum;
+/// the indexes of those selected; the one at its top.
+fn list_parts<'a>(
+    labels: impl Iterator<Item = &'a str>,
+    selected: &[usize],
+    top: usize,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("combo", "0".into()),
+        ("labels", texts_sum(labels)),
+        ("selected", indexes(selected)),
+        ("top", top.to_string()),
+    ]
+}
+
+/// A push button's parts: its three captions, each by its length and
+/// checksum, and whether its `/H` calls for rollover and down appearances.
+fn push_parts(
+    caption: &str,
+    rollover: Option<&str>,
+    down: Option<&str>,
+    pressed: bool,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("caption", text_sum(caption)),
+        ("rc", text_or_none(rollover)),
+        ("ac", text_or_none(down)),
+        ("pressed", u8::from(pressed).to_string()),
+    ]
+}
+
+/// The family's reading of a button's or choice's widget, by its kind.
+enum FamilyRead<'c> {
+    Toggle(forms::WidgetToggle),
+    Choice(forms::WidgetChoice<'c>),
+    Push(forms::WidgetPush),
+}
+
+impl FamilyRead<'_> {
+    /// The font name its `/DA` gives, where its appearance is drawn in it:
+    /// none for a toggle, whose mark is drawn in ZapfDingbats.
+    fn font_name(&self) -> Option<Option<&[u8]>> {
+        match self {
+            FamilyRead::Toggle(_) => None,
+            FamilyRead::Choice(c) => Some(c.font_name()),
+            FamilyRead::Push(p) => Some(p.font_name()),
+        }
     }
 }
 
@@ -225,6 +455,57 @@ fn text_sum(text: &str) -> String {
             text.len(),
             sheaf_util::checksum_hex(text.as_bytes())
         ),
+    }
+}
+
+/// [`text_sum`] of a text, `-` for none.
+fn text_or_none(text: Option<&str>) -> String {
+    text.map_or("-".into(), text_sum)
+}
+
+/// Bytes' length and checksum, or `0` for none: a name that's a value
+/// when it's on, never printed.
+fn bytes_sum(bytes: &[u8]) -> String {
+    match bytes.is_empty() {
+        true => "0".into(),
+        false => format!("{}:{}", bytes.len(), sheaf_util::checksum_hex(bytes)),
+    }
+}
+
+/// How many texts, and the checksum of them all, each its length then its
+/// bytes, or `0` for none.
+fn texts_sum<'a>(texts: impl Iterator<Item = &'a str>) -> String {
+    let mut sum = sheaf_util::Checksum::new();
+    let mut n = 0usize;
+    for text in texts {
+        n += 1;
+        sum.write(&(text.len() as u64).to_le_bytes());
+        sum.write(text.as_bytes());
+    }
+    match n {
+        0 => "0".into(),
+        n => format!("{n}:{:032x}", sum.finish()),
+    }
+}
+
+/// The most indexes [`indexes`] lists; more are their count and checksum.
+const INDEXES: usize = 16;
+
+/// Indexes, comma apart, `-` for none; past [`INDEXES`] of them, their
+/// count and the checksum of them all.
+fn indexes(indexes: &[usize]) -> String {
+    match indexes.len() {
+        0 => "-".into(),
+        n if n <= INDEXES => (indexes.iter().map(usize::to_string))
+            .collect::<Vec<_>>()
+            .join(","),
+        n => {
+            let mut sum = sheaf_util::Checksum::new();
+            for &i in indexes {
+                sum.write(&(i as u64).to_le_bytes());
+            }
+            format!("{n}:{:032x}", sum.finish())
+        }
     }
 }
 
@@ -357,18 +638,16 @@ where
 
 /// The family's appearance of `read` with its text `text`, in `font`, the
 /// family's reading of its `/DA`'s font, and the fallback: what
-/// [`made_name`] says.
-fn family_made(
-    read: &forms::WidgetText<'_>,
-    text: &str,
-    font: &Result<FieldFont, Error>,
-) -> Result<MadeWithFallback, Unmade> {
+/// [`made_name`] says, its one form `/N`'s, as sheaf's is.
+fn family_made(read: &forms::WidgetText<'_>, text: &str, font: &Result<FieldFont, Error>) -> Made {
     let font = font.as_ref().map_err(|e| Unmade::from(e.clone()))?;
     let res = font.res().ok_or(Unmade::FontNotBindable)?;
     let mut field = read.field();
     field.text = text;
     let look = read.look();
-    forms::text_with_fallback(
+    let MadeWithFallback {
+        appearance, glyphs, ..
+    } = forms::text_with_fallback(
         &field,
         &look,
         read.default_appearance(),
@@ -376,62 +655,190 @@ fn family_made(
         &font.layout(),
         &Fallback::SANS.field(),
         &LIMITS,
-    )
+    )?;
+    Ok(appearance::Made {
+        forms: vec![(Slot::Normal, appearance)],
+        glyphs,
+    })
 }
 
-/// sheaf's appearance of `look` with its text `text`, as the emitter makes
-/// one: in the font its `/DA` names in `src`'s `/DR`, read once a name by
-/// the source ([`appearance::font`]), named as sheaf names it (copy
-/// `copy`'s, [`appearance::font_res`]); and the same made with the font
-/// named as the family names it, to set beside the family's. A font named
-/// by an entry, which the emitter writes as an object of its own, is
-/// bound here to no object: the content's bytes are the same.
-fn ours_made(src: &Source, look: &TextLook, text: &str, copy: u32) -> (Made, Made) {
-    let look = TextLook {
-        text: text.into(),
-        ..look.clone()
+/// The family's appearances of `read`, a button's or choice's widget: a
+/// toggle's in ZapfDingbats as the standard 14 font is written by name, as
+/// sheaf's are drawn; a choice's or push button's in `font`, the family's
+/// reading of its `/DA`'s font, and the fallback, as sheaf's are drawn. A
+/// form for each slot of the widget's `/AP`, as sheaf's [`appearance::Made`]
+/// has them, and the fallback's glyphs they draw.
+fn family_kind_made(read: &FamilyRead<'_>, font: Option<&Result<FieldFont, Error>>) -> Made {
+    if let FamilyRead::Toggle(t) = read {
+        let zapf = FieldFont::standard(Std14::ZapfDingbats).res();
+        let ToggleAppearances {
+            on,
+            off,
+            down_on,
+            down_off,
+            ..
+        } = t.make(zapf.ok_or(Unmade::FontNotBindable)?, &LIMITS)?;
+        let forms = [
+            (Slot::Normal, Some(on)),
+            (Slot::NormalOff, off),
+            (Slot::Down, Some(down_on)),
+            (Slot::DownOff, down_off),
+        ];
+        return Ok(appearance::Made {
+            forms: (forms.into_iter())
+                .filter_map(|(slot, form)| Some((slot, form?)))
+                .collect(),
+            glyphs: Glyphs::new(),
+        });
+    }
+    let font = font.ok_or(Unmade::FontNotBindable)?;
+    let font = font.as_ref().map_err(|e| Unmade::from(e.clone()))?;
+    let res = font.res().ok_or(Unmade::FontNotBindable)?;
+    let recorded = Mutex::new(Glyphs::new());
+    let layout = font.layout();
+    let fallback = Fallback::SANS.recording(&recorded);
+    let fonts = WithFallback::new(&layout, &fallback, Fallback::SANS.res());
+    let forms = match read {
+        FamilyRead::Toggle(_) => unreachable!("a toggle is made above"),
+        FamilyRead::Choice(c) => vec![(Slot::Normal, Some(c.make(res, &fonts, &LIMITS)?))],
+        FamilyRead::Push(p) => {
+            let PushAppearances {
+                normal,
+                rollover,
+                down,
+                ..
+            } = p.make(res, &fonts, &LIMITS)?;
+            vec![
+                (Slot::Normal, Some(normal)),
+                (Slot::Rollover, rollover),
+                (Slot::Down, down),
+            ]
+        }
     };
-    let font = match appearance::font(src, &look) {
+    let glyphs = recorded
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner);
+    Ok(appearance::Made {
+        forms: (forms.into_iter())
+            .filter_map(|(slot, form)| Some((slot, form?)))
+            .collect(),
+        glyphs,
+    })
+}
+
+/// sheaf's appearances of `look`, as the emitter makes them: a text's,
+/// choice's or push button's in the font its `/DA` names in `src`'s `/DR`,
+/// read once a name by the source ([`appearance::font`]), named as sheaf
+/// names it (copy `copy`'s, [`appearance::font_res`]); and the same made
+/// with the font named as the family names it, to set beside the
+/// family's. A font named by an entry, which the emitter writes as an
+/// object of its own, is bound here to no object: the content's bytes are
+/// the same. A toggle's mark is drawn in ZapfDingbats, its `/DA`'s font
+/// never read, so its two are one.
+fn ours_made(src: &Source, look: &Look, copy: u32) -> (Made, Made) {
+    if let Look::Toggle(_) = look {
+        let no_font = |_: Option<&[u8]>| Err::<DaFont, _>(Unmade::FontNotBindable);
+        let made = appearance::make(look, no_font);
+        return (made.clone(), made);
+    }
+    let name = look.frame().font_name();
+    let font = match appearance::font(src, name.as_deref()) {
         Ok(font) => font,
         Err(e) => return (Err(e.clone().into()), Err(e.into())),
     };
-    let name = look.font_name().unwrap_or_default();
+    let name = name.unwrap_or_default();
     let written = |at: FontAt<'_>| match at {
         FontAt::Object(id) => id,
         FontAt::Entry(_) => ObjectId::new(0, 0),
     };
     let res = appearance::font_res(&font, src.id(), copy, &name, written);
-    let ours = appearance::make(&look, &font, res);
+    let da_font = |res| {
+        let font = font.clone();
+        move |_: Option<&[u8]>| Ok::<_, Unmade>(DaFont { font, res })
+    };
+    let ours = appearance::make(look, da_font(res));
     let theirs = match font.res() {
-        Some(res) => appearance::make(&look, &font, res),
+        Some(res) => appearance::make(look, da_font(res)),
         None => Err(Unmade::FontNotBindable),
     };
     (ours, theirs)
 }
 
 /// An appearance made, and the fallback's glyphs it draws; or why none was.
-type Made = Result<MadeWithFallback, Unmade>;
+type Made = Result<appearance::Made, Unmade>;
+
+/// A text widget's one form, made: `/N`'s.
+fn normal(made: &appearance::Made) -> &Appearance {
+    made.form(Slot::Normal)
+        .expect("a text widget's normal form")
+}
 
 /// An appearance as the dump says it: its size, whether it overflowed, its
 /// content's length and checksum and the resources it draws with, by their
 /// ids; or `unmade:` and why.
 fn made_name(made: &Made) -> String {
-    match made.as_ref().map(|m| &m.appearance) {
-        Ok(a) => {
-            let needs: Vec<String> = (a.needs.0.iter())
-                .map(|need| format!("{:032x}", need.res.id().0))
-                .collect();
-            format!(
-                "{},{},{}:{},{}",
-                a.font_size,
-                u8::from(a.overflowed),
-                a.content.len(),
-                sheaf_util::checksum_hex(&a.content),
-                needs.join("+")
-            )
-        }
+    match made.as_ref().map(normal) {
+        Ok(a) => form_name(a),
         Err(why) => format!("unmade:{}", appearance::unmade_kind(why)),
     }
+}
+
+/// A form as the dump says it: its size, whether it overflowed, its
+/// content's length and checksum and the resources it draws with, by their
+/// ids.
+fn form_name(a: &Appearance) -> String {
+    let needs: Vec<String> = (a.needs.0.iter())
+        .map(|need| format!("{:032x}", need.res.id().0))
+        .collect();
+    format!(
+        "{},{},{}:{},{}",
+        a.font_size,
+        u8::from(a.overflowed),
+        a.content.len(),
+        sheaf_util::checksum_hex(&a.content),
+        needs.join("+")
+    )
+}
+
+/// The slot of a widget's `/AP` a form goes in, as the dump names it: the
+/// entry, and `.Off` for a toggle's `Off` state in it.
+fn slot_name(slot: Slot) -> &'static str {
+    match slot {
+        Slot::Normal => "N",
+        Slot::NormalOff => "N.Off",
+        Slot::Down => "D",
+        Slot::DownOff => "D.Off",
+        Slot::Rollover => "R",
+    }
+}
+
+/// A button's or choice's appearances as the dump says them: each slot's
+/// form ([`form_name`]), `slot:` before it, `;` apart; or `unmade:` and
+/// why.
+fn forms_name(made: &Made) -> String {
+    match made {
+        Ok(made) => (made.forms.iter())
+            .map(|(slot, a)| format!("{}:{}", slot_name(*slot), form_name(a)))
+            .collect::<Vec<_>>()
+            .join(";"),
+        Err(why) => format!("unmade:{}", appearance::unmade_kind(why)),
+    }
+}
+
+/// The parts of two forms that differ, by the names the dump gives them.
+fn form_differs(a: &Appearance, b: &Appearance) -> Vec<&'static str> {
+    let parts = [
+        ("bbox", a.bbox == b.bbox),
+        ("matrix", a.matrix == b.matrix),
+        ("size", a.font_size == b.font_size),
+        ("ovf", a.overflowed == b.overflowed),
+        ("content", a.content == b.content),
+        ("needs", a.needs == b.needs),
+    ];
+    (parts.iter())
+        .filter(|(_, same)| !same)
+        .map(|(name, _)| *name)
+        .collect()
 }
 
 /// sheaf's appearance, its font named as the family names it, beside the
@@ -439,21 +846,39 @@ fn made_name(made: &Made) -> String {
 /// that differ, `made` where one is made and the other isn't.
 fn versus(ours: &Made, theirs: &Made) -> String {
     fn appearance(m: &Made) -> Result<&Appearance, &Unmade> {
-        m.as_ref().map(|m| &m.appearance)
+        m.as_ref().map(normal)
     }
     match (appearance(ours), appearance(theirs)) {
         (Ok(a), Ok(b)) => {
-            let parts = [
-                ("bbox", a.bbox == b.bbox),
-                ("matrix", a.matrix == b.matrix),
-                ("size", a.font_size == b.font_size),
-                ("ovf", a.overflowed == b.overflowed),
-                ("content", a.content == b.content),
-                ("needs", a.needs == b.needs),
-            ];
-            let differ: Vec<&str> = (parts.iter())
-                .filter(|(_, same)| !same)
-                .map(|(name, _)| *name)
+            let differ = form_differs(a, b);
+            match differ.is_empty() {
+                true => "=".into(),
+                false => differ.join(","),
+            }
+        }
+        (Err(a), Err(b)) if appearance::unmade_kind(a) == appearance::unmade_kind(b) => "=".into(),
+        (Err(_), Err(_)) => "unmade".into(),
+        _ => "made".into(),
+    }
+}
+
+/// [`versus`] for a button's or choice's appearances: `=` where every slot's
+/// form is the same (or they're unmade alike); `slots` where they make
+/// forms for other slots; else each slot's parts that differ
+/// (`D.Off:content`), comma apart; `made` where one is made and the other
+/// isn't.
+fn versus_forms(ours: &Made, theirs: &Made) -> String {
+    match (ours, theirs) {
+        (Ok(a), Ok(b)) => {
+            let slots = |m: &appearance::Made| m.forms.iter().map(|(s, _)| *s).collect::<Vec<_>>();
+            if slots(a) != slots(b) {
+                return "slots".into();
+            }
+            let differ: Vec<String> = (a.forms.iter().zip(&b.forms))
+                .flat_map(|((slot, a), (_, b))| {
+                    (form_differs(a, b).into_iter())
+                        .map(move |part| format!("{}:{part}", slot_name(*slot)))
+                })
                 .collect();
             match differ.is_empty() {
                 true => "=".into(),
@@ -480,8 +905,8 @@ impl Line {
     }
 }
 
-/// What the family read of the file's form, where it read one: its text
-/// fields' widgets by their objects.
+/// What the family read of the file's form, where it read one: its
+/// terminal fields' widgets by their objects.
 struct Family<'o> {
     form: forms::Form<'o>,
     /// Each terminal field's widgets by object, with the field's index:
@@ -490,12 +915,15 @@ struct Family<'o> {
     /// Text fields' widgets written as direct dictionaries, which no
     /// widget of sheaf's is.
     direct: usize,
+    /// Buttons' and choices' widgets written as direct dictionaries.
+    direct_kinds: usize,
 }
 
 impl<'o> Family<'o> {
     fn of(form: forms::Form<'o>) -> Family<'o> {
         let mut widgets = HashMap::new();
         let mut direct = 0;
+        let mut direct_kinds = 0;
         for (i, field) in form.terminals() {
             for (n, w) in field.widgets().iter().enumerate() {
                 match w.id() {
@@ -503,6 +931,7 @@ impl<'o> Family<'o> {
                         widgets.entry(id).or_insert((i, n));
                     }
                     None if field.kind() == Some(forms::FieldKind::Text) => direct += 1,
+                    None if family_kind(field.kind()).is_some() => direct_kinds += 1,
                     None => {}
                 }
             }
@@ -511,6 +940,7 @@ impl<'o> Family<'o> {
             form,
             widgets,
             direct,
+            direct_kinds,
         }
     }
 
@@ -519,6 +949,34 @@ impl<'o> Family<'o> {
         (self.widgets.iter())
             .filter(|(_, (i, _))| self.form.fields()[*i].kind() == Some(forms::FieldKind::Text))
             .map(|(id, _)| *id)
+    }
+
+    /// Its buttons' and choices' widgets that have objects.
+    fn kind_widgets(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        (self.widgets.iter())
+            .filter(|(_, (i, _))| family_kind(self.form.fields()[*i].kind()).is_some())
+            .map(|(id, _)| *id)
+    }
+}
+
+/// The kind of line a button's or choice's widget is, by its field's kind
+/// as sheaf reads it: `toggle`, `choice` or `push`; none for any other.
+fn line_kind(kind: FieldKind) -> Option<&'static str> {
+    match kind {
+        FieldKind::CheckBox | FieldKind::Radio => Some("toggle"),
+        FieldKind::Combo | FieldKind::List => Some("choice"),
+        FieldKind::PushButton => Some("push"),
+        _ => None,
+    }
+}
+
+/// [`line_kind`] of a field's kind as the family reads it.
+fn family_kind(kind: Option<forms::FieldKind>) -> Option<&'static str> {
+    match kind? {
+        forms::FieldKind::CheckBox | forms::FieldKind::Radio => Some("toggle"),
+        forms::FieldKind::Combo | forms::FieldKind::List => Some("choice"),
+        forms::FieldKind::PushButton => Some("push"),
+        _ => None,
     }
 }
 
@@ -540,8 +998,260 @@ struct Counts {
     versus_differ: usize,
 }
 
+/// The dump's counts of a file's buttons' and choices' widgets, which its
+/// `buttons` line says: those sheaf reads on a page, by their kind of line,
+/// and of those, as [`Counts`] counts a file's text widgets.
+#[derive(Default)]
+struct KindCounts {
+    toggle: usize,
+    choice: usize,
+    push: usize,
+    equal: usize,
+    differ: usize,
+    sheaf_only: usize,
+    /// Widgets the opened document holds no record of on their page.
+    unlooked: usize,
+    /// sheaf's looks refused (`look=unmade:`).
+    refused: usize,
+    made: usize,
+    unmade: usize,
+    ours_made: usize,
+    ours_unmade: usize,
+    versus_differ: usize,
+}
+
+/// What a file's button and choice lines are read with: its source, the
+/// document it's opened as, its objects, and the family's reading of its
+/// form, where it read one.
+struct FileCx<'a, 'o> {
+    src: &'a Src,
+    st: Option<&'a DocState>,
+    objects: Objects<'o, LazyPdf>,
+    family: Option<&'a Family<'o>>,
+}
+
+/// What a file's button and choice lines keep as they're read: what the
+/// family reads each choice field to show, by the field's index, read once
+/// for its widgets; the objects of the widgets given a line; and the
+/// counts.
+#[derive(Default)]
+struct KindsCx {
+    choices: HashMap<usize, Result<forms::FieldChoice, Unmade>>,
+    seen: HashSet<ObjectId>,
+    counts: KindCounts,
+}
+
+/// The fonts a file's `/DA`s name, as the family reads them, by name: what
+/// the dump says of each, and the font, read once ([`font_of`]).
+type Fonts = HashMap<Option<Vec<u8>>, (Vec<(&'static str, String)>, Result<FieldFont, Error>)>;
+
+/// The parts of `theirs` that `ours` hasn't, or has another value of, and
+/// those `ours` has that `theirs` hasn't (`-`): of two readings of a button
+/// or choice, whose own parts are another kind's where the two read its
+/// field as other kinds.
+fn differing(
+    ours: &[(&'static str, String)],
+    theirs: &[(&'static str, String)],
+) -> Vec<(&'static str, String)> {
+    let mut differ: Vec<(&'static str, String)> = (theirs.iter())
+        .filter(|(name, value)| !ours.iter().any(|(n, v)| n == name && v == value))
+        .cloned()
+        .collect();
+    for (name, _) in ours {
+        if !theirs.iter().any(|(n, _)| n == name) {
+            differ.push((name, "-".into()));
+        }
+    }
+    differ
+}
+
+/// The line of `w`, a button's or choice's widget of sheaf's `field` read
+/// at `at` (its path, page, slot and object), of kind `kind`
+/// ([`line_kind`]), `aid` its record in the opened document: sheaf's look
+/// beside the family's reading, and the appearances each makes, as
+/// [`fields_dump`] says; counted in `kinds`, the family's fonts read once
+/// into `fonts`.
+#[allow(clippy::too_many_arguments)]
+fn kind_line(
+    cx: &FileCx<'_, '_>,
+    kinds: &mut KindsCx,
+    fonts: &mut Fonts,
+    at: &str,
+    kind: &'static str,
+    w: &crate::forms::Widget,
+    field: &Field,
+    aid: Option<AnnotId>,
+) -> String {
+    let counts = &mut kinds.counts;
+    match kind {
+        "toggle" => counts.toggle += 1,
+        "choice" => counts.choice += 1,
+        _ => counts.push += 1,
+    }
+    kinds.seen.insert(w.object);
+    let mut line = Line::new(at, kind);
+    line.field("field", &id_of(Some(field.object)));
+    line.field("merged", &u8::from(w.merged).to_string());
+    let Some((st, aid)) = cx.st.zip(aid) else {
+        counts.unlooked += 1;
+        line.field("look", "-");
+        return line.0;
+    };
+    let look = match appearance::look(st, aid) {
+        Ok(look) => Ok(look),
+        Err(NoLook::Unmade(why)) => Err(why),
+        // sheaf's model reads it as no button or choice, which its file's
+        // reading does: never met.
+        Err(NoLook::NotWidget | NoLook::Kind(_)) => {
+            counts.unlooked += 1;
+            line.field("look", "-");
+            return line.0;
+        }
+    };
+    let ours = match &look {
+        Ok(look) => match KindPlain::of_look(look) {
+            Some(plain) => {
+                for (name, value) in plain.parts() {
+                    line.field(name, &value);
+                }
+                Some(plain)
+            }
+            // sheaf's model reads the field as a text field, which its
+            // file's reading doesn't: never met.
+            None => {
+                counts.refused += 1;
+                line.field("look", "text");
+                None
+            }
+        },
+        Err(why) => {
+            counts.refused += 1;
+            line.field("look", &format!("unmade:{}", appearance::unmade_kind(why)));
+            None
+        }
+    };
+    if kind == "toggle" {
+        line.field("file_on", &u8::from(w.on_state.is_some()).to_string());
+    }
+    let theirs = 'family: {
+        let Some(family) = cx.family else {
+            counts.sheaf_only += 1;
+            line.field("family", "-");
+            break 'family None;
+        };
+        let Some(&(i, n)) = family.widgets.get(&w.object) else {
+            counts.sheaf_only += 1;
+            line.field("family", "-");
+            break 'family None;
+        };
+        let theirs = &family.form.fields()[i];
+        // The field the family reads the widget as, where it isn't
+        // sheaf's: the tree read otherwise.
+        let other = (theirs.id() != Some(field.object)).then(|| id_of(theirs.id()));
+        if family_kind(theirs.kind()) != Some(kind) {
+            counts.sheaf_only += 1;
+            let k = theirs.kind().map_or("-".into(), |k| format!("{k:?}"));
+            line.field("family", &format!("kind:{k}"));
+            if let Some(other) = &other {
+                line.field("family.field", other);
+            }
+            break 'family None;
+        }
+        let widget = &theirs.widgets()[n];
+        let read = match kind {
+            "toggle" => {
+                forms::widget_toggle(theirs, widget, cx.objects, &LIMITS).map(FamilyRead::Toggle)
+            }
+            "push" => forms::widget_push(theirs, widget, cx.objects, &LIMITS).map(FamilyRead::Push),
+            _ => match (kinds.choices.entry(i))
+                .or_insert_with(|| forms::field_choice(theirs, cx.objects, &LIMITS))
+            {
+                Ok(choice) => forms::widget_choice(theirs, widget, choice, cx.objects, &LIMITS)
+                    .map(FamilyRead::Choice),
+                Err(why) => Err(why.clone()),
+            },
+        };
+        let read = match read {
+            Ok(read) => read,
+            Err(why) => {
+                let kind = appearance::unmade_kind(&why);
+                match &look {
+                    Err(ours) if appearance::unmade_kind(ours) == kind => {
+                        counts.equal += 1;
+                        line.field("family", "=");
+                    }
+                    _ => {
+                        counts.differ += 1;
+                        line.field("family", &format!("unmade:{kind}"));
+                    }
+                }
+                break 'family None;
+            }
+        };
+        let plain = KindPlain::of_family(&read);
+        let differ: Vec<(&str, String)> = (other.map(|other| ("field", other)).into_iter())
+            .chain(match &ours {
+                Some(ours) => differing(&ours.parts(), &plain.parts()),
+                None => vec![("look", "read".into())],
+            })
+            .collect();
+        match differ.is_empty() {
+            true => {
+                counts.equal += 1;
+                line.field("family", "=");
+            }
+            false => {
+                counts.differ += 1;
+                let names: Vec<&str> = differ.iter().map(|(n, _)| *n).collect();
+                line.field("family", &names.join(","));
+                for (name, value) in &differ {
+                    line.field(&format!("family.{name}"), value);
+                }
+            }
+        }
+        let font = read.font_name().map(|name| {
+            let name = name.map(<[u8]>::to_vec);
+            let (said, font) = (fonts.entry(name.clone()))
+                .or_insert_with(|| font_of(cx.objects, &family.form, name.as_deref()));
+            for (key, value) in said.iter() {
+                line.field(key, value);
+            }
+            &*font
+        });
+        let made = family_kind_made(&read, font);
+        match made.is_ok() {
+            true => counts.made += 1,
+            false => counts.unmade += 1,
+        }
+        line.field("made", &forms_name(&made));
+        Some(made)
+    };
+    // sheaf's, as the emitter makes them, and beside the family's.
+    let copy = st.annot(aid).and_then(|r| r.widget()).map(|w| w.inst.copy);
+    let (made, named) = match &look {
+        Ok(look) => ours_made(cx.src, look, copy.unwrap_or(0)),
+        Err(why) => (Err(why.clone()), Err(why.clone())),
+    };
+    match made.is_ok() {
+        true => counts.ours_made += 1,
+        false => counts.ours_unmade += 1,
+    }
+    line.field("ours", &forms_name(&made));
+    if let Some(n) = (made.as_ref().ok())
+        .map(|m| m.glyphs.len())
+        .filter(|&n| n > 0)
+    {
+        line.field("fallback", &n.to_string());
+    }
+    let vs = theirs.map_or("-".into(), |theirs| versus_forms(&named, &theirs));
+    counts.versus_differ += usize::from(vs != "=" && vs != "-");
+    line.field("ours.vs", &vs);
+    line.0
+}
+
 /// The dump's lines for file `path`, open as `src` in `store`: one for
-/// the file, then one for each text widget sheaf reads on a page, in page
+/// the file, one for its buttons and choices where it has any, then one
+/// for each text, button and choice widget sheaf reads on a page, in page
 /// order and each page's in `/Annots` order (a widget on two pages is on
 /// both). sheaf's reading of each is its model's, of the file opened as a
 /// document.
@@ -571,15 +1281,36 @@ fn lines_of(path: &str, store: &Arc<Store>, src: &Src) -> Vec<String> {
         }
     }
     let fields: HashMap<_, &Field> = form.fields.iter().map(|f| (f.id, f)).collect();
-    let mut fonts: HashMap<Option<Vec<u8>>, _> = HashMap::new();
+    let mut fonts: Fonts = HashMap::new();
     let mut counts = Counts::default();
     let mut seen = HashSet::new();
     let mut lines = Vec::new();
+    let cx = FileCx {
+        src,
+        st,
+        objects,
+        family: family.as_ref(),
+    };
+    let mut kinds = KindsCx::default();
     for (&page, widgets) in &form.widgets {
         for w in widgets {
-            let Some(field) = fields.get(&w.field).filter(|f| f.kind == FieldKind::Text) else {
+            let Some(&field) = fields.get(&w.field) else {
                 continue;
             };
+            if field.kind != FieldKind::Text {
+                if let Some(kind) = line_kind(field.kind) {
+                    let at = format!(
+                        "{path}\t{}\t{}\t{}",
+                        page + 1,
+                        w.slot,
+                        id_of(Some(w.object))
+                    );
+                    let aid = aids.get(&(page, w.object)).copied();
+                    let line = kind_line(&cx, &mut kinds, &mut fonts, &at, kind, w, field, aid);
+                    lines.push(line);
+                }
+                continue;
+            }
             counts.text += 1;
             seen.insert(w.object);
             let at = format!(
@@ -592,7 +1323,14 @@ fn lines_of(path: &str, store: &Arc<Store>, src: &Src) -> Vec<String> {
             line.field("field", &id_of(Some(field.object)));
             line.field("merged", &u8::from(w.merged).to_string());
             let aid = aids.get(&(page, w.object)).copied();
-            let look = st.zip(aid).and_then(|(st, aid)| text_look(st, aid));
+            let look = st
+                .zip(aid)
+                .and_then(|(st, aid)| match appearance::look(st, aid) {
+                    Ok(Look::Text(look)) => Some(look),
+                    // A text field as its file is read: never a button or
+                    // a choice.
+                    Ok(Look::Toggle(_) | Look::Choice(_) | Look::Push(_)) | Err(_) => None,
+                });
             let Some(look) = look else {
                 counts.unlooked += 1;
                 line.field("look", "-");
@@ -681,7 +1419,11 @@ fn lines_of(path: &str, store: &Arc<Store>, src: &Src) -> Vec<String> {
             };
             // sheaf's, as the emitter makes it, and beside the family's.
             let copy = aid.and_then(|aid| st?.annot(aid)?.widget().map(|w| w.inst.copy));
-            let (made, named) = ours_made(src, &look, &sample, copy.unwrap_or(0));
+            let sampled = Look::Text(TextLook {
+                text: sample.as_str().into(),
+                ..look.clone()
+            });
+            let (made, named) = ours_made(src, &sampled, copy.unwrap_or(0));
             match made.is_ok() {
                 true => counts.ours_made += 1,
                 false => counts.ours_unmade += 1,
@@ -730,8 +1472,66 @@ fn lines_of(path: &str, store: &Arc<Store>, src: &Src) -> Vec<String> {
     head.field("ours_unmade", &counts.ours_unmade.to_string());
     head.field("vs_differ", &counts.versus_differ.to_string());
     let mut file = vec![head.0];
+    file.extend(kinds_line(path, form, family.as_ref(), &kinds));
     file.extend(lines);
     file
+}
+
+/// The file's `buttons` line, where it has any button's or choice's widget
+/// on a page, on no page, or that only the family reads: those sheaf reads
+/// on a page by their kind of line, those of their fields on no page
+/// (`outside`, on page templates), and as the `file` line counts its text
+/// widgets, from `kinds`, the counts of their lines, and `family`, the
+/// family's reading of `form`.
+fn kinds_line(
+    path: &str,
+    form: &crate::forms::FileForm,
+    family: Option<&Family<'_>>,
+    kinds: &KindsCx,
+) -> Option<String> {
+    let c = &kinds.counts;
+    let family_only = family.map_or(0, |f| {
+        f.kind_widgets()
+            .filter(|id| !kinds.seen.contains(id))
+            .count()
+            + f.direct_kinds
+    });
+    let outside: usize = (form.fields.iter())
+        .filter(|f| line_kind(f.kind).is_some())
+        .map(|f| usize::from(f.outside))
+        .sum();
+    if c.toggle + c.choice + c.push + family_only + outside == 0 {
+        return None;
+    }
+    let mut line = Line::new(&format!("{path}\t-\t-\t-"), "buttons");
+    for (name, n) in [
+        ("toggle", c.toggle),
+        ("choice", c.choice),
+        ("push", c.push),
+        ("outside", outside),
+        ("equal", c.equal),
+        ("differ", c.differ),
+        ("sheaf_only", c.sheaf_only),
+        ("family_only", family_only),
+        ("made", c.made),
+        ("unmade", c.unmade),
+    ] {
+        line.field(name, &n.to_string());
+    }
+    if c.unlooked > 0 {
+        line.field("unlooked", &c.unlooked.to_string());
+    }
+    if c.refused > 0 {
+        line.field("refused", &c.refused.to_string());
+    }
+    for (name, n) in [
+        ("ours_made", c.ours_made),
+        ("ours_unmade", c.ours_unmade),
+        ("vs_differ", c.versus_differ),
+    ] {
+        line.field(name, &n.to_string());
+    }
+    Some(line.0)
 }
 
 /// `src`, in `store`, opened as a document is, as file `path`: what sheaf's
@@ -768,15 +1568,17 @@ fn dump_file(corpus: &Corpus, path: &str) -> Vec<String> {
     }
 }
 
-/// Every text widget of every form in the corpus's manifest, to set
-/// beside itself after a change to what reads a form or makes a text
-/// field's appearance: a line a file and one a text widget
-/// ([`lines_of`]), the files in the order of their paths, written to the
-/// path in [`DUMP`]. Two runs over the same code write the same file.
-/// With [`DUMP_ONLY`] it reads the one file named, and prints its lines
-/// to stderr.
+/// Every text, button and choice widget of every form in the corpus's
+/// manifest, to set beside itself after a change to what reads a form or
+/// makes a widget's appearance: a line a file, one for its buttons and
+/// choices where it has any, and one a widget ([`lines_of`]), the files in
+/// the order of their paths, written to the path in [`DUMP`]. Two runs
+/// over the same code write the same file. It prints how many lines of
+/// each kind, a widget's by what the family's reading of it is beside
+/// sheaf's. With [`DUMP_ONLY`] it reads the one file named, and prints its
+/// lines to stderr.
 #[test]
-#[ignore = "a dump of the corpus's text fields, written to $SHEAF_FIELDS_DUMP"]
+#[ignore = "a dump of the corpus's text, button and choice fields, written to $SHEAF_FIELDS_DUMP"]
 fn fields_dump() {
     let to = std::env::var_os(DUMP);
     let only = std::env::var(DUMP_ONLY).ok();
@@ -803,11 +1605,11 @@ fn fields_dump() {
         let fields: Vec<&str> = line.split('\t').skip(4).collect();
         let what = fields.first().copied().unwrap_or_default();
         let key = match what {
-            "text" => {
+            "text" | "toggle" | "choice" | "push" => {
                 let family = (fields.iter())
                     .find_map(|f| f.strip_prefix("family="))
                     .unwrap_or("?");
-                format!("text family={family}")
+                format!("{what} family={family}")
             }
             what if what.starts_with("unopened") => "unopened".into(),
             what if what.starts_with("panicked") => "panicked".into(),
@@ -826,15 +1628,16 @@ fn fields_dump() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forms::fixture::Form;
-    use crate::pdf::{dictionary, literal};
+    use crate::forms::fixture::{Button, Form, RADIO};
+    use crate::pdf::{Stream, dictionary, literal};
 
     /// A form of one page with a text field of each kind of reading the
     /// dump tells apart: one that's its own widget, drawn in `/DR`'s
     /// Helvetica by reference; a field of two kid widgets, one with a
     /// `/DA` of its own naming a font `/DR` lacks, the other inheriting
     /// its parent's dashed border style and a direct font; a comb field;
-    /// one whose `/DA` names no font; and a check box, which isn't a line.
+    /// one whose `/DA` names no font; and a check box, a line of a kind of
+    /// its own, which the file's line doesn't count.
     /// In a store of its own, as the document it's opened as is.
     fn file() -> (Arc<Store>, Src) {
         let mut f = Form::new(1);
@@ -907,13 +1710,22 @@ mod tests {
         (store, src)
     }
 
-    /// The fields of the line of the widget in slot `slot`, after its
-    /// place.
-    fn fields(lines: &[String], slot: usize) -> Vec<&str> {
-        let line = (lines.iter())
+    /// The line of the widget in slot `slot`.
+    fn line(lines: &[String], slot: usize) -> &str {
+        (lines.iter())
             .find(|l| l.split('\t').nth(2) == Some(&*slot.to_string()))
-            .unwrap_or_else(|| panic!("no line for slot {slot}:\n{}", lines.join("\n")));
-        line.split('\t').skip(5).collect()
+            .unwrap_or_else(|| panic!("no line for slot {slot}:\n{}", lines.join("\n")))
+    }
+
+    /// The fields of the line of the widget in slot `slot`, after its
+    /// place and kind.
+    fn fields(lines: &[String], slot: usize) -> Vec<&str> {
+        line(lines, slot).split('\t').skip(5).collect()
+    }
+
+    /// The kind of the line of the widget in slot `slot`.
+    fn kind(lines: &[String], slot: usize) -> &str {
+        line(lines, slot).split('\t').nth(4).unwrap()
     }
 
     /// Field `name` of `fields`.
@@ -933,13 +1745,16 @@ mod tests {
         let (store, src) = file();
         let lines = lines_of("f.pdf", &store, &src);
         assert_eq!(lines, lines_of("f.pdf", &store, &src));
-        assert_eq!(lines.len(), 1 + 5, "{}", lines.join("\n"));
+        // The file, its buttons, five text widgets and the check box.
+        assert_eq!(lines.len(), 1 + 1 + 5 + 1, "{}", lines.join("\n"));
         assert_eq!(
             lines[0],
             "f.pdf\t-\t-\t-\tfile\tpages=1\tclass=acroform\tfamily=read\ttext=5\toutside=0\t\
              equal=5\tdiffer=0\tsheaf_only=0\tfamily_only=0\tmade=5\tunmade=0\t\
              ours_made=5\tours_unmade=0\tvs_differ=0"
         );
+        assert!(lines[1].starts_with("f.pdf\t-\t-\t-\tbuttons\ttoggle=1\t"));
+        assert_eq!(kind(&lines, 5), "toggle");
         // sheaf's plain data make what the family's do, each widget's.
         for slot in 0..5 {
             assert_eq!(field(&fields(&lines, slot), "ours.vs"), "=", "slot {slot}");
@@ -1016,6 +1831,197 @@ mod tests {
         assert_eq!(field(&bare, "da"), "0 g");
         assert_eq!(field(&bare, "font"), "none");
         assert_eq!(field(&bare, "sample"), text_sum("Sample 123"));
+    }
+
+    /// A form of one page with a widget of each kind of line but text's:
+    /// a check box whose file draws its on state, and one with no
+    /// appearance; a radio group of two with no appearances, under `/Opt`;
+    /// a combo box showing its second option; a list box of three, its
+    /// third selected, from `/TI` 1; a push button with `/H /P` and three
+    /// captions; and one that shows an icon. In a store of its own.
+    fn kinds_file() -> (Arc<Store>, Src) {
+        let mut f = Form::new(1);
+        f.check_box("drawn", 0, [10.0, 700.0, 30.0, 720.0], true);
+        let off = |x: f32| Button {
+            page: 0,
+            rect: [x, 700.0, x + 20.0, 720.0],
+            on_state: None,
+            shows: Some("Off"),
+        };
+        f.buttons("bare", 0, &[off(40.0)]);
+        let (pick, _) = f.buttons("pick", RADIO, &[off(70.0), off(100.0)]);
+        f.dict(pick).set("Opt", vec![literal("a"), literal("b")]);
+        let combo = f.choice("combo", 0, [10.0, 600.0, 160.0, 620.0], &OPTIONS[..2], true);
+        f.dict(combo).set("V", literal("bravo"));
+        let list = f.choice("list", 0, [10.0, 500.0, 160.0, 560.0], &OPTIONS, false);
+        f.dict(list).set("V", literal("charlie"));
+        f.dict(list).set("TI", 1);
+        let push = f.push_button("push", 0, [10.0, 400.0, 110.0, 420.0], "Go");
+        f.dict(push).set("H", Object::name("P"));
+        f.dict(push).set(
+            "MK",
+            dictionary! { "CA" => literal("Go"), "RC" => literal("Over"), "AC" => literal("Down") },
+        );
+        let icon = f.push_button("icon", 0, [10.0, 300.0, 110.0, 320.0], "Go");
+        let picture = (f.pdf).add_object(Stream::new(dictionary! {}, Vec::new()));
+        f.dict(icon).set(
+            "MK",
+            dictionary! { "CA" => literal("Go"), "I" => picture, "TP" => 2 },
+        );
+        let store = Store::new();
+        let kind = BlobKind::file(Path::new("k.pdf"), None);
+        let src = store.open(f.bytes().into(), kind).unwrap();
+        (store, src)
+    }
+
+    /// The options [`kinds_file`]'s choices list.
+    const OPTIONS: [&str; 3] = ["alpha", "bravo", "charlie"];
+
+    /// Each button's and choice's widget is a line of its kind, read by both
+    /// and made by both alike, each part said as the family reads it; the
+    /// file's line counts no text widget and its buttons line counts them;
+    /// and no caption, option or value is said, only its length and
+    /// checksum.
+    #[test]
+    fn the_fields_dump_says_what_each_button_and_choice_is() {
+        let (store, src) = kinds_file();
+        let lines = lines_of("k.pdf", &store, &src);
+        assert_eq!(lines, lines_of("k.pdf", &store, &src));
+        assert_eq!(lines.len(), 1 + 1 + 8, "{}", lines.join("\n"));
+        assert!(lines[0].contains("\ttext=0\t"), "{}", lines[0]);
+        assert_eq!(
+            lines[1],
+            "k.pdf\t-\t-\t-\tbuttons\ttoggle=4\tchoice=2\tpush=2\toutside=0\tequal=8\t\
+             differ=0\tsheaf_only=0\tfamily_only=0\tmade=7\tunmade=0\trefused=1\t\
+             ours_made=7\tours_unmade=1\tvs_differ=0"
+        );
+        let kinds: Vec<&str> = (0..8).map(|slot| kind(&lines, slot)).collect();
+        let expected = [
+            "toggle", "toggle", "toggle", "toggle", "choice", "choice", "push", "push",
+        ];
+        assert_eq!(kinds, expected);
+        for slot in 0..7 {
+            let f = fields(&lines, slot);
+            assert_eq!(field(&f, "family"), "=", "slot {slot}: {f:?}");
+            assert_eq!(field(&f, "ours.vs"), "=", "slot {slot}: {f:?}");
+        }
+        let joined = lines.join("\n");
+        for value in ["bravo", "charlie", "Over", "Down"] {
+            assert!(!joined.contains(value), "{value}");
+        }
+
+        // A check box whose file draws its on state, `/Yes`, and one with
+        // none, named `Yes` as a press names it: each made alike, as it
+        // isn't asked whether it's stale. With no `/MK`, its normal `Off`
+        // paints nothing and isn't made.
+        let drawn = fields(&lines, 0);
+        assert_eq!(field(&drawn, "merged"), "1");
+        assert_eq!(field(&drawn, "radio"), "0");
+        assert_eq!(field(&drawn, "caption"), "-");
+        assert_eq!(field(&drawn, "on"), bytes_sum(b"Yes"));
+        assert_eq!(field(&drawn, "file_on"), "1");
+        let bare = fields(&lines, 1);
+        assert_eq!(field(&bare, "merged"), "0");
+        assert_eq!(field(&bare, "on"), bytes_sum(b"Yes"));
+        assert_eq!(field(&bare, "file_on"), "0");
+        let slots: Vec<&str> = (field(&bare, "ours").split(';'))
+            .map(|form| form.split(':').next().unwrap())
+            .collect();
+        assert_eq!(slots, ["N", "D", "D.Off"]);
+        assert_eq!(field(&bare, "ours"), field(&bare, "made"));
+        // A radio group's widgets under `/Opt`: each named by its index.
+        let first = fields(&lines, 2);
+        assert_eq!(field(&first, "radio"), "1");
+        assert_eq!(field(&first, "on"), bytes_sum(b"0"));
+        assert_eq!(field(&fields(&lines, 3), "on"), bytes_sum(b"1"));
+
+        // A combo box shows its value's option's label; a list box its
+        // labels, the one its value selects, from its top. Each draws in
+        // `/DR`'s Helvetica, as the family reads it.
+        let combo = fields(&lines, 4);
+        assert_eq!(field(&combo, "combo"), "1");
+        assert_eq!(field(&combo, "shows"), text_sum("bravo"));
+        assert_eq!(field(&combo, "font.base"), "Helvetica");
+        assert!(field(&combo, "ours").starts_with("N:10,0,"), "{combo:?}");
+        let list = fields(&lines, 5);
+        assert_eq!(field(&list, "combo"), "0");
+        assert_eq!(field(&list, "labels"), texts_sum(OPTIONS.into_iter()));
+        assert_eq!(field(&list, "selected"), "2");
+        assert_eq!(field(&list, "top"), "1");
+
+        // A push button with `/H /P`: its three captions, and its normal,
+        // rollover and down forms.
+        let push = fields(&lines, 6);
+        assert_eq!(field(&push, "caption"), text_sum("Go"));
+        assert_eq!(field(&push, "rc"), text_sum("Over"));
+        assert_eq!(field(&push, "ac"), text_sum("Down"));
+        assert_eq!(field(&push, "pressed"), "1");
+        let slots: Vec<&str> = (field(&push, "ours").split(';'))
+            .map(|form| form.split(':').next().unwrap())
+            .collect();
+        assert_eq!(slots, ["N", "R", "D"]);
+        // One that shows an icon: refused by both alike.
+        let icon = fields(&lines, 7);
+        assert_eq!(field(&icon, "look"), "unmade:icon");
+        assert_eq!(field(&icon, "family"), "=");
+        assert_eq!(field(&icon, "ours"), "unmade:icon");
+        assert_eq!(field(&icon, "ours.vs"), "-");
+    }
+
+    /// A push button's `/MK /TP` past `i32` is read by both alike: its low
+    /// 32 bits, so `4294967297` is 1, the icon alone, and no caption is
+    /// shown; one that is 0 so (2 to the 32nd) shows its caption.
+    #[test]
+    fn a_text_position_past_i32_is_the_familys() {
+        let mut f = Form::new(1);
+        for (i, tp) in [(1i64 << 32) + 1, 1 << 32].into_iter().enumerate() {
+            let y = 400.0 - 30.0 * i as f32;
+            let push = f.push_button(&format!("push{i}"), 0, [10.0, y, 110.0, y + 20.0], "Go");
+            let mk = dictionary! { "CA" => literal("Go"), "TP" => tp };
+            f.dict(push).set("MK", mk);
+        }
+        let store = Store::new();
+        let kind = BlobKind::file(Path::new("tp.pdf"), None);
+        let src = store.open(f.bytes().into(), kind).unwrap();
+        let lines = lines_of("tp.pdf", &store, &src);
+        let captions: Vec<String> = (0..2)
+            .map(|slot| {
+                let push = fields(&lines, slot);
+                assert_eq!(field(&push, "family"), "=", "slot {slot}: {push:?}");
+                assert_eq!(field(&push, "ours.vs"), "=", "slot {slot}: {push:?}");
+                field(&push, "caption").to_string()
+            })
+            .collect();
+        assert_eq!(captions, [text_sum(""), text_sum("Go")]);
+    }
+
+    /// Two readings of a button or choice: the family's parts that differ
+    /// or sheaf's lacks, with the family's value, and sheaf's that the
+    /// family's lacks, as `-`; none where they're the same.
+    #[test]
+    fn differing_parts_are_the_familys_and_those_it_lacks() {
+        let parts = |p: &[(&'static str, &str)]| -> Vec<(&'static str, String)> {
+            p.iter().map(|&(n, v)| (n, v.to_string())).collect()
+        };
+        let combo = parts(&[("combo", "1"), ("shows", "3:ab"), ("w", "10")]);
+        let list = parts(&[
+            ("combo", "0"),
+            ("labels", "2:cd"),
+            ("selected", "-"),
+            ("top", "0"),
+            ("w", "10"),
+        ]);
+        assert_eq!(differing(&combo, &combo), []);
+        assert_eq!(
+            differing(&combo, &list),
+            parts(&[
+                ("combo", "0"),
+                ("labels", "2:cd"),
+                ("selected", "-"),
+                ("top", "0"),
+                ("shows", "-"),
+            ])
+        );
     }
 
     /// A sample is the field's own value, cut at `/MaxLen`, else the

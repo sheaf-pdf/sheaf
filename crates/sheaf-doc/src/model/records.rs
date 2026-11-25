@@ -738,9 +738,22 @@ pub struct FieldProps {
     pub align: Option<u8>,
     /// `/MaxLen`, as the file has it.
     pub max_len: Option<u32>,
+    /// `/TI`: the index in [`options`](Self::options) of the first option
+    /// a list box shows at its top; 0 for none.
+    pub top: u32,
     /// `/Opt`: a choice field's items, or a check box's or radio group's
-    /// export values.
+    /// export values, by its widgets' [`index`](WidgetProps::index).
     pub options: Arc<[Choice]>,
+    /// `/Opt` is an array, an empty one too: a check box's or radio
+    /// group's widgets with no on state of their own are named by their
+    /// indexes.
+    pub has_opt: bool,
+    /// A check box's or radio group's widgets' on states in its file, by
+    /// their [`index`](WidgetProps::index): every one's, so one the model
+    /// holds no widget for (on a page template, or on a page since
+    /// deleted) keeps the name its file gives it. Empty for any other
+    /// kind.
+    pub on_states: Vec<Option<String>>,
     /// `/TU`: what the field is for, in words.
     pub tooltip: Option<String>,
     /// Its own `/AA`: keystroke, format, validate and calculate.
@@ -759,7 +772,10 @@ impl Terminal {
                 da: field.da.clone(),
                 align: field.align,
                 max_len: field.max_len,
+                top: field.top,
                 options: field.options.clone(),
+                has_opt: field.has_opt,
+                on_states: field.on_states.clone(),
                 tooltip: field.tooltip.clone(),
                 actions: field.actions.clone(),
             }),
@@ -934,6 +950,18 @@ pub struct WidgetProps {
     pub actions: Vec<(Trigger, Action)>,
     /// It has a normal appearance: a stream, or states.
     pub has_appearance: bool,
+    /// Its place among its field's widgets in its file, from 0, as the
+    /// field tree is read: what its field's `/Opt` entry and a check
+    /// box's or radio button's group go by. A duplicate's copy has its
+    /// original's; a page the page tree lists twice shows one widget at
+    /// one index twice.
+    pub index: u32,
+    /// The name of its normal appearance's on state in its file, as the
+    /// family reads one: none where it has no states.
+    pub on_state: Option<String>,
+    /// `/H` is `/P` or `/T`: a push button's rollover and down appearances
+    /// are made.
+    pub pressed: bool,
 }
 
 impl Widget {
@@ -961,6 +989,9 @@ impl Widget {
                 align: w.align,
                 actions: w.actions.clone(),
                 has_appearance: w.has_appearance,
+                index: w.index,
+                on_state: w.on_state.clone(),
+                pressed: w.pressed,
             }),
         }
     }

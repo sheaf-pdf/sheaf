@@ -44,6 +44,33 @@ pub const RADIO: i64 = 1 << 15;
 pub const NO_TOGGLE_TO_OFF: i64 = 1 << 14;
 pub const PUSH_BUTTON: i64 = 1 << 16;
 pub const COMBO: i64 = 1 << 17;
+pub const RADIOS_IN_UNISON: i64 = 1 << 25;
+
+/// One widget of a check box or radio field [`Form::buttons`] makes.
+#[derive(Debug, Clone, Copy)]
+pub struct Button<'a> {
+    /// The page it's on, from 0, and where.
+    pub page: usize,
+    pub rect: Rect,
+    /// The name its normal and down appearances' on state goes under,
+    /// beside `Off`; none for a widget with no appearance.
+    pub on_state: Option<&'a str>,
+    /// Its `/AS`; none for none.
+    pub shows: Option<&'a str>,
+}
+
+impl<'a> Button<'a> {
+    /// A widget on page 0 in row `i` ([`row`]), its on state `on_state`,
+    /// showing `shows`.
+    pub fn at(i: usize, on_state: Option<&'a str>, shows: Option<&'a str>) -> Button<'a> {
+        Button {
+            page: 0,
+            rect: row(i),
+            on_state,
+            shows,
+        }
+    }
+}
 
 /// What a signature's `/ByteRange` says until [`Form::bytes`] fills it in.
 const RANGE_PLACEHOLDER: &[u8] = b"[0 9999999999 9999999999 9999999999]";
@@ -195,6 +222,48 @@ impl Form {
         self.dict(field).set("Kids", kids);
         self.add_field(field);
         field
+    }
+
+    /// A check box or radio field named `name`, `ff` its `/Ff`, with a kid
+    /// widget for each of `buttons`, in order: each on its page at its
+    /// rect, with its on state's appearance and an `Off` one, or none, and
+    /// the `/AS` it shows. Its `/V` is the first `/AS` that isn't `Off`,
+    /// else `Off`. Returns the field and its widgets.
+    pub fn buttons(
+        &mut self,
+        name: &str,
+        ff: i64,
+        buttons: &[Button],
+    ) -> (ObjectId, Vec<ObjectId>) {
+        let value = (buttons.iter())
+            .filter_map(|b| b.shows)
+            .find(|&s| s != "Off")
+            .unwrap_or("Off");
+        let field = self.pdf.add_object(dictionary! {
+            "FT" => Object::name("Btn"),
+            "T" => literal(name),
+            "Ff" => ff,
+            "DA" => literal("/ZaDb 0 Tf 0 g"),
+            "V" => Object::name(value.as_bytes()),
+        });
+        let mut kids = Vec::new();
+        for b in buttons {
+            let w = self.widget(b.page, b.rect);
+            let ap = b.on_state.map(|on| self.states(b.rect, on));
+            let d = self.dict(w);
+            d.set("Parent", field);
+            if let Some(ap) = ap {
+                d.set("AP", ap);
+            }
+            if let Some(shows) = b.shows {
+                d.set("AS", Object::name(shows.as_bytes()));
+            }
+            kids.push(w);
+        }
+        let list: Vec<Object> = kids.iter().map(|&k| Object::from(k)).collect();
+        self.dict(field).set("Kids", list);
+        self.add_field(field);
+        (field, kids)
     }
 
     /// A combo box (or, with `combo` false, a list box) of `options`.

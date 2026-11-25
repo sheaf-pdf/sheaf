@@ -422,7 +422,7 @@ macro_rules! le_bytes {
     };
 }
 
-le_bytes!(u8, u16, u32, u64, u128, i64);
+le_bytes!(u8, u16, u32, u64, u128, i32, i64);
 
 impl Feed for usize {
     fn feed(&self, sum: &mut Sum) {
@@ -849,11 +849,19 @@ impl Feed for Mk {
             border_color,
             rotation,
             caption,
+            rollover,
+            down,
+            text_position,
+            icon,
         } = self;
         sum.feed(background)
             .feed(border_color)
             .feed(rotation)
-            .feed(caption);
+            .feed(caption)
+            .feed(rollover)
+            .feed(down)
+            .feed(text_position)
+            .feed(icon);
     }
 }
 
@@ -874,11 +882,17 @@ impl Feed for WidgetProps {
             align,
             actions,
             has_appearance,
+            index,
+            on_state,
+            pressed,
         } = self;
         sum.feed(border)
             .feed(align)
             .feed(actions)
-            .feed(has_appearance);
+            .feed(has_appearance)
+            .feed(index)
+            .feed(on_state)
+            .feed(pressed);
     }
 }
 
@@ -941,14 +955,20 @@ impl Feed for FieldProps {
             da,
             align,
             max_len,
+            top,
             options,
+            has_opt,
+            on_states,
             tooltip,
             actions,
         } = self;
         sum.feed(da)
             .feed(align)
             .feed(max_len)
+            .feed(top)
             .feed(options)
+            .feed(has_opt)
+            .feed(on_states)
             .feed(tooltip)
             .feed(actions);
     }

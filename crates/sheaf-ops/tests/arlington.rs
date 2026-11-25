@@ -53,18 +53,30 @@
 //! Two files test the version: a PDF 1.3 file given what came later, and
 //! a PDF 2.0 file given what 2.0 deprecates or asks more of.
 //!
+//! Every kind of button and choice, changed and its appearances made (M10
+//! slice 8), is held on a form built in code ([`buttons_and_choices`]): a
+//! check box's and a radio button's state dictionaries and the
+//! ZapfDingbats font their marks are drawn in, a combo box's and a list
+//! box's form, and a push button's `/N`, `/R` and `/D`.
+//!
 //! The corpus tier (ignored, as a corpus tier: `just tier-arlington`)
 //! holds what sheaf writes on every form of Greg's corpus, never the
 //! form's own objects: each is given a note, a header and footer and a
 //! recognized word, saved as planned, then rewritten, and what each save
 //! wrote is checked, a fault the form has carried as above. The header
 //! draws a name in two fonts, so each save writes a subset of the
-//! fallback font sheaf bundles, and its objects are checked too. It
-//! prints what it checked: objects by table, keys, the checks not made
-//! and why, the keys the model doesn't list, and those the version
-//! deprecates or readers ignore; run on every form, its counts of forms
-//! and saves are asserted ([`FORMS`]). Skips when there's no corpus (see
-//! `sheaf_doc::forms::corpus`).
+//! fallback font sheaf bundles, and its objects are checked too. A form
+//! with check boxes or radio buttons whose file has no on state has a
+//! save of its own, each of them pressed and the document rewritten, so
+//! what's made of them is checked too ([`pressed_save`]). It prints what it
+//! checked: objects by table, keys, the checks not made and why, the keys
+//! the model doesn't list, and those the version deprecates or readers
+//! ignore, and the widgets pressed and what was made of them; run on every
+//! form, its counts of forms and saves are asserted ([`FORMS`]), and what
+//! the pressed saves pressed and made, which is held beside the files'
+//! failures so one doesn't hide the other; a pressed widget whose
+//! appearance can be made and that the save wrote none for fails its
+//! form. Skips when there's no corpus (see `sheaf_doc::forms::corpus`).
 
 mod common;
 mod lint;
@@ -695,6 +707,88 @@ fn pages(how: How) {
         &checked,
         &["PageObject", "PageTreeNodeRoot", "AnnotText", "AnnotPopup"],
     );
+}
+
+sheaf_doc::both_ways!(buttons_and_choices_hold, buttons_and_choices_hold_appended: buttons_and_choices);
+
+/// The tables [`buttons_and_choices`] must check: each kind of field and
+/// its widget, the `/AP` dictionaries and their state dictionaries, the
+/// forms made, and the ZapfDingbats font the marks are drawn in. A radio
+/// field apart from its widgets is checked only in an Append, which writes
+/// it, its dictionary as its file has it, for its value (`/V` isn't written
+/// before M10 slice 9); a Rewrite copies it.
+const BUTTONS: &[&str] = &[
+    "FieldBtnCheckbox",
+    "FieldChoice",
+    "FieldBtnPush",
+    "AnnotWidget",
+    "Appearance",
+    "AppearanceSubDict",
+    "XObjectFormType1",
+    "FontType1",
+];
+
+/// Every kind of button and choice changed as no op changes one before M10
+/// slice 9 (`tx::fixture`), each widget's appearances made by the save
+/// (M10 slice 8): a check box, one object with its widget, and a radio
+/// group of two kid widgets, under `/Opt`, each with no appearances,
+/// pressed (`/N` and `/D` state dictionaries, `/AS`, the marks in
+/// ZapfDingbats); a combo box and a list box given values (`/N`); and a
+/// push button with `/H /P` given three captions (`/N`, `/R` and `/D`).
+/// The check box is required (`/Ff 2`), as [`apart`] says why.
+fn buttons_and_choices(how: How) {
+    use sheaf_doc::forms::fixture::{Button, RADIO, row};
+    use sheaf_doc::materialize::key::Part;
+    let dir = scratch(&format!("arlington-buttons-{how:?}"));
+    let mut f = Form::new(1);
+    let check = f.check_box("check", 0, row(0), false);
+    f.dict(check).remove(b"AP");
+    f.dict(check).set("Ff", 2);
+    let off = |i| Button::at(i, None, Some("Off"));
+    let (pick, _) = f.buttons("pick", RADIO, &[off(1), off(2)]);
+    f.dict(pick).set("Opt", vec![literal("a"), literal("b")]);
+    f.choice("combo", 0, row(3), &["alpha", "bravo"], true);
+    f.choice("list", 0, row(4), &["alpha", "bravo", "charlie"], false);
+    let push = f.push_button("push", 0, row(5), "Go");
+    f.dict(push).set("H", Object::name("P"));
+    let path = common::write(&dir, "buttons.pdf", &mut f);
+    let mut doc = common::open(&path);
+    let widgets = |doc: &Document, name: &str| {
+        let st = doc.state();
+        let id = st.field_named(name).expect("the field");
+        let term = st.field(id).and_then(|f| f.term.clone());
+        let widgets = term.expect("a terminal").widgets.clone();
+        widgets.into_iter().collect::<Vec<_>>()
+    };
+    let check = widgets(&doc, "check")[0];
+    fx::press(&mut doc, check);
+    let second = widgets(&doc, "pick")[1];
+    fx::press(&mut doc, second);
+    fx::choose(&mut doc, "combo", &["bravo"]);
+    fx::choose(&mut doc, "list", &["charlie"]);
+    let push = widgets(&doc, "push")[0];
+    fx::caption(&mut doc, push, Some("Stop"), Some("Over"), Some("Down"));
+    let checked = held(&mut doc, Some(how), &path);
+    let mut tables = BUTTONS.to_vec();
+    if how == How::Appended {
+        tables.push("FieldBtnRadio");
+    }
+    clean(&checked, &tables);
+    // The forms the save made, each widget's: the check box's on state's
+    // normal and down ones and `Off`'s down one (the pressed gray; its
+    // normal `Off` paints nothing, with no `/MK`), the radio group's
+    // pressed widget's the same and the other's none (its state didn't
+    // change), a form each choice, and the push button's three.
+    let record = doc.saved_record().expect("saved");
+    let made: Vec<usize> = (["check", "pick", "combo", "list", "push"].iter())
+        .flat_map(|name| widgets(&doc, name))
+        .map(|aid| {
+            (Part::ALL.into_iter())
+                .filter(|&part| (record.map.keys).contains_key(&ObjKey::AnnotPart(aid, part)))
+                .count()
+        })
+        .collect();
+    assert_eq!(made, [3, 0, 3, 1, 1, 3]);
 }
 
 /// A page deleted, saved as the plan decides: a Rewrite, strict removal
@@ -1641,8 +1735,10 @@ const TOP: usize = 20;
 /// The corpus tier's counts on the corpus they were counted on (its
 /// manifest's length), unnarrowed: the forms that open, those that don't
 /// and why (three whose cross-reference tables don't parse, which no tier
-/// opens), and what the saves were. A change that moves one says why, and
-/// moves it.
+/// opens), and what the saves were, a form's check boxes and radio buttons
+/// with no on state pressed among them ([`pressed_save`], M10 slice 8). A
+/// change that moves one says why, and moves it. A save of none isn't
+/// counted.
 const FORMS: FormsBaseline = FormsBaseline {
     manifest: 4392,
     files: 4389,
@@ -1652,15 +1748,39 @@ const FORMS: FormsBaseline = FormsBaseline {
         ("as planned, Rewrite", 1983),
         ("a page deleted, as planned, Rewrite", 2901),
         ("of one page, a Rewrite to a copy", 1488),
+        (PRESSED, 47),
     ],
+    pressed: PressedBaseline {
+        pressed: &[("check box", 254), ("radio button", 53)],
+        stale: &[("check box", 254), ("radio button", 50)],
+        made: &[("check box", 254), ("radio button", 14)],
+        unmade: &[("radio button, no-box", 36)],
+    },
 };
 
 struct FormsBaseline {
     manifest: usize,
     files: usize,
     unopened: [(&'static str, usize); 2],
-    saves: [(&'static str, usize); 4],
+    saves: [(&'static str, usize); 5],
+    pressed: PressedBaseline,
 }
+
+/// What the pressed saves pressed and made over the whole corpus
+/// ([`Pressed`], summed), each by its kind: the widgets pressed, those to
+/// be made, those the save made, and those it made none for, by why (36
+/// radio buttons whose box has no size). Held whatever else the tier
+/// finds ([`Pressed::moved`]), so a save that stops making a toggle's
+/// appearances fails it.
+struct PressedBaseline {
+    pressed: &'static [(&'static str, usize)],
+    stale: &'static [(&'static str, usize)],
+    made: &'static [(&'static str, usize)],
+    unmade: &'static [(&'static str, usize)],
+}
+
+/// What [`pressed_save`]'s save is.
+const PRESSED: &str = "toggles pressed, a Rewrite";
 
 /// Why a form didn't open.
 const UNREAD: &str = "its file doesn't read";
@@ -1680,6 +1800,104 @@ struct FormChecked {
     saves: Vec<SaveChecked>,
     /// Why its first page took no recognized text, when it didn't.
     untexted: Option<&'static str>,
+    /// What its pressed save pressed and made, where it had one
+    /// ([`pressed_save`]).
+    pressed: Option<Pressed>,
+    /// Why its pressed save failed, where it did: the form's other saves
+    /// are counted all the same.
+    failed: Option<String>,
+}
+
+/// What [`pressed_save`] pressed of a form's check boxes and radio
+/// buttons, and what the save made of them, each by its kind (`check box`,
+/// `radio button`).
+#[derive(Default)]
+struct Pressed {
+    /// The widgets pressed.
+    pressed: BTreeMap<&'static str, usize>,
+    /// The widgets whose state the presses left other than their file's
+    /// and whose file has no on state: those whose appearances the save
+    /// makes (`appearance::stale`).
+    stale: BTreeMap<&'static str, usize>,
+    /// Of those, the widgets the save made appearances for.
+    made: BTreeMap<&'static str, usize>,
+    /// Of those, the widgets it made none for, by kind and why
+    /// (`appearance::unmade_kind`).
+    unmade: BTreeMap<String, usize>,
+}
+
+impl Pressed {
+    /// Each of its counts that isn't `held`'s, as a line that says which
+    /// and both: none where every count is the one held.
+    fn moved(&self, held: &PressedBaseline) -> Vec<String> {
+        fn differ<K: AsRef<str>>(
+            what: &str,
+            counted: &BTreeMap<K, usize>,
+            held: &[(&'static str, usize)],
+        ) -> Option<String> {
+            let counted: BTreeMap<&str, usize> =
+                counted.iter().map(|(k, &n)| (k.as_ref(), n)).collect();
+            let held: BTreeMap<&str, usize> = held.iter().copied().collect();
+            (counted != held).then(|| format!("{what}: {counted:?}, held at {held:?}"))
+        }
+        [
+            differ("pressed", &self.pressed, held.pressed),
+            differ("pressed, to be made", &self.stale, held.stale),
+            differ("pressed, made", &self.made, held.made),
+            differ("pressed, not made", &self.unmade, held.unmade),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+}
+
+/// What [`pressed_save`] says of a widget whose appearance can be made and
+/// that the save wrote none for: a failure of its form.
+const NOT_WRITTEN: &str = "made, not written";
+
+/// The held counts hold themselves, and each count that moves is said: a
+/// save that makes no toggle, a class of unmade widgets that's new, and
+/// one that's gone.
+#[test]
+fn the_pressed_saves_counts_are_held() {
+    let counted = |held: &PressedBaseline| Pressed {
+        pressed: held.pressed.iter().copied().collect(),
+        stale: held.stale.iter().copied().collect(),
+        made: held.made.iter().copied().collect(),
+        unmade: (held.unmade.iter())
+            .map(|&(why, n)| (why.to_string(), n))
+            .collect(),
+    };
+    let held = &FORMS.pressed;
+    assert_eq!(counted(held).moved(held), [] as [String; 0]);
+    // Every widget to be made is made, or counted as not made.
+    let sum = |counts: &[(&str, usize)]| counts.iter().map(|&(_, n)| n).sum::<usize>();
+    assert_eq!(sum(held.stale), sum(held.made) + sum(held.unmade));
+
+    let mut none_made = counted(held);
+    none_made.made.clear();
+    let moved = none_made.moved(held);
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert!(
+        moved[0].starts_with("pressed, made: {}, held at"),
+        "{moved:?}"
+    );
+
+    let mut fewer = counted(held);
+    *fewer.made.get_mut("radio button").unwrap() -= 1;
+    *fewer
+        .unmade
+        .entry("radio button, no-box".into())
+        .or_default() += 1;
+    assert_eq!(fewer.moved(held).len(), 2);
+
+    let mut new_class = counted(held);
+    new_class.unmade.insert("check box, other".into(), 1);
+    new_class.unmade.remove("radio button, no-box");
+    let moved = new_class.moved(held);
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert!(moved[0].starts_with("pressed, not made:"), "{moved:?}");
 }
 
 /// One save's check, its findings sorted out.
@@ -1723,13 +1941,16 @@ impl SaveChecked {
 /// with Bates numbers on every page, in one version, saved as planned (an
 /// Append where the form takes one); then its last page deleted, saved as
 /// planned, which strict removal makes a Rewrite, or a form of one page
-/// rewritten to a copy. A finding no allowance holds fails, unless it's in
+/// rewritten to a copy. And, on a copy of its own, its check boxes and
+/// radio buttons whose file has no on state pressed, and rewritten
+/// ([`pressed_save`]). A finding no allowance holds fails, unless it's in
 /// an object merged over the form's that the form has too. The counts are
 /// printed: saves by what they were, objects checked by table, keys, the
 /// checks not made and what stood in their way, the keys the model doesn't
 /// list, those the version deprecates and those readers ignore, the
-/// findings carried and allowed, and the allowances that allowed nothing
-/// here. A save that held nothing but its trailer fails. Run on every
+/// widgets pressed and those made and not by why, the findings carried and
+/// allowed, and the allowances that allowed nothing here. A save that held
+/// nothing but its trailer fails. Run on every
 /// form, the counts of forms opened and not, and of saves, are asserted
 /// against their baseline ([`FORMS`]), so a form that stops opening fails
 /// too; and each allowance for one corpus file must have allowed a
@@ -1756,6 +1977,7 @@ fn what_sheaf_writes_on_every_form_holds_to_arlington() {
             Outcome::Checked(form) => {
                 let left: Vec<&str> = (form.saves.iter())
                     .flat_map(|save| save.left.iter().map(String::as_str))
+                    .chain(form.failed.as_deref())
                     .collect();
                 if !left.is_empty() {
                     failed.insert(entry.path.clone(), left.join("\n  "));
@@ -1779,7 +2001,21 @@ fn what_sheaf_writes_on_every_form_holds_to_arlington() {
     for (path, why) in &failed {
         println!("{path}:\n  {why}");
     }
-    assert!(failed.is_empty(), "{} files failed", failed.len());
+    // What the pressed saves made is held beside the files' failures, not
+    // after them, so a file that fails for something else doesn't hide it.
+    let pressed_moved = match entries.len() == FORMS.manifest {
+        true => totals.pressed.moved(&FORMS.pressed),
+        false => Vec::new(),
+    };
+    for moved in &pressed_moved {
+        println!("the pressed saves' counts moved: {moved}");
+    }
+    assert!(
+        failed.is_empty() && pressed_moved.is_empty(),
+        "{} files failed, {} of the pressed saves' counts moved",
+        failed.len(),
+        pressed_moved.len()
+    );
     if entries.len() == FORMS.manifest {
         assert_eq!(totals.files, FORMS.files, "forms opened");
         let unopened: BTreeMap<&str, usize> = (FORMS.unopened.iter().copied())
@@ -1787,6 +2023,7 @@ fn what_sheaf_writes_on_every_form_holds_to_arlington() {
             .collect();
         assert_eq!(totals.unopened, unopened, "forms not opened");
         let saves: BTreeMap<String, usize> = (FORMS.saves.iter())
+            .filter(|&&(_, n)| n > 0)
             .map(|&(what, n)| (what.to_string(), n))
             .collect();
         assert_eq!(totals.saves, saves, "saves");
@@ -1815,7 +2052,20 @@ fn written_on(entry: &Entry, corpus: &Corpus, dir: &Path, allowances: &Allowance
             Ok(opened) => {
                 let mut doc = opened.doc;
                 match saves_of(&mut doc, (&path, &entry.path), allowances) {
-                    Ok(form) => Outcome::Checked(form),
+                    Ok(mut form) => {
+                        let pressed = dir.join("pressed.pdf");
+                        let from = corpus.path(entry);
+                        let saved = pressed_save(&from, &pressed, entry, allowances);
+                        match saved {
+                            Ok(Some((save, pressed))) => {
+                                form.saves.push(save);
+                                form.pressed = Some(pressed);
+                            }
+                            Ok(None) => {}
+                            Err(e) => form.failed = Some(e),
+                        }
+                        Outcome::Checked(form)
+                    }
                     Err(e) => Outcome::Failed(e),
                 }
             }
@@ -1874,7 +2124,135 @@ fn saves_of(
         held,
         &mut sources,
     ));
-    Ok(FormChecked { saves, untexted })
+    Ok(FormChecked {
+        saves,
+        untexted,
+        pressed: None,
+        failed: None,
+    })
+}
+
+/// Where the corpus file `entry` has check box or radio widgets whose
+/// normal appearance has no on state, a save of its own (M10 slice 8): the
+/// file copied from `from` to `path`, opened as a document of its own, so
+/// the other saves don't move, each such widget pressed once
+/// (`tx::fixture::press`, as M10 slice 9's lowering will press one), in
+/// page order, then rewritten and checked. Their state changed, and their
+/// file having no appearance to show it, the save makes their appearances
+/// ([`appearance::stale`]): which widgets it made them for, and which it
+/// couldn't and why, are counted ([`Pressed`]). A widget the group doesn't
+/// hold, or another record of one already pressed (a page the tree lists
+/// twice), isn't pressed. None where the file has no such widget.
+///
+/// A Rewrite, not a save as planned: the Rewrite holds every object sheaf
+/// writes anew for the widgets pressed, which is what this save is for,
+/// where a planned Append of a field whose own dictionary is a widget
+/// beside its kids (the corpus's toggles with no on state are most often
+/// such a dictionary, of no size) stops at the save's own check, as a text
+/// field of that shape filled does (an Append writes the widget apart from
+/// the field and not its page's `/Annots`).
+///
+/// [`appearance::stale`]: sheaf_doc::forms::appearance::stale
+fn pressed_save(
+    from: &Path,
+    path: &Path,
+    entry: &Entry,
+    allowances: &Allowances,
+) -> Result<Option<(SaveChecked, Pressed)>, String> {
+    use sheaf_doc::forms::FieldKind;
+    use sheaf_doc::forms::{appearance, buttons};
+    use sheaf_doc::materialize::{SaveHow, key::Part};
+    std::fs::copy(from, path).map_err(|e| format!("not copied to press: {e}"))?;
+    let mut doc = (sheaf_doc::open::file(path, None))
+        .map_err(|e| format!("not opened to press: {e}"))?
+        .doc;
+    let kind_of = |doc: &Document, aid| {
+        let st = doc.state();
+        let w = st.annot(aid)?.widget()?;
+        match st.field(w.field)?.term.as_deref()?.kind {
+            FieldKind::CheckBox => Some(("check box", w.field)),
+            FieldKind::Radio => Some(("radio button", w.field)),
+            _ => None,
+        }
+    };
+    let st = doc.state();
+    let mut seen = std::collections::HashSet::new();
+    let mut presses = Vec::new();
+    for &page in st.order() {
+        for (aid, w) in st.widgets_on(page) {
+            let Some((kind, field)) = kind_of(&doc, aid) else {
+                continue;
+            };
+            let Some(r) = &w.src else {
+                continue;
+            };
+            let read = r.src.form().widget_by_object(r.id);
+            if read.is_none_or(|read| read.on_state.is_some()) {
+                continue;
+            }
+            let held = buttons(st, field).is_some_and(|group| group.on_state(aid).is_some());
+            if held && seen.insert((r.src.id(), r.id)) {
+                presses.push((aid, kind));
+            }
+        }
+    }
+    if presses.is_empty() {
+        return Ok(None);
+    }
+    let mut pressed = Pressed::default();
+    for &(aid, kind) in &presses {
+        fx::press(&mut doc, aid);
+        *pressed.pressed.entry(kind).or_default() += 1;
+    }
+    // Which widgets the save should make appearances for, and why one
+    // can't be: asked before it, as a save takes what it wrote for its
+    // file's.
+    let st = doc.state();
+    let no_font = |_: Option<&[u8]>| Err(sheaf_doc::pdf::forms::Unmade::FontNotBindable);
+    let stale: Vec<(sheaf_doc::AnnotId, &str, String)> = (st.annots())
+        .filter(|&(aid, _)| appearance::stale(st, aid))
+        .filter_map(|(aid, _)| {
+            let (kind, _) = kind_of(&doc, aid)?;
+            let why = match appearance::look(st, aid) {
+                Ok(look) => match appearance::make(&look, no_font) {
+                    Ok(_) => NOT_WRITTEN.to_string(),
+                    Err(why) => appearance::unmade_kind(&why),
+                },
+                Err(why) => why.kind(),
+            };
+            Some((aid, kind, format!("{kind}, {why}")))
+        })
+        .collect();
+    let (strategy, bytes) = common::saved_or_why(&mut doc, path, SaveHow::Rewrite)?;
+    let record = doc
+        .saved_record()
+        .ok_or("the pressed save left no record")?;
+    let mut unwritten = 0;
+    for (aid, kind, unmade) in stale {
+        *pressed.stale.entry(kind).or_default() += 1;
+        match (record.map.keys).contains_key(&ObjKey::AnnotPart(aid, Part::Ap)) {
+            true => *pressed.made.entry(kind).or_default() += 1,
+            false => {
+                unwritten += usize::from(unmade.ends_with(NOT_WRITTEN));
+                *pressed.unmade.entry(unmade).or_default() += 1;
+            }
+        }
+    }
+    if unwritten > 0 {
+        return Err(format!(
+            "{PRESSED}: no appearance written for {unwritten} widgets whose state changed and \
+             that one can be made for"
+        ));
+    }
+    let (report, version) = save_checked(&doc, 0, strategy, &bytes)?;
+    let held = (&doc, entry.path.as_str(), allowances);
+    let save = sorted_out(
+        PRESSED.into(),
+        (report, version, false),
+        held,
+        &mut BTreeMap::new(),
+    );
+    Ok(Some((save, pressed)))
 }
 
 /// `doc` given, in one version, a note and a recognized word on its first
@@ -1975,6 +2353,10 @@ struct Totals {
     unopened: BTreeMap<&'static str, usize>,
     /// Files whose first page took no word, by why.
     untexted: BTreeMap<&'static str, usize>,
+    /// Files with a pressed save, and what those pressed and made, summed
+    /// ([`pressed_save`]).
+    pressed_files: usize,
+    pressed: Pressed,
     checked: BTreeMap<String, usize>,
     keys: usize,
     /// Checks not made, by what stood in the way ([`in_the_way`]), and by
@@ -2001,6 +2383,22 @@ impl Totals {
         self.files += 1;
         if let Some(why) = form.untexted {
             *self.untexted.entry(why).or_default() += 1;
+        }
+        if let Some(pressed) = form.pressed {
+            self.pressed_files += 1;
+            let sums = &mut self.pressed;
+            for (kind, n) in pressed.pressed {
+                *sums.pressed.entry(kind).or_default() += n;
+            }
+            for (kind, n) in pressed.stale {
+                *sums.stale.entry(kind).or_default() += n;
+            }
+            for (kind, n) in pressed.made {
+                *sums.made.entry(kind).or_default() += n;
+            }
+            for (why, n) in pressed.unmade {
+                *sums.unmade.entry(why).or_default() += n;
+            }
         }
         for save in form.saves {
             let r = save.report;
@@ -2072,6 +2470,26 @@ impl Totals {
         }
         for (why, n) in &self.untexted {
             println!("  no word recognized, {why}: {n}");
+        }
+        let p = &self.pressed;
+        match self.pressed_files {
+            0 => println!(
+                "  no form has a check box or radio button whose file has no on state: no toggle \
+                 was pressed, and the pressed saves prove nothing of made toggles"
+            ),
+            n => println!("  forms whose toggles with no on state were pressed: {n}"),
+        }
+        for (kind, n) in &p.pressed {
+            println!("  pressed, {kind}: {n}");
+        }
+        for (kind, n) in &p.stale {
+            println!("  pressed, to be made, {kind}: {n}");
+        }
+        for (kind, n) in &p.made {
+            println!("  pressed, made, {kind}: {n}");
+        }
+        for (why, n) in &p.unmade {
+            println!("  pressed, not made, {why}: {n}");
         }
         for (table, n) in largest(&self.checked, usize::MAX) {
             println!("  checked as {table}: {n}");

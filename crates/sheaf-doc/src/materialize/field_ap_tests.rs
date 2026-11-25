@@ -71,7 +71,10 @@ fn fill_id(d: &mut Document, id: FieldId, value: &str) {
     let mut term = Terminal::clone(node.term.as_deref().expect("a terminal"));
     term.value = Some(Value::Text(value.into()));
     node.term = Some(Arc::new(term));
-    d.put_for_test(Key::Field(id), Some(Val::Field(Arc::new(node))), "fill");
+    d.put_for_test(
+        vec![(Key::Field(id), Some(Val::Field(Arc::new(node))))],
+        "fill",
+    );
 }
 
 /// A widget's `/AP` in `pdf`, references followed.
@@ -242,6 +245,24 @@ fn a_rewrite_writes_a_filled_field_s_appearance_where_a_mark_s_is() {
     }
     assert_eq!(span(&pdf, &out.bytes, b), span(&was, &bytes, b));
     assert_eq!(any_stream_holds(&pdf, b"Trenton"), []);
+
+    // The whole saved file, by this Rewrite and by an Append of the same
+    // fill, as the code before M10 slice 8 made `appearance` a module of
+    // kinds wrote it: the widget's dictionary, its form's and the form's
+    // compressed content, which nothing above holds byte for byte, are as
+    // they were. Taken from that code; never edited.
+    assert_eq!(
+        sheaf_util::checksum_hex(&out.bytes),
+        "e36fbc8b00e757ec9268167e80683fdd"
+    );
+    let dir = scratch();
+    let (path, mut appended) = opened(&dir, "a.pdf", &bytes);
+    fx::fill(&mut appended, "a", "Camden");
+    appended_in_place(&mut appended).unwrap();
+    assert_eq!(
+        sheaf_util::checksum_hex(&std::fs::read(&path).unwrap()),
+        "b3a5c22072529f5a52fb17c925aeafc8"
+    );
 
     // `b` naming `a`'s stream too: it stays, for `b`.
     let (mut f, a, b) = two_fields();

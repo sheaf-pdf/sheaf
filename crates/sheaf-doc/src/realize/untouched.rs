@@ -190,9 +190,11 @@ fn annots_kept(
                 let Some(r) = read.filter(|r| listed(r.id) && w.inst.copy == 0) else {
                     return false;
                 };
-                // Its text field's value changed: its appearance is made
-                // anew.
-                if crate::forms::appearance::stale(st, aid) {
+                // Its text field's value changed, or its button's state:
+                // its appearance is made anew, or its `/AS` written.
+                if crate::forms::appearance::stale(st, aid)
+                    || crate::forms::appearance::state_changed(st, aid).is_some()
+                {
                     return false;
                 }
                 // One object with its field, which shows elsewhere too: the
@@ -382,25 +384,25 @@ pub fn emission_is_base(st: &DocState, page: PageId, inputs: &ViewInputs) -> any
 }
 
 /// The appearance forms an overlay of page `page` of `st` alone, for
-/// `inputs`, makes for the page's widgets (M10 slice 6), each by its
-/// widget, as the overlay's emission holds it: its references the
-/// emitter's placeholders, its content as it's written. For tests, to set
-/// beside the forms a save writes for the same widgets: the realizer
-/// draws what the save writes.
+/// `inputs`, makes for the page's widgets (M10 slices 6 and 8), each by its
+/// widget and its part (a text field's `Part::Ap`; a check box's or radio
+/// button's on and `Off` forms, normal and down), as the overlay's
+/// emission holds it: its references the emitter's placeholders, its
+/// content as it's written. For tests, to set beside the forms a save
+/// writes for the same widgets: the realizer draws what the save writes.
 #[cfg(any(test, feature = "fixtures"))]
 pub fn overlay_appearances(
     st: &DocState,
     page: PageId,
     inputs: &ViewInputs,
-) -> anyhow::Result<Vec<(AnnotId, crate::pdf::Stream)>> {
+) -> anyhow::Result<Vec<(AnnotId, crate::materialize::key::Part, crate::pdf::Stream)>> {
     use crate::materialize::ObjKey;
     use crate::materialize::emit::SymObject;
-    use crate::materialize::key::Part;
 
     let e = overlay_alone(st, page, inputs)?;
     let mut forms = Vec::new();
     for (key, object) in e.objects {
-        let ObjKey::AnnotPart(aid, Part::Ap) = key else {
+        let ObjKey::AnnotPart(aid, part) = key else {
             continue;
         };
         if st.annot(aid).and_then(|rec| rec.widget()).is_none() {
@@ -414,7 +416,7 @@ pub fn overlay_appearances(
             SymObject::Deferred(d) => crate::pdf::Stream::new(d.dict, (d.data)()?),
             SymObject::Raw(_) => anyhow::bail!("{key:?} is a source's object, not one it made"),
         };
-        forms.push((aid, form));
+        forms.push((aid, part, form));
     }
     Ok(forms)
 }
