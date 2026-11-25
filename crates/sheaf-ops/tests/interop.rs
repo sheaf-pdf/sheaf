@@ -70,8 +70,9 @@
 //! each case the pixel checks (`tests/buttons.rs`) hold to PDFium's own,
 //! pass `qpdf --check`; pdftoppm draws each where it draws PDFium's, a
 //! mark loosely (poppler draws ZapfDingbats in a face of its own) and an
-//! `Off` with no frame not at all; and pdf.js reads each, with its
-//! warnings on, and warns of nothing.
+//! `Off` with no frame not at all; and pdf.js reads each and warns of
+//! nothing, but that it doesn't support a push button with no action,
+//! which each push button here is.
 //!
 //! qpdf is `$SHEAF_QPDF`, else `qpdf` on the PATH; pdf.js is `node` on the
 //! PATH with `$SHEAF_PDFJS`, pdfjs-dist's `legacy/build/pdf.mjs`, which
@@ -1655,14 +1656,18 @@ fn text_field_appearances_pass_qpdf_and_poppler_draws_them_where_pdfium_s() {
 }
 
 /// What pdf.js makes of each file given after pdf.js's `pdf.mjs`: `file`
-/// and its path, then, with pdf.js's warnings on (`verbosity` 1, each a
-/// line `Warning: …` of its own), the first page drawn at two pixels a
-/// point with its annotations' appearances, and each annotation's subtype,
-/// field type and the text pdf.js reads of its appearance, as JSON.
+/// and its path, then each warning pdf.js gives while it reads and draws
+/// it (a line `Warning: …` of its own; pdf.js says them through
+/// `console.warn`, which node writes to stderr, so the script says them
+/// on stdout instead, under the file they're of), the first page drawn at
+/// two pixels a point with its annotations' appearances, and each
+/// annotation's subtype, field type and the text pdf.js reads of its
+/// appearance, as JSON.
 const PDFJS_WARNED: &str = r#"
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+console.warn = (...said) => console.log(said.join(" "));
 const [lib, ...files] = process.argv.slice(2);
 const pdfjs = await import(pathToFileURL(lib).href);
 const standardFontDataUrl = new URL("../../standard_fonts/", pathToFileURL(lib)).pathname;
@@ -1684,6 +1689,43 @@ for (const file of files) {
 }
 "#;
 
+/// What pdf.js 6.4.299 warns of a push button that has no action (`/A` or
+/// `/AA`) and no tooltip: it draws the button's appearance and gives it
+/// nothing to do. The pixel checks' push buttons have none.
+const PDFJS_NO_ACTION: &str = "Warning: Push buttons without action dictionaries are not supported";
+
+/// The warnings among `lines`, what [`PDFJS_WARNED`] printed under one
+/// file: how many are the one a push button with no action gets
+/// ([`PDFJS_NO_ACTION`]), counted only for a file that `has_push`, and
+/// every other line that says `Warning`.
+fn warned<'a>(lines: &[&'a str], has_push: bool) -> (usize, Vec<&'a str>) {
+    let warnings = lines.iter().filter(|l| l.contains("Warning"));
+    let (allowed, other): (Vec<&str>, Vec<&str>) =
+        warnings.partition(|&&l| has_push && l == PDFJS_NO_ACTION);
+    (allowed.len(), other)
+}
+
+/// A warning is any line that says so; only a push button's file may have
+/// the one of no action, and that line exactly.
+#[test]
+fn pdfjs_warnings_are_told_from_the_one_a_push_button_gets() {
+    let lines = [
+        "annotation [\"Widget\",\"Btn\",\"\"]",
+        PDFJS_NO_ACTION,
+        "Warning: Indexing all PDF objects",
+        PDFJS_NO_ACTION,
+    ];
+    assert_eq!(
+        warned(&lines, true),
+        (2, vec!["Warning: Indexing all PDF objects"])
+    );
+    let (allowed, other) = warned(&lines, false);
+    assert_eq!((allowed, other.len()), (0, 3));
+    assert_eq!(warned(&lines[..1], true), (0, vec![]));
+    let longer = format!("{PDFJS_NO_ACTION} here");
+    assert_eq!(warned(&[&longer], true), (0, vec![&*longer]));
+}
+
 /// From M10 slice 8 a check box's and a radio button's appearances sheaf
 /// makes, in each case the pixel checks (`tests/buttons.rs`) hold to
 /// PDFium's own (each frame off, framed and not, and each mark on), a combo
@@ -1696,8 +1738,10 @@ for (const file of files) {
 /// checks' tolerance of where PDFium's reaches and [`INK_APART`] more on
 /// each edge, as poppler draws ZapfDingbats in a face of its own, and
 /// nothing at all for an `Off` with no frame; and pdf.js reads every file,
-/// draws its page and lists its widget, with its warnings on and none
-/// said.
+/// draws its page and lists its widget, and warns of nothing ([`warned`])
+/// but, of each push button, that it supports none without an action
+/// ([`PDFJS_NO_ACTION`]): these have none, and it says so of each, which
+/// also shows its warnings are heard.
 #[test]
 #[ignore = "needs qpdf, pdftoppm, or node and pdf.js"]
 fn button_and_choice_appearances_pass_qpdf_and_other_readers_draw_them() {
@@ -1720,6 +1764,7 @@ fn button_and_choice_appearances_pass_qpdf_and_other_readers_draw_them() {
     .collect();
     let mut failed = Vec::new();
     let mut files = Vec::new();
+    let mut pushes = std::collections::HashSet::new();
     let (mut bare, mut marked, mut boxed) = (0, 0, 0);
     for case in &cases {
         let (name, px) = (case.file_name(), case.pixels());
@@ -1731,6 +1776,9 @@ fn button_and_choice_appearances_pass_qpdf_and_other_readers_draw_them() {
             path
         });
         files.push(ours.clone());
+        if matches!(case.shows, Shows::Push { .. }) {
+            pushes.insert(ours.display().to_string());
+        }
         if let Some(qpdf) = &qpdf
             && let Err(e) = run(Command::new(qpdf).arg("--check").arg(&ours))
         {
@@ -1795,22 +1843,29 @@ fn button_and_choice_appearances_pass_qpdf_and_other_readers_draw_them() {
         std::fs::write(&script, PDFJS_WARNED).unwrap();
         let said = run(Command::new("node").arg(&script).arg(pdfjs).args(&files))
             .unwrap_or_else(|e| panic!("pdf.js: {e}"));
-        let mut read = 0;
+        let (mut read, mut no_action) = (0, 0);
         for block in said.split("file ").skip(1) {
             let (path, lines) = block.split_once('\n').unwrap();
             let lines: Vec<&str> = lines.lines().collect();
-            let warned: Vec<&&str> = lines.iter().filter(|l| l.contains("Warning")).collect();
             let widgets = (lines.iter())
                 .filter(|l| l.starts_with("annotation [\"Widget\""))
                 .count();
             read += 1;
-            if !warned.is_empty() || widgets != 1 {
+            let push = pushes.contains(path);
+            let (allowed, other) = warned(&lines, push);
+            no_action += allowed;
+            // A push button's one warning is said, so warnings are heard.
+            if !other.is_empty() || widgets != 1 || (push && allowed == 0) {
                 failed.push(format!(
-                    "pdf.js, {path}: {widgets} widgets, warned {warned:?}"
+                    "pdf.js, {path}: {widgets} widgets, {allowed} warnings of no action, \
+                     warned {other:?}"
                 ));
             }
         }
-        println!("pdf.js read {read} files, its annotations:\n{said}");
+        println!(
+            "pdf.js read {read} files, {no_action} warnings of a push button with no action; \
+             its annotations:\n{said}"
+        );
         assert_eq!(read, files.len(), "pdf.js read every file");
     }
     println!(
