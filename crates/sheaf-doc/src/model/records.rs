@@ -748,6 +748,12 @@ pub struct FieldProps {
     /// group's widgets with no on state of their own are named by their
     /// indexes.
     pub has_opt: bool,
+    /// A check box's or radio group's widgets' on states in its file, by
+    /// their [`index`](WidgetProps::index): every one's, so one the model
+    /// holds no widget for (on a page template, or on a page since
+    /// deleted) keeps the name its file gives it. Empty for any other
+    /// kind.
+    pub on_states: Vec<Option<String>>,
     /// `/TU`: what the field is for, in words.
     pub tooltip: Option<String>,
     /// Its own `/AA`: keystroke, format, validate and calculate.
@@ -769,6 +775,7 @@ impl Terminal {
                 top: field.top,
                 options: field.options.clone(),
                 has_opt: field.has_opt,
+                on_states: field.on_states.clone(),
                 tooltip: field.tooltip.clone(),
                 actions: field.actions.clone(),
             }),

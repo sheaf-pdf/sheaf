@@ -566,6 +566,7 @@ impl HeapSize for FieldProps {
     fn heap_size(&self) -> usize {
         self.da.heap_size()
             + self.options.heap_size()
+            + self.on_states.heap_size()
             + self.tooltip.heap_size()
             + self.actions.heap_size()
     }

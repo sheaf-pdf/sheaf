@@ -178,9 +178,9 @@ fn a_toggle_s_look_is_its_kind_caption_and_on_state() {
     assert_eq!(group.on_state(aid).as_deref(), Some(b"1".as_slice()));
     assert_eq!(group.press(aid).unwrap().states, [(aid, "1".into())]);
 
-    // Its field's terminal holding none of its widgets.
-    let id = d.state().field_named("bare").unwrap();
-    let aid = widget_of(&d, "bare", 0);
+    // The name is read from the widget's and its field's records alone:
+    // its field's terminal holding none of its widgets, it's the same.
+    let id = d.state().field_named("opt").unwrap();
     let mut node = FieldNode::clone(d.state().field(id).unwrap());
     let mut term = Terminal::clone(node.term.as_deref().unwrap());
     term.widgets.clear();
@@ -189,9 +189,12 @@ fn a_toggle_s_look_is_its_kind_caption_and_on_state() {
         vec![(Key::Field(id), Some(Val::Field(Arc::new(node))))],
         "orphan",
     );
-    let why = look(d.state(), aid).unwrap_err();
-    assert_eq!(why, Unmade::NotButton);
-    assert_eq!(unmade_kind(&why), "not-button");
+    let st = d.state();
+    assert_eq!(crate::forms::buttons(st, id).unwrap().on_state(aid), None);
+    match look(st, aid) {
+        Ok(Look::Toggle(look)) => assert_eq!(look.on_state, b"1"),
+        other => panic!("a button's widget: {other:?}"),
+    }
 }
 
 /// What's made for a widget nothing changed (as M10 slice 9's

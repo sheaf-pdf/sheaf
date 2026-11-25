@@ -692,6 +692,22 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         if widgets.is_empty() && field_kids {
             return;
         }
+        let kind = FieldKind::of(here.ft, here.flags);
+        // A check box or radio field's widgets' on states, every one's,
+        // a page's or not: its group names each by it.
+        let mut on_states = Vec::new();
+        if matches!(kind, FieldKind::CheckBox | FieldKind::Radio) {
+            for &(w, _) in &widgets {
+                let states = (pdf.dictionary(w))
+                    .and_then(|d| normal_of(pdf, d))
+                    .and_then(Object::as_dict);
+                let on = states.and_then(|n| on_state_of(pdf, n));
+                on_states.push(on.filter(|on| self.spend(on.len())));
+            }
+            if self.damaged.is_some() {
+                return;
+            }
+        }
         let tooltip = match dict.get(b"TU").and_then(|t| resolve(pdf, t)) {
             Some(t) => self.text(t),
             None => None,
@@ -704,7 +720,6 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         for ((w, kid), index) in widgets.into_iter().zip(0..) {
             self.widget_of.insert(w, WidgetOf { field, kid, index });
         }
-        let kind = FieldKind::of(here.ft, here.flags);
         let has_opt = here.options.as_ref().is_some_and(|o| o.array);
         let options = here.options.map(|o| o.for_kind(kind));
         self.fields.push(Field {
@@ -721,6 +736,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             top: here.top.unwrap_or(0),
             options: options.unwrap_or_else(|| Arc::from([])),
             has_opt,
+            on_states,
             tooltip: tooltip.map(|t| t.to_string()),
             actions,
             outside: 0,
@@ -1035,10 +1051,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         };
         let state = d.get(b"AS").and_then(Object::as_name);
         let state = state.filter(|s| self.spend(s.len())).map(latin1);
-        let normal = get(b"AP")
-            .and_then(Object::as_dict)
-            .and_then(|ap| ap.get(b"N"))
-            .and_then(|n| resolve(pdf, n));
+        let normal = normal_of(pdf, d);
         let mut states = Vec::new();
         let mut on_state = None;
         if let Some(PdfValue::Dict(n)) = normal.map(Object::value) {
@@ -1096,6 +1109,15 @@ fn text_position(o: &Object) -> Option<i32> {
         // `as` takes a real toward 0 and holds it within `i32`.
         None => o.as_number().filter(|v| v.is_finite()).map(|v| v as i32),
     }
+}
+
+/// Widget `d`'s normal appearance, `/AP /N`, each followed: a stream, or
+/// its states.
+fn normal_of<'a, P: Objects + ?Sized>(pdf: &'a P, d: &'a Dictionary) -> Option<&'a Object> {
+    (d.get(b"AP").and_then(|ap| resolve(pdf, ap)))
+        .and_then(Object::as_dict)
+        .and_then(|ap| ap.get(b"N"))
+        .and_then(|n| resolve(pdf, n))
 }
 
 /// The name of the on state of a normal appearance's states `n`: of its

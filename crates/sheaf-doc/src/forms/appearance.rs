@@ -176,8 +176,7 @@ impl Frame {
 /// terminal's (its own or a parent's, as read), else its instance's form's
 /// (`form_defaults`). [`Unmade::NotText`] for any other annotation, a
 /// widget whose field isn't a terminal, and a field of a kind no look is
-/// read for (a signature's); [`Unmade::NotButton`] for a check box's or
-/// radio button's widget its field's group doesn't hold; [`Unmade::Icon`]
+/// read for (a signature's); [`Unmade::Icon`]
 /// for a push button's that shows an icon. It doesn't ask [`stale`]: a
 /// look is read for any widget.
 pub fn look(st: &DocState, aid: AnnotId) -> Result<Look, Unmade> {
@@ -190,9 +189,7 @@ pub fn look(st: &DocState, aid: AnnotId) -> Result<Look, Unmade> {
     };
     match term.kind {
         FieldKind::Text => Ok(Look::Text(text::look(st, w, node, term))),
-        FieldKind::CheckBox | FieldKind::Radio => {
-            toggle::look(st, aid, w, node, term).map(Look::Toggle)
-        }
+        FieldKind::CheckBox | FieldKind::Radio => Ok(Look::Toggle(toggle::look(st, w, node, term))),
         FieldKind::Combo | FieldKind::List => Ok(Look::Choice(choice::look(st, w, node, term))),
         FieldKind::PushButton => push::look(st, w, node).map(Look::Push),
         _ => Err(Unmade::NotText),

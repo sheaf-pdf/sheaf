@@ -958,6 +958,7 @@ impl Feed for FieldProps {
             top,
             options,
             has_opt,
+            on_states,
             tooltip,
             actions,
         } = self;
@@ -967,6 +968,7 @@ impl Feed for FieldProps {
             .feed(top)
             .feed(options)
             .feed(has_opt)
+            .feed(on_states)
             .feed(tooltip)
             .feed(actions);
     }

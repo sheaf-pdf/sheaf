@@ -24,7 +24,7 @@ use super::{Frame, Made, Slot, frame, limits, read_widget};
 use crate::annot::AnnotId;
 use crate::content::{Glyphs, Res};
 use crate::forms::field::FieldKind;
-use crate::forms::group::{buttons, name_bytes};
+use crate::forms::group::{name_bytes, on_state};
 use crate::model::{DocState, FieldNode, Terminal, Widget};
 use crate::pdf::fonts::Std14;
 use crate::pdf::forms::{
@@ -49,7 +49,8 @@ pub struct ToggleLook {
     /// The name its on state's forms go under, its bytes: its file's, else
     /// its index under `/Opt`, else `Yes`, as its field's group names it
     /// ([`Buttons::on_state`](crate::forms::Buttons::on_state)) and as a
-    /// press puts it in `/AS`.
+    /// press puts it in `/AS`; read from the widget's and the field's
+    /// records alone, never by building the group.
     pub on_state: Vec<u8>,
     /// The widget's box, `/MK`, border and effective `/DA`: the mark's
     /// color, and its size where the `/DA` gives one.
@@ -73,26 +74,17 @@ impl fmt::Debug for ToggleLook {
     }
 }
 
-/// Widget `aid`, `w`, its look, `node` its field and `term` that field's
-/// terminal, a check box or radio field: whether it's a radio button's,
-/// its `/MK /CA`, the name its on state goes under, and its frame.
-/// [`Unmade::NotButton`] where its field's group doesn't hold it.
-pub(super) fn look(
-    st: &DocState,
-    aid: AnnotId,
-    w: &Widget,
-    node: &FieldNode,
-    term: &Terminal,
-) -> Result<ToggleLook, Unmade> {
-    let on_state = (buttons(st, w.field))
-        .and_then(|group| group.on_state(aid))
-        .ok_or(Unmade::NotButton)?;
-    Ok(ToggleLook {
+/// Widget `w`'s look, `node` its field and `term` that field's terminal,
+/// a check box or radio field: whether it's a radio button's, its `/MK
+/// /CA`, the name its on state goes under, and its frame. A map lookup or
+/// two, whatever the number of its field's widgets.
+pub(super) fn look(st: &DocState, w: &Widget, node: &FieldNode, term: &Terminal) -> ToggleLook {
+    ToggleLook {
         radio: term.kind == FieldKind::Radio,
         caption: w.mk.caption.clone(),
-        on_state,
+        on_state: on_state(term, w),
         frame: frame(st, w, node),
-    })
+    }
 }
 
 /// The state widget `aid` of `st` shows where it isn't the one its source

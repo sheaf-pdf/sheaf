@@ -21,7 +21,7 @@ use crate::forms::corpus::Corpus;
 use crate::forms::fixture::{Button, Form, NO_TOGGLE_TO_OFF, RADIO, RADIOS_IN_UNISON};
 use crate::history::FixedCount;
 use crate::materialize::tests::open;
-use crate::model::Document;
+use crate::model::{DocState, Document};
 use crate::pdf::forms::group::{FieldGroup, on_state_name};
 use crate::pdf::forms::{self, Limits};
 use crate::pdf::{Object, ObjectId, literal};
@@ -425,6 +425,133 @@ fn a_value_is_set_by_name_or_by_export_value() {
     assert_eq!(group(&d, "x").on_state(w[0]), None);
 }
 
+/// An index the model holds no widget at keeps the on state its file gives
+/// it: a widget on no page, and one a page delete took. So a value set by
+/// the name of a widget held after it turns that widget on, not the one
+/// that isn't there (which the rules would else name `Yes`, or its index
+/// under `/Opt`); set by the missing one's own name, the value is that
+/// name and every held widget is off, as the family's rules give for its
+/// reading of the file; and a press of the held one is as with every
+/// widget held.
+#[test]
+fn a_widget_the_model_doesnt_hold_keeps_its_files_on_state() {
+    let on = |page, on_state, shows| Button {
+        page,
+        rect: crate::forms::fixture::row(0),
+        on_state: Some(on_state),
+        shows: Some(shows),
+    };
+    let check = |d: &mut Document, opt: bool| {
+        let w = widgets(d, "r");
+        assert_eq!(w.len(), 1, "the widget held");
+        let g = group(d, "r");
+        assert_eq!(g.members.len(), 2, "both indexes");
+        assert!(g.shown[0].is_empty(), "the first is held nowhere");
+        assert!(format!("{g:?}").contains("holes: 1"), "{g:?}");
+        assert_eq!(g.on_state(w[0]), Some(b"Yes".to_vec()));
+        // The value it has: nothing changes.
+        let export = Some(if opt { "ex yes" } else { "Yes" }.to_string());
+        assert_eq!(
+            said(&g.set_state("Yes"), &w),
+            (state("Yes"), vec![], export.clone())
+        );
+        // The missing widget's name: the value is it, and the held one off.
+        let export_no = Some(if opt { "ex no" } else { "No" }.to_string());
+        assert_eq!(
+            said(&g.set_state("No"), &w),
+            (state("No"), vec![(0, "Off".into())], export_no)
+        );
+        assert_eq!(
+            said(
+                &g.set_export(if opt { "ex yes" } else { "Yes" }).unwrap(),
+                &w
+            ),
+            (state("Yes"), vec![], export)
+        );
+        // Pressed while on, with no NoToggleToOff, it turns off.
+        assert_eq!(
+            said(&g.press(w[0]).unwrap(), &w),
+            (state("Off"), vec![(0, "Off".into())], None)
+        );
+        fx::set_buttons(d, "r", "Yes");
+        assert_eq!(shown(d, "r"), states(&["Yes"]));
+        assert_eq!(value(d, "r"), Some(state("Yes")));
+    };
+    for opt in [false, true] {
+        // On no page: its field lists it, no page's /Annots does.
+        let mut f = Form::new(1);
+        let (r, kids) = f.buttons("r", RADIO, &[on(0, "No", "Off"), on(0, "Yes", "Yes")]);
+        if opt {
+            f.dict(r)
+                .set("Opt", vec![literal("ex no"), literal("ex yes")]);
+        }
+        f.set_annots(0, &kids[1..]);
+        let mut d = open(&f.bytes(), None);
+        let node = d.state().field(field(&d, "r")).unwrap();
+        let term = node.term.as_ref().unwrap();
+        assert_eq!(term.outside, 1);
+        assert_eq!(
+            term.props.on_states,
+            [Some("No".to_string()), Some("Yes".to_string())]
+        );
+        check(&mut d, opt);
+
+        // On a page since deleted.
+        let mut f = Form::new(2);
+        let (r, _) = f.buttons("r", RADIO, &[on(0, "No", "Off"), on(1, "Yes", "Yes")]);
+        if opt {
+            f.dict(r)
+                .set("Opt", vec![literal("ex no"), literal("ex yes")]);
+        }
+        let mut d = open(&f.bytes(), None);
+        assert_eq!(widgets(&d, "r").len(), 2);
+        let first = d.state().order()[0];
+        d.commit_ops(vec![fx::delete(&[first])], "delete").unwrap();
+        check(&mut d, opt);
+    }
+}
+
+/// The name a widget's on state goes under is the same read from its
+/// record and its field's alone ([`on_state`], what a toggle's look takes)
+/// as its group gives ([`Buttons::on_state`]): a name of its own, none,
+/// under `/Opt` and not, and a duplicate's copy.
+#[test]
+fn a_widgets_on_state_s_name_needs_no_group() {
+    let mut f = Form::new(2);
+    let buttons = [
+        Button::at(0, None, None),
+        Button::at(1, Some("own"), Some("Off")),
+        Button::at(2, Some("Off"), Some("Off")),
+    ];
+    f.buttons("plain", 0, &buttons);
+    let (c, _) = f.buttons("opt", RADIO, &buttons);
+    f.dict(c).set("Opt", vec![literal("x")]);
+    let mut d = open(&f.bytes(), None);
+    let first = d.state().order()[0];
+    d.commit_ops(vec![fx::duplicate(&[first])], "dup").unwrap();
+    let st = d.state();
+    let mut names = Vec::new();
+    for (id, _, term) in st.terminals() {
+        let group = buttons_of(st, id);
+        for &aid in &term.widgets {
+            let w = st.annot(aid).and_then(|r| r.widget()).unwrap();
+            let name = on_state(term, w);
+            assert_eq!(Some(&name), group.on_state(aid).as_ref());
+            names.push(String::from_utf8(name).unwrap());
+        }
+    }
+    names.sort();
+    let expected = [
+        "0", "0", "2", "2", "Yes", "Yes", "Yes", "Yes", "own", "own", "own", "own",
+    ];
+    assert_eq!(names, expected);
+}
+
+/// Field `id`'s group in `st`.
+fn buttons_of(st: &DocState, id: FieldId) -> Buttons {
+    buttons(st, id).expect("a check box or radio field")
+}
+
 /// A duplicated page's copy of a group is a group of its own: pressing its
 /// widget changes the copy alone, and the original's widget on the page
 /// not duplicated is no widget of the copy's.
@@ -627,6 +754,9 @@ struct Tally {
     /// how many: indexes none of whose widgets is compared.
     on_no_page: usize,
     unheld: usize,
+    /// Of those, the indexes set beside the family's all the same, by the
+    /// on state the field's record keeps for each.
+    unheld_compared: usize,
     /// Fields whose own dictionary is a widget beside kid widgets that no
     /// page lists: past every kid, so in neither group, and one of the
     /// field's widgets on no page (its `outside`).
@@ -651,6 +781,7 @@ impl Tally {
         self.own_after_kids += t.own_after_kids;
         self.on_no_page += t.on_no_page;
         self.unheld += t.unheld;
+        self.unheld_compared += t.unheld_compared;
         self.own_on_no_page += t.own_on_no_page;
         self.not_the_familys += t.not_the_familys;
         self.family_only_damaged += t.family_only_damaged;
@@ -710,15 +841,25 @@ fn tally(o: &Opened) -> Tally {
             continue;
         }
         let (n, m) = (a.widgets.len(), b.widgets.len());
+        // The field's own dictionary is a widget beside its kids.
+        let own_widget = {
+            let d = pdf.get_dictionary(object).ok();
+            d.is_some_and(|d| {
+                d.get(b"Subtype").and_then(Object::as_name) == Some(&b"Widget"[..])
+                    && d.has(b"Kids")
+            })
+        };
         if n > m {
-            // The extra index is the field's own dictionary, the last.
+            // The extra index is the field's own dictionary, the last,
+            // held where a page lists it.
             let own = |aid: &(AnnotId, Option<String>)| {
                 st.annot(aid.0)
                     .and_then(|r| r.widget())
                     .is_some_and(|w| w.merged)
             };
-            match n == m + 1 && ours.shown[m].iter().all(own) && !ours.shown[m].is_empty() {
-                true => t.own_after_kids += 1,
+            match n == m + 1 && own_widget && ours.shown[m].iter().all(own) {
+                true if !ours.shown[m].is_empty() => t.own_after_kids += 1,
+                true => {}
                 false => t.other.push(format!("{at}: {n} indexes, the family's {m}")),
             }
         }
@@ -727,14 +868,7 @@ fn tally(o: &Opened) -> Tally {
             .filter(|w| w.is_empty())
             .count())
             + m.saturating_sub(n);
-        let own_unlisted = {
-            let d = pdf.get_dictionary(object).ok();
-            let widget = d.is_some_and(|d| {
-                d.get(b"Subtype").and_then(Object::as_name) == Some(&b"Widget"[..])
-                    && d.has(b"Kids")
-            });
-            usize::from(widget && n <= m && src.form().widget_by_object(object).is_none())
-        };
+        let own_unlisted = usize::from(own_widget && src.form().widget_by_object(object).is_none());
         // Every widget of the field on no page is accounted for.
         if unheld + own_unlisted != usize::from(term.outside) {
             t.other.push(format!(
@@ -748,12 +882,31 @@ fn tally(o: &Opened) -> Tally {
         }
         t.own_on_no_page += own_unlisted;
         let on = ours.states(&a);
-        for i in (0..n.min(m)).filter(|&i| !ours.shown[i].is_empty()) {
-            t.indexes += 1;
-            let ours = (a.on_state(i), a.export_value(i), on[i]);
+        for i in 0..n.min(m) {
+            // An index the model holds no widget at is named and exports
+            // as the family's; what its file's widget shows isn't read.
+            let held = !ours.shown[i].is_empty();
+            match held {
+                true => t.indexes += 1,
+                false => t.unheld_compared += 1,
+            }
+            let ours_on = if held { on[i] } else { theirs.states()[i] };
+            let named = (a.on_state(i), a.export_value(i), ours_on);
             let family = (b.on_state(i), b.export_value(i), theirs.states()[i]);
-            if ours != family {
-                t.other.push(format!("{at} #{i}: {ours:?} and {family:?}"));
+            if named != family {
+                t.other.push(format!("{at} #{i}: {named:?} and {family:?}"));
+            }
+            // A held widget's own record names its on state as its field's.
+            for (aid, _) in &ours.shown[i] {
+                let w = st.annot(*aid).and_then(|r| r.widget()).expect("a widget");
+                if w.props.on_state != term.props.on_states[i] {
+                    t.other
+                        .push(format!("{at} #{i}: the widget's on state and the field's"));
+                }
+                if Some(on_state(term, w)) != a.on_state(i).map(Cow::into_owned) {
+                    t.other
+                        .push(format!("{at} #{i}: the name without the group"));
+                }
             }
         }
     }
@@ -775,10 +928,11 @@ fn tally(o: &Opened) -> Tally {
 
 /// Every check box and radio field of every corpus form: its group as
 /// sheaf's model holds it, beside the family's reading of the file
-/// (`Field::group`), equal in kind, flags and `/Opt`, and at each index
-/// the model holds in its on state's name, its export value and whether
-/// it's on. What differs is a class held to its count. Skips without the
-/// corpus.
+/// (`Field::group`), equal in kind, flags and `/Opt`, at every index in
+/// its on state's name and its export value (one the model holds no
+/// widget at too, by the name the field's record keeps), and at each the
+/// model holds in whether it's on. What differs is a class held to its
+/// count. Skips without the corpus.
 #[test]
 fn corpus_groups_are_the_familys() {
     let Some(corpus) = Corpus::or_skip() else {
@@ -814,6 +968,7 @@ fn corpus_groups_are_the_familys() {
         ("own_after_kids", t.own_after_kids),
         ("on_no_page", t.on_no_page),
         ("unheld", t.unheld),
+        ("unheld_compared", t.unheld_compared),
         ("own_on_no_page", t.own_on_no_page),
         ("not_the_familys", t.not_the_familys),
         ("family_only_damaged", t.family_only_damaged),
@@ -825,6 +980,7 @@ fn corpus_groups_are_the_familys() {
         ("own_after_kids", 36),
         ("on_no_page", 105),
         ("unheld", 109),
+        ("unheld_compared", 109),
         ("own_on_no_page", 10),
         ("not_the_familys", 1),
         ("family_only_damaged", 28),

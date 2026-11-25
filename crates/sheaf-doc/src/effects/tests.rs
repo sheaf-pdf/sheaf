@@ -148,6 +148,7 @@ fn terminal(kind: FieldKind, value: Option<Value>) -> Terminal {
             top: 0,
             options: Arc::from([]),
             has_opt: false,
+            on_states: Vec::new(),
             tooltip: None,
             actions: Vec::new(),
         }),

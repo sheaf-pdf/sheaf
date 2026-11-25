@@ -202,6 +202,12 @@ pub struct Field {
     /// a check box's or radio group's widgets with no on state of their
     /// own are named by their indexes (`pdf::forms::group::on_state_name`).
     pub has_opt: bool,
+    /// A check box's or radio group's widgets' on states, by their
+    /// [`index`](Widget::index): each one's [`on_state`](Widget::on_state),
+    /// a widget's on no page too, which no [`Widget`] is read for, so the
+    /// group names every one of its widgets as its file does. Empty for a
+    /// field of any other kind.
+    pub on_states: Vec<Option<String>>,
     /// `/TU`: what the field is for, in words.
     pub tooltip: Option<String>,
     /// Its own `/AA`: keystroke, format, validate and calculate.

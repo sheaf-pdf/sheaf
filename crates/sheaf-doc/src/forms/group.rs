@@ -14,8 +14,11 @@
 //! widgets in its file ([`WidgetProps::index`](crate::model::WidgetProps::index)),
 //! which the field's `/Opt` entries and an on state made under `/Opt` go
 //! by. An index the model holds no widget at (one on a page template,
-//! which the model doesn't hold, or one a page delete took) is a widget
-//! with no on state of its own, which nothing is put for; an index two of
+//! which the model doesn't hold, or one a page delete took) keeps the on
+//! state its file gives it, which the field's record holds for every
+//! index ([`FieldProps::on_states`](crate::model::FieldProps::on_states)),
+//! so the rules name it as its file does; it shows no state, and nothing
+//! is put for it. An index two of
 //! the model's widgets share (a page the page tree lists twice) puts both.
 //! A duplicate's copy of a field is a group of its own, of the copy's
 //! widgets.
@@ -29,8 +32,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::annot::AnnotId;
-use crate::model::DocState;
-use crate::pdf::forms::group::{Group, GroupKind, GroupWidget};
+use crate::model::{DocState, Terminal, Widget};
+use crate::pdf::forms::group::{Group, GroupKind, GroupWidget, on_state_name};
 
 use super::FieldId;
 use super::field::{FieldKind, Value, flags};
@@ -78,8 +81,17 @@ pub fn buttons(st: &DocState, field: FieldId) -> Option<Buttons> {
         FieldKind::Radio => GroupKind::Radio,
         _ => return None,
     };
-    let mut members: Vec<GroupWidget<'static>> = Vec::new();
-    let mut shown: Vec<Vec<(AnnotId, Option<String>)>> = Vec::new();
+    // Every index its file has, by the on state its file gives it; then
+    // the model's widgets, each at its own.
+    let member = |on_state: Option<&str>| {
+        let mut member = GroupWidget::new(None);
+        member.on_state = on_state.and_then(name_bytes).map(Cow::Owned);
+        member
+    };
+    let mut members: Vec<GroupWidget<'static>> = (term.props.on_states.iter())
+        .map(|on_state| member(on_state.as_deref()))
+        .collect();
+    let mut shown: Vec<Vec<(AnnotId, Option<String>)>> = vec![Vec::new(); members.len()];
     for &aid in &term.widgets {
         let Some(w) = st.annot(aid).and_then(|rec| rec.widget()) else {
             continue;
@@ -88,12 +100,7 @@ pub fn buttons(st: &DocState, field: FieldId) -> Option<Buttons> {
         if index >= members.len() {
             members.resize_with(index + 1, || GroupWidget::new(None));
             shown.resize_with(index + 1, Vec::new);
-        }
-        let member = &mut members[index];
-        if member.on_state.is_none() {
-            member.on_state = (w.props.on_state.as_deref())
-                .and_then(name_bytes)
-                .map(Cow::Owned);
+            members[index] = member(file_on_state(term, w));
         }
         shown[index].push((aid, w.state.clone()));
     }
@@ -109,6 +116,27 @@ pub fn buttons(st: &DocState, field: FieldId) -> Option<Buttons> {
         members,
         shown,
     })
+}
+
+/// The on state widget `w`'s file gives it, `term` its field's terminal:
+/// its field's record's for its index, and its own where the record has
+/// none for it (a widget its file's field didn't list).
+fn file_on_state<'a>(term: &'a Terminal, w: &'a Widget) -> Option<&'a str> {
+    match term.props.on_states.get(w.props.index as usize) {
+        Some(on_state) => on_state.as_deref(),
+        None => w.props.on_state.as_deref(),
+    }
+}
+
+/// The name widget `w`'s on state goes under, `term` its field's terminal,
+/// a check box or radio field's: its file's, else its index under `/Opt`,
+/// else `Yes` ([`on_state_name`]), as a made appearance names it and as a
+/// press puts it in `/AS`. What [`Buttons::on_state`] gives for it, from
+/// the widget's and the field's records alone: no group is built, so one
+/// widget's name costs nothing of its field's other widgets.
+pub(crate) fn on_state(term: &Terminal, w: &Widget) -> Vec<u8> {
+    let own = file_on_state(term, w).and_then(name_bytes);
+    on_state_name(own.as_deref(), term.props.has_opt, w.props.index as usize).into_owned()
 }
 
 impl Buttons {
@@ -154,8 +182,7 @@ impl Buttons {
     }
 
     /// The name `widget`'s on state goes under: its normal appearance's,
-    /// else its index under `/Opt`, else `Yes`
-    /// ([`on_state_name`](crate::pdf::forms::group::on_state_name)), as a
+    /// else its index under `/Opt`, else `Yes` ([`on_state_name`]), as a
     /// made appearance names it and as a press puts it in `/AS`. None
     /// where `widget` isn't one of the group's.
     pub fn on_state(&self, widget: AnnotId) -> Option<Vec<u8>> {
@@ -181,7 +208,8 @@ impl Buttons {
     /// shows its on state's name as the group names it, so a widget with
     /// no appearance yet is on where its state names the one its
     /// appearance would be made under (the family's `FieldGroup::states`).
-    /// An index the model holds no widget at is off.
+    /// An index the model holds no widget at is off: what its file's
+    /// widget shows isn't read.
     fn states(&self, group: &Group<'_>) -> Vec<bool> {
         (self.shown.iter().enumerate())
             .map(|(index, at)| {
