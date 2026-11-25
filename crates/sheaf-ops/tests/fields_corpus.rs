@@ -336,7 +336,7 @@ fn class(f: &Facts) -> Option<&'static str> {
     Some(match () {
         _ if f.pdfium_tf == "none" && f.nameless => NAMELESS,
         _ if f.pdfium_tf == "none" && f.ft_up.is_some_and(|up| up >= 2) => TYPE_UP,
-        _ if f.fallback > 0 => TWO_FONTS,
+        _ if f.fallback > 0 && f.frame == "alike" => TWO_FONTS,
         _ if f.font.starts_with("fallback:") && f.font != "fallback:Helvetica" => FALLBACK,
         _ if f.border.0.fract() != 0.0 => FRACTION,
         _ if f.border_array.is_some_and(|w| w as f32 != f.border.0) => BORDER_ARRAY,
@@ -401,6 +401,11 @@ struct Facts {
     /// Whether the two forms draw alike within a rounding
     /// ([`drawn::alike`]): `alike`, or the first thing that differs.
     drawn: String,
+    /// Whether the two forms draw alike but for their text
+    /// ([`drawn::frame_alike`]: the box, the matrix and the paths painted):
+    /// `alike`, or the first thing that differs; `-` where either isn't
+    /// read.
+    frame: String,
     /// Its field's full name is empty: PDFium finds a widget's field by
     /// its name, and finds none for an empty one.
     nameless: bool,
@@ -441,7 +446,7 @@ impl std::fmt::Display for Facts {
             f,
             "font={} kind={} da={} ff={:x} q={} maxlen={} w={} h={} r={} bw={} bs={} dash={} \
              bg={} bc={} size={} ovf={} fallback={} ours.tf={} pdfium.tf={} chars={} ascii={} \
-             euro={} drawn={} \
+             euro={} drawn={} frame={} \
              nameless={} f={} overlaps={} overlap_differs={} text={} wmaxlen={} border_array={} \
              ft_up={} auto={} edge_only={} levels={}",
             self.font,
@@ -471,6 +476,7 @@ impl std::fmt::Display for Facts {
             u8::from(self.ascii),
             u8::from(self.euro),
             self.drawn,
+            self.frame,
             u8::from(self.nameless),
             self.annot_flags,
             self.overlaps,
@@ -1414,20 +1420,21 @@ fn facts_of(w: &Filled, saved: &Pdf, copy: &Pdf) -> Facts {
     let pdfium = saved_ap(copy, w.object).ok().flatten();
     let ours = (w.saved).and_then(|at| saved_ap(saved, at).ok().flatten());
     let theirs = pdfium.as_ref().and_then(|ap| ap.form.as_ref());
-    let (alike, text) = match (ours.and_then(|ap| ap.form), theirs) {
+    let said = |alike: Result<(), String>| alike.err().unwrap_or_else(|| "alike".to_string());
+    let (alike, frame, text) = match (ours.and_then(|ap| ap.form), theirs) {
         (Some(a), Some(b)) => match (drawn::drawn(saved, &a), drawn::drawn(copy, b)) {
-            (Ok(a), Ok(b)) => {
-                let text = text_vs(a.text(), b.text());
-                match drawn::alike(&a, &b) {
-                    Ok(()) => ("alike".to_string(), text),
-                    Err(what) => (what, text),
-                }
-            }
-            (Err(e), _) | (_, Err(e)) => {
-                (format!("unread:{}", line(&e).replace(' ', "_")), "-".into())
-            }
+            (Ok(a), Ok(b)) => (
+                said(drawn::alike(&a, &b)),
+                said(drawn::frame_alike(&a, &b)),
+                text_vs(a.text(), b.text()),
+            ),
+            (Err(e), _) | (_, Err(e)) => (
+                format!("unread:{}", line(&e).replace(' ', "_")),
+                "-".into(),
+                "-".into(),
+            ),
         },
-        _ => ("none".to_string(), "-".to_string()),
+        _ => ("none".to_string(), "-".to_string(), "-".to_string()),
     };
     let pdfium_tf = match pdfium.as_ref().and_then(|ap| ap.form.as_ref()) {
         None => "none".to_string(),
@@ -1477,6 +1484,7 @@ fn facts_of(w: &Filled, saved: &Pdf, copy: &Pdf) -> Facts {
         ascii: w.look.text.is_ascii(),
         euro: w.look.text.contains('€'),
         drawn: alike,
+        frame,
         nameless: w.nameless,
         annot_flags: w.annot_flags,
         overlaps: 0,
