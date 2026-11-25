@@ -920,7 +920,7 @@ fn tally(o: &Opened) -> Tally {
         }
         t.own_on_no_page += own_unlisted;
         let on = ours.states(&a);
-        for i in 0..n.min(m) {
+        for (i, &shows_on) in on.iter().enumerate().take(n.min(m)) {
             // An index the model holds no widget at is named and exports
             // as the family's; what its file's widget shows isn't read.
             let held = !ours.shown[i].is_empty();
@@ -928,7 +928,7 @@ fn tally(o: &Opened) -> Tally {
                 true => t.indexes += 1,
                 false => t.unheld_compared += 1,
             }
-            let ours_on = if held { on[i] } else { theirs.states()[i] };
+            let ours_on = if held { shows_on } else { theirs.states()[i] };
             let named = (a.on_state(i), a.export_value(i), ours_on);
             let family = (b.on_state(i), b.export_value(i), theirs.states()[i]);
             if named != family {
