@@ -1,6 +1,6 @@
-//! Text fields', check boxes', radio buttons', combo boxes' and list boxes'
-//! appearances through `pdf-forms` (M10 slices 6 and 8), and a check box or
-//! radio group's rules (M10 slice 8).
+//! Text fields', check boxes', radio buttons', combo boxes', list boxes' and
+//! push buttons' appearances through `pdf-forms` (M10 slices 6 and 8), and a
+//! check box or radio group's rules (M10 slice 8).
 //!
 //! **Making one.** A text field's appearance is made from plain data
 //! ([`text_with_fallback`]): what the field shows ([`TextField`]: its text, flags
@@ -39,6 +39,12 @@
 //! selects ([`selected_options`], over each option's export value,
 //! [`FieldOption`]) is the family's rule too.
 //!
+//! A push button's ([`push_button`]) are made from its captions and whether
+//! it has rollover and down appearances ([`PushButton`]), the same
+//! [`WidgetLook`] and default appearance string, and the same set of fonts
+//! a choice is drawn in: its normal appearance, and its rollover and down
+//! ones where its `/H` calls for them ([`PushAppearances`]).
+//!
 //! **A group's rules.** What pressing a check box or radio button, or
 //! setting its field's value, does to each widget's state and to the
 //! value ([`group`]: [`Group`](group::Group) of
@@ -64,8 +70,8 @@
 
 pub use pdf_forms::appearance::{
     Appearance, ComboBox, Fallback as FieldFallback, FieldFont, ListBox, MadeWithFallback,
-    TextField, ToggleAppearances, ToggleButton, Unmade, WidgetLook, check_box, combo_box, list_box,
-    radio_button, text_with_fallback,
+    PushAppearances, PushButton, TextField, ToggleAppearances, ToggleButton, Unmade, WidgetLook,
+    check_box, combo_box, list_box, push_button, radio_button, text_with_fallback,
 };
 pub use pdf_forms::{Cap, Error, FieldFlags, FieldOption, Limits, Quadding, selected_options};
 

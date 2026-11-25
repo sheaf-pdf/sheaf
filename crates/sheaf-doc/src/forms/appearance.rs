@@ -12,14 +12,15 @@
 //! `/Tx BMC`, text in runs of the field's font and sheaf's fallback
 //! font ([`Fallback`](crate::content::Fallback), M10 slice 7) for what the
 //! field's can't draw, a check box's or radio button's mark in
-//! ZapfDingbats, and a combo box's or list box's text in the field's font
-//! and the fallback. What's made is a form for each slot of the widget's
-//! `/AP` ([`Made`], [`Slot`]).
+//! ZapfDingbats, and a combo box's or list box's text and a push button's
+//! captions in the field's font and the fallback. What's made is a form for
+//! each slot of the widget's `/AP` ([`Made`], [`Slot`]).
 //!
 //! Each kind is a module of its own: a text field's widget (`text`,
 //! [`TextLook`]), a check box's or radio button's (`toggle`,
-//! [`ToggleLook`]) and a combo box's or list box's (`choice`,
-//! [`ChoiceLook`]). What they share is here.
+//! [`ToggleLook`]), a combo box's or list box's (`choice`,
+//! [`ChoiceLook`]) and a push button's (`push`, [`PushLook`]). What they
+//! share is here.
 //!
 //! What's sheaf's and stays here: the model and its records, which widgets
 //! are made, the caps, a source's font cache, the names a made form gives
@@ -44,15 +45,19 @@ use crate::source::{FieldFontRead, Source};
 use crate::store::BlobId;
 
 mod choice;
+mod push;
 mod text;
 mod toggle;
 
 pub use choice::{ChoiceLook, ChoiceShows};
+pub use push::PushLook;
 pub use text::TextLook;
 pub use toggle::{ToggleLook, state_changed};
 
 #[cfg(test)]
 mod choice_tests;
+#[cfg(test)]
+mod push_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 #[cfg(test)]
@@ -70,6 +75,8 @@ pub enum Look {
     Toggle(ToggleLook),
     /// A combo box's or list box's widget.
     Choice(ChoiceLook),
+    /// A push button's widget.
+    Push(PushLook),
 }
 
 impl Look {
@@ -79,6 +86,7 @@ impl Look {
             Look::Text(look) => &look.frame,
             Look::Toggle(look) => &look.frame,
             Look::Choice(look) => &look.frame,
+            Look::Push(look) => &look.frame,
         }
     }
 }
@@ -162,15 +170,16 @@ impl Frame {
 
 /// What widget `aid`'s appearance is made from, by its kind: a text
 /// field's widget's ([`TextLook`]), a check box's or radio button's
-/// ([`ToggleLook`]), a combo box's or list box's ([`ChoiceLook`]). Every
-/// kind's frame is the widget's box, `/MK` and
-/// border, and its effective `/DA`: the widget's own, else the terminal's
-/// (its own or a parent's, as read), else its instance's form's
+/// ([`ToggleLook`]), a combo box's or list box's ([`ChoiceLook`]), a push
+/// button's ([`PushLook`]). Every kind's frame is the widget's box, `/MK`
+/// and border, and its effective `/DA`: the widget's own, else the
+/// terminal's (its own or a parent's, as read), else its instance's form's
 /// (`form_defaults`). [`Unmade::NotText`] for any other annotation, a
 /// widget whose field isn't a terminal, and a field of a kind no look is
-/// read for; [`Unmade::NotButton`] for a check box's or radio button's
-/// widget its field's group doesn't hold. It doesn't ask [`stale`]: a look
-/// is read for any widget.
+/// read for (a signature's); [`Unmade::NotButton`] for a check box's or
+/// radio button's widget its field's group doesn't hold; [`Unmade::Icon`]
+/// for a push button's that shows an icon. It doesn't ask [`stale`]: a
+/// look is read for any widget.
 pub fn look(st: &DocState, aid: AnnotId) -> Result<Look, Unmade> {
     let found = (st.annot(aid).and_then(|rec| rec.widget())).and_then(|w| {
         let node = st.field(w.field)?;
@@ -185,20 +194,16 @@ pub fn look(st: &DocState, aid: AnnotId) -> Result<Look, Unmade> {
             toggle::look(st, aid, w, node, term).map(Look::Toggle)
         }
         FieldKind::Combo | FieldKind::List => Ok(Look::Choice(choice::look(st, w, node, term))),
+        FieldKind::PushButton => push::look(st, w, node).map(Look::Push),
         _ => Err(Unmade::NotText),
     }
 }
 
 /// Widget `w`'s frame, `node` its field: its `/Rect`'s size, its `/MK`
 /// colors and rotation, its border (width 1, solid, where it has none), and
-/// the effective `/DA`, the widget's own, else its terminal's, else its
-/// instance's form's ([`form_defaults`]).
+/// its effective `/DA` ([`effective_da`]).
 fn frame(st: &DocState, w: &Widget, node: &FieldNode) -> Frame {
-    let term = node.term.as_deref();
-    let (form_da, _) = form_defaults(st, w, node);
-    let da = (w.da.as_deref())
-        .or(term.and_then(|t| t.props.da.as_deref()))
-        .or(form_da);
+    let da = effective_da(st, w, node);
     Frame {
         width: w.rect[2] - w.rect[0],
         height: w.rect[3] - w.rect[1],
@@ -210,6 +215,24 @@ fn frame(st: &DocState, w: &Widget, node: &FieldNode) -> Frame {
         // back whole.
         da: da.map_or_else(Vec::new, |da| da.chars().map(|c| c as u8).collect()),
     }
+}
+
+/// Widget `w`'s effective `/DA`, `node` its field: its own, else its
+/// terminal's (its own or a parent's, as read), else its instance's form's
+/// ([`form_defaults`]); none where none of them has one.
+fn effective_da<'a>(st: &'a DocState, w: &'a Widget, node: &'a FieldNode) -> Option<&'a str> {
+    let term = node.term.as_deref();
+    let (form_da, _) = form_defaults(st, w, node);
+    (w.da.as_deref())
+        .or(term.and_then(|t| t.props.da.as_deref()))
+        .or(form_da)
+}
+
+/// Widget `w`'s source widget, as its source's form was read: none for a
+/// widget read from no source, or not among its source's widgets as read.
+fn read_widget(w: &Widget) -> Option<&crate::forms::Widget> {
+    let r = w.src.as_ref()?;
+    r.src.form().widget_by_object(r.id)
 }
 
 /// The `/DA` and `/Q` widget `w`'s instance's form gives the fields that
@@ -244,17 +267,19 @@ fn form_defaults<'a>(
 /// goes under ([`ToggleLook::on_state`]), `Off`'s under `Off`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Slot {
-    /// `/N`, the normal appearance: a text field's one form; a check box's
-    /// or radio button's on state's.
+    /// `/N`, the normal appearance: a text field's, a choice's and a push
+    /// button's one form; a check box's or radio button's on state's.
     Normal,
     /// A check box's or radio button's normal appearance of `Off`, in
     /// `/N`.
     NormalOff,
     /// `/D`, the down appearance: a check box's or radio button's on
-    /// state's.
+    /// state's; a push button's one form.
     Down,
     /// A check box's or radio button's down appearance of `Off`, in `/D`.
     DownOff,
+    /// `/R`, a push button's rollover appearance.
+    Rollover,
 }
 
 /// What [`make`] makes of a look: each form, by the slot of the widget's
@@ -305,7 +330,9 @@ pub struct DaFont {
 /// what that can't draw; a check box's or radio button's, its on state's
 /// and `Off`'s normal and down forms (`toggle`), the mark in ZapfDingbats;
 /// a combo box's or list box's, its `/N` alone (`choice`), in the two fonts
-/// as a text field's. `font` gives the `/DA`'s font for the name the `/DA` gives (none where
+/// as a text field's; a push button's, its `/N`, and its `/R` and `/D`
+/// where its `/H` calls for them (`push`), its captions in the two fonts.
+/// `font` gives the `/DA`'s font for the name the `/DA` gives (none where
 /// it names none), and is asked only by a kind that draws in it: a check
 /// box's or radio button's mark isn't, so its `/DA`'s font is never read,
 /// and can't refuse it. Pure: the same look, font and name give the same
@@ -321,6 +348,7 @@ pub fn make(
         Look::Text(look) => text::make(look, font(look.frame.font_name().as_deref())?),
         Look::Toggle(look) => toggle::make(look),
         Look::Choice(look) => choice::make(look, font(look.frame.font_name().as_deref())?),
+        Look::Push(look) => push::make(look, font(look.frame.font_name().as_deref())?),
     }
 }
 
@@ -338,10 +366,13 @@ pub fn make(
 /// - a combo box's or list box's widget whose terminal's value holds other
 ///   texts than its source's field's as read (no value and an empty array
 ///   alike, a text and an array of it alike), or whose field was read from
-///   no source, or isn't among its source's fields as read.
+///   no source, or isn't among its source's fields as read;
+/// - a push button's widget whose captions (`/MK /CA`, `/RC`, `/AC`) aren't
+///   its source widget's as read (one not read had none): one nothing
+///   changed keeps its appearances, and one with none stays so.
 ///
 /// False for anything else. A map lookup or two and a compare of two
-/// strings, or of a list box's selected texts.
+/// strings, or of a list box's selected texts, or of three captions.
 pub fn stale(st: &DocState, aid: AnnotId) -> bool {
     let Some(w) = st.annot(aid).and_then(|rec| rec.widget()) else {
         return false;
@@ -356,6 +387,7 @@ pub fn stale(st: &DocState, aid: AnnotId) -> bool {
         FieldKind::Text => text::stale(node, term),
         FieldKind::CheckBox | FieldKind::Radio => toggle::stale(st, aid, w),
         FieldKind::Combo | FieldKind::List => choice::stale(node, term),
+        FieldKind::PushButton => push::stale(w),
         _ => false,
     }
 }
@@ -493,6 +525,7 @@ pub fn unmade_kind(why: &Unmade) -> String {
         Unmade::Limit(cap) => format!("limit:{}", cap_kind(*cap)),
         Unmade::NotText => "not-text".into(),
         Unmade::NotButton => "not-button".into(),
+        Unmade::Icon => "icon".into(),
         Unmade::NotChoice => "not-choice".into(),
         Unmade::UnencodableOption { .. } => "unencodable-option".into(),
         Unmade::FontNotBindable => "font-not-bindable".into(),

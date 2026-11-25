@@ -140,11 +140,13 @@ pub enum Part {
     /// A check box's or radio button's down appearance of `Off`, in
     /// `/AP /D`.
     ApDownOff,
+    /// A push button's rollover appearance, `/AP /R`.
+    ApRollover,
 }
 
 impl Part {
     /// Every part, in their keys' order.
-    pub const ALL: [Part; 8] = [
+    pub const ALL: [Part; 9] = [
         Part::Ap,
         Part::Companion,
         Part::FileSpec,
@@ -153,6 +155,7 @@ impl Part {
         Part::ApOff,
         Part::ApDown,
         Part::ApDownOff,
+        Part::ApRollover,
     ];
 }
 
@@ -267,6 +270,7 @@ impl ObjKey {
                     Part::ApOff => 5,
                     Part::ApDown => 6,
                     Part::ApDownOff => 7,
+                    Part::ApRollover => 8,
                 });
             }
             ObjKey::Field(id) => {
@@ -384,6 +388,7 @@ mod tests {
             ObjKey::AnnotPart(AnnotId(1), Part::ApOff),
             ObjKey::AnnotPart(AnnotId(1), Part::ApDown),
             ObjKey::AnnotPart(AnnotId(1), Part::ApDownOff),
+            ObjKey::AnnotPart(AnnotId(1), Part::ApRollover),
             ObjKey::Field(FieldId(1)),
             ObjKey::Bookmark(OutlineId(1)),
             ObjKey::Labels,
@@ -499,6 +504,10 @@ mod tests {
         assert_eq!(
             ObjKey::AnnotPart(AnnotId(2), Part::ApDownOff).bytes(),
             [8, 0, 0, 0, 0, 0, 0, 0, 2, 7]
+        );
+        assert_eq!(
+            ObjKey::AnnotPart(AnnotId(2), Part::ApRollover).bytes(),
+            [8, 0, 0, 0, 0, 0, 0, 0, 2, 8]
         );
         let mut parts = Part::ALL.to_vec();
         parts.sort();

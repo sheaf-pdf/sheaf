@@ -20,7 +20,7 @@
 use std::fmt;
 use std::sync::LazyLock;
 
-use super::{Frame, Made, Slot, frame, limits};
+use super::{Frame, Made, Slot, frame, limits, read_widget};
 use crate::annot::AnnotId;
 use crate::content::{Glyphs, Res};
 use crate::forms::field::FieldKind;
@@ -119,12 +119,6 @@ pub fn state_changed(st: &DocState, aid: AnnotId) -> Option<&str> {
 /// state in its normal appearance (or wasn't read).
 pub(super) fn stale(st: &DocState, aid: AnnotId, w: &Widget) -> bool {
     state_changed(st, aid).is_some() && read_widget(w).is_none_or(|read| read.on_state.is_none())
-}
-
-/// Widget `w`'s source widget, as its source's form was read.
-fn read_widget(w: &Widget) -> Option<&crate::forms::Widget> {
-    let r = w.src.as_ref()?;
-    r.src.form().widget_by_object(r.id)
 }
 
 /// `look`'s appearances, made by pdf-forms ([`check_box`] or

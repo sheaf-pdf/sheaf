@@ -126,6 +126,7 @@ fn widget(field: u64, state: Option<&str>) -> Widget {
             has_appearance: true,
             index: 0,
             on_state: None,
+            pressed: false,
         }),
     }
 }

@@ -899,6 +899,74 @@ fn a_widgets_on_state_is_the_least_name_of_a_stream() {
     assert_eq!((w.on_state.as_deref(), w.has_appearance), (None, true));
 }
 
+/// A push button's `/MK` and `/H`: its three captions, each a text and
+/// followed where it's a reference; `/TP` an integer, a real taken toward
+/// 0, one past `i32` held within it, and none where it's no number; `/I` an
+/// icon only where it's a stream, followed; `/H /P`, `/T` and the string
+/// `(P)` pressed, `/I`, `/N`, `/O` and none not. A widget with no `/MK` has
+/// none of them.
+#[test]
+fn a_push_button_s_captions_icon_and_highlight_are_read() {
+    let mut f = Form::new(1);
+    let rc = f.pdf.add_object(literal("Over"));
+    let icon = f
+        .pdf
+        .add_object(Stream::new(dictionary! {}, b"0 g".to_vec()));
+    let tps: [(Object, Option<i32>); 5] = [
+        (Object::from(1), Some(1)),
+        (Object::from(2.9), Some(2)),
+        (Object::from(-0.5), Some(0)),
+        (Object::from(1i64 << 40), Some(i32::MAX)),
+        (literal("1"), None),
+    ];
+    let mut ids = Vec::new();
+    for (i, (tp, _)) in tps.iter().enumerate() {
+        let id = f.push_button(&format!("b{i}"), 0, row(i), "Go");
+        let i_entry = match i {
+            0 => Object::from(icon),
+            _ => literal("x"),
+        };
+        let mk = dictionary! {
+            "CA" => literal("Go"), "RC" => rc, "AC" => crate::pdf::text::string("\u{141}"),
+            "TP" => tp.clone(), "I" => i_entry,
+        };
+        f.dict(id).set("MK", mk);
+        ids.push(id);
+    }
+    let highlights: [(Object, bool); 6] = [
+        (Object::name("P"), true),
+        (Object::name("T"), true),
+        (literal("P"), true),
+        (Object::name("I"), false),
+        (Object::name("N"), false),
+        (Object::name("O"), false),
+    ];
+    let mut his = Vec::new();
+    for (i, (h, _)) in highlights.iter().enumerate() {
+        let id = f.push_button(&format!("h{i}"), 0, row(6 + i), "Go");
+        f.dict(id).set("H", h.clone());
+        his.push(id);
+    }
+    let bare = f.push_button("bare", 0, row(13), "Go");
+    f.dict(bare).remove(b"MK");
+    let form = read_back(&mut f);
+    for (i, (_, tp)) in tps.iter().enumerate() {
+        let w = form.widget_by_object(ids[i]).unwrap();
+        assert_eq!(w.mk.caption.as_deref(), Some("Go"), "{i}");
+        assert_eq!(w.mk.rollover.as_deref(), Some("Over"), "{i}: followed");
+        assert_eq!(w.mk.down.as_deref(), Some("\u{141}"), "{i}");
+        assert_eq!(w.mk.text_position, *tp, "{i}");
+        assert_eq!(w.mk.icon, i == 0, "{i}");
+        assert!(!w.pressed, "{i}: no /H");
+    }
+    for (i, (_, pressed)) in highlights.iter().enumerate() {
+        let w = form.widget_by_object(his[i]).unwrap();
+        assert_eq!(w.pressed, *pressed, "{i}");
+    }
+    let w = form.widget_by_object(bare).unwrap();
+    assert_eq!(w.mk, Mk::default());
+}
+
 /// A field has `/Opt` where its own or a parent's is an array, an empty
 /// one too, and not where it's none or no array; a button field's keeps
 /// each item's place, one that is no text an empty option, and a choice

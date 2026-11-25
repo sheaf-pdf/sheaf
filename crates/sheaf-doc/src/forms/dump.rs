@@ -612,7 +612,7 @@ fn lines_of(path: &str, store: &Arc<Store>, src: &Src) -> Vec<String> {
                     Ok(Look::Text(look)) => Some(look),
                     // A text field as its file is read: never a button or
                     // a choice.
-                    Ok(Look::Toggle(_) | Look::Choice(_)) | Err(_) => None,
+                    Ok(Look::Toggle(_) | Look::Choice(_) | Look::Push(_)) | Err(_) => None,
                 });
             let Some(look) = look else {
                 counts.unlooked += 1;

@@ -952,6 +952,9 @@ pub struct WidgetProps {
     /// The name of its normal appearance's on state in its file, as the
     /// family reads one: none where it has no states.
     pub on_state: Option<String>,
+    /// `/H` is `/P` or `/T`: a push button's rollover and down appearances
+    /// are made.
+    pub pressed: bool,
 }
 
 impl Widget {
@@ -981,6 +984,7 @@ impl Widget {
                 has_appearance: w.has_appearance,
                 index: w.index,
                 on_state: w.on_state.clone(),
+                pressed: w.pressed,
             }),
         }
     }

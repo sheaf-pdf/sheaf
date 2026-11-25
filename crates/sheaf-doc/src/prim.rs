@@ -492,7 +492,7 @@ impl HeapSize for Foreign {
 
 impl HeapSize for Mk {
     fn heap_size(&self) -> usize {
-        self.caption.heap_size()
+        self.caption.heap_size() + self.rollover.heap_size() + self.down.heap_size()
     }
 }
 

@@ -1643,8 +1643,9 @@ of this, and a user sees nothing new.
   font cache; and the binding, with the names a made form gives a font.
 - **The plain data** (`look(st, aid)`, `Look::Text` for a text field's
   widget; since M10 slice 8 `Look::Toggle` for a check box's or radio
-  button's and `Look::Choice` for a combo box's or list box's;
-  `Unmade::NotText` for anything else): the terminal's value,
+  button's, `Look::Choice` for a combo box's or list box's and
+  `Look::Push` for a push button's, `Unmade::Icon` for one that shows an
+  icon; `Unmade::NotText` for anything else): the terminal's value,
   which is the text shown (a format script's display string, once slice
   9's op carries one), its `/Ff`, `/MaxLen` and effective `/Q`; and the
   widget's frame (`Frame`, which every kind's look shares: its box, `/MK`

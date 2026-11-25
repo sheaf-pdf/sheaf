@@ -1,8 +1,8 @@
 //! Ops as tests write them (M10.5 slice 11): a version made of the user's
 //! ops, the pages, bookmarks and files they name, and a fixture's marks
 //! said as the ops that make and change them; and a field's fill, a
-//! check box's or radio button's press or value, and a combo box's or list
-//! box's value, which no op makes yet.
+//! check box's or radio button's press or value, a combo box's or list
+//! box's value, and a push button's captions, which no op makes yet.
 //! For tests here and in other crates (the `fixtures` feature).
 
 use std::sync::Arc;
@@ -17,6 +17,7 @@ use sheaf_edit::{
 
 use super::{Actor, Commit, CommitOpts, EditError, JobKind, Tx};
 use crate::annot::{Annot, AnnotId, AnnotKind};
+use crate::forms::field::Mk;
 use crate::forms::{Change, FieldId, FieldKind, Value, buttons};
 use crate::labels::LabelSpec;
 use crate::model::{
@@ -117,6 +118,44 @@ pub fn choose(doc: &mut Document, name: &str, values: &[&str]) {
     node.term = Some(Arc::new(term));
     let val = Some(Val::Field(Arc::new(node)));
     doc.put_for_test(vec![(Key::Field(id), val)], "choose");
+}
+
+/// Widget `widget` of `doc`, a push button's, given the captions `normal`,
+/// `rollover` and `down` (`/MK /CA`, `/RC`, `/AC`; none for none), as a
+/// version of its own: what no op does, for tests of what a save or a
+/// render makes of a changed caption. Panics where `widget` isn't a push
+/// button's.
+pub fn caption(
+    doc: &mut Document,
+    widget: AnnotId,
+    normal: Option<&str>,
+    rollover: Option<&str>,
+    down: Option<&str>,
+) {
+    let st = doc.state();
+    let rec = st.annot(widget).expect("its widget");
+    let w = rec
+        .widget()
+        .unwrap_or_else(|| panic!("{widget:?} is no widget"));
+    let kind = st
+        .field(w.field)
+        .and_then(|f| f.term.as_deref())
+        .map(|t| t.kind);
+    assert_eq!(
+        kind,
+        Some(FieldKind::PushButton),
+        "{widget:?} is no push button's"
+    );
+    let mut w = Widget::clone(w);
+    let mut mk = Mk::clone(&w.mk);
+    let text = |c: Option<&str>| c.map(str::to_string);
+    (mk.caption, mk.rollover, mk.down) = (text(normal), text(rollover), text(down));
+    w.mk = Arc::new(mk);
+    let rec = AnnotRec {
+        page: rec.page,
+        body: AnnotBody::Widget(Arc::new(w)),
+    };
+    doc.put_for_test(vec![(Key::Annot(widget), Some(Val::Annot(rec)))], "caption");
 }
 
 /// Widget `widget` of `doc` pressed, by the group's rules

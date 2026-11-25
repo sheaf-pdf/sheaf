@@ -276,6 +276,10 @@ pub struct Widget {
     pub on_state: Option<String>,
     /// It has a normal appearance: a stream, or states.
     pub has_appearance: bool,
+    /// `/H` is `/P` (push) or `/T` (toggle), a name or, as PDFium reads
+    /// one, a string: a push button's rollover and down appearances are
+    /// made.
+    pub pressed: bool,
     /// `/A` and its own `/AA` (enter, exit, down, up, focus, blur).
     pub actions: Vec<(Trigger, Action)>,
 }
@@ -300,6 +304,17 @@ pub struct Mk {
     pub rotation: u16,
     /// `/CA`: a check box's glyph (in ZapfDingbats), or a button's caption.
     pub caption: Option<String>,
+    /// `/RC`: a push button's rollover caption.
+    pub rollover: Option<String>,
+    /// `/AC`: a push button's down caption.
+    pub down: Option<String>,
+    /// `/TP`: where a push button's caption goes beside its icon, 0 the
+    /// caption alone, 1 the icon alone: an integer, or a real taken toward
+    /// 0, within `i32` (as PDFium reads one); none where it's neither.
+    pub text_position: Option<i32>,
+    /// `/I` is a stream: a push button's normal icon, which sheaf doesn't
+    /// draw.
+    pub icon: bool,
 }
 
 /// A color in `/MK`, each part within 0–1.

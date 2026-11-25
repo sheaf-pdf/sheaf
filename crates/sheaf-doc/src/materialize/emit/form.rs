@@ -41,6 +41,12 @@
 //!   field's is, in the field's font and the fallback: one form under
 //!   `Part::Ap`, `<< /N … >>`. Its field's `/V` and `/I` are the file's
 //!   until M10 slice 9.
+//! - **A push button's widget whose captions changed**
+//!   ([`appearance::stale`]) gets its appearances made anew from them, in
+//!   the field's font and the fallback: `/N` under `Part::Ap`, and where its
+//!   `/H` is `/P` or `/T` `/R` under `ApRollover` and `/D` under `ApDown`,
+//!   `<< /N … /R … /D … >>`. One nothing changed keeps its own, and one with
+//!   none stays so. Its `/MK` is the file's, as a field's `/V` is.
 //! - **Widgets on page templates** (`/Names /Templates`) aren't records: a
 //!   primary field's kids the records don't account for and no page shows
 //!   stay in its `/Kids`, as the file has them.
@@ -455,8 +461,9 @@ pub(crate) fn widget(
     };
     let split = cx.form.split.contains(&w.field);
     let key = ObjKey::Annot(aid);
-    // Its text field's value changed, or its button's state where its file
-    // has no appearance of it: its appearance is made anew.
+    // Its text or choice field's value changed, its check box's or radio
+    // button's state where its file has no appearance of it, or its push
+    // button's captions: its appearance is made anew.
     let stale = appearance::stale(st, aid);
     // Its button's state changed: its `/AS` is the model's.
     let changed = appearance::state_changed(st, aid);
@@ -518,9 +525,9 @@ pub(crate) fn widget(
 }
 
 /// Widget `aid`'s appearance, made anew for its field as the model holds
-/// it ([`appearance::stale`]: a text or choice field's value, a button's
-/// state) and
-/// bound as a mark's is: made by pdf-forms from the model's plain data
+/// it ([`appearance::stale`]: a text or choice field's value, a check box's
+/// or radio button's state, a push button's captions) and bound as a
+/// mark's is: made by pdf-forms from the model's plain data
 /// ([`appearance::look`]) in the font its `/DA` names in `src`'s `/DR`,
 /// `src` the source the widget was read from, under that source's name (a
 /// merged `/DR` may have renamed it; it's still the same object), and the
@@ -528,15 +535,17 @@ pub(crate) fn widget(
 /// button's mark in ZapfDingbats, whose `/DA` font isn't read; each form it
 /// makes ([`Made`]) pushed under its part of `AnnotPart(aid, …)` where the
 /// emission writes it (a text's or a choice's one form, `/N`'s, under
-/// `Part::Ap`; a
-/// button's on state's and `Off`'s normal and down forms under `Ap`,
-/// `ApOff`, `ApDown` and `ApDownOff`), the fallback's glyphs joined to a
-/// form that draws in it and only there, as what's written is what binds
-/// them. The widget's `/AP`: a key for each form (`<< /N … >>` for a text
-/// field's), a button's in state dictionaries (`<< /N << /on … /Off … >>
-/// /D << … >> >>`, `on` its look's on state's name, no `/Off` where none
-/// was made), nothing else of the file's (its `/D` and `/R` would show the
-/// old value). None where none can be made: the widget is written with no
+/// `Part::Ap`; a check box's or radio button's on state's and `Off`'s
+/// normal and down forms under `Ap`, `ApOff`, `ApDown` and `ApDownOff`; a
+/// push button's normal, rollover and down forms under `Ap`, `ApRollover`
+/// and `ApDown`), the fallback's glyphs joined to a form that draws in it
+/// and only there, as what's written is what binds them. The widget's
+/// `/AP`: a key for each form (`<< /N … >>` for a text field's, `<< /N …
+/// /R … /D … >>` for a push button's with all three), a check box's or
+/// radio button's in state dictionaries (`<< /N << /on … /Off … >> /D <<
+/// … >> >>`, `on` its look's on state's name, no `/Off` where none was
+/// made), nothing else of the file's (its `/D` and `/R` would show the old
+/// value or caption). None where none can be made: the widget is written with no
 /// `/AP`, so no file shows a value the field no longer holds, and a
 /// warning says which kind, never the text.
 fn appearance(cx: &mut Cx, aid: AnnotId, src: &Src) -> Option<Object> {
@@ -559,7 +568,7 @@ fn appearance(cx: &mut Cx, aid: AnnotId, src: &Src) -> Option<Object> {
     // A check box's or radio button's forms go in state dictionaries.
     let on = match &look {
         Look::Toggle(toggle) => Some(toggle.on_state.as_slice()),
-        Look::Text(_) | Look::Choice(_) => None,
+        Look::Text(_) | Look::Choice(_) | Look::Push(_) => None,
     };
     let none = Glyphs::new();
     let mut ap = Dictionary::new();
@@ -570,6 +579,7 @@ fn appearance(cx: &mut Cx, aid: AnnotId, src: &Src) -> Option<Object> {
             Slot::NormalOff => (Part::ApOff, "N", true),
             Slot::Down => (Part::ApDown, "D", false),
             Slot::DownOff => (Part::ApDownOff, "D", true),
+            Slot::Rollover => (Part::ApRollover, "R", false),
         };
         let key = ObjKey::AnnotPart(aid, part);
         if cx.writes(&key) {
@@ -942,9 +952,9 @@ impl Fields {
             .copied();
         let one = merged.and_then(|w| Some(st.annot(w)?.page));
         let tags = one.is_some_and(|page| cx.keeps_tags(page));
-        // That widget's text field's value changed, or its button's state
-        // where its file has no appearance of it: its appearance is made
-        // anew.
+        // That widget's text or choice field's value changed, its check
+        // box's or radio button's state where its file has no appearance of
+        // it, or its push button's captions: its appearance is made anew.
         let stale = merged.is_some_and(|w| appearance::stale(st, w));
         // That widget's button's state changed: its `/AS` is the model's.
         let changed = merged.and_then(|w| appearance::state_changed(st, w));

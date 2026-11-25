@@ -971,10 +971,12 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         let mk = get(b"MK").and_then(Object::as_dict);
         let mk_get = |key: &[u8]| mk.and_then(|m| m.get(key)).and_then(|o| resolve(pdf, o));
         let rotation = mk_get(b"R").and_then(Object::as_integer).unwrap_or(0);
-        let caption = match mk_get(b"CA") {
-            Some(ca) => self.text(ca),
+        // `/CA`, `/RC` and `/AC`, each a text, in that order.
+        let mut caption = |key: &[u8]| match mk_get(key) {
+            Some(text) => self.text(text).map(|c| c.to_string()),
             None => None,
         };
+        let (normal, rollover, down) = (caption(b"CA"), caption(b"RC"), caption(b"AC"));
         let mk = Mk {
             background: mk_get(b"BG").and_then(|c| color(pdf, c)),
             border_color: mk_get(b"BC").and_then(|c| color(pdf, c)),
@@ -982,7 +984,11 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
                 r @ (90 | 180 | 270) => r as u16,
                 _ => 0,
             },
-            caption: caption.map(|c| c.to_string()),
+            caption: normal,
+            rollover,
+            down,
+            text_position: mk_get(b"TP").and_then(text_position),
+            icon: mk_get(b"I").is_some_and(|i| i.as_stream().is_some()),
         };
         let border = match (
             get(b"BS").and_then(Object::as_dict),
@@ -1054,6 +1060,10 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             true => (self.da(d), align(pdf, d)),
             false => (None, None),
         };
+        // `/H`: a name, or a string's bytes, as PDFium reads one.
+        let pressed = get(b"H")
+            .and_then(|h| h.as_name().or_else(|| h.as_bytes()))
+            .is_some_and(|h| matches!(h, b"P" | b"T"));
         let actions = self.actions(d, true);
         Widget {
             field,
@@ -1071,8 +1081,20 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             states,
             on_state,
             has_appearance,
+            pressed,
             actions,
         }
+    }
+}
+
+/// `/MK /TP`, `o` followed: an integer, or a finite real taken toward 0,
+/// each held within `i32`, as PDFium reads a number as an integer; none
+/// for anything else.
+fn text_position(o: &Object) -> Option<i32> {
+    match o.as_integer() {
+        Some(n) => Some(n.clamp(i32::MIN.into(), i32::MAX.into()) as i32),
+        // `as` takes a real toward 0 and holds it within `i32`.
+        None => o.as_number().filter(|v| v.is_finite()).map(|v| v as i32),
     }
 }
 

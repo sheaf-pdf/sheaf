@@ -109,6 +109,8 @@ mod plan_tests;
 #[cfg(test)]
 mod private_tests;
 #[cfg(test)]
+mod push_ap_tests;
+#[cfg(test)]
 mod recognized_tests;
 pub mod record;
 pub mod removal;
