@@ -15,7 +15,7 @@ use sheaf_edit::{Rotation, Turn};
 use super::fixture::{every_input, hiding, layer, their_comment};
 use super::*;
 use crate::forms::Value;
-use crate::forms::fixture::Form;
+use crate::forms::fixture::{Form, kids_beside};
 use crate::materialize::header_tests::ACROBAT_HEADER;
 use crate::materialize::others_tests::{ACROBAT, BODY, acrobat_file};
 use crate::materialize::tests::{add, bytes, file, insert, open};
@@ -295,6 +295,39 @@ fn the_predicate_agrees_with_the_emission_in_every_case() {
     // The link isn't drawn now: the page's key says so where it's drawn.
     assert_ne!(key(&d, &screen), was[0]);
     assert_eq!(key(&d, &content), was[1]);
+}
+
+/// Fields whose own dictionary is a widget beside kid widgets
+/// ([`kids_beside`]): as opened, the page of those widgets draws as its
+/// base does, an overlay of it writing each field and its widget as one
+/// object as the file has them, and the page with only kids of them
+/// doesn't, an overlay of it writing the fields apart, without those
+/// widgets' keys. A press of the check box's own widget, or of its kid on
+/// the second page, and a fill of the text field, each change the page of
+/// what they change, and the model agrees with the emission on every one.
+#[test]
+fn a_field_beside_its_kids_is_untouched_where_an_overlay_writes_it_as_read() {
+    let bytes = kids_beside().bytes();
+    let d = opened(bytes.clone(), "kids.pdf");
+    assert_eq!(agree(d.state(), "beside, opened"), [true, false]);
+    let content = verdicts(d.state(), &ViewInputs::content_only(), "beside");
+    assert_eq!(content, [true, true], "no widget drawn");
+    let widgets = |d: &crate::Document, name: &str| -> Vec<crate::annot::AnnotId> {
+        let st = d.state();
+        let field = st.field_named(name).unwrap();
+        let term = st.field(field).unwrap().term.clone().unwrap();
+        term.widgets.iter().copied().collect()
+    };
+    // Its own widget, then its kids.
+    for (pressed, want) in [(0, [false, false]), (2, [true, false])] {
+        let mut d = opened(bytes.clone(), "kids.pdf");
+        let w = widgets(&d, "c")[pressed];
+        fx::press(&mut d, w);
+        assert_eq!(agree(d.state(), "beside, pressed"), want, "{pressed}");
+    }
+    let mut d = opened(bytes, "kids.pdf");
+    fx::fill(&mut d, "t", "Camden");
+    assert_eq!(agree(d.state(), "beside, filled"), [false, false]);
 }
 
 /// An untouched page is viewed in its source's base engine at its base

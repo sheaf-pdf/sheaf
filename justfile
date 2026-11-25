@@ -461,12 +461,12 @@ tier-codes:
 # saved as planned, then a Rewrite, each save's objects checked; the
 # form's own aren't. A form with check boxes or radio buttons whose file
 # has no on state has a save of its own (M10 slice 8): each pressed and
-# the document rewritten, so the appearances made of them are checked,
-# with how many were pressed, made and not. SHEAF_ARLINGTON_ONLY=<paths,
+# the document saved as planned, so the appearances made of them are
+# checked, with how many were pressed, made and not. SHEAF_ARLINGTON_ONLY=<paths,
 # comma-separated> narrows it to a few forms; SHEAF_ARLINGTON_SAVES=<file>
 # writes each save's counts there, a line each, to set one run beside
 # another.
-[doc("pdf-lint over what sheaf writes on every form: a mark, a header and footer, recognized text, then a Rewrite, and its unmade toggles pressed (SHEAF_ARLINGTON_ONLY narrows it, SHEAF_ARLINGTON_SAVES writes each save's counts)")]
+[doc("pdf-lint over what sheaf writes on every form: a mark, a header and footer, recognized text, then a Rewrite, and its unmade toggles pressed and saved as planned (SHEAF_ARLINGTON_ONLY narrows it, SHEAF_ARLINGTON_SAVES writes each save's counts)")]
 [group('corpus')]
 tier-arlington:
     scripts/test-capped.sh cargo test -p sheaf-ops --test arlington -- --ignored --nocapture

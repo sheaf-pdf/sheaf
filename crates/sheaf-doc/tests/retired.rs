@@ -1062,6 +1062,11 @@ const RETIRED_M10: &[(&str, u8)] = &[
     // (`Look::Text` for a text field's widget, over the `Frame` every kind
     // shares): no reader for text alone beside it.
     ("forms::appearance::text_look", 8),
+    // Which widget a field is one object with is `emit::form::joined`'s,
+    // which the emitter, an Append's scope and the realizer's predicate
+    // each ask: a field whose own dictionary is a widget beside its kids
+    // is one object with it, not only a field of one widget.
+    ("materialize::deps::merged_widget", 9),
 ];
 
 /// Every name M11 retired, with the slice of `plan/m11-security/README.md` that retired

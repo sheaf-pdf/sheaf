@@ -717,7 +717,8 @@ impl<'a> Deps<'a> {
         // A widget that was its field's object and isn't now, or the other
         // way round, is written at another number: the pages listing the
         // field's widgets list them anew.
-        if merged_widget(self.was, f) != merged_widget(self.now, f) {
+        let merged = |st| emit::form::joined(st, f).widget();
+        if merged(self.was) != merged(self.now) {
             let pages: Vec<PageId> = (widgets.iter())
                 .filter_map(|&w| Some(self.now.annot(w)?.page))
                 .collect();
@@ -1012,7 +1013,7 @@ impl<'a> Deps<'a> {
                     };
                     let copy = w.inst.copy;
                     // One its field's object is, written with it.
-                    let merged = merged_widget(now, w.field) == Some(a);
+                    let merged = emit::form::joined(now, w.field).widget() == Some(a);
                     let again = written(key) || (merged && written(ObjKey::Field(w.field)));
                     if !anew(again, r.src.id(), copy)
                         && walk.reaches(&r.src, copy, &Object::from(r.id), ANNOT_OWN)
@@ -1068,18 +1069,6 @@ impl<'a> Deps<'a> {
         }
         None
     }
-}
-
-/// The widget field `f` of `st` is written as one object with, as the
-/// emitter merges them: its one widget, read merged with it.
-fn merged_widget(st: &DocState, f: crate::forms::FieldId) -> Option<AnnotId> {
-    let node = st.field(f)?;
-    let src = node.src.as_ref()?;
-    let widgets = &node.term.as_ref()?.widgets;
-    let w = *widgets.front().filter(|_| widgets.len() == 1)?;
-    let widget = st.annot(w)?.widget()?;
-    let own = widget.src.as_ref().is_some_and(|r| r.id == src.id);
-    (widget.merged && own).then_some(w)
 }
 
 /// The name a reply names annotation `rec` by.

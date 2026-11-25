@@ -17,13 +17,14 @@ use crate::pdf::{
 use in_progress::NoProgress;
 
 use super::append_tests::{appended_in_place, written};
+use super::field_ap_tests::{EACH_WAY, form_shape, kids_of, saved_each_way};
 use super::key::{ObjKey, Part};
 use super::removal_tests::{opened, scratch, warned};
 use super::tests::{add, insert, lazy, open, rewrite, span};
 use super::*;
 use crate::annot::AnnotId;
 use crate::forms::appearance::tests::shown;
-use crate::forms::fixture::{Button, Form, RADIO, row};
+use crate::forms::fixture::{Button, Form, RADIO, kids_beside, row};
 use crate::model::Document;
 use crate::realize::{ViewInputs, overlay_appearances, untouched};
 use crate::tx::fixture as fx;
@@ -745,6 +746,77 @@ fn each_kind_of_widget_gets_its_forms() {
     );
     assert_eq!(shows(&pdf, at), Some(n("Yes")));
     let _ = theirs;
+}
+
+/// A check box whose own dictionary is a widget beside kid widgets is
+/// written as its file has it: one object that's the field and that
+/// widget, at the field's number, its kids in its `/Kids`. Its own widget
+/// pressed (it and its kid of the same on state turn on), and in another
+/// document its kid of another on state on the second page pressed (the
+/// field's own widget stays off), each saved by a Rewrite, an Append and
+/// as planned (an Append: a box turned on replaces nothing) and checked as
+/// every save is: each widget shows the model's state, the field's own on
+/// its object; the Append writes the field and its kids at their numbers
+/// and no page; each saved file reopens to the same fields, each widget at
+/// its place.
+#[test]
+fn a_check_box_beside_its_kid_widgets_is_saved_as_its_file_has_it() {
+    let mut f = kids_beside();
+    let c = f.fields()[1];
+    let kids = f.widgets_of(c);
+    let pages = f.pages.clone();
+    let bytes = table(&mut f);
+    let size = lazy(&bytes, None).xref().size;
+    let shape = form_shape(&open(&bytes, None));
+    assert_eq!(shape[1].2, [(0, 2, true), (0, 0, false), (1, 1, false)]);
+    // Which of its widgets is pressed (its own, then its kids), and what
+    // each object shows after: its kids', then its own.
+    let cases = [(0, ["Yes", "Off", "Yes"]), (2, ["Off", "Two", "Off"])];
+    for (pressed, after) in cases {
+        for how in EACH_WAY {
+            let case = format!("widget {pressed} pressed, {how}");
+            let dir = scratch();
+            let (path, mut d) = opened(&dir, "a.pdf", &bytes);
+            let widgets = widgets_of(&d, "c");
+            fx::press(&mut d, widgets[pressed]);
+            let strategy = saved_each_way(&mut d, &path, how);
+            let appended = how != "a Rewrite";
+            let want = match appended {
+                true => StrategyKind::Append,
+                false => StrategyKind::Rewrite,
+            };
+            assert_eq!(strategy, want, "{case}");
+            let record = d.saved_record().unwrap();
+            let at = |key| {
+                let at = record.map.keys.get(&key).copied();
+                at.unwrap_or_else(|| panic!("{case}: no {key:?} in {:?}", record.map.keys))
+            };
+            // The field's number, where the map lists its key (a Rewrite
+            // that copies it as it is doesn't); its own widget's always.
+            let field = d.state().field_named("c").unwrap();
+            let listed = record.map.keys.get(&ObjKey::Field(field));
+            assert!(listed.is_none_or(|&at| at == c), "{case}: {listed:?}");
+            assert_eq!(at(ObjKey::Annot(widgets[0])), c, "{case}: one object");
+            let now = std::fs::read(&path).unwrap();
+            let pdf = lazy(&now, None);
+            let dict = pdf.get_dictionary(c).unwrap();
+            let subtype = dict.get(b"Subtype").and_then(Object::as_name);
+            assert_eq!(subtype, Some(b"Widget".as_slice()), "{case}");
+            assert_eq!(kids_of(&pdf, c), kids, "{case}");
+            for (id, state) in [kids[0], kids[1], c].into_iter().zip(after) {
+                assert_eq!(shows(&pdf, id), Some(n(state)), "{case}: {id:?}");
+            }
+            if appended {
+                let wrote = written(bytes.len(), &now[bytes.len()..], &path);
+                let old: BTreeSet<ObjectId> = (wrote.iter().copied())
+                    .filter(|id| id.number < size)
+                    .collect();
+                assert_eq!(old, BTreeSet::from([c, kids[0], kids[1]]), "{case}");
+                assert!(pages.iter().all(|p| !wrote.contains(p)), "{case}: no page");
+            }
+            assert_eq!(form_shape(&open(&now, None)), shape, "{case}: reopened");
+        }
+    }
 }
 
 /// An overlay of the page holds the save's forms for a pressed check box

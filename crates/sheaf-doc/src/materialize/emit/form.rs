@@ -8,13 +8,22 @@
 //!   instance whose names clashed is written from its record. Copy 0 of
 //!   the primary's own keeps its numbers, and a field the save changed
 //!   nothing of is the file's object as it is.
-//! - **A field merged with its one widget** (ISO 32000-1 12.7.3.1) is one
-//!   object under [`ObjKey::Field`]: the page's `/Annots` names it, and the
-//!   widget's key is an alias of it ([`Plan::aliases`]), so no number is
-//!   written twice. A copy stays merged, with no `/Parent` but the tree's,
-//!   so it's never an orphan. One whose widget the state shows more than
-//!   once (a page the tree lists twice) is written apart: the field's keys
-//!   in the field, each widget with the widget's.
+//! - **A field whose own dictionary is a widget** (ISO 32000-1 12.7.3.1)
+//!   is one object with it under [`ObjKey::Field`], as its file has it,
+//!   whatever other widgets it has, which are its kids beside it
+//!   ([`joined`], which the Append's scope and the realizer's predicate ask
+//!   too): the page's `/Annots` names it, and the widget's key is an alias
+//!   of it ([`Plan::aliases`]), so no number is written twice, and an
+//!   Append of it writes the field at its number and no page. A copy
+//!   stays merged, with no `/Parent` but the tree's, so it's never an
+//!   orphan. One whose widget the state shows more than once (a page the
+//!   tree lists twice) is written apart: the field's keys in the field,
+//!   each widget with the widget's. So is one an overlay writes without
+//!   that widget's page: the field's keys alone, as no page it writes
+//!   lists the widget. One an overlay writes with that widget and none of
+//!   its kids lists them still, where its base has them: PDFium takes a
+//!   field's own dictionary for its widget only where the field lists no
+//!   kids, and draws it then, which it doesn't from the file.
 //! - **Widgets** not merged are their source's, `/Parent` their field and
 //!   `/P` their page, `/StructParent` kept only where the page keeps its
 //!   tags.
@@ -139,11 +148,16 @@ const MAX_SCRIPTS: usize = Limits::DEFAULT.forms.scripts;
 /// What the form's emission decides before the pages are written.
 #[derive(Default)]
 pub(crate) struct Plan {
-    /// Widgets that are their field's one object, by id: their field.
+    /// Widgets that are one object with their field ([`Joined::One`]), by
+    /// id: their field.
     merged: HashMap<AnnotId, FieldId>,
-    /// Fields read merged with a widget the state shows more than once:
-    /// written apart from their widgets.
+    /// Fields read merged with a widget the state shows more than once
+    /// ([`Joined::Split`]): written apart from their widgets.
     split: HashSet<FieldId>,
+    /// An overlay's fields one object with a widget on a page it doesn't
+    /// show: written without that widget's keys, which no page it writes
+    /// lists.
+    unshown: HashSet<FieldId>,
     /// `/DR` merged, when files other than the primary's bring forms.
     dr: Option<Dictionary>,
     /// Each other file's fonts renamed in `/DR`, by old name.
@@ -177,32 +191,84 @@ impl Plan {
     }
 }
 
+/// How a field is written with its widgets ([`joined`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Joined {
+    /// No widget of it was read as its own dictionary: each is an object of
+    /// its own, a kid of it.
+    Kids,
+    /// Its own dictionary is this widget's, as its file has it: the two are
+    /// one object, and its other widgets, if any, are its kids beside it.
+    One(AnnotId),
+    /// The state shows the widget that's its own dictionary more than once
+    /// (a page the tree lists twice): the field and each widget are
+    /// written apart.
+    Split,
+}
+
+impl Joined {
+    /// The widget it's one object with, if any.
+    pub(crate) fn widget(self) -> Option<AnnotId> {
+        match self {
+            Joined::One(w) => Some(w),
+            Joined::Kids | Joined::Split => None,
+        }
+    }
+}
+
+/// How field `f` of `st` is written with its widgets, by every emission:
+/// one object with the widget of it read as its own dictionary, however
+/// many other widgets it has; apart where the state shows that widget more
+/// than once, or none of its widgets is it. What [`prepare`] writes, what
+/// an Append's scope brings in for it (`deps.rs`), and what the realizer's
+/// predicate takes as written as its file has it (`untouched.rs`).
+pub(crate) fn joined(st: &DocState, f: FieldId) -> Joined {
+    let Some(node) = st.field(f) else {
+        return Joined::Kids;
+    };
+    let (Some(src), Some(term)) = (&node.src, node.term.as_deref()) else {
+        return Joined::Kids;
+    };
+    let own = |w: &AnnotId| {
+        (st.annot(*w).and_then(AnnotRec::widget))
+            .is_some_and(|w| w.merged && w.src.as_ref().is_some_and(|r| r.id == src.id))
+    };
+    let mut own = term.widgets.iter().copied().filter(own);
+    match (own.next(), own.next()) {
+        (None, _) => Joined::Kids,
+        (Some(w), None) => Joined::One(w),
+        (Some(_), Some(_)) => Joined::Split,
+    }
+}
+
 /// The form's plan, and its fields' claims to the primary's numbers: copy 0
 /// of the primary's own nodes keep theirs. An overlay's is of the fields
 /// with a widget on its pages alone.
 pub(crate) fn prepare(cx: &mut Cx) -> Plan {
     let st = cx.st;
     let scoped = (cx.overlay).map(|_| scoped(st, cx.shown.keys().copied()));
-    let terminals = (nodes(st, scoped.as_ref()))
-        .filter_map(|(fid, node)| Some((fid, &**node, &**node.term.as_ref()?)));
     let mut merged = HashMap::new();
     let mut split = HashSet::new();
-    for (fid, node, term) in terminals {
-        let Some(src) = &node.src else {
-            continue;
-        };
-        let shows: Vec<(AnnotId, &Arc<Widget>)> = (term.widgets.iter())
-            .filter_map(|&w| Some((w, st.annot(w)?.widget()?)))
-            .collect();
-        let one = |w: &Widget| w.merged && w.src.as_ref().is_some_and(|r| r.id == src.id);
-        match shows.as_slice() {
-            [(w, widget)] if one(widget) => {
-                merged.insert(*w, fid);
+    let mut unshown = HashSet::new();
+    let terminals = nodes(st, scoped.as_ref()).filter(|(_, node)| node.term.is_some());
+    for (fid, _) in terminals {
+        match joined(st, fid) {
+            // An overlay that doesn't show that widget's page writes the
+            // field apart: merged, it would hold a widget's keys no page it
+            // writes lists, `/P` naming a page it doesn't write.
+            Joined::One(w)
+                if cx.overlay.is_some()
+                    && !(st.annot(w)).is_some_and(|a| cx.shown.contains_key(&a.page)) =>
+            {
+                unshown.insert(fid);
             }
-            many if many.iter().any(|(_, w)| one(w)) => {
+            Joined::One(w) => {
+                merged.insert(w, fid);
+            }
+            Joined::Split => {
                 split.insert(fid);
             }
-            _ => {}
+            Joined::Kids => {}
         }
     }
     let primary = cx.primary.id();
@@ -227,6 +293,7 @@ pub(crate) fn prepare(cx: &mut Cx) -> Plan {
     let mut plan = Plan {
         merged,
         split,
+        unshown,
         dr: None,
         renamed: HashMap::new(),
         others,
@@ -950,7 +1017,8 @@ impl Fields {
         let copy = node.inst.copy;
         let scope = Scope { src: &r.src, copy };
         let term = node.term.as_ref();
-        let split = cx.form.split.contains(&fid);
+        // Written apart from the widget that's its own dictionary.
+        let split = cx.form.split.contains(&fid) || cx.form.unshown.contains(&fid);
         // The widget it's one object with, and that widget's page.
         let merged = (term.into_iter().flat_map(|t| t.widgets.iter()))
             .find(|&&w| cx.form.merged_into(w) == Some(fid))
@@ -972,13 +1040,29 @@ impl Fields {
                 kids.push(cx.placeholder(ObjKey::Annot(w)));
             }
         }
+        // An overlay that shows the widget it's one object with and none of
+        // its kids lists them still, where they are in its base (copy 0 of
+        // its own source's): with no `/Kids`, PDFium would take the field's
+        // own dictionary for its widget, which it doesn't from the file,
+        // and draw it.
+        let primary = cx.primary.id();
+        let own = copy == 0 && r.src.id() == primary;
+        if self.scoped.is_some() && merged.is_some() && kids.is_empty() && own {
+            let theirs: Vec<ObjectId> = (term.into_iter().flat_map(|t| t.widgets.iter()))
+                .filter(|&&w| cx.form.merged_into(w).is_none())
+                .filter_map(|&w| Some(st.annot(w)?.widget()?.src.as_ref()?.id))
+                .collect();
+            for id in theirs {
+                let kid = cx.sym(&Object::from(id), &scope);
+                kids.push(kid);
+            }
+        }
         // Widgets on page templates: a kid of the primary's own instance
         // nothing accounts for and that no page shows, when it's a widget.
         // Any other such kid isn't the field's to write: a page, or the
         // catalog, as 0092321's `Page2[0]` lists it, copied as a kid would
         // carry what the save wrote anew, a removed generator's text in
         // the catalog's `/SHEF_Generators` among it (Greg, 2026-10-22).
-        let primary = cx.primary.id();
         if copy == 0 && r.src.id() == primary && !split && self.scoped.is_none() {
             let pdf = r.src.pdf();
             let listed = (read.get(b"Kids"))

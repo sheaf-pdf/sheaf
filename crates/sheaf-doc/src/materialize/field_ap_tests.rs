@@ -9,6 +9,7 @@
 //! that can't be made.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::pdf::{
@@ -29,8 +30,8 @@ use crate::annot::AnnotId;
 use crate::content::fixture::{FALLBACK_TEXT, fallback_subsets, subsets_hold};
 use crate::content::{Fallback, Glyphs};
 use crate::forms::appearance::tests::shown;
-use crate::forms::fixture::{Form, Rect, row};
-use crate::forms::{FieldId, Value};
+use crate::forms::fixture::{Form, Rect, kids_beside, row};
+use crate::forms::{FieldId, FieldKind, Value};
 use crate::model::{Document, FieldNode, PageId, Terminal};
 use crate::prim::{Key, Val};
 use crate::realize::{ViewInputs, emission_is_base, untouched};
@@ -475,6 +476,131 @@ fn each_kind_of_widget_draws_in_its_own_source_s_font() {
     // of its `/AP` would bring.
     assert_eq!(any_stream_holds(&pdf, b"(Old)"), []);
     assert_eq!(any_stream_holds(&pdf, b"Trenton"), []);
+}
+
+/// A terminal field as [`form_shape`] gives it: its full name, its kind,
+/// and each of its widgets' page, place among the field's widgets and
+/// whether it's the field's own dictionary.
+pub(super) type FieldShape = (String, FieldKind, Vec<(usize, u32, bool)>);
+
+/// What `d`'s form is, as a saved file reopened is held to it: each
+/// terminal's [`FieldShape`].
+pub(super) fn form_shape(d: &Document) -> Vec<FieldShape> {
+    let st = d.state();
+    (st.terminals())
+        .map(|(id, _, term)| {
+            let widgets = (term.widgets.iter())
+                .map(|&w| {
+                    let rec = st.annot(w).expect("its widget");
+                    let widget = rec.widget().expect("a widget");
+                    let page = st.pos_of(rec.page).expect("its page");
+                    (page, widget.props.index, widget.merged)
+                })
+                .collect();
+            (st.full_name(id).unwrap_or_default(), term.kind, widgets)
+        })
+        .collect()
+}
+
+/// How the tests of a field beside its kid widgets save: each way, then as
+/// planned.
+pub(super) const EACH_WAY: [&str; 3] = ["a Rewrite", "an Append", "as planned"];
+
+/// `doc`, opened from `path`, saved `how` ([`EACH_WAY`]): checked as every
+/// save is, or why it stopped.
+pub(super) fn saved_each_way(doc: &mut Document, path: &Path, how: &str) -> StrategyKind {
+    let report = match how {
+        "a Rewrite" => save_rewritten(doc, path),
+        "an Append" => save_appended(doc, path),
+        _ => save_with(
+            doc,
+            path,
+            SaveHow::Planned,
+            &AskAnswers::default(),
+            &NoProgress,
+        ),
+    };
+    let report = report.unwrap_or_else(|stop| panic!("{how}: {stop}"));
+    report.strategy.expect("a file written")
+}
+
+/// What field `field`'s `/Kids` names in `pdf`, in order.
+pub(super) fn kids_of(pdf: &LazyPdf, field: ObjectId) -> Vec<ObjectId> {
+    let d = pdf.get_dictionary(field).expect("the field");
+    let kids = d
+        .get(b"Kids")
+        .and_then(Object::as_array)
+        .expect("its /Kids");
+    kids.iter().filter_map(Object::as_reference).collect()
+}
+
+/// A field whose own dictionary is a widget beside kid widgets is written
+/// as its file has it: one object that's the field and that widget, at the
+/// field's number, with the widget's keys and its made form, its kids in
+/// its `/Kids` (written apart from the field, that widget took a number of
+/// its own that its page's `/Annots` didn't name, so an Append left the
+/// field's object there with no widget's keys, and stopped at the save's
+/// check). The empty text field `t` filled, saved by a Rewrite, an Append
+/// and as planned (an Append: it held nothing), is checked as every save
+/// is; each widget's form draws the value; the Append writes the field and
+/// its kids at their numbers, what's new past the file's last, and no
+/// page; and each saved file reopens to the same fields, each widget at
+/// its place.
+#[test]
+fn a_field_beside_its_kid_widgets_is_saved_as_its_file_has_it() {
+    let mut f = kids_beside();
+    let t = f.fields()[0];
+    let kids = f.widgets_of(t);
+    let pages = f.pages.clone();
+    let bytes = table(&mut f);
+    let size = lazy(&bytes, None).xref().size;
+    let shape = form_shape(&open(&bytes, None));
+    // Its own first, as the tree is read, at the place after its kids'.
+    assert_eq!(shape[0].2, [(0, 2, true), (0, 0, false), (1, 1, false)]);
+    for how in EACH_WAY {
+        let dir = scratch();
+        let (path, mut d) = opened(&dir, "a.pdf", &bytes);
+        let [own, k0, k1] = widgets_of(&d, "t")[..] else {
+            panic!("{how}: the field's own and two kids")
+        };
+        fx::fill(&mut d, "t", "Camden");
+        let strategy = saved_each_way(&mut d, &path, how);
+        let appended = how != "a Rewrite";
+        let want = match appended {
+            true => StrategyKind::Append,
+            false => StrategyKind::Rewrite,
+        };
+        assert_eq!(strategy, want, "{how}");
+        let record = d.saved_record().unwrap();
+        let at = |key| record.map.keys[&key];
+        let field = d.state().field_named("t").unwrap();
+        assert_eq!(at(ObjKey::Field(field)), t, "{how}");
+        assert_eq!(at(ObjKey::Annot(own)), t, "{how}: one object");
+        assert_eq!([at(ObjKey::Annot(k0)), at(ObjKey::Annot(k1))], kids[..]);
+        let now = std::fs::read(&path).unwrap();
+        let pdf = lazy(&now, None);
+        let dict = pdf.get_dictionary(t).unwrap();
+        let subtype = dict.get(b"Subtype").and_then(Object::as_name);
+        assert_eq!(subtype, Some(b"Widget".as_slice()), "{how}");
+        assert_eq!(
+            dict.get(b"P").and_then(Object::as_reference),
+            Some(pages[0])
+        );
+        assert_eq!(kids_of(&pdf, t), kids, "{how}");
+        for (w, id) in [(own, t), (k0, kids[0]), (k1, kids[1])] {
+            assert_eq!(ap_n(&pdf, id), Some(at(ObjKey::AnnotPart(w, Part::Ap))));
+            assert_eq!(shown(&saved_form(&pdf, id).0.content), b"Camden", "{how}");
+        }
+        if appended {
+            let wrote = written(bytes.len(), &now[bytes.len()..], &path);
+            let old: BTreeSet<ObjectId> = (wrote.iter().copied())
+                .filter(|id| id.number < size)
+                .collect();
+            assert_eq!(old, BTreeSet::from([t, kids[0], kids[1]]), "{how}");
+            assert!(pages.iter().all(|p| !wrote.contains(p)), "{how}: no page");
+        }
+        assert_eq!(form_shape(&open(&now, None)), shape, "{how}: reopened");
+    }
 }
 
 /// Each kind of `/DR` font is bound: a direct dictionary that holds no

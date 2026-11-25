@@ -67,8 +67,8 @@
 //! draws a name in two fonts, so each save writes a subset of the
 //! fallback font sheaf bundles, and its objects are checked too. A form
 //! with check boxes or radio buttons whose file has no on state has a
-//! save of its own, each of them pressed and the document rewritten, so
-//! what's made of them is checked too ([`pressed_save`]). It prints what it
+//! save of its own, each of them pressed and the document saved as
+//! planned, so what's made of them is checked too ([`pressed_save`]). It prints what it
 //! checked: objects by table, keys, the checks not made and why, the keys
 //! the model doesn't list, and those the version deprecates or readers
 //! ignore, and the widgets pressed and what was made of them; run on every
@@ -1736,19 +1736,23 @@ const TOP: usize = 20;
 /// manifest's length), unnarrowed: the forms that open, those that don't
 /// and why (three whose cross-reference tables don't parse, which no tier
 /// opens), and what the saves were, a form's check boxes and radio buttons
-/// with no on state pressed among them ([`pressed_save`], M10 slice 8). A
-/// change that moves one says why, and moves it. A save of none isn't
-/// counted.
+/// with no on state pressed among them ([`pressed_save`], M10 slice 8),
+/// by the strategy their plan chose. A change that moves one says why, and
+/// moves it. A save of none isn't counted.
 const FORMS: FormsBaseline = FormsBaseline {
     manifest: 4392,
     files: 4389,
     unopened: [(UNREAD, 3), (PASSWORD, 0)],
     saves: [
-        ("as planned, Append", 2406),
-        ("as planned, Rewrite", 1983),
+        // 34 forms more since M10 slice 9: a field whose own dictionary is
+        // a widget beside kid widgets, written as one object with it, no
+        // longer turns their Append into a Rewrite.
+        ("as planned, Append", 2440),
+        ("as planned, Rewrite", 1949),
         ("a page deleted, as planned, Rewrite", 2901),
         ("of one page, a Rewrite to a copy", 1488),
-        (PRESSED, 47),
+        ("toggles pressed, as planned, Append", 42),
+        ("toggles pressed, as planned, Rewrite", 5),
     ],
     pressed: PressedBaseline {
         pressed: &[("check box", 254), ("radio button", 53)],
@@ -1762,7 +1766,7 @@ struct FormsBaseline {
     manifest: usize,
     files: usize,
     unopened: [(&'static str, usize); 2],
-    saves: [(&'static str, usize); 5],
+    saves: [(&'static str, usize); 6],
     pressed: PressedBaseline,
 }
 
@@ -1779,8 +1783,8 @@ struct PressedBaseline {
     unmade: &'static [(&'static str, usize)],
 }
 
-/// What [`pressed_save`]'s save is.
-const PRESSED: &str = "toggles pressed, a Rewrite";
+/// What [`pressed_save`]'s save is, before the strategy the plan chose.
+const PRESSED: &str = "toggles pressed, as planned";
 
 /// Why a form didn't open.
 const UNREAD: &str = "its file doesn't read";
@@ -1942,8 +1946,8 @@ impl SaveChecked {
 /// Append where the form takes one); then its last page deleted, saved as
 /// planned, which strict removal makes a Rewrite, or a form of one page
 /// rewritten to a copy. And, on a copy of its own, its check boxes and
-/// radio buttons whose file has no on state pressed, and rewritten
-/// ([`pressed_save`]). A finding no allowance holds fails, unless it's in
+/// radio buttons whose file has no on state pressed, and saved as planned
+/// ([`pressed_save`]): an Append where the form takes one. A finding no allowance holds fails, unless it's in
 /// an object merged over the form's that the form has too. The counts are
 /// printed: saves by what they were, objects checked by table, keys, the
 /// checks not made and what stood in their way, the keys the model doesn't
@@ -2137,20 +2141,17 @@ fn saves_of(
 /// file copied from `from` to `path`, opened as a document of its own, so
 /// the other saves don't move, each such widget pressed once
 /// (`tx::fixture::press`, as M10 slice 9's lowering will press one), in
-/// page order, then rewritten and checked. Their state changed, and their
+/// page order, then saved as planned and checked, the save's line saying
+/// the strategy the plan chose (`toggles pressed, as planned, Append`).
+/// Their state changed, and their
 /// file having no appearance to show it, the save makes their appearances
 /// ([`appearance::stale`]): which widgets it made them for, and which it
 /// couldn't and why, are counted ([`Pressed`]). A widget the group doesn't
 /// hold, or another record of one already pressed (a page the tree lists
-/// twice), isn't pressed. None where the file has no such widget.
-///
-/// A Rewrite, not a save as planned: the Rewrite holds every object sheaf
-/// writes anew for the widgets pressed, which is what this save is for,
-/// where a planned Append of a field whose own dictionary is a widget
-/// beside its kids (the corpus's toggles with no on state are most often
-/// such a dictionary, of no size) stops at the save's own check, as a text
-/// field of that shape filled does (an Append writes the widget apart from
-/// the field and not its page's `/Annots`).
+/// twice), isn't pressed. None where the file has no such widget. The
+/// corpus's toggles with no on state are most often a field's own
+/// dictionary, of no size, beside its kid widgets, which an Append writes
+/// as one object with the field, at its number, and no page.
 ///
 /// [`appearance::stale`]: sheaf_doc::forms::appearance::stale
 fn pressed_save(
@@ -2161,7 +2162,7 @@ fn pressed_save(
 ) -> Result<Option<(SaveChecked, Pressed)>, String> {
     use sheaf_doc::forms::FieldKind;
     use sheaf_doc::forms::{appearance, buttons};
-    use sheaf_doc::materialize::{SaveHow, key::Part};
+    use sheaf_doc::materialize::key::Part;
     std::fs::copy(from, path).map_err(|e| format!("not copied to press: {e}"))?;
     let mut doc = (sheaf_doc::open::file(path, None))
         .map_err(|e| format!("not opened to press: {e}"))?
@@ -2223,7 +2224,9 @@ fn pressed_save(
             Some((aid, kind, format!("{kind}, {why}")))
         })
         .collect();
-    let (strategy, bytes) = common::saved_or_why(&mut doc, path, SaveHow::Rewrite)?;
+    let from = section_start(&doc);
+    let (strategy, bytes) = common::planned_or_why(&mut doc, path)?;
+    let what = format!("{PRESSED}, {strategy:?}");
     let record = doc
         .saved_record()
         .ok_or("the pressed save left no record")?;
@@ -2240,15 +2243,16 @@ fn pressed_save(
     }
     if unwritten > 0 {
         return Err(format!(
-            "{PRESSED}: no appearance written for {unwritten} widgets whose state changed and \
+            "{what}: no appearance written for {unwritten} widgets whose state changed and \
              that one can be made for"
         ));
     }
-    let (report, version) = save_checked(&doc, 0, strategy, &bytes)?;
+    let (report, version) = save_checked(&doc, from, strategy, &bytes)?;
     let held = (&doc, entry.path.as_str(), allowances);
+    let appended = strategy == StrategyKind::Append;
     let save = sorted_out(
-        PRESSED.into(),
-        (report, version, false),
+        what,
+        (report, version, appended),
         held,
         &mut BTreeMap::new(),
     );

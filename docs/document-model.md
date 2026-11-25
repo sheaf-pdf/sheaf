@@ -1938,7 +1938,8 @@ each one version, as slice 9's op will be one transaction).
   classes the group's comparison holds; pdf-lint over a form built in
   code of each kind changed, by a Rewrite and an Append, and in `just
   tier-arlington` over every corpus form whose check boxes or radio
-  buttons have no on state, each pressed and rewritten, what was pressed
+  buttons have no on state, each pressed and saved as planned (an Append
+  or a Rewrite, each counted; M10 slice 9), what was pressed
   and made held to its counts (47 forms; 254 check boxes and 14 radio
   buttons made, 36 radio buttons of no size not) and a widget whose
   appearance can be made and wasn't written a failure of its form.
@@ -3061,11 +3062,19 @@ below).
   dictionaries are their source's, copied as their instance
   (`FormInst.copy`): an instance past copy 0 of its file's bytes gets
   objects of its own. `/Parent` and `/Kids` are the tree's; a parent
-  sheaf made is written from its record. A field merged with its one
-  widget is one object under `ObjKey::Field`, which the page's `/Annots`
-  names, its widget key an alias in the record's map (`Emission::aliases`);
-  a copy stays merged. One whose widget the state shows twice is written
-  apart. A primary field's kids the records don't account for and no page
+  sheaf made is written from its record. A field whose own dictionary is
+  a widget is one object with it under `ObjKey::Field`, as its file has
+  it, whatever other widgets it has, which are its kids beside it: the
+  page's `/Annots` names it, its widget key an alias in the record's map
+  (`Emission::aliases`), and an Append of it writes the field at its
+  number and no page; a copy stays merged. `emit::form::joined` says it,
+  for the emitter, an Append's scope and the realizer's predicate alike.
+  One whose widget the state shows twice is written apart. An overlay
+  writes such a field apart where it doesn't show that widget's page (the
+  field's keys alone: no page it writes lists the widget), and where it
+  shows that widget and none of the field's kids, lists them still where
+  its base has them, as PDFium takes a field's own dictionary for its
+  widget only where the field lists none. A primary field's kids the records don't account for and no page
   shows stay in its `/Kids` when they're widgets (widgets on page
   templates); any other such kid, a page or the catalog (0092321's
   `Page2[0]` lists its catalog), isn't the field's and isn't written as
@@ -4204,8 +4213,10 @@ render's flags draw
 them, its base page's annotations as they are: each drawn record as read
 from its own entry, none hidden or dragged, no entry left out (a record
 deleted, sheaf's marks and their companions under `ByHost`, another
-tool's without `foreign`, a link that leads nowhere), no merged field
-split, each drawn widget's `/Parent`s (merged,
+tool's without `foreign`, a link that leads nowhere), no field written
+apart from the widget that's its own dictionary (one the state shows
+twice, or one on another page, which an overlay of the page doesn't
+write), each drawn widget's `/Parent`s (merged,
 its field's) as the model's field tree has them, which a file's `/Kids`
 made where its `/Parent`s say otherwise, and the form's `DA`, `Q` and
 `NeedAppearances` as the source's form has them, and no text field's

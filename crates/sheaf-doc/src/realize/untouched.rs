@@ -21,12 +21,15 @@
 //! drawn record as read from its own entry there, none hidden or dragged,
 //! no entry left out (a record deleted, or a kind the inputs leave to the
 //! screen, as sheaf's marks under [`MarkDraw::ByHost`]), each widget's
-//! `/Parent`s as the model's field tree has them, no text field's widget
-//! whose value the model holds changed ([`stale`], M10 slice 6: the
-//! overlay draws the appearance pdf-forms makes for it, the form a save
-//! writes), and the form's own keys the overlay writes from the document's
-//! as its file has them. The value itself isn't one of them: no save
-//! writes a field's `/V` before M10 slice 9's fills.
+//! `/Parent`s as the model's field tree has them, no field written apart
+//! from the widget that's its own dictionary ([`joined`]: one the state
+//! shows twice, or one on another page, which an overlay of this page
+//! doesn't write, so it writes the field without that widget's keys), no
+//! text field's widget whose value the model holds changed ([`stale`], M10
+//! slice 6: the overlay draws the appearance pdf-forms makes for it, the
+//! form a save writes), and the form's own keys the overlay writes from
+//! the document's as its file has them. The value itself isn't one of
+//! them: no save writes a field's `/V` before M10 slice 9's fills.
 //!
 //! [`stale`]: crate::forms::appearance::stale
 
@@ -42,6 +45,7 @@ use crate::geom::Geom;
 use crate::materialize::emit::Shown;
 use crate::materialize::emit::annots::{dead_link, mark_kept};
 use crate::materialize::emit::content;
+use crate::materialize::emit::form::{Joined, joined};
 use crate::model::{AnnotBody, DocState, FormInst, PageDef, PageId, Static, Widget};
 use crate::source::{ObjRef, PageFacts};
 use crate::store::Src;
@@ -197,11 +201,15 @@ fn annots_kept(
                 {
                     return false;
                 }
-                // One object with its field, which shows elsewhere too: the
-                // two are written apart.
-                let term = st.field(w.field).and_then(|node| node.term.as_ref());
-                if w.merged && term.is_some_and(|t| t.widgets.len() > 1) {
-                    return false;
+                // Its field written apart from the widget that's its own
+                // dictionary: one the state shows twice, or one on another
+                // page, which an overlay of this one doesn't write.
+                match joined(st, w.field) {
+                    Joined::Split => return false,
+                    Joined::One(own) if st.annot(own).is_none_or(|a| a.page != page) => {
+                        return false;
+                    }
+                    Joined::One(_) | Joined::Kids => {}
                 }
                 if !tree_kept(st, src, w, r.id) {
                     return false;
