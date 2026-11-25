@@ -80,6 +80,8 @@ pub mod append;
 mod append_rewrite_tests;
 #[cfg(test)]
 mod append_tests;
+#[cfg(test)]
+mod choice_ap_tests;
 pub mod copy;
 pub mod deps;
 pub mod emit;

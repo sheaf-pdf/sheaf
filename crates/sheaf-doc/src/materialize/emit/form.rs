@@ -36,6 +36,11 @@
 //!   the maker made none, `on` the name a press puts in `/AS`. One whose
 //!   file's has keeps it, and only `/AS` moves. Its field's `/V` is the
 //!   file's, as a text field's is, until M10 slice 9.
+//! - **A combo box's or list box's widget whose value changed**
+//!   ([`appearance::stale`]) gets its appearance made anew as a text
+//!   field's is, in the field's font and the fallback: one form under
+//!   `Part::Ap`, `<< /N … >>`. Its field's `/V` and `/I` are the file's
+//!   until M10 slice 9.
 //! - **Widgets on page templates** (`/Names /Templates`) aren't records: a
 //!   primary field's kids the records don't account for and no page shows
 //!   stay in its `/Kids`, as the file has them.
@@ -513,7 +518,8 @@ pub(crate) fn widget(
 }
 
 /// Widget `aid`'s appearance, made anew for its field as the model holds
-/// it ([`appearance::stale`]: a text field's value, a button's state) and
+/// it ([`appearance::stale`]: a text or choice field's value, a button's
+/// state) and
 /// bound as a mark's is: made by pdf-forms from the model's plain data
 /// ([`appearance::look`]) in the font its `/DA` names in `src`'s `/DR`,
 /// `src` the source the widget was read from, under that source's name (a
@@ -521,7 +527,8 @@ pub(crate) fn widget(
 /// fallback font for what that can't draw, or a check box's or radio
 /// button's mark in ZapfDingbats, whose `/DA` font isn't read; each form it
 /// makes ([`Made`]) pushed under its part of `AnnotPart(aid, …)` where the
-/// emission writes it (a text's one form, `/N`'s, under `Part::Ap`; a
+/// emission writes it (a text's or a choice's one form, `/N`'s, under
+/// `Part::Ap`; a
 /// button's on state's and `Off`'s normal and down forms under `Ap`,
 /// `ApOff`, `ApDown` and `ApDownOff`), the fallback's glyphs joined to a
 /// form that draws in it and only there, as what's written is what binds
@@ -552,7 +559,7 @@ fn appearance(cx: &mut Cx, aid: AnnotId, src: &Src) -> Option<Object> {
     // A check box's or radio button's forms go in state dictionaries.
     let on = match &look {
         Look::Toggle(toggle) => Some(toggle.on_state.as_slice()),
-        Look::Text(_) => None,
+        Look::Text(_) | Look::Choice(_) => None,
     };
     let none = Glyphs::new();
     let mut ap = Dictionary::new();

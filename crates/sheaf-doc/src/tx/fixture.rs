@@ -1,7 +1,8 @@
 //! Ops as tests write them (M10.5 slice 11): a version made of the user's
 //! ops, the pages, bookmarks and files they name, and a fixture's marks
-//! said as the ops that make and change them; and a field's fill, and a
-//! check box's or radio button's press or value, which no op makes yet.
+//! said as the ops that make and change them; and a field's fill, a
+//! check box's or radio button's press or value, and a combo box's or list
+//! box's value, which no op makes yet.
 //! For tests here and in other crates (the `fixtures` feature).
 
 use std::sync::Arc;
@@ -16,7 +17,7 @@ use sheaf_edit::{
 
 use super::{Actor, Commit, CommitOpts, EditError, JobKind, Tx};
 use crate::annot::{Annot, AnnotId, AnnotKind};
-use crate::forms::{Change, FieldId, Value, buttons};
+use crate::forms::{Change, FieldId, FieldKind, Value, buttons};
 use crate::labels::LabelSpec;
 use crate::model::{
     AnnotBody, AnnotRec, Document, FieldNode, GroupId, GroupKind, OutlineId, PageId, Terminal,
@@ -91,6 +92,31 @@ pub fn fill(doc: &mut Document, name: &str, value: &str) {
     node.term = Some(Arc::new(term));
     let val = Some(Val::Field(Arc::new(node)));
     doc.put_for_test(vec![(Key::Field(id), val)], "fill");
+}
+
+/// The combo box or list box field of `doc` whose full name is `name` given
+/// the value `values`, as a version of its own: none for no texts, a text
+/// for one, an array of them for several (a list box's of several
+/// selected), as M10 slice 9's `SetFieldValues` will put a choice's.
+/// Panics where no field has that name or it isn't a combo box or list
+/// box.
+pub fn choose(doc: &mut Document, name: &str, values: &[&str]) {
+    let st = doc.state();
+    let id = (st.field_named(name)).unwrap_or_else(|| panic!("no field is named {name:?}"));
+    let mut node = FieldNode::clone(st.field(id).expect("the field"));
+    let mut term = Terminal::clone(node.term.as_deref().expect("a terminal field"));
+    assert!(
+        matches!(term.kind, FieldKind::Combo | FieldKind::List),
+        "{name:?} is no combo box or list box"
+    );
+    term.value = match values {
+        [] => None,
+        [one] => Some(Value::Text((*one).into())),
+        many => Some(Value::Items(many.iter().map(|&v| v.into()).collect())),
+    };
+    node.term = Some(Arc::new(term));
+    let val = Some(Val::Field(Arc::new(node)));
+    doc.put_for_test(vec![(Key::Field(id), val)], "choose");
 }
 
 /// Widget `widget` of `doc` pressed, by the group's rules

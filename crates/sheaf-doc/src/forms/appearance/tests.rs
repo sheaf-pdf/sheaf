@@ -93,11 +93,20 @@ fn normal(made: Made) -> Appearance {
 
 /// The bytes the content's one `Tj` shows.
 pub(crate) fn shown(content: &[u8]) -> Vec<u8> {
+    let [one] = &shows(content)[..] else {
+        panic!("one Tj")
+    };
+    one.clone()
+}
+
+/// The bytes each of the content's `Tj`s shows, in order, as sheaf's
+/// reader reads the content back.
+pub(crate) fn shows(content: &[u8]) -> Vec<Vec<u8>> {
     let (ops, _) = read_back::operations(content, None).expect("content that reads");
-    let mut shows = ops.iter().filter(|(_, op)| *op == b"Tj");
-    let (operands, _) = shows.next().expect("a Tj");
-    assert!(shows.next().is_none(), "one Tj");
-    string_bytes(operands[0])
+    (ops.iter())
+        .filter(|(_, op)| *op == b"Tj")
+        .map(|(operands, _)| string_bytes(operands[0]))
+        .collect()
 }
 
 /// A string operand's bytes, literal or hex, as written.
@@ -497,11 +506,22 @@ fn every_kind_is_named_by_hand() {
         (Unmade::NotFinite, "not-finite"),
         (Unmade::NotText, "not-text"),
         (Unmade::NotButton, "not-button"),
+        (Unmade::NotChoice, "not-choice"),
         (Unmade::FontNotBindable, "font-not-bindable"),
     ];
     for (why, name) in plain {
         assert_eq!(unmade_kind(&why), name);
     }
+    let character = UnencodableChar {
+        at: 3,
+        character: '\u{738b}',
+    };
+    let option = Unmade::UnencodableOption {
+        option: 4,
+        character,
+    };
+    assert_eq!(unmade_kind(&option), "unencodable-option");
+    assert_eq!(unmade_kind(&Unmade::Unencodable(character)), "unencodable");
 }
 
 /// A value is drawn in the field's font, and what that lacks in the
@@ -1023,15 +1043,14 @@ fn the_caps_are_the_family_s_with_sheaf_s() {
     assert_eq!(caps.hops, ours.reader.max_depth);
     assert_eq!(caps.annots, crate::source::annots::limits());
     assert_eq!(caps.text, ours.forms.text);
+    assert_eq!(caps.items, ours.forms.items, "as many as an /Opt is read");
     assert_eq!(caps.comb_cells, crate::forms::read::MAX_LAYOUT_LEN as usize);
     assert_eq!(caps.fonts, ours.fonts());
     assert_eq!(caps.font_budget, ours.content.decompressed);
-    assert_eq!(
-        (caps.fields, caps.depth, caps.items),
-        (family.fields, family.depth, family.items)
-    );
+    assert_eq!((caps.fields, caps.depth), (family.fields, family.depth));
     // Each of sheaf's is its own, not the family's.
     assert_ne!(caps.text, family.text);
+    assert_ne!(caps.items, family.items);
     assert_ne!(caps.hops, family.hops);
     assert_ne!(caps.font_budget, family.font_budget);
 }

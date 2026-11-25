@@ -23,11 +23,12 @@
 //! [`Sink::fallback`]: crate::content::sink::Sink::fallback
 //! [`sink::bind`]: crate::content::sink::bind
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::content::{Res, ResBody, ResId, ResourceNeeds};
 use crate::pdf::fonts::{EmbedOptions, Glyphs, Program, embed_write};
 use crate::pdf::forms::FieldFallback;
+use crate::pdf::gfx::ProgramFont;
 use crate::pdf::{Object, dictionary};
 
 /// The font sheaf bundles to draw what another font can't
@@ -91,6 +92,17 @@ impl Fallback {
     /// appearance binds it as any other drawing does.
     pub fn field(self) -> FieldFallback<'static> {
         FieldFallback::new(self.res(), self.program())
+    }
+
+    /// It as a drawing in a set of fonts draws in it where the drawing
+    /// gives back no glyphs of its own (a combo box's or a list box's
+    /// appearance, M10 slice 8): its program, each glyph it's drawn in
+    /// recorded in `glyphs` with its text as it's laid out (pdf-gfx's
+    /// [`ProgramFont`]), drawn under its marker ([`Fallback::res`]). A
+    /// drawing refused partway has recorded the glyphs before the
+    /// refusal, which nothing draws: its caller drops them with it.
+    pub fn recording(self, glyphs: &Mutex<Glyphs>) -> ProgramFont<'_> {
+        ProgramFont::new(self.program(), glyphs)
     }
 
     /// Whether `res` is its marker ([`Fallback::res`]).

@@ -1,6 +1,6 @@
-//! Text fields', check boxes' and radio buttons' appearances through
-//! `pdf-forms` (M10 slices 6 and 8), and a check box or radio group's rules
-//! (M10 slice 8).
+//! Text fields', check boxes', radio buttons', combo boxes' and list boxes'
+//! appearances through `pdf-forms` (M10 slices 6 and 8), and a check box or
+//! radio group's rules (M10 slice 8).
 //!
 //! **Making one.** A text field's appearance is made from plain data
 //! ([`text_with_fallback`]): what the field shows ([`TextField`]: its text, flags
@@ -29,6 +29,16 @@
 //! appearances of its on state and of `Off`, an `Off` one none where it
 //! would paint nothing ([`ToggleAppearances`]).
 //!
+//! A combo box's ([`combo_box`]) is made from the text it shows
+//! ([`ComboBox`]), a list box's ([`list_box`]) from its options' labels,
+//! the selected ones and the first shown ([`ListBox`]); each with the same
+//! [`WidgetLook`] and default appearance string, and a set of fonts: the
+//! field's, then the fallback, a program that records each glyph it draws
+//! (pdf-gfx's [`ProgramFont`](super::gfx::ProgramFont) in a
+//! [`WithFallback`](super::gfx::WithFallback)). Which options a value
+//! selects ([`selected_options`], over each option's export value,
+//! [`FieldOption`]) is the family's rule too.
+//!
 //! **A group's rules.** What pressing a check box or radio button, or
 //! setting its field's value, does to each widget's state and to the
 //! value ([`group`]: [`Group`](group::Group) of
@@ -53,11 +63,11 @@
 //! [`Streams`]: super::Streams
 
 pub use pdf_forms::appearance::{
-    Appearance, Fallback as FieldFallback, FieldFont, MadeWithFallback, TextField,
-    ToggleAppearances, ToggleButton, Unmade, WidgetLook, check_box, radio_button,
-    text_with_fallback,
+    Appearance, ComboBox, Fallback as FieldFallback, FieldFont, ListBox, MadeWithFallback,
+    TextField, ToggleAppearances, ToggleButton, Unmade, WidgetLook, check_box, combo_box, list_box,
+    radio_button, text_with_fallback,
 };
-pub use pdf_forms::{Cap, Error, FieldFlags, Limits, Quadding};
+pub use pdf_forms::{Cap, Error, FieldFlags, FieldOption, Limits, Quadding, selected_options};
 
 /// A check box or radio group's rules, over plain data: which widgets a
 /// press or a value turns on and off, the field's value and export value,

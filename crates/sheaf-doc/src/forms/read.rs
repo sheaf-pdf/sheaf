@@ -20,7 +20,8 @@
 //! is damaged: none of its fields are kept, so nothing can be filled, and
 //! the file still opens. Rects, widths, dashes and colors are made finite
 //! and clamped, each number followed where it's a reference. `/MaxLen` is
-//! kept as the file has it; layout uses at most 1,000 of it.
+//! kept as the file has it; layout uses at most 1,000 of it. `/TI` is read
+//! as the family reads it: an integer within `u32`, else 0.
 //!
 //! Fields are read down `/Kids` from `/Fields`, as PDFium reads them;
 //! `/Parent` isn't followed (the form check reports kids whose `/Parent`
@@ -431,6 +432,7 @@ struct Inherited<'a> {
     da: Option<Arc<str>>,
     align: Option<u8>,
     max_len: Option<u32>,
+    top: Option<u32>,
     options: Option<Opt>,
 }
 
@@ -640,6 +642,11 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         if let Some(n) = number(pdf, dict, b"MaxLen") {
             here.max_len = u32::try_from(n.max(0)).ok().or(Some(u32::MAX));
         }
+        // An integer past `u32`, less than 0 too, is 0, as the family reads
+        // one (`Field::top_index`).
+        if let Some(n) = number(pdf, dict, b"TI") {
+            here.top = Some(u32::try_from(n).unwrap_or(0));
+        }
         if let Some(opt) = dict.get(b"Opt") {
             here.options = Some(self.choices(opt));
         }
@@ -711,6 +718,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             da: here.da,
             align: here.align,
             max_len: here.max_len,
+            top: here.top.unwrap_or(0),
             options: options.unwrap_or_else(|| Arc::from([])),
             has_opt,
             tooltip: tooltip.map(|t| t.to_string()),

@@ -945,6 +945,7 @@ impl Feed for FieldProps {
             da,
             align,
             max_len,
+            top,
             options,
             has_opt,
             tooltip,
@@ -953,6 +954,7 @@ impl Feed for FieldProps {
         sum.feed(da)
             .feed(align)
             .feed(max_len)
+            .feed(top)
             .feed(options)
             .feed(has_opt)
             .feed(tooltip)

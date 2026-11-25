@@ -1642,7 +1642,9 @@ of this, and a user sees nothing new.
   are made (`stale`); the plain data (`Look`, `TextLook`); the caps; a source's
   font cache; and the binding, with the names a made form gives a font.
 - **The plain data** (`look(st, aid)`, `Look::Text` for a text field's
-  widget, `Unmade::NotText` for anything else): the terminal's value,
+  widget; since M10 slice 8 `Look::Toggle` for a check box's or radio
+  button's and `Look::Choice` for a combo box's or list box's;
+  `Unmade::NotText` for anything else): the terminal's value,
   which is the text shown (a format script's display string, once slice
   9's op carries one), its `/Ff`, `/MaxLen` and effective `/Q`; and the
   widget's frame (`Frame`, which every kind's look shares: its box, `/MK`
@@ -1697,8 +1699,10 @@ of this, and a user sees nothing new.
   as a value sheaf reads (`FormLimits::text`, 1 MiB), a comb's cells as
   many as sheaf lays out (`MAX_LAYOUT_LEN`, 1,000, where the family's
   default is 1,024), a font read under sheaf's font caps and decompressed
-  within what a page's content may be (256 MiB). The tree's caps are the
-  read layer's, which only tests call. sheaf's clamps on what it reads
+  within what a page's content may be (256 MiB), and (M10 slice 8) a list
+  box's options shown from its top as many as sheaf reads of an `/Opt`
+  (`FormLimits::items`, 10,000, where the family's default is 16,384).
+  The tree's caps are the read layer's, which only tests call. sheaf's clamps on what it reads
   stay (a border's width to 0–100, a `/Rect` to ±1,000,000, a `/DA`
   within `FormLimits::da`): caps on untrusted input, which no corpus
   widget meets.

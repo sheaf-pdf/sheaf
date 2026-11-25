@@ -11,13 +11,15 @@
 //! pdf-forms': its `/DA` parser, encoders, layout, borders, `/MK /R` and
 //! `/Tx BMC`, text in runs of the field's font and sheaf's fallback
 //! font ([`Fallback`](crate::content::Fallback), M10 slice 7) for what the
-//! field's can't draw, and a check box's or radio button's mark in
-//! ZapfDingbats. What's made is a form for each slot of the widget's `/AP`
-//! ([`Made`], [`Slot`]).
+//! field's can't draw, a check box's or radio button's mark in
+//! ZapfDingbats, and a combo box's or list box's text in the field's font
+//! and the fallback. What's made is a form for each slot of the widget's
+//! `/AP` ([`Made`], [`Slot`]).
 //!
 //! Each kind is a module of its own: a text field's widget (`text`,
-//! [`TextLook`]) and a check box's or radio button's (`toggle`,
-//! [`ToggleLook`]). What they share is here.
+//! [`TextLook`]), a check box's or radio button's (`toggle`,
+//! [`ToggleLook`]) and a combo box's or list box's (`choice`,
+//! [`ChoiceLook`]). What they share is here.
 //!
 //! What's sheaf's and stays here: the model and its records, which widgets
 //! are made, the caps, a source's font cache, the names a made form gives
@@ -41,12 +43,16 @@ use crate::pdf::{ObjectId, Why};
 use crate::source::{FieldFontRead, Source};
 use crate::store::BlobId;
 
+mod choice;
 mod text;
 mod toggle;
 
+pub use choice::{ChoiceLook, ChoiceShows};
 pub use text::TextLook;
 pub use toggle::{ToggleLook, state_changed};
 
+#[cfg(test)]
+mod choice_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 #[cfg(test)]
@@ -62,6 +68,8 @@ pub enum Look {
     Text(TextLook),
     /// A check box's or radio button's widget.
     Toggle(ToggleLook),
+    /// A combo box's or list box's widget.
+    Choice(ChoiceLook),
 }
 
 impl Look {
@@ -70,6 +78,7 @@ impl Look {
         match self {
             Look::Text(look) => &look.frame,
             Look::Toggle(look) => &look.frame,
+            Look::Choice(look) => &look.frame,
         }
     }
 }
@@ -153,7 +162,8 @@ impl Frame {
 
 /// What widget `aid`'s appearance is made from, by its kind: a text
 /// field's widget's ([`TextLook`]), a check box's or radio button's
-/// ([`ToggleLook`]). Every kind's frame is the widget's box, `/MK` and
+/// ([`ToggleLook`]), a combo box's or list box's ([`ChoiceLook`]). Every
+/// kind's frame is the widget's box, `/MK` and
 /// border, and its effective `/DA`: the widget's own, else the terminal's
 /// (its own or a parent's, as read), else its instance's form's
 /// (`form_defaults`). [`Unmade::NotText`] for any other annotation, a
@@ -174,6 +184,7 @@ pub fn look(st: &DocState, aid: AnnotId) -> Result<Look, Unmade> {
         FieldKind::CheckBox | FieldKind::Radio => {
             toggle::look(st, aid, w, node, term).map(Look::Toggle)
         }
+        FieldKind::Combo | FieldKind::List => Ok(Look::Choice(choice::look(st, w, node, term))),
         _ => Err(Unmade::NotText),
     }
 }
@@ -292,8 +303,9 @@ pub struct DaFont {
 /// [`limits`]: a text field's widget's, its `/N` alone (`text`), in the
 /// font its `/DA` names and the fallback font ([`Fallback::SANS`]) for
 /// what that can't draw; a check box's or radio button's, its on state's
-/// and `Off`'s normal and down forms (`toggle`), the mark in ZapfDingbats.
-/// `font` gives the `/DA`'s font for the name the `/DA` gives (none where
+/// and `Off`'s normal and down forms (`toggle`), the mark in ZapfDingbats;
+/// a combo box's or list box's, its `/N` alone (`choice`), in the two fonts
+/// as a text field's. `font` gives the `/DA`'s font for the name the `/DA` gives (none where
 /// it names none), and is asked only by a kind that draws in it: a check
 /// box's or radio button's mark isn't, so its `/DA`'s font is never read,
 /// and can't refuse it. Pure: the same look, font and name give the same
@@ -308,6 +320,7 @@ pub fn make(
     match look {
         Look::Text(look) => text::make(look, font(look.frame.font_name().as_deref())?),
         Look::Toggle(look) => toggle::make(look),
+        Look::Choice(look) => choice::make(look, font(look.frame.font_name().as_deref())?),
     }
 }
 
@@ -321,10 +334,14 @@ pub fn make(
 /// - a check box's or radio button's widget that shows a state its source
 ///   widget didn't as read ([`state_changed`]) and whose file's normal
 ///   appearance has no on state (none, a stream, or `Off` alone): one
-///   that has keeps its appearances, and only its `/AS` moves.
+///   that has keeps its appearances, and only its `/AS` moves;
+/// - a combo box's or list box's widget whose terminal's value holds other
+///   texts than its source's field's as read (no value and an empty array
+///   alike, a text and an array of it alike), or whose field was read from
+///   no source, or isn't among its source's fields as read.
 ///
 /// False for anything else. A map lookup or two and a compare of two
-/// strings.
+/// strings, or of a list box's selected texts.
 pub fn stale(st: &DocState, aid: AnnotId) -> bool {
     let Some(w) = st.annot(aid).and_then(|rec| rec.widget()) else {
         return false;
@@ -338,28 +355,32 @@ pub fn stale(st: &DocState, aid: AnnotId) -> bool {
     match term.kind {
         FieldKind::Text => text::stale(node, term),
         FieldKind::CheckBox | FieldKind::Radio => toggle::stale(st, aid, w),
+        FieldKind::Combo | FieldKind::List => choice::stale(node, term),
         _ => false,
     }
 }
 
-/// The caps a text field's appearance and its font are made and read
-/// under: pdf-forms' defaults, with each sheaf has a cap for from sheaf's
+/// The caps a widget's appearance and its font are made and read under:
+/// pdf-forms' defaults, with each sheaf has a cap for from sheaf's
 /// ([`crate::source::Limits::DEFAULT`]): references followed as deep as
 /// sheaf's reader follows them; a widget's caps as sheaf reads an
 /// annotation (`source::annots::limits`), among them the one a
 /// `/DA` is parsed under; the text as long as a value sheaf reads
-/// (`FormLimits::text`); a comb field's cells as many as sheaf lays out
+/// (`FormLimits::text`), a list box's options together too; a list box's
+/// options shown from its top as many as sheaf reads of an `/Opt`
+/// (`FormLimits::items`); a comb field's cells as many as sheaf lays out
 /// ([`MAX_LAYOUT_LEN`](super::read::MAX_LAYOUT_LEN)); a font read under
 /// sheaf's font caps ([`Limits::fonts`](crate::source::Limits::fonts)),
 /// its streams decompressed within what a page's content and its fonts
-/// may decompress to. The tree's caps (`fields`, `depth`, `items`) are
-/// the family's read layer's, which only tests call.
+/// may decompress to. The tree's caps (`fields`, `depth`) are the family's
+/// read layer's, which only tests call.
 pub fn limits() -> Limits {
     let ours = crate::source::Limits::DEFAULT;
     let mut limits = Limits::DEFAULT;
     limits.hops = ours.reader.max_depth;
     limits.annots = crate::source::annots::limits();
     limits.text = ours.forms.text;
+    limits.items = ours.forms.items;
     limits.comb_cells = super::read::MAX_LAYOUT_LEN as usize;
     limits.fonts = ours.fonts();
     limits.font_budget = ours.content.decompressed;
@@ -472,6 +493,8 @@ pub fn unmade_kind(why: &Unmade) -> String {
         Unmade::Limit(cap) => format!("limit:{}", cap_kind(*cap)),
         Unmade::NotText => "not-text".into(),
         Unmade::NotButton => "not-button".into(),
+        Unmade::NotChoice => "not-choice".into(),
+        Unmade::UnencodableOption { .. } => "unencodable-option".into(),
         Unmade::FontNotBindable => "font-not-bindable".into(),
         Unmade::Unreadable(u) => format!("unreadable:{}", why_kind(u.why)),
         _ => "other".into(),

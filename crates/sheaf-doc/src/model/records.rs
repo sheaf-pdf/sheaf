@@ -738,6 +738,9 @@ pub struct FieldProps {
     pub align: Option<u8>,
     /// `/MaxLen`, as the file has it.
     pub max_len: Option<u32>,
+    /// `/TI`: the index in [`options`](Self::options) of the first option
+    /// a list box shows at its top; 0 for none.
+    pub top: u32,
     /// `/Opt`: a choice field's items, or a check box's or radio group's
     /// export values, by its widgets' [`index`](WidgetProps::index).
     pub options: Arc<[Choice]>,
@@ -763,6 +766,7 @@ impl Terminal {
                 da: field.da.clone(),
                 align: field.align,
                 max_len: field.max_len,
+                top: field.top,
                 options: field.options.clone(),
                 has_opt: field.has_opt,
                 tooltip: field.tooltip.clone(),

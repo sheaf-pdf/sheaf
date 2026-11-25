@@ -186,6 +186,11 @@ pub struct Field {
     /// `/MaxLen`, as the file has it. Layout uses at most
     /// [`super::read::MAX_LAYOUT_LEN`] of it.
     pub max_len: Option<u32>,
+    /// `/TI`: the index in [`options`](Self::options) of the first option
+    /// a list box shows at its top, its own or a parent field's; 0 where
+    /// it has none, or gives no integer within `u32` (less than 0 too), as
+    /// the family reads it.
+    pub top: u32,
     /// `/Opt`: a choice field's items, or a check box's or radio group's
     /// export values (one per widget, by its [`index`](Widget::index)).
     /// Shared with the fields that inherit it. A choice field's leaves

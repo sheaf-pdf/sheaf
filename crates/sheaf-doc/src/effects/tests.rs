@@ -144,6 +144,7 @@ fn terminal(kind: FieldKind, value: Option<Value>) -> Terminal {
             da: None,
             align: None,
             max_len: None,
+            top: 0,
             options: Arc::from([]),
             has_opt: false,
             tooltip: None,
