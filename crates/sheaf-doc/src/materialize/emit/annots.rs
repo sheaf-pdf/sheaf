@@ -67,7 +67,7 @@ use crate::pdf::{Dictionary, Object, ObjectId, Stream, Value, dictionary, litera
 use super::{Cx, Shown};
 use crate::annot::{self, Annot, AnnotId, AnnotKind, Emitted};
 use crate::content::sink;
-use crate::content::{Glyphs, Res, ResId};
+use crate::content::{Res, ResId};
 use crate::geom::{Affine, Rect};
 use crate::materialize::copy::{self, Scope};
 use crate::materialize::key::{ObjKey, Part};
@@ -535,17 +535,19 @@ impl Page<'_> {
         }
         let page = cx.placeholder(ObjKey::Page(self.id));
         main.set("P", page.clone());
-        // An appearance an Append doesn't write isn't drawn.
+        // An appearance an Append doesn't write isn't drawn: what it draws
+        // in the fallback is joined where its form is written, and only
+        // there, as the form written is what binds the subset.
         let ap = ObjKey::AnnotPart(aid, Part::Ap);
         if cx.writes(&ap) {
-            let none = Glyphs::new();
+            let annot::Drawing { ap: drawn, glyphs } = drawn;
             let form = sink::form(
                 cx,
                 drawn.bbox,
                 drawn.matrix,
                 drawn.content,
                 &drawn.needs,
-                &none,
+                &glyphs,
             );
             cx.push(ap, Object::from(form));
         }
@@ -570,14 +572,14 @@ impl Page<'_> {
         if let Some((mut dict, drawn)) = companions.into_iter().next() {
             let ap = ObjKey::AnnotPart(aid, Part::CompanionAp);
             if cx.writes(&ap) {
-                let none = Glyphs::new();
+                let annot::Drawing { ap: drawn, glyphs } = drawn;
                 let form = sink::form(
                     cx,
                     drawn.bbox,
                     drawn.matrix,
                     drawn.content,
                     &drawn.needs,
-                    &none,
+                    &glyphs,
                 );
                 cx.push(ap, Object::from(form));
             }
@@ -869,8 +871,10 @@ impl Cx<'_> {
     /// Pinned appearance `ap` as a form in the file, drawn from its inputs
     /// as the mark it was drawn from is ([`annot::appearance`]), with the
     /// stamp's page it holds: its dictionary now, its content as it's
-    /// written ([`ObjKey::Pinned`], once a file), the same each time. Its
-    /// placeholder, `/BBox` and `/Matrix`, the drawing's.
+    /// written ([`ObjKey::Pinned`], once a file), the same each time, what
+    /// it draws in the fallback joined where its dictionary is made, which
+    /// is where it's written. Its placeholder, `/BBox` and `/Matrix`, the
+    /// drawing's.
     fn pinned(&mut self, ap: &Arc<PinnedAp>) -> (Object, Rect, Affine) {
         let inputs = &ap.inputs;
         // The stamp's page named by its form, not its number, which an
@@ -886,16 +890,15 @@ impl Cx<'_> {
                 }),
             _ => None,
         };
-        let drawn = annot::appearance(&inputs.annot(), page);
+        let annot::Drawing { ap: drawn, glyphs } = annot::appearance(&inputs.annot(), page);
         let (bbox, matrix) = (Rect::from(drawn.bbox), Affine::from(drawn.matrix));
         let id = self.push_deferred(ObjKey::Pinned(ap.digest), |cx| {
-            let none = Glyphs::new();
-            let mut dict = sink::form_dict(cx, drawn.bbox, drawn.matrix, &drawn.needs, &none);
+            let mut dict = sink::form_dict(cx, drawn.bbox, drawn.matrix, &drawn.needs, &glyphs);
             dict.set("Filter", Object::name("FlateDecode"));
             let ap = ap.clone();
             let data = move || {
                 let drawn = annot::appearance(&ap.inputs.annot(), page);
-                super::deflated(&drawn.content)
+                super::deflated(&drawn.ap.content)
             };
             super::Deferred {
                 dict,

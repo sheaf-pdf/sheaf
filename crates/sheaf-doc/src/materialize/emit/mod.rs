@@ -28,7 +28,11 @@
 //! holds that draws them all ([`SaveRecord::fallbacks`]), which nothing
 //! writes again; else a subset of them, written as an ordinary resource
 //! keyed by its objects' digest ([`Emission::fallback`]), as every Rewrite
-//! and overlay writes its own.
+//! and overlay writes its own. A page's own resources that bind it are
+//! keyed again then by the subset they bind (`rebind`), so pages alike but
+//! for it never share one dictionary: what's joined is everything that
+//! writes a binding draws, a page's every block whose names its resources
+//! bind among it, a block the saved file has too.
 //!
 //! Some keys are written at the number of the primary's object they are
 //! (§11.5's model-owned identities, [`Emission::owned`]): copy 0 of a
@@ -527,6 +531,10 @@ pub(crate) struct Cx<'a> {
     /// [`finish`] chooses once every glyph is joined ([`subset`]).
     fallback: Glyphs,
     fallback_bound: bool,
+    /// The page resources ([`ObjKey::PageRes`]) that bind the fallback's
+    /// marker, by the keys they're drawn under: [`subset`] keys them again
+    /// by the subset they bind ([`content::with_subset`]).
+    fallback_res: BTreeSet<ObjKey>,
 }
 
 impl<'a> Cx<'a> {
@@ -578,6 +586,7 @@ impl<'a> Cx<'a> {
             left_out: Vec::new(),
             fallback: Glyphs::new(),
             fallback_bound: false,
+            fallback_res: BTreeSet::new(),
         }
     }
 
@@ -1217,6 +1226,9 @@ fn finish(mut cx: Cx, p: &dyn Progress) -> Result<Emission> {
 /// Bound with no glyph joined is a missed join, a bug: logged, and a
 /// subset of none written, so no reference dangles. Glyphs joined where
 /// nothing binds the font are logged and dropped.
+///
+/// The page resources that bind the marker are keyed again by the subset
+/// chosen ([`rebind`]).
 fn subset(cx: &mut Cx) -> Option<(ResId, Glyphs)> {
     let sans = Fallback::SANS;
     let marker = ObjKey::Res(sans.res().id());
@@ -1240,14 +1252,47 @@ fn subset(cx: &mut Cx) -> Option<(ResId, Glyphs)> {
         });
         if let Some(&(id, _)) = saved {
             cx.syms.rekey(marker, ObjKey::Res(id));
+            rebind(cx, id);
             return None;
         }
     }
     let written = sans.subset(&glyphs);
     let id = written.id();
     cx.syms.rekey(marker, ObjKey::Res(id));
+    rebind(cx, id);
     cx.resource(&written);
     Some((id, glyphs))
+}
+
+/// Each page's own resources that bind the fallback's marker, keyed again
+/// by `subset`, the subset it stands for ([`content::with_subset`]):
+/// whatever holds the key moves with it (the placeholders, the object
+/// pushed, what's made and the dictionary kept), and an Append that finds
+/// the new key in the saved map writes none of it, as the saved file
+/// holds the same resources bound to the same subset. A page's resources
+/// are the one object keyed by digest that binds the marker and whose key
+/// doesn't decide what's drawn through it: a form's is its drawing's (a
+/// mark's appearance, a flattened one by its inputs), a block names it
+/// through its page's.
+fn rebind(cx: &mut Cx, subset: ResId) {
+    for from in std::mem::take(&mut cx.fallback_res) {
+        let to = content::with_subset(from, subset);
+        cx.syms.rekey(from, to);
+        if let Some(resources) = cx.page_res.remove(&from) {
+            cx.page_res.insert(to, resources);
+        }
+        if cx.made.remove(&from) {
+            cx.made.insert(to);
+        }
+        let writes = cx.writes(&to);
+        cx.objects.retain_mut(|(key, _)| {
+            if *key != from {
+                return true;
+            }
+            *key = to;
+            writes
+        });
+    }
 }
 
 /// An Append's objects, into `cx`: the pages whose dictionaries are in

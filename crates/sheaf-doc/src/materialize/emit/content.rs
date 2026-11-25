@@ -123,9 +123,9 @@ use crate::pdf::{
 use super::{Cx, Deferred, PdfVersion};
 use crate::content::sink::{self, Sink as _};
 use crate::content::{
-    self, Balance, BlockAt, BlockId, Concat, ContentWriter, GenId, Glyphs, Marker, NameSet,
-    PagOrigin, PageBlocks, PageContent, Pagination, PaginationKind, Pos, Res, ResBody, ResCx,
-    ResId, ResKind, Reserved, ResourceNeeds, Rewrite, SheafBlock, SpanAcross, SpliceError, Spliced,
+    self, Balance, BlockAt, BlockId, Concat, ContentWriter, GenId, Marker, NameSet, PagOrigin,
+    PageBlocks, PageContent, Pagination, PaginationKind, Pos, Res, ResBody, ResCx, ResId, ResKind,
+    Reserved, ResourceNeeds, Rewrite, SheafBlock, SpanAcross, SpliceError, Spliced, Uses,
 };
 use crate::generate::{self, Art};
 use crate::geom::Geom;
@@ -557,10 +557,10 @@ fn wrapped(
 ) {
     let base = sink::content_entries(cx, page);
     let mut reserved = reserved(cx, src, index, page, &NameSet::default());
-    let mut needs = ResourceNeeds::default();
+    let mut uses = Uses::default();
     let (mut under, mut over) = (Vec::new(), Vec::new());
     for (g, ctx) in on.iter().zip(ctxs) {
-        let block = drawn(cx, (id, g), ctx, &mut reserved, &mut needs);
+        let block = drawn(cx, (id, g), ctx, &mut reserved, &mut uses);
         match g.z {
             sheaf_edit::Z::Under => under.push(block),
             sheaf_edit::Z::Over => over.push(block),
@@ -573,7 +573,7 @@ fn wrapped(
     contents.push(isolation(cx, Shared::QClose(close)));
     let mut flats = Vec::new();
     for l in layers {
-        let block = layer(cx, l, &mut reserved, &mut needs);
+        let block = layer(cx, l, &mut reserved, &mut uses.needs);
         match l.kind() {
             BlockKind::Ocr => contents.push(block),
             BlockKind::Flattened => flats.push(block),
@@ -587,7 +587,7 @@ fn wrapped(
         (src, index),
         page,
         &NameSet::default(),
-        (&needs, &ResStrip::default()),
+        (&uses, &ResStrip::default()),
     );
 }
 
@@ -848,7 +848,7 @@ fn rebuilt(
         base.push(entry(cx, i));
     }
     let mut reserved = reserved(cx, src, index, page, &kept.dropped);
-    let mut needs = ResourceNeeds::default();
+    let mut uses = Uses::default();
     let contents = match on.is_empty() && layers.is_empty() && saved_layers.is_empty() {
         true => base,
         false => {
@@ -859,7 +859,7 @@ fn rebuilt(
                         keeps(cx, (id, g), src, (ids[i], mark(i)));
                         entry(cx, i)
                     }
-                    None => drawn(cx, (id, g), ctx, &mut reserved, &mut needs),
+                    None => drawn(cx, (id, g), ctx, &mut reserved, &mut uses),
                 };
                 match g.z {
                     sheaf_edit::Z::Under => under.push(block),
@@ -893,7 +893,7 @@ fn rebuilt(
                 }
             }
             for l in layers {
-                let block = layer(cx, l, &mut reserved, &mut needs);
+                let block = layer(cx, l, &mut reserved, &mut uses.needs);
                 match l.kind() {
                     BlockKind::Ocr => contents.push(block),
                     BlockKind::Flattened => flats.push(block),
@@ -906,9 +906,12 @@ fn rebuilt(
     };
     page.set("Contents", Object::from(contents));
     // A name dropped that a block drawn anew names the same resource by
-    // stays as the page's resources bind it.
+    // stays as the page's resources bind it. The fallback's marker is
+    // never like what a name is bound to ([`alike`]), so it's added
+    // wherever a block names it, with the glyphs the blocks draw in it.
     let (mut dropped, mut added) = (kept.dropped, ResourceNeeds::default());
     let resources = sink::resources(cx, page);
+    let Uses { needs, glyphs } = uses;
     for need in needs.0 {
         let bound = (dropped.contains(need.kind, &need.name))
             .then(|| binding(cx, &resources, need.kind, &need.name))
@@ -918,6 +921,10 @@ fn rebuilt(
             false => added.0.push(need),
         }
     }
+    let added = Uses {
+        needs: added,
+        glyphs,
+    };
     page_res(cx, (src, index), page, &dropped, (&added, &strip));
     Some(Stayed {
         ranges: stayed,
@@ -1038,17 +1045,19 @@ fn isolated(balance: Balance) -> (u32, u32) {
 
 /// Generator `g` laid out on page `id`, as `ctx` says it is, its names
 /// clear of `reserved` and kept there, what it draws with added to
-/// `needs`: its block, marked `<< /K /Gen /G (g…) /L <…> /R <…> >>` and,
-/// on a page the header numbers, `/N (…)`, written once a file.
+/// `uses`, its glyphs in the fallback font too: its block, marked `<< /K
+/// /Gen /G (g…) /L <…> /R <…> >>` and, on a page the header numbers, `/N
+/// (…)`, written once a file. A block the saved file has is drawn all the
+/// same, and what it draws with is the page's as any other's.
 fn drawn(
     cx: &mut Cx,
     (id, g): (PageId, &Generator),
     ctx: &PageCtx,
     reserved: &mut Reserved,
-    needs: &mut ResourceNeeds,
+    uses: &mut Uses,
 ) -> Object {
     let art = g.spec.watermark().and_then(|wm| art(cx, &wm.content));
-    let art = art.map(|art| as_the_page_draws(art, needs));
+    let art = art.map(|art| as_the_page_draws(art, &uses.needs));
     let drawn = generate::layout(g, ctx, art.as_ref(), reserved, cx.private);
     let recipe = generate::recipe_digest(g, id);
     // What a view or a save asks of the page next ([`header_digest`]): a
@@ -1059,7 +1068,8 @@ fn drawn(
         (cx.st.laid()).put((g.id, recipe, reads), drawn.layout_digest);
     }
     reserved.take(&drawn.res);
-    add_needs(needs, drawn.res.clone());
+    add_needs(&mut uses.needs, drawn.res.clone());
+    uses.glyphs.merge(&drawn.glyphs);
     let mut marker = dictionary! {
         "K" => Object::name("Gen"),
         "G" => literal(g.id.to_string()),
@@ -1201,18 +1211,25 @@ impl ResStrip {
 }
 
 /// `page`'s resources, page `index` of `src`'s, with the names `dropped`
-/// taken out of their categories, those `needs` adds bound, and what
+/// taken out of their categories, those `uses` adds bound, and what
 /// `strip` takes out of them: a dictionary of the page's own
 /// ([`ObjKey::PageRes`]), shared by the pages whose base resources,
 /// dropped names, added names and strip are the same. Nothing when it's
 /// none of them.
+///
+/// What the page's blocks draw in the fallback font is joined for every
+/// page, not only the first of those that share the dictionary: each
+/// page's blocks draw through it. The dictionary is noted as one that
+/// binds the fallback, whose key isn't known until the subset is
+/// ([`with_subset`], in the emission's `finish`).
 fn page_res(
     cx: &mut Cx,
     (src, index): (&Src, u32),
     page: &mut Dictionary,
     dropped: &NameSet,
-    (needs, strip): (&ResourceNeeds, &ResStrip),
+    (uses, strip): (&Uses, &ResStrip),
 ) {
+    let Uses { needs, glyphs } = uses;
     if dropped.is_empty() && needs.0.is_empty() && strip.is_empty() {
         return;
     }
@@ -1243,8 +1260,13 @@ fn page_res(
             }
             resources.set(kind.key(), category);
         }
-        sink::bind(cx, needs, &Glyphs::new(), &mut resources);
+        sink::bind(cx, needs, glyphs, &mut resources);
         cx.page_res.insert(key, resources);
+    } else if !glyphs.is_empty() {
+        cx.fallback(glyphs);
+    }
+    if !glyphs.is_empty() {
+        cx.fallback_res.insert(key);
     }
     let resources = cx.placeholder(key);
     page.set("Resources", resources);
@@ -1355,6 +1377,32 @@ fn names_of(dropped: &NameSet) -> u64 {
 /// ([`ObjKey::PageRes`]).
 fn names_digest(bytes: &[u8]) -> u64 {
     sheaf_util::checksum(bytes) as u64
+}
+
+/// Page resources `key` ([`ObjKey::PageRes`]), which bind the fallback
+/// font's marker, as keyed once the subset it stands for is known,
+/// `subset`: what they add mixed with the subset's id. Its added names
+/// say the marker, not what the page's blocks draw in it, so pages
+/// alike but for the subset their resources bind (an Append's against
+/// the saved file's, two pages of an overlay emitted apart) would
+/// otherwise share one dictionary, and one subset. Anything else is as it
+/// is.
+pub(super) fn with_subset(key: ObjKey, subset: ResId) -> ObjKey {
+    let ObjKey::PageRes {
+        base,
+        dropped,
+        added,
+    } = key
+    else {
+        return key;
+    };
+    let mut bytes = added.to_be_bytes().to_vec();
+    bytes.extend(subset.0.to_be_bytes());
+    ObjKey::PageRes {
+        base,
+        dropped,
+        added: names_digest(&bytes),
+    }
 }
 
 /// What a block's stream dictionary says: `/SHEF_Block` and `marker`, or

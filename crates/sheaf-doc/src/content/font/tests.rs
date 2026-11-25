@@ -76,8 +76,8 @@ fn text_advances_by_the_afm_s_widths() {
             // The code's character, where it has one and it's written as
             // this code (the lower one, where two draw it).
             let text = encoding.text(code).unwrap_or_default();
-            if font.encode(&text) == (vec![code], Unencoded(0)) {
-                let advance = font.width(&text, 1000.0);
+            if font.encode_alone(&text) == (vec![code], Unencoded(0)) {
+                let advance = font.width_alone(&text, 1000.0);
                 assert_eq!(Some(advance), width, "{font:?} {code:#x} {glyph}");
                 written += 1;
             }
@@ -118,7 +118,7 @@ fn the_latin_fonts_write_windows_1252() {
             .into_iter()
             .filter(|&f| written_in(f) == Encoding::WinAnsi)
         {
-            let encoded = font.encode(&c.to_string());
+            let encoded = font.encode_alone(&c.to_string());
             match drawn {
                 true => assert_eq!(encoded, (vec![code], Unencoded(0)), "{font:?} {c:?}"),
                 false => assert_eq!(encoded, (b"?".to_vec(), Unencoded(1)), "{font:?} {c:?}"),
@@ -128,31 +128,39 @@ fn the_latin_fonts_write_windows_1252() {
     }
     // The ten cp1252 characters outside Latin-1, which the old header
     // encoder drew as `?`.
-    let (codes, none) = Std14::Helvetica.encode("Š š Ž ž Œ œ Ÿ ƒ ˆ ˜");
+    let (codes, none) = Std14::Helvetica.encode_alone("Š š Ž ž Œ œ Ÿ ƒ ˆ ˜");
     assert_eq!(codes, b"\x8a \x9a \x8e \x9e \x8c \x9c \x9f \x83 \x88 \x98");
     assert_eq!(none, Unencoded(0));
     // The second space and the soft hyphen are their own.
-    assert_eq!(Std14::Helvetica.encode("\u{a0}\u{ad} -").0, b"\xa0\xad -");
+    assert_eq!(
+        Std14::Helvetica.encode_alone("\u{a0}\u{ad} -").0,
+        b"\xa0\xad -"
+    );
 }
 
+/// A font alone draws what it can't encode as `?`, counted: what's drawn
+/// of a cluster neither it nor the fallback has ([`DrawFont::encode`]).
 #[test]
 fn what_a_font_cant_encode_draws_a_question_mark_and_is_counted() {
     assert_eq!(
-        Std14::Helvetica.encode("a中文b€"),
+        Std14::Helvetica.encode_alone("a中文b€"),
         (b"a??b\x80".to_vec(), Unencoded(2))
     );
-    assert_eq!(Std14::Helvetica.width("中", 10.0), 5.56);
+    assert_eq!(Std14::Helvetica.width_alone("中", 10.0), 5.56);
     // Composed first: a decomposed é is one character.
     assert_eq!(
-        Std14::TimesRoman.encode("e\u{301}"),
+        Std14::TimesRoman.encode_alone("e\u{301}"),
         (vec![0xe9], Unencoded(0))
     );
     assert!(!Std14::Helvetica.covers('α'));
     // Symbol has a question mark; ZapfDingbats hasn't, so it leaves the
     // character out.
-    assert_eq!(Std14::Symbol.encode("αx"), (b"a?".to_vec(), Unencoded(1)));
     assert_eq!(
-        Std14::ZapfDingbats.encode("✔x✘"),
+        Std14::Symbol.encode_alone("αx"),
+        (b"a?".to_vec(), Unencoded(1))
+    );
+    assert_eq!(
+        Std14::ZapfDingbats.encode_alone("✔x✘"),
         (b"48".to_vec(), Unencoded(1))
     );
 }
@@ -160,21 +168,21 @@ fn what_a_font_cant_encode_draws_a_question_mark_and_is_counted() {
 #[test]
 fn symbol_and_zapf_dingbats_encode_their_own() {
     let symbol = Std14::Symbol;
-    assert_eq!(symbol.encode("αβ∑≠ ").0, b"ab\xe5\xb9 ");
+    assert_eq!(symbol.encode_alone("αβ∑≠ ").0, b"ab\xe5\xb9 ");
     assert!(symbol.covers('π') && symbol.covers('€') && !symbol.covers('A'));
     // Omega, Delta and mu, as the Greek letters and as the AGL reads
     // Symbol's glyphs: the ohm sign, the increment and the micro sign.
     let greek = (
-        symbol.encode("\u{3a9}\u{394}\u{3bc}"),
-        symbol.encode("\u{2126}\u{2206}\u{b5}"),
+        symbol.encode_alone("\u{3a9}\u{394}\u{3bc}"),
+        symbol.encode_alone("\u{2126}\u{2206}\u{b5}"),
     );
     assert_eq!(greek.0, (b"WDm".to_vec(), Unencoded(0)));
     assert_eq!(greek.1, greek.0);
     assert!(symbol.covers('\u{2126}') && symbol.covers('\u{3a9}'));
     // The checks and crosses: ✓ is a19, ✔ a20, ✗ a23, ✘ a24.
     let dingbats = Std14::ZapfDingbats;
-    assert_eq!(dingbats.encode("✓✔✗✘").0, b"3478");
-    assert_eq!(dingbats.encode("☎ ").0, b"\x25 ");
+    assert_eq!(dingbats.encode_alone("✓✔✗✘").0, b"3478");
+    assert_eq!(dingbats.encode_alone("☎ ").0, b"\x25 ");
     assert!(dingbats.covers('❤') && !dingbats.covers('a'));
 }
 
@@ -194,12 +202,12 @@ fn wrap_breaks_at_spaces_and_inside_long_words() {
 
 #[test]
 fn glyphless_encodes_utf16_at_half_an_em() {
-    let (codes, none) = Glyphless.encode("Hé𝄞");
+    let (codes, none) = Glyphless.encode_alone("Hé𝄞");
     assert_eq!(codes, [0x00, 0x48, 0x00, 0xe9, 0xd8, 0x34, 0xdd, 0x1e]);
     assert_eq!(none, Unencoded(0));
     assert_eq!(Glyphless.width("Hé𝄞", 10.0), 20.0);
     // Decomposed text stays as it was recognized.
-    assert_eq!(Glyphless.encode("e\u{301}").0, [0, 0x65, 0x03, 0x01]);
+    assert_eq!(Glyphless.encode_alone("e\u{301}").0, [0, 0x65, 0x03, 0x01]);
     assert!(Glyphless.covers('中'));
     // Any font goes where a `dyn DrawFont` does.
     let fonts: [&dyn DrawFont; 2] = [&Std14::Courier, &Glyphless];
@@ -367,13 +375,16 @@ fn text_is_written_in_its_font() {
 
     let mut w = ContentWriter::new();
     w.set_font(&Std14::Helvetica, 9.0);
-    assert_eq!(w.show_text(&Std14::Helvetica, "(a\\b) é"), Unencoded(0));
-    assert_eq!(w.show_text(&Std14::Helvetica, "中文"), Unencoded(2));
+    assert_eq!(
+        w.show_text(&Std14::Helvetica, 9.0, "(a\\b) é").1,
+        Unencoded(0)
+    );
+    assert_eq!(w.show_text(&Std14::Helvetica, 9.0, "中文").1, Unencoded(2));
     w.save();
     w.set_font(&Glyphless, 10.0);
-    assert_eq!(w.show_text(&Glyphless, "Hi"), Unencoded(0));
+    assert_eq!(w.show_text(&Glyphless, 10.0, "Hi").1, Unencoded(0));
     w.restore();
-    w.show_text(&Std14::Helvetica, "é");
+    w.show_text(&Std14::Helvetica, 9.0, "é");
     // A font set again is the one need, under the one name.
     w.set_font(&Std14::Helvetica, 12.0);
     let (bytes, needs) = w.finish(&Reserved::default());
@@ -452,10 +463,12 @@ fn every_character_encodes_as_it_always_has() {
             Some(font) => font,
             None => &Glyphless,
         };
+        // Each font alone: what it draws of what it has, and of what
+        // neither it nor the fallback has.
         drawn_digest(
             |c| font.covers(c),
-            |s| font.encode(s),
-            |s, z| font.width(s, z),
+            |s| font.encode_alone(s),
+            |s, z| font.width_alone(s, z),
         )
     });
     // Every font is said before any fails, each as it is now.
@@ -591,4 +604,203 @@ fn a_subset_draws_all_of_what_it_holds() {
     later.insert(l, "\u{179}");
     assert!(!draws_all(&held, &smaller));
     assert!(draws_all(&held, &later));
+}
+
+/// Text a font can't draw all of is drawn in two (M10 slice 7): composed,
+/// a grapheme cluster at a time, each in the first of the font and the
+/// fallback that has all of it, the fallback's glyphs said with their
+/// text; a cluster neither has is `?` in the font, counted; a control
+/// character stays the font's, though the fallback maps two (a carriage
+/// return, a NUL); and text the font draws whole is its own codes, one
+/// run, no glyph.
+#[test]
+fn text_the_font_lacks_is_drawn_in_the_fallback() {
+    use crate::content::fixture::FALLBACK_TEXT;
+
+    let program = Fallback::SANS.program();
+    let glyph = |c: char| program.glyph(c).unwrap();
+    let code = |c: char| glyph(c).to_be_bytes().to_vec();
+    let helvetica = Std14::Helvetica;
+    let e = helvetica.encode(FALLBACK_TEXT);
+    assert_eq!(
+        e.runs,
+        [
+            (InFont::Fallback, code('\u{141}')),
+            (InFont::Own, b"ukasz Nguy".to_vec()),
+            (InFont::Fallback, code('\u{1ec5}')),
+            (InFont::Own, b"n \xd6l\xe7er".to_vec()),
+        ]
+    );
+    assert_eq!(e.unencoded, Unencoded(0));
+    let drawn: Vec<(u16, &str)> = e.glyphs.iter().collect();
+    let mut want = vec![
+        (glyph('\u{141}'), "\u{141}"),
+        (glyph('\u{1ec5}'), "\u{1ec5}"),
+    ];
+    want.sort();
+    assert_eq!(drawn, want);
+    // Decomposed, the same: composed first.
+    let decomposed: String = FALLBACK_TEXT.nfd().collect();
+    assert_eq!(helvetica.encode(&decomposed), e);
+    // As wide as the two draw it: Helvetica's widths, the program's.
+    let units: f32 = (FALLBACK_TEXT.chars())
+        .map(|c| (helvetica.char_advance(c)).unwrap_or_else(|| program.width(glyph(c))))
+        .sum();
+    assert_eq!(helvetica.width(FALLBACK_TEXT, 10.0), units * 10.0 / 1000.0);
+    assert_eq!(helvetica.width(&decomposed, 10.0), units * 10.0 / 1000.0);
+    assert!(!helvetica.covers('\u{141}'), "covers is the font alone");
+
+    // What neither has is `?` in the font, counted, beside what one has.
+    let e = helvetica.encode("\u{141}\u{6f22}");
+    assert_eq!(
+        e.runs,
+        [
+            (InFont::Fallback, code('\u{141}')),
+            (InFont::Own, b"?".to_vec())
+        ]
+    );
+    assert_eq!((e.glyphs.len(), e.unencoded), (1, Unencoded(1)));
+    assert_eq!(
+        helvetica.width("\u{6f22}", 10.0),
+        helvetica.width_alone("\u{6f22}", 10.0)
+    );
+    // A control character is the font's, `?`, as it always was.
+    for control in ["a\rb", "a\0b"] {
+        let e = helvetica.encode(control);
+        assert_eq!(e.runs, [(InFont::Own, b"a?b".to_vec())], "{control:?}");
+        assert_eq!((e.glyphs.len(), e.unencoded), (0, Unencoded(1)));
+        assert_eq!(
+            helvetica.width(control, 10.0),
+            helvetica.width_alone(control, 10.0)
+        );
+    }
+    // Symbol and ZapfDingbats fall back too.
+    assert_eq!(
+        Std14::Symbol.encode("\u{3b1}x").runs,
+        [(InFont::Own, b"a".to_vec()), (InFont::Fallback, code('x'))]
+    );
+    assert_eq!(
+        Std14::ZapfDingbats.encode("✔x✘").runs,
+        [
+            (InFont::Own, b"4".to_vec()),
+            (InFont::Fallback, code('x')),
+            (InFont::Own, b"8".to_vec())
+        ]
+    );
+
+    // Text a font draws whole is its own codes, as they always were.
+    for whole in ["plain \u{e9} \u{20ac}", "", "e\u{301}"] {
+        let (codes, unencoded) = helvetica.encode_alone(whole);
+        let e = helvetica.encode(whole);
+        assert_eq!(e.runs, [(InFont::Own, codes)], "{whole:?}");
+        assert_eq!((e.glyphs.len(), e.unencoded), (0, unencoded));
+        assert_eq!(
+            helvetica.width(whole, 10.0),
+            helvetica.width_alone(whole, 10.0)
+        );
+    }
+    // Glyphless never falls back: it draws every character.
+    let e = Glyphless.encode("\u{141}ukasz \u{6f22}");
+    assert_eq!(
+        e.runs,
+        [(
+            InFont::Own,
+            Glyphless.encode_alone("\u{141}ukasz \u{6f22}").0
+        )]
+    );
+    assert!(e.glyphs.is_empty());
+}
+
+/// Lines are broken where the text, in both fonts, is as wide as it's
+/// drawn: a word of `Ł`s measures the fallback's widths, not `?`'s.
+#[test]
+fn wrap_measures_text_in_both_fonts() {
+    let program = Fallback::SANS.program();
+    let l = program.width(program.glyph('\u{141}').unwrap());
+    assert_ne!(l, 600.0, "not Courier's");
+    let courier = Std14::Courier;
+    let three = "\u{141}\u{141}\u{141}";
+    assert_eq!(courier.width(three, 10.0), 3.0 * l * 10.0 / 1000.0);
+    let line = courier.width(three, 10.0);
+    assert_eq!(
+        courier.wrap(&format!("{three} {three}"), 10.0, line),
+        [three, three]
+    );
+}
+
+/// Text in two fonts is written in runs ([`DrawText::show_text`]): the
+/// fallback's set at the size under its marker's name, then the font set
+/// again, so what follows is the font's; what it drew in the fallback and
+/// what neither font draws come back. Text the font draws whole is the
+/// bytes it always was.
+#[test]
+fn text_in_two_fonts_is_written_in_runs() {
+    use crate::content::{ContentWriter, DrawText, Reserved};
+
+    let helvetica = Std14::Helvetica;
+    let sans = Fallback::SANS;
+    let program = sans.program();
+    let mut w = ContentWriter::new();
+    w.set_font(&helvetica, 9.0);
+    let (glyphs, unencoded) = w.show_text(&helvetica, 9.0, "\u{141}u\u{6f22}");
+    assert_eq!((glyphs.len(), unencoded), (1, Unencoded(1)));
+    let (_, none) = w.show_text(&helvetica, 9.0, "plain");
+    assert_eq!(none, Unencoded(0));
+    let written = w.finish(&Reserved::default());
+
+    let mut by_hand = ContentWriter::new();
+    by_hand.font(helvetica.res(), 9.0);
+    by_hand.font(sans.res(), 9.0);
+    by_hand.show(&program.glyph('\u{141}').unwrap().to_be_bytes());
+    by_hand.font(helvetica.res(), 9.0);
+    by_hand.show(b"u?");
+    by_hand.show(b"plain");
+    assert_eq!(written, by_hand.finish(&Reserved::default()));
+    let (_, needs) = written;
+    let named: Vec<bool> = needs.0.iter().map(|n| sans.is(&n.res)).collect();
+    assert_eq!(
+        named,
+        [false, true],
+        "Helvetica, then the fallback's marker"
+    );
+}
+
+/// Wherever a standard 14 font draws a character itself, the two-font
+/// drawing is the font alone's, its codes and its width to the bit; and
+/// wherever it draws one in the fallback, the font alone couldn't: over
+/// every character of the Basic Multilingual Plane, in each of the 14.
+#[test]
+fn what_a_font_draws_itself_is_drawn_as_it_always_was() {
+    let mut buf = [0u8; 4];
+    for font in Std14::ALL {
+        let mut fallen = 0;
+        // A char range skips the surrogates.
+        for c in '\0'..='\u{ffff}' {
+            let s = &*c.encode_utf8(&mut buf);
+            let drawn = font.encode(s);
+            let alone = font.encode_alone(s);
+            let width = font.width(s, 1000.0).to_bits();
+            match &drawn.runs[..] {
+                [(InFont::Own, codes)] => {
+                    assert_eq!(
+                        (codes, drawn.unencoded),
+                        (&alone.0, alone.1),
+                        "{font:?} {c:?}"
+                    );
+                    assert_eq!(
+                        width,
+                        font.width_alone(s, 1000.0).to_bits(),
+                        "{font:?} {c:?}"
+                    );
+                    assert!(drawn.glyphs.is_empty());
+                }
+                _ => {
+                    assert_ne!(alone.1, Unencoded(0), "{font:?} {c:?}");
+                    assert_eq!(drawn.unencoded, Unencoded(0), "{font:?} {c:?}");
+                    fallen += 1;
+                }
+            }
+        }
+        assert!(fallen > 2000, "{font:?}: {fallen} in the fallback");
+    }
 }

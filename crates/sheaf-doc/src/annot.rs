@@ -43,8 +43,11 @@
 //! look for them isn't sheaf's: the underline, strikeout and squiggly, the
 //! note, the line and the dimension, free text and the callout, a plain
 //! ellipse, and sheaf's own tools (the tape, the connector, the stamps).
-//! Their text is in the standard 14 fonts; a character those lack draws
-//! `?`, which [`Annot::unencodable`] tells without drawing anything.
+//! Their text is in the standard 14 fonts, and a character those lack in
+//! the fallback font sheaf bundles ([`Fallback`](crate::content::Fallback),
+//! M10 slice 7), what it draws there said beside the drawing
+//! ([`Drawing`]); a character neither has draws `?`, which
+//! [`Annot::unencodable`] tells without drawing anything.
 //! Another tool's annotation is read by pdf-annots and made a mark by
 //! [`import`](crate::import).
 //!
@@ -74,8 +77,8 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::attachments::{Objects, resolve};
 use crate::content::{
-    Blend, Color, ContentWriter, DrawFont, DrawText, FillRule, GState, Paint, Reserved, Std14,
-    place_form,
+    Blend, Color, ContentWriter, DrawFont, DrawText, FillRule, GState, Glyphs, Paint, Reserved,
+    Std14, Uses, place_form,
 };
 use crate::geom::{Affine, Geom, Rect, family_point, layout_point, sides};
 use crate::model::{FormRef, PinnedAp};
@@ -1088,6 +1091,16 @@ impl Annot {
     }
 }
 
+/// A mark's appearance, drawn: the parts of its form as pdf-annots holds
+/// one ([`SynthesizedAp`]: its box, matrix, content and what that draws
+/// with), and the glyphs its text draws in the fallback font, which the
+/// writer joins where it binds the form's resources
+/// ([`sink::form`](crate::content::sink::form)).
+pub struct Drawing {
+    pub ap: SynthesizedAp,
+    pub glyphs: Glyphs,
+}
+
 /// A mark as the writer makes it, before anything of it is in a file
 /// ([`emission`]).
 pub struct Emitted {
@@ -1095,12 +1108,13 @@ pub struct Emitted {
     /// or `/IRT`, which the writer gives it.
     pub main: Dictionary,
     /// Its appearance, drawn: the parts of its form, which the writer
-    /// makes ([`sink::form`](crate::content::sink::form)).
-    pub appearance: SynthesizedAp,
+    /// makes ([`sink::form`](crate::content::sink::form)), and what it
+    /// draws in the fallback font.
+    pub appearance: Drawing,
     /// What it writes beside itself, each with its appearance: a
     /// replacement's StrikeOut, its `/NM` set. The writer gives each
     /// `/AP`, `/IRT` to the main annotation and `/RT /Group`.
-    pub companions: Vec<(Dictionary, SynthesizedAp)>,
+    pub companions: Vec<(Dictionary, Drawing)>,
 }
 
 /// Mark `a` as the writer makes it, drawing and embedding what `held`
@@ -1165,7 +1179,7 @@ pub fn companion(a: &Annot) -> Option<Annot> {
 /// what a flattened mark's layer draws again ([`PinnedAp`]).
 ///
 /// [`PinnedAp`]: crate::model::PinnedAp
-pub(crate) fn appearance(a: &Annot, stamp: Option<StampForm>) -> SynthesizedAp {
+pub(crate) fn appearance(a: &Annot, stamp: Option<StampForm>) -> Drawing {
     annotation(a, stamp).1
 }
 
@@ -1263,11 +1277,11 @@ impl Annot {
         }
     }
 
-    /// Whether some of the text it draws can't be drawn in the built-in
-    /// fonts: its appearance shows those characters as `?`, while its
-    /// `/Contents` and its `/SHEF_Annot` keep them (M10.5 proposal 22,
-    /// until M10 slice 7's fallback font). Read from the text the writer
-    /// draws, laid out, without drawing it.
+    /// Whether some of the text it draws can't be drawn in any font sheaf
+    /// bundles, its own or the fallback (M10 slice 7): its appearance
+    /// shows those characters as `?`, while its `/Contents` and its
+    /// `/SHEF_Annot` keep them (M10.5 proposal 22). Read from the text the
+    /// writer draws, laid out, without drawing it.
     pub fn unencodable(&self) -> bool {
         runs(self, &self.upright()).iter().any(Run::unencodable)
     }
@@ -1415,9 +1429,10 @@ struct Run {
 }
 
 impl Run {
-    /// Whether its font draws some of it as `?`.
+    /// Whether some of it is drawn as `?`: neither its font nor the
+    /// fallback has it.
     fn unencodable(&self) -> bool {
-        self.font.encode(&self.text).1.0 > 0
+        self.font.encode(&self.text).unencoded.0 > 0
     }
 }
 
@@ -1541,10 +1556,17 @@ pub fn tick_glyph(c: char) -> char {
 }
 
 /// `runs` drawn in `color`, each from where the text matrix `at` makes
-/// of its point puts it.
-fn draw_runs(w: &mut ContentWriter, runs: &[Run], color: Color, at: impl Fn(Pt) -> Affine) {
+/// of its point puts it, in its font and the fallback: what they drew in
+/// the fallback.
+fn draw_runs(
+    w: &mut ContentWriter,
+    runs: &[Run],
+    color: Color,
+    at: impl Fn(Pt) -> Affine,
+) -> Glyphs {
+    let mut glyphs = Glyphs::new();
     if runs.is_empty() {
-        return;
+        return glyphs;
     }
     w.begin_text();
     w.fill_color(color);
@@ -1555,9 +1577,11 @@ fn draw_runs(w: &mut ContentWriter, runs: &[Run], color: Color, at: impl Fn(Pt) 
             set = Some((run.font, run.size));
         }
         w.text_matrix(at(run.at).array());
-        w.show_text(run.font, &run.text);
+        let (drawn, _) = w.show_text(run.font, run.size, &run.text);
+        glyphs.merge(&drawn);
     }
     w.end_text();
+    glyphs
 }
 
 /// The main annotation dictionary (without `/AP`, `/P` or `/SHEF_Annot`)
@@ -1565,8 +1589,10 @@ fn draw_runs(w: &mut ContentWriter, runs: &[Run], color: Color, at: impl Fn(Pt) 
 /// when it has one. The appearance is pdf-annots' drawing of the kinds it
 /// draws ([`family_drawing`]), and sheaf's of the rest, held as the
 /// family holds one it draws ([`SynthesizedAp::drawn`]): either way its
-/// `/BBox` is the mark's `/Rect`, in user space, at the identity.
-fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp) {
+/// `/BBox` is the mark's `/Rect`, in user space, at the identity. What its
+/// text draws in the fallback font is said with it (none where the family
+/// drew it: it draws no text).
+fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Drawing) {
     // Laid out as it reads, then drawn in user space through `user`, so
     // it's upright whatever the page's /Rotate.
     let shown = a.upright();
@@ -1594,6 +1620,8 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
     let family = family_drawing(a, &shown, &user, bbox);
 
     let mut w = ContentWriter::new();
+    // What its text draws in the fallback font.
+    let mut glyphs = Glyphs::new();
     // A page stamp's page first, under its text and its opacity: fitted
     // into the mark as it reads, in the frame that reads upright, turned
     // y up, where a form's box is placed.
@@ -1751,7 +1779,7 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
             dict.set("DA", default_appearance(*size, c));
             dict.set("C", vec![Object::from(1.0_f64); 3]);
             let tape = a.tape().unwrap_or_default();
-            tape_content(&mut w, *rect, *size, look, &tape, c, &user);
+            glyphs = tape_content(&mut w, *rect, *size, look, &tape, c, &user);
         }
         AnnotKind::Square { rect } | AnnotKind::Ellipse { rect } => {
             let square = matches!(a.kind, AnnotKind::Square { .. });
@@ -2060,7 +2088,7 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
         };
         let theta = (a.turn.degrees() as f32).to_radians();
         let (cs, sn) = (theta.cos(), theta.sin());
-        draw_runs(&mut w, &runs(a, &shown), ink, |p| {
+        glyphs = draw_runs(&mut w, &runs(a, &shown), ink, |p| {
             let o = up(p);
             Affine {
                 a: cs,
@@ -2085,7 +2113,7 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, SynthesizedAp
         }
         None => SynthesizedAp::drawn(bbox, gfx::Matrix::IDENTITY, Canvas::from_writer(w)),
     };
-    (dict, drawn)
+    (dict, Drawing { ap: drawn, glyphs })
 }
 
 /// Mark `a`'s appearance as pdf-annots draws it, for the kinds it draws
@@ -2460,6 +2488,7 @@ fn tape_runs(
 /// A tape's appearance: paper, then its rows ([`tape_runs`]), drawn in
 /// the tape's own frame and mapped onto the page through `up`, from
 /// `rect`'s frame, so it reads the right way whichever way it's turned.
+/// What its rows draw in the fallback font.
 fn tape_content(
     w: &mut ContentWriter,
     rect: Box2,
@@ -2468,7 +2497,7 @@ fn tape_content(
     tape: &crate::tape::Tape,
     c: [u8; 3],
     up: &Affine,
-) {
+) -> Glyphs {
     let (width, h) = tape_frame(rect, look);
     // The frame, PDF-style (y up from its bottom left), to user space.
     let user = |x: f32, y: f32| up.apply(tape_to_shown(rect, look, x, h - y));
@@ -2497,7 +2526,7 @@ fn tape_content(
             w.paint(Paint::Stroke);
         }
     }
-    draw_runs(w, &tape_runs(rect, size, look, tape), Color::rgb8(c), |p| {
+    let glyphs = draw_runs(w, &tape_runs(rect, size, look, tape), Color::rgb8(c), |p| {
         Affine {
             e: p.x,
             f: p.y,
@@ -2505,6 +2534,7 @@ fn tape_content(
         }
     });
     w.restore();
+    glyphs
 }
 
 /// A tape alone, as it reads, as a one-page PDF its size: how sheaf shows
@@ -2525,10 +2555,10 @@ pub fn tape_pdf(a: &Annot) -> Option<Vec<u8>> {
     };
     let page = Geom::read(Some(Rect::new(0.0, 0.0, rect.w, rect.h)), None, 0);
     let mut w = ContentWriter::new();
-    tape_content(&mut w, at, *size, look, &tape, a.color, &page.from_view());
+    let glyphs = tape_content(&mut w, at, *size, look, &tape, a.color, &page.from_view());
     let (content, needs) = w.finish(&Reserved::default());
     let mut built = Built::new();
-    built.page(page.media, content, &needs.into());
+    built.page(page.media, content, &Uses { needs, glyphs });
     built
         .finish()
         .inspect_err(|e| log::warn!("a tape's picture: {e:#}"))
@@ -2829,6 +2859,50 @@ mod tests {
         assert_eq!(states.len(), 3, "{states:?}");
     }
 
+    /// A mark's text its font can't draw all of is drawn in the fallback
+    /// (M10 slice 7): its appearance names the fallback's marker and says
+    /// the glyphs it draws there, and it isn't unencodable. One whose font
+    /// draws it whole draws nothing there; text no font sheaf bundles has
+    /// (漢) is unencodable, drawn `?` beside what the fallback draws.
+    #[test]
+    fn a_mark_draws_what_its_font_lacks_in_the_fallback() {
+        let sans = crate::content::Fallback::SANS;
+        let rect = bx(10.0, 10.0, 200.0, 40.0);
+        let free = |text: &str| {
+            let mut a = mark(AnnotKind::FreeText { rect, size: 12.0 });
+            a.contents = text.into();
+            a
+        };
+        let stamp = |text: &str| {
+            mark(AnnotKind::TextStamp {
+                rect,
+                text: text.into(),
+                status: false,
+            })
+        };
+        let names = |drawn: &Drawing| (drawn.ap.needs.0.iter()).any(|n| sans.is(&n.res));
+        let makes: [&dyn Fn(&str) -> Annot; 2] = [&free, &stamp];
+        for make in makes {
+            let two = make("\u{141}ukasz");
+            assert!(!two.unencodable(), "{:?}", two.kind);
+            let drawn = appearance(&two, None);
+            assert_eq!(drawn.glyphs.len(), 1);
+            assert!(names(&drawn));
+            let drawn = appearance(&make("Lukasz"), None);
+            assert!(drawn.glyphs.is_empty() && !names(&drawn));
+            let cjk = make("\u{141} \u{6f22}");
+            assert!(cjk.unencodable());
+            let drawn = appearance(&cjk, None);
+            assert_eq!(drawn.glyphs.len(), 1);
+            let content = &drawn.ap.content;
+            assert!(
+                content.windows(8).any(|w| w == b"( ?) Tj\n"),
+                "{}",
+                String::from_utf8_lossy(content)
+            );
+        }
+    }
+
     /// A tape's symbols draw in the font that has them: its minus and
     /// subtotal lozenge, which WinAnsi lacks, in Symbol, so a tape draws
     /// no `?`.
@@ -3007,7 +3081,7 @@ mod tests {
             a.stroke = [1.0, 1.5, 3.0][i % 3];
             a.fill = (i % 7 == 0).then_some([255, 255, 0]);
             a.turn = [Rotation::R0, Rotation::R90][i % 4 / 2];
-            let ap = appearance(&a, None);
+            let ap = appearance(&a, None).ap;
             assert!(
                 stroked(&ap.content),
                 "{flat:?}, line {}: {:?}",
@@ -3032,7 +3106,7 @@ mod tests {
             bx(300.0, 600.0, 120.0, 0.0),
             bx(198.915, 63.896, 120.0, 40.0),
         ] {
-            let ap = appearance(&mark(AnnotKind::Square { rect }), None);
+            let ap = appearance(&mark(AnnotKind::Square { rect }), None).ap;
             assert!(ap.content.starts_with(b"q\n") && stroked(&ap.content));
         }
         // A line of width 0 draws no border, crossed or not: the family's.
@@ -3044,7 +3118,7 @@ mod tests {
             framed(gfx::Rect::new(0.0, 0.0, 9.0, 9.0), [4.0; 4], 0.0),
             Some([4.0; 4])
         );
-        assert!(!stroked(&appearance(&hairline, None).content));
+        assert!(!stroked(&appearance(&hairline, None).ap.content));
     }
 
     /// A mark turned with its page is laid out as it reads there: a

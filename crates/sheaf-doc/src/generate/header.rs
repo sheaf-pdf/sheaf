@@ -162,10 +162,11 @@ pub fn slots<'a>(
 }
 
 /// Whether some of the text `spec` draws, with what `frozen` fixed, can't
-/// be drawn in `face`: it shows as `?`. Its tokens draw the same
-/// characters on every page but the digits, which every face has, and a
-/// page's label, which [`label_unencodable`] reads: so a page labeled by
-/// its number answers for all.
+/// be drawn in any font sheaf bundles, `face` or the fallback: it shows
+/// as `?`. Its tokens draw the same characters on every page but the
+/// digits, which every face has, and a page's label, which
+/// [`label_unencodable`] reads: so a page labeled by its number answers
+/// for all.
 pub fn unencodable(spec: &HeaderFooterSpec, frozen: &Frozen, face: &Std14) -> bool {
     let first = PageCtx {
         geom: Geom::read(None, None, 0),
@@ -174,17 +175,17 @@ pub fn unencodable(spec: &HeaderFooterSpec, frozen: &Frozen, face: &Std14) -> bo
         label: "1".into(),
         bates: spec.bates.as_ref().map(|b| b.start),
     };
-    slots(spec, frozen, &first).any(|(_, text)| face.encode(&text).1.0 > 0)
+    slots(spec, frozen, &first).any(|(_, text)| face.encode(&text).unencoded.0 > 0)
 }
 
-/// Whether `spec` draws page label `label` (`<<label>>`), and `face` can't
-/// draw all of it.
+/// Whether `spec` draws page label `label` (`<<label>>`), and neither
+/// `face` nor the fallback can draw all of it.
 pub fn label_unencodable(spec: &HeaderFooterSpec, label: &str, face: &Std14) -> bool {
-    needs(spec).label && face.encode(label).1.0 > 0
+    needs(spec).label && face.encode(label).unencoded.0 > 0
 }
 
 /// The slots' texts on the page `ctx` says, placed on it as it shows, in
-/// `face`.
+/// `face`, each as wide as it's drawn there and in the fallback.
 pub fn layout(spec: &HeaderFooterSpec, frozen: &Frozen, ctx: &PageCtx, face: &Std14) -> Vec<Line> {
     let size = ctx.geom.shown();
     let fs = spec.size;
@@ -345,16 +346,17 @@ mod tests {
         assert!(draws(&only, &ctx(0, 1, "1", Some(3))));
     }
 
-    /// A slot is as wide as its face draws it, whatever its characters.
+    /// A slot is as wide as its face draws it, whatever its characters:
+    /// one no font sheaf bundles has (漢) draws `?`.
     #[test]
     fn slots_are_as_wide_as_helvetica_draws_them() {
         let spec = HeaderFooterSpec {
-            texts: ["Il “€”", "Œuvre", "Ω", "", "", ""].map(String::from),
+            texts: ["Il “€”", "Œuvre", "漢", "", "", ""].map(String::from),
             ..spec()
         };
         let lines = layout(&spec, &frozen(), &ctx(0, 1, "1", None), &Std14::Helvetica);
         let widths: Vec<f32> = lines.iter().map(|l| l.width).collect();
-        // I l space “ € ” at 10 pt; Œ u v r e; Ω draws `?`.
+        // I l space “ € ” at 10 pt; Œ u v r e; 漢 draws `?`.
         let at_10 = |w: f32| w * 10.0 / 1000.0;
         assert_eq!(
             widths[0],
@@ -370,16 +372,47 @@ mod tests {
         assert!(!unencodable(&fine, &frozen(), &Std14::Helvetica));
     }
 
-    /// A label is checked apart, and only when a text draws it.
+    /// A slot its face can't draw all of but the fallback can (Ω, Ł) is
+    /// as wide as the two draw it, the fallback's glyphs its own widths,
+    /// and isn't unencodable (M10 slice 7).
+    #[test]
+    fn a_slot_in_two_fonts_is_as_wide_as_both_draw_it() {
+        let spec = HeaderFooterSpec {
+            texts: ["Ω", "Łukasz", "", "", "", ""].map(String::from),
+            ..spec()
+        };
+        let lines = layout(&spec, &frozen(), &ctx(0, 1, "1", None), &Std14::Helvetica);
+        let widths: Vec<f32> = lines.iter().map(|l| l.width).collect();
+        let program = crate::content::Fallback::SANS.program();
+        let fallback = |c: char| program.width(program.glyph(c).unwrap());
+        let at_10 = |w: f32| w * 10.0 / 1000.0;
+        assert_eq!(widths[0], at_10(fallback('Ω')));
+        // Ł in the fallback, u k a s z Helvetica's.
+        let ukasz = 556.0 + 500.0 + 556.0 + 500.0 + 500.0;
+        assert_eq!(widths[1], at_10(fallback('Ł') + ukasz));
+        assert!(!unencodable(&spec, &frozen(), &Std14::Helvetica));
+    }
+
+    /// A label is checked apart, and only when a text draws it: one no
+    /// font sheaf bundles has (漢) is unencodable.
     #[test]
     fn a_label_is_unencodable_only_where_it_is_drawn() {
         let face = Std14::Helvetica;
-        assert!(label_unencodable(&spec(), "Ω-1", &face));
+        assert!(label_unencodable(&spec(), "漢-1", &face));
         assert!(!label_unencodable(&spec(), "é-1", &face));
         let unlabeled = HeaderFooterSpec {
             texts: ["<<1>>", "", "", "", "", ""].map(String::from),
             ..spec()
         };
-        assert!(!label_unencodable(&unlabeled, "Ω-1", &face));
+        assert!(!label_unencodable(&unlabeled, "漢-1", &face));
+    }
+
+    /// A label the fallback draws what the face can't of (Ω) isn't
+    /// unencodable.
+    #[test]
+    fn a_label_in_two_fonts_is_drawn() {
+        let face = Std14::Helvetica;
+        assert!(!label_unencodable(&spec(), "Ω-1", &face));
+        assert!(!label_unencodable(&spec(), "Ł-ễ-1", &face));
     }
 }

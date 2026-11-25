@@ -132,7 +132,7 @@ impl From<&EditError> for sheaf_edit::Failure {
 }
 
 /// What a commit tells the reader beside its lines (§6.5): the texts M10
-/// slices 4–5 pinned, and text the built-in fonts can't draw.
+/// slices 4–5 pinned, and text no font sheaf bundles can draw.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notice {
     /// An inserted file's fields went under a new parent, `under`, since
@@ -152,8 +152,10 @@ pub enum Notice {
     /// The op turned the form's scripts off: they came in from more than
     /// one form (M10 proposal 5).
     ScriptsOff,
-    /// Text it added draws characters the built-in fonts can't as `?`
-    /// (until M10 slice 7). Told once a document ([`Document::commit`]).
+    /// Text it added draws characters no font sheaf bundles has as `?`:
+    /// neither the standard 14 font it's in nor the fallback (CJK, emoji,
+    /// right-to-left scripts). Told once a document
+    /// ([`Document::commit`]).
     ///
     /// [`Document::commit`]: crate::model::Document::commit
     Unencodable,
@@ -191,7 +193,7 @@ impl fmt::Display for Notice {
                 f.write_str("scripts are off: fields from more than one form have them")
             }
             Notice::Unencodable => f.write_str(
-                "some characters can't be drawn in the built-in fonts and show as “?” in the \
+                "some characters can't be drawn in any font sheaf has and show as “?” in the \
                  file; the text itself is kept",
             ),
         }

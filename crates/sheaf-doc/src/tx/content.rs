@@ -187,7 +187,7 @@ pub(crate) fn set_watermark(
         Some(pages) => Scope::Pages(pages.clone()),
     };
     if let WatermarkContent::Text { text, font, .. } = content
-        && std14_of(*font).encode(text).1.0 > 0
+        && std14_of(*font).encode(text).unencoded.0 > 0
     {
         lw.notices.push(Notice::Unencodable);
     }
@@ -489,8 +489,9 @@ fn narrowed(st: &DocState, kinds: &BTreeSet<PaginationKind>, pages: &[PageId]) -
 /// fixed now: setting it again is how to renumber. Numbers that would run
 /// past `u64::MAX` are refused. It replaces the headers
 /// and footers others drew on its pages as a save writes them (§6.5).
-/// With no text, there's none. Text its face can't draw, a page label
-/// included, is said ([`Notice::Unencodable`]).
+/// With no text, there's none. Text neither its face nor the fallback
+/// font can draw, a page label included, is said
+/// ([`Notice::Unencodable`]).
 pub(crate) fn set_header_footer(
     lw: &mut Lower,
     spec: &HeaderFooterSpec,
@@ -555,7 +556,8 @@ pub(crate) fn set_header_footer(
 }
 
 /// Whether header and footer `g` draws, on a page of `st` it covers, a
-/// label its face can't draw all of (`<<label>>`). A label's number is
+/// label neither its face nor the fallback can draw all of
+/// (`<<label>>`). A label's number is
 /// digits or letters, which every face has, so only a range's prefix can
 /// make one: the pages are read only when one does.
 pub(crate) fn label_unencodable(st: &DocState, g: &Generator) -> bool {

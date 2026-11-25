@@ -990,7 +990,9 @@ mod tests {
     /// [`sheaf_generators`]' fixtures: files sheaf saved with a watermark of
     /// each kind on every page and a background on some, text over an image,
     /// and a PDF's page over text; and a header and footer, of page numbers
-    /// and Bates numbers on every page, then of labels on some.
+    /// and Bates numbers on every page, then of labels on some; then text in
+    /// two fonts, a watermark, a background and a header each drawing some
+    /// in the fallback (M10 slice 7), and a character no font has (`漢`).
     fn generator_fixtures() -> Vec<Vec<u8>> {
         use sheaf_edit::{BlobSel, GridPos, WatermarkContent, WatermarkSpec, Z};
         let image = crate::materialize::watermark_tests::png();
@@ -1020,10 +1022,17 @@ mod tests {
         let numbered = crate::tx::fixture::set_header(numbered, None);
         let labeled = crate::tx::fixture::header("<<label>> <<date>>");
         let labeled = crate::tx::fixture::set_header(labeled, Some(&[second]));
+        let two = crate::tx::fixture::header("\u{141}ukasz <<1>> \u{6f22}");
+        let two = crate::tx::fixture::set_header(two, None);
         let mut out = Vec::new();
         for (over, under, header) in [
             (crate::tx::fixture::watermark("DRAFT"), image, numbered),
             (page, crate::tx::fixture::watermark("under"), labeled),
+            (
+                crate::tx::fixture::watermark("\u{141}\u{f3}d\u{17a} \u{6f22}"),
+                crate::tx::fixture::watermark("\u{3a9}mega"),
+                two,
+            ),
         ] {
             let ops = vec![
                 crate::tx::fixture::set_watermark(over, Z::Over, None),
@@ -1073,11 +1082,29 @@ mod tests {
     /// files they refer to, but for what makes a page stamp and an
     /// attachment marks: the stamp's appearance, after them, which names
     /// its page, and the attachment's file specification, which names its
-    /// file. Neither the page nor the file is in it.
+    /// file. Neither the page nor the file is in it. Then the same, every
+    /// mark's text in two fonts and with a character no font has (M10
+    /// slice 7).
     fn mark_fixtures() -> Vec<Vec<u8>> {
+        let two = "\u{141}ukasz Nguy\u{1ec5}n \u{6f22}";
+        let in_two = every_mark_kind().into_iter().map(|mut a| {
+            a.contents = two.into();
+            if let crate::annot::AnnotKind::TextStamp { text, .. } = &mut a.kind {
+                *text = two.into();
+            }
+            a
+        });
+        vec![
+            marks_fixture(&every_mark_kind()),
+            marks_fixture(&in_two.collect::<Vec<_>>()),
+        ]
+    }
+
+    /// [`mark_fixtures`]' fixture of `marks`.
+    fn marks_fixture(marks: &[crate::annot::Annot]) -> Vec<u8> {
         let mut f = Form::new(1);
         let mut page = f.dict(f.pages[0]).clone();
-        let marks = crate::forms::fixture::holding(&every_mark_kind());
+        let marks = crate::forms::fixture::holding(marks);
         crate::forms::fixture::write_marks(&mut f.pdf, &mut page, &marks);
         let entries: Vec<ObjectId> = page
             .get(b"Annots")
@@ -1121,7 +1148,7 @@ mod tests {
         let mut bytes = Vec::new();
         out.save_to(&mut bytes).unwrap();
         let at = |token: &[u8]| bytes.windows(token.len()).position(|w| w == token).unwrap();
-        vec![bytes[at(b"4 0 obj")..at(b"xref")].to_vec()]
+        bytes[at(b"4 0 obj")..at(b"xref")].to_vec()
     }
 
     /// Content's fixtures: page content with an inline image found by

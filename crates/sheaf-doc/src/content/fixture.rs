@@ -1945,3 +1945,29 @@ fn to_unicode_codes(cmap: &[u8]) -> HashSet<u16> {
     }
     codes
 }
+
+/// The PDF `bytes`, of no pages (the comments an exchange gathers,
+/// `exchange::gather`), with a page of its own whose `/Annots` lists
+/// `annots`, its objects: what's drawn of them read as a page's, by
+/// [`subsets_hold`] or a renderer, as another tool reading the file's
+/// comments would draw them.
+pub fn listed_on_a_page(bytes: &[u8], annots: &[ObjectId]) -> Vec<u8> {
+    let mut pdf = Pdf::load_mem(bytes).expect("a PDF that reads");
+    let listed: Vec<Object> = annots.iter().map(|&id| id.into()).collect();
+    let tree = pdf.new_object_id();
+    let page = pdf.add_object(dictionary! {
+        "Type" => Object::name("Page"), "Parent" => tree, "Annots" => listed,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+    });
+    let kids = vec![Object::from(page)];
+    pdf.objects.insert(
+        tree,
+        dictionary! { "Type" => Object::name("Pages"), "Kids" => kids, "Count" => 1 }.into(),
+    );
+    let catalog =
+        pdf.add_object(dictionary! { "Type" => Object::name("Catalog"), "Pages" => tree });
+    pdf.trailer.set("Root", catalog);
+    let mut out = Vec::new();
+    pdf.save_to(&mut out).expect("written");
+    out
+}

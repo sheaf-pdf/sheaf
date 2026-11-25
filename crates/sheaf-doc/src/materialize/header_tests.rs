@@ -417,9 +417,9 @@ fn a_print_file_opened_again_says_the_document_s_numbers() {
     }
 }
 
-/// A label change that makes a `<<label>>` header draw what its face
-/// can't says so, and the header draws `?` for it: saving still works.
-/// Both ways.
+/// A label change that makes a `<<label>>` header draw what no font
+/// sheaf bundles can (漢) says so, and the header draws `?` for it: saving
+/// still works. Both ways.
 fn unencodable(how: How) {
     let dir = scratch();
     let (path, mut doc) = opened(&dir, "a.pdf", &text_file(2));
@@ -428,7 +428,7 @@ fn unencodable(how: How) {
     how.save(&mut doc, &path);
     let first = doc.page(0).unwrap();
     let labels = Op::SetPageLabels {
-        ranges: Some(vec![fx::label(first, LabelStyle::Decimal, "Ω-", 1)]),
+        ranges: Some(vec![fx::label(first, LabelStyle::Decimal, "漢-", 1)]),
     };
     let notices = doc.commit_ops(vec![labels], "labels").unwrap().notices;
     assert_eq!(notices, [Notice::Unencodable]);
@@ -446,6 +446,45 @@ fn unencodable(how: How) {
 crate::both_ways!(
     an_unencodable_label_draws_a_question_mark,
     an_unencodable_label_draws_a_question_mark_appended: unencodable
+);
+
+/// A label change that makes a `<<label>>` header draw what its face can't
+/// but the fallback can (Ω) says nothing, and the header draws it in the
+/// fallback on every page, no `?`: every code a glyph of the subset the
+/// file holds, which PDFium reads back (`sheaf-ops`' tests). Both ways
+/// (M10 slice 7).
+fn in_two_fonts(how: How) {
+    use crate::content::fixture::{fallback_subsets, subsets_hold};
+    let dir = scratch();
+    let (path, mut doc) = opened(&dir, "a.pdf", &text_file(2));
+    let set = fx::set_header(fx::header("<<label>>"), None);
+    doc.commit_ops(vec![set], "header").unwrap();
+    how.save(&mut doc, &path);
+    assert_eq!(subsets_hold(&std::fs::read(&path).unwrap()), 0);
+    let first = doc.page(0).unwrap();
+    let labels = Op::SetPageLabels {
+        ranges: Some(vec![fx::label(first, LabelStyle::Decimal, "Ω-", 1)]),
+    };
+    let notices = doc.commit_ops(vec![labels], "labels").unwrap().notices;
+    assert_eq!(notices, []);
+    how.save(&mut doc, &path);
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(subsets_hold(&bytes), 2, "{how:?}: Ω on each page");
+    assert_eq!(fallback_subsets(&bytes).len(), 1, "{how:?}: one subset");
+    let pdf = Pdf::load(&path).unwrap();
+    for (i, page) in pages(&pdf).into_iter().enumerate() {
+        let text = drawn(&pdf, page);
+        assert!(!text.contains('?'), "{how:?}: {text}");
+        assert!(
+            text.contains(&format!("(-{}) Tj", i + 1)),
+            "{how:?}: {text}"
+        );
+    }
+}
+
+crate::both_ways!(
+    a_label_in_two_fonts_draws_in_the_fallback,
+    a_label_in_two_fonts_draws_in_the_fallback_appended: in_two_fonts
 );
 
 /// A header set over pages Acrobat drew a header on replaces Acrobat's,

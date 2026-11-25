@@ -800,3 +800,172 @@ fn realized_glyphs_lie_within_a_sixteenth_of_a_point_of_the_source_s() {
         .collect();
     assert!(differ.is_empty(), "{differ:#?}");
 }
+
+/// A mark of ours saying `contents`, a text box at height `y`, or a text
+/// stamp saying it.
+fn ours(contents: &str, y: f32, stamp: bool) -> sheaf_doc::Annot {
+    use sheaf_doc::{Annot, AnnotId, AnnotKind};
+    let rect = Box2 {
+        x: 72.0,
+        y,
+        w: 220.0,
+        h: 40.0,
+    };
+    let kind = match stamp {
+        true => AnnotKind::TextStamp {
+            rect,
+            text: contents.into(),
+            status: false,
+        },
+        false => AnnotKind::FreeText { rect, size: 14.0 },
+    };
+    Annot {
+        id: AnnotId(0),
+        kind,
+        color: [200, 30, 30],
+        opacity: 1.0,
+        stroke: 1.0,
+        author: "Greg".into(),
+        contents: if stamp {
+            String::new()
+        } else {
+            contents.into()
+        },
+        modified: "D:20261124000000".into(),
+        created: String::new(),
+        fill: None,
+        dashed: false,
+        cloudy: false,
+        turn: Rotation::R0,
+        name: String::new(),
+    }
+}
+
+/// Text sheaf draws past what its standard 14 face has, in the fallback
+/// font it bundles (M10 slice 7), is what PDFium reads back: a note, a
+/// text stamp, a header and a watermark each saying "Łukasz" give it back
+/// from the saved file, saved both ways, and each code is a glyph of its
+/// subset; nothing is said. An Append that changes the header to a name
+/// with a glyph no saved subset has gives both pages' text back, the one
+/// it redrew and the one it didn't. And what each owner of a PDF built in
+/// memory writes of the note gives it back: a flattened mark's page, a
+/// stamp's page back from its saved appearance, and the comments gathered
+/// for an exchange file, read as a page's.
+#[test]
+fn text_in_two_fonts_reads_back_in_pdfium() {
+    use sheaf_doc::content::fixture::{listed_on_a_page, subsets_hold};
+    use sheaf_doc::model::{FormRef, MarkAp, PinnedAp};
+    use sheaf_edit::Z;
+    use sheaf_render::pdfium::appearance_text;
+
+    let name = "\u{141}ukasz";
+    let mut doc = opened(file(2, XrefKind::Table), "a.pdf", None);
+    let p0 = doc.page(0).unwrap();
+    let ops = vec![
+        fx::add(p0, &ours(name, 600.0, false)),
+        fx::add(p0, &ours(name, 500.0, true)),
+        fx::set_header(fx::header(name), None),
+        fx::set_watermark(fx::watermark(name), Z::Over, None),
+    ];
+    let c = doc.commit_ops(ops, "two fonts").unwrap();
+    assert!(c.notices.is_empty(), "{:?}", c.notices);
+    for how in [How::Rewritten, How::Appended] {
+        let bytes = written(&doc, how);
+        assert_eq!(subsets_hold(&bytes), 6, "{how:?}");
+        for (page, n) in [(0, 4), (1, 2)] {
+            let text = appearance_text(&bytes, None, PageIndex(page)).unwrap();
+            assert_eq!(
+                text.matches(name).count(),
+                n,
+                "{how:?}, page {page}: {text:?}"
+            );
+            assert!(!text.contains('?'), "{how:?}: {text:?}");
+        }
+    }
+
+    // A header on the first page and a watermark on the second, saved;
+    // then the header in a glyph no saved subset has, appended: the page
+    // it redrew and the one it didn't each read back.
+    let mut doc = opened(file(2, XrefKind::Table), "b.pdf", None);
+    let (p0, p1) = (doc.page(0).unwrap(), doc.page(1).unwrap());
+    let lodz = "\u{141}\u{f3}d\u{17a}";
+    let ops = vec![
+        fx::set_header(fx::header(name), Some(&[p0])),
+        fx::set_watermark(fx::watermark(lodz), Z::Over, Some(&[p1])),
+        fx::add(p0, &ours(name, 600.0, false)),
+    ];
+    doc.commit_ops(ops, "set").unwrap();
+    let dir = common::scratch("two-fonts");
+    let path = dir.join("b.pdf");
+    let (_, saved) = common::saved(&mut doc, &path, How::Rewritten);
+    let renamed = format!("{name} Nguy\u{1ec5}n");
+    let header = fx::set_header(fx::header(&renamed), Some(&[p0]));
+    doc.commit_ops(vec![header], "header").unwrap();
+    let (_, appended) = common::saved(&mut doc, &path, How::Appended);
+    assert!(appended.starts_with(&saved), "an Append");
+    assert_eq!(
+        sheaf_doc::content::fixture::fallback_subsets(&appended).len(),
+        2
+    );
+    subsets_hold(&appended);
+    let first = appearance_text(&appended, None, PageIndex(0)).unwrap();
+    assert!(
+        first.contains(&renamed) && first.contains(name),
+        "{first:?}"
+    );
+    let second = appearance_text(&appended, None, PageIndex(1)).unwrap();
+    assert!(second.contains(lodz), "{second:?}");
+
+    // What each built owner writes of the note.
+    let note = ours(&renamed, 600.0, false);
+    let inputs = MarkAp {
+        kind: note.kind.clone(),
+        color: note.color,
+        opacity: note.opacity,
+        stroke: note.stroke,
+        contents: note.contents.clone(),
+        fill: None,
+        dashed: false,
+        cloudy: false,
+        turn: Rotation::R0,
+        stamp: None,
+    };
+    let flattened = FormRef::Pinned(Arc::new(PinnedAp::new(inputs)));
+    let flattened = flattened.to_pdf().unwrap().to_vec();
+    let saved = Pdf::load_mem(&appended).unwrap();
+    let first_page = saved.get_pages()[&1];
+    let annots = saved.get_dictionary(first_page).unwrap().get(b"Annots");
+    let ap_of = |annot: &Object| {
+        let annot = saved.get_dictionary(annot.as_reference()?).ok()?;
+        let n = annot.get(b"AP")?.as_dict()?.get(b"N")?.as_reference()?;
+        Some(n)
+    };
+    let form = (annots.and_then(Object::as_array).unwrap().iter())
+        .find_map(ap_of)
+        .expect("the note's appearance");
+    let stamp = sheaf_doc::stamp_lib::form_to_pdf(&saved, form).unwrap();
+    let note_id = doc.state().marks_on(p0).next().unwrap().id;
+    let comments = sheaf_doc::exchange::gather(&doc.snapshot(), &[note_id], &[]).unwrap();
+    let ids: Vec<_> = comments.annots.iter().map(|&(_, id)| id).collect();
+    let gathered = listed_on_a_page(&comments.src.bytes()[..], &ids);
+    // A page drawing the form is read as its text (the flattening reader
+    // reads nothing of a page that's one form, in any font); the comments
+    // as the appearances on a page.
+    let page_text =
+        |bytes: &[u8]| -> String { pdfium_s(bytes, 0).glyphs.iter().map(|g| g.ch).collect() };
+    let annots_text = |bytes: &[u8]| appearance_text(bytes, None, PageIndex(0)).unwrap();
+    for (owner, bytes, read, want) in [
+        (
+            "a flattened mark's page",
+            flattened,
+            &page_text as &dyn Fn(&[u8]) -> String,
+            renamed.as_str(),
+        ),
+        ("a stamp's page", stamp, &page_text, name),
+        ("an exchange file's comments", gathered, &annots_text, name),
+    ] {
+        assert!(subsets_hold(&bytes) > 0, "{owner}");
+        let text = read(&bytes);
+        assert!(text.contains(want), "{owner}: {text:?}");
+    }
+}

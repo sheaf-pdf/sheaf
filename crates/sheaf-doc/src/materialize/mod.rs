@@ -84,6 +84,8 @@ pub mod copy;
 pub mod deps;
 pub mod emit;
 #[cfg(test)]
+mod fallback_tests;
+#[cfg(test)]
 mod field_ap_tests;
 #[cfg(test)]
 mod flatten_tests;

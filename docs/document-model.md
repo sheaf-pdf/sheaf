@@ -909,17 +909,19 @@ on each side. `Content` is left as the fixtures' builder, and its
   and footer, the watermark's text, OCR layers and the comment summary
   all draw through them. A tick draws ZapfDingbats' heavy check and
   cross (✔ ✘), as it always has.
-- **Text a font can't draw shows as `?`** in the drawing only:
-  `/Contents`, the mark's JSON and the header's spec keep the exact text
-  (ZapfDingbats has no `?`, so there the character is left out). An op
-  whose drawing would lose characters says so (`Notice::Unencodable`,
-  from M10.5 slice 11: adding or changing a mark or a connector, the
-  marks pages bring with them when inserted or replacing others, a header
-  and footer, and from slice 16 a watermark's text), and a commit tells
-  it once a
-  document: "Some characters can't be drawn in the built-in fonts and show
-  as “?” in the file; the text itself is kept". A tape's minus and subtotal sign, which
-  Helvetica lacks, draw in Symbol. M10 slice 7's Noto fallback ends it.
+- **Text no font sheaf bundles can draw shows as `?`** in the drawing
+  only: `/Contents`, the mark's JSON and the header's spec keep the exact
+  text (ZapfDingbats has no `?`, so there the character is left out).
+  Since M10 slice 7 what a standard 14 face lacks is drawn in the Noto
+  fallback beside it, so only text neither has (CJK, emoji, right-to-left
+  scripts, control characters) is `?`. An op whose drawing would lose
+  characters says so (`Notice::Unencodable`, from M10.5 slice 11: adding
+  or changing a mark or a connector, the marks pages bring with them when
+  inserted or replacing others, a header and footer, and from slice 16 a
+  watermark's text), and a commit tells it once a document: "Some
+  characters can't be drawn in any font sheaf has and show as “?” in the
+  file; the text itself is kept". A tape's minus and subtotal sign, which
+  Helvetica lacks, draw in Symbol.
 - **The words a page draws** (`text_bag`) are decoded through its fonts
   (a `/ToUnicode` CMap, else a simple font's encoding and
   `/Differences`, else Symbol's or ZapfDingbats' own, else the code as it

@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context as _, Result};
 
-use crate::annot::{Annot, AnnotKind};
+use crate::annot::{Annot, AnnotKind, Drawing};
 #[cfg(any(test, feature = "fixtures"))]
 use crate::annot::{Emitted, emission};
 use crate::content::sink::{self, Sink};
@@ -299,9 +299,10 @@ impl WriteCx {
                     }
                     _ => None,
                 };
-                let drawn = crate::annot::appearance(&ap.inputs.annot(), page);
+                let Drawing { ap: drawn, glyphs } =
+                    crate::annot::appearance(&ap.inputs.annot(), page);
                 let (bbox, matrix) = (Rect::from(drawn.bbox), Affine::from(drawn.matrix));
-                let id = as_form(drawn, &Glyphs::new(), pdf, &mut self.res);
+                let id = as_form(drawn, &glyphs, pdf, &mut self.res);
                 Ok(StampForm::written(id, bbox, matrix))
             }
         };
@@ -316,8 +317,12 @@ impl WriteCx {
         held(&m.annot, m.stamp.as_ref(), m.file.as_ref(), pdf, self)
     }
 
-    pub fn form(&mut self, appearance: SynthesizedAp, pdf: &mut Pdf) -> ObjectId {
-        as_form(appearance, &Glyphs::new(), pdf, &mut self.res)
+    /// A mark's `appearance` as a form written into `pdf`, what it draws
+    /// with through this writer, what it draws in the fallback font joined
+    /// to the subset [`WriteCx::finish`] writes.
+    pub fn form(&mut self, appearance: Drawing, pdf: &mut Pdf) -> ObjectId {
+        let Drawing { ap, glyphs } = appearance;
+        as_form(ap, &glyphs, pdf, &mut self.res)
     }
 
     /// Writes the fallback font's subset of what its marks drew
@@ -518,7 +523,7 @@ mod tests {
             w.begin_text();
             w.set_font(&Std14::Helvetica, 12.0);
             w.text_move(72.0, 700.0);
-            w.show_text(&Std14::Helvetica, line);
+            w.show_text(&Std14::Helvetica, 12.0, line);
             w.end_text();
             let (content, needs) = w.finish(&Reserved::default());
             built.page(Rect::new(0.0, 0.0, 612.0, 792.0), content, &needs.into());
