@@ -87,7 +87,9 @@ use crate::annot::AnnotId;
 use crate::content::corpus::{each_path, written};
 use crate::content::{Fallback, Glyphs, Objects, Unkept};
 use crate::forms::FormClass;
-use crate::forms::appearance::{self, ChoiceShows, DaFont, FontAt, Frame, Look, Slot, TextLook};
+use crate::forms::appearance::{
+    self, ChoiceShows, DaFont, FontAt, Frame, Look, NoLook, Slot, TextLook,
+};
 use crate::forms::corpus::Corpus;
 use crate::forms::field::{self, Field, FieldKind};
 use crate::forms::fixture::sample;
@@ -1095,7 +1097,17 @@ fn kind_line(
         line.field("look", "-");
         return line.0;
     };
-    let look = appearance::look(st, aid);
+    let look = match appearance::look(st, aid) {
+        Ok(look) => Ok(look),
+        Err(NoLook::Unmade(why)) => Err(why),
+        // sheaf's model reads it as no button or choice, which its file's
+        // reading does: never met.
+        Err(NoLook::NotWidget | NoLook::Kind(_)) => {
+            counts.unlooked += 1;
+            line.field("look", "-");
+            return line.0;
+        }
+    };
     let ours = match &look {
         Ok(look) => match KindPlain::of_look(look) {
             Some(plain) => {

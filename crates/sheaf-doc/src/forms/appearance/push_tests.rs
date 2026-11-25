@@ -212,8 +212,8 @@ fn the_look_is_the_button_s_captions_highlight_and_da() {
         assert_eq!(&*push_of(&d, name).caption, "Go", "{name}");
     }
     let refused = look(d.state(), widget_of(&d, "tp2"));
-    assert!(matches!(refused, Err(Unmade::Icon)), "{refused:?}");
-    assert_eq!(unmade_kind(&Unmade::Icon), "icon");
+    assert_eq!(refused, Err(NoLook::Unmade(Unmade::Icon)));
+    assert_eq!(NoLook::Unmade(Unmade::Icon).kind(), "icon");
     assert_eq!(&*push_of(&d, "nostream").caption, "Go", "no icon to show");
     let debug = format!("{p:?}");
     assert!(

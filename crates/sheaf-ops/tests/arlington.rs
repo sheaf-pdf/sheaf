@@ -2102,10 +2102,12 @@ fn pressed_save(
         .filter(|&(aid, _)| appearance::stale(st, aid))
         .filter_map(|(aid, _)| {
             let (kind, _) = kind_of(&doc, aid)?;
-            let made = appearance::look(st, aid).and_then(|look| appearance::make(&look, no_font));
-            let why = match made {
-                Ok(_) => "made, not written".to_string(),
-                Err(why) => appearance::unmade_kind(&why),
+            let why = match appearance::look(st, aid) {
+                Ok(look) => match appearance::make(&look, no_font) {
+                    Ok(_) => "made, not written".to_string(),
+                    Err(why) => appearance::unmade_kind(&why),
+                },
+                Err(why) => why.kind(),
             };
             Some((aid, kind, format!("{kind}, {why}")))
         })

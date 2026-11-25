@@ -174,25 +174,59 @@ impl Frame {
 /// button's ([`PushLook`]). Every kind's frame is the widget's box, `/MK`
 /// and border, and its effective `/DA`: the widget's own, else the
 /// terminal's (its own or a parent's, as read), else its instance's form's
-/// (`form_defaults`). [`Unmade::NotText`] for any other annotation, a
-/// widget whose field isn't a terminal, and a field of a kind no look is
-/// read for (a signature's); [`Unmade::Icon`]
-/// for a push button's that shows an icon. It doesn't ask [`stale`]: a
-/// look is read for any widget.
-pub fn look(st: &DocState, aid: AnnotId) -> Result<Look, Unmade> {
+/// (`form_defaults`). Why none is read is sheaf's to say ([`NoLook`]):
+/// [`NoLook::NotWidget`] for any other annotation and a widget whose field
+/// isn't a terminal, [`NoLook::Kind`] for a field of a kind no look is
+/// read for (a signature's), and pdf-forms' own refusal of what was read,
+/// [`Unmade::Icon`] for a push button's that shows an icon, as
+/// [`NoLook::Unmade`]. It doesn't ask [`stale`]: a look is read for any
+/// widget.
+pub fn look(st: &DocState, aid: AnnotId) -> Result<Look, NoLook> {
     let found = (st.annot(aid).and_then(|rec| rec.widget())).and_then(|w| {
         let node = st.field(w.field)?;
         Some((w, node, node.term.as_deref()?))
     });
     let Some((w, node, term)) = found else {
-        return Err(Unmade::NotText);
+        return Err(NoLook::NotWidget);
     };
     match term.kind {
         FieldKind::Text => Ok(Look::Text(text::look(st, w, node, term))),
         FieldKind::CheckBox | FieldKind::Radio => Ok(Look::Toggle(toggle::look(st, w, node, term))),
         FieldKind::Combo | FieldKind::List => Ok(Look::Choice(choice::look(st, w, node, term))),
-        FieldKind::PushButton => push::look(st, w, node).map(Look::Push),
-        _ => Err(Unmade::NotText),
+        FieldKind::PushButton => match push::look(st, w, node) {
+            Ok(look) => Ok(Look::Push(look)),
+            Err(why) => Err(NoLook::Unmade(why)),
+        },
+        kind @ (FieldKind::Signature | FieldKind::Unknown) => Err(NoLook::Kind(kind)),
+    }
+}
+
+/// Why [`look`] reads no look for an annotation. The first two are sheaf's
+/// own reasons, kept apart from pdf-forms' refusals ([`Unmade`]), whose
+/// kind checks (`NotText`, `NotButton`, `NotChoice`) are its own read
+/// layer's and mean what that crate says of a field it read.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NoLook {
+    /// It isn't a widget, or its field isn't a terminal.
+    NotWidget,
+    /// Its field is of a kind no look is read for: a signature's, or of no
+    /// kind sheaf knows.
+    Kind(FieldKind),
+    /// pdf-forms' refusal of what was read: [`Unmade::Icon`], a push
+    /// button's that shows an icon, which isn't drawn.
+    Unmade(Unmade),
+}
+
+impl NoLook {
+    /// Which kind of reason it is, as a warning or a dump says it:
+    /// `not-widget`, `no-look:` and the field's kind
+    /// ([`FieldKind::short`]), or pdf-forms' by [`unmade_kind`].
+    pub fn kind(&self) -> String {
+        match self {
+            NoLook::NotWidget => "not-widget".into(),
+            NoLook::Kind(kind) => format!("no-look:{}", kind.short()),
+            NoLook::Unmade(why) => unmade_kind(why),
+        }
     }
 }
 

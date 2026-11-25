@@ -551,18 +551,21 @@ pub(crate) fn widget(
 /// `/AP`, so no file shows a value the field no longer holds, and a
 /// warning says which kind, never the text.
 fn appearance(cx: &mut Cx, aid: AnnotId, src: &Src) -> Option<Object> {
-    let made = appearance::look(cx.st, aid).and_then(|look| {
+    let look = appearance::look(cx.st, aid).map_err(|why| why.kind());
+    let made = look.and_then(|look| {
         let made = appearance::make(&look, |name| {
             let font = appearance::font(src, name)?;
             let res = font_res(cx, &font, src, name.unwrap_or_default());
             Ok(DaFont { font, res })
-        })?;
-        Ok((look, made))
+        });
+        match made {
+            Ok(made) => Ok((look, made)),
+            Err(why) => Err(appearance::unmade_kind(&why)),
+        }
     });
     let (look, Made { forms, glyphs }) = match made {
         Ok(made) => made,
         Err(why) => {
-            let why = appearance::unmade_kind(&why);
             log::warn!("a widget's appearance can't be made ({why}): it has none");
             return None;
         }

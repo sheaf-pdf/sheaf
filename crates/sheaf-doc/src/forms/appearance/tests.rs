@@ -282,10 +282,14 @@ fn the_look_is_the_model_s_plain_data() {
     assert!(!as_look.contains("Trenton"), "{as_look}");
     let check = super::look(d.state(), widget_of(&d, "box", 0));
     assert!(matches!(check, Ok(Look::Toggle(_))), "{check:?}");
-    assert_eq!(
-        super::look(d.state(), widget_of(&d, "sig", 0)),
-        Err(Unmade::NotText)
-    );
+    // None is read for a signature's widget, or for what is no widget:
+    // sheaf's own reasons, not pdf-forms' kind checks.
+    let none = super::look(d.state(), widget_of(&d, "sig", 0)).unwrap_err();
+    assert_eq!(none, NoLook::Kind(FieldKind::Signature));
+    assert_eq!(none.kind(), "no-look:sig");
+    let none = super::look(d.state(), AnnotId(u64::MAX)).unwrap_err();
+    assert_eq!(none, NoLook::NotWidget);
+    assert_eq!(none.kind(), "not-widget");
 }
 
 /// The IRS's navy, `0 0 0.502 rg`, is the text's color: a field of a
