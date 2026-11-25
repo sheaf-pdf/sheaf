@@ -242,7 +242,7 @@ impl fmt::Debug for Change {
 
 /// A name the model holds (Latin-1, a character a byte) as its bytes;
 /// none for text that names nothing, with a character past U+00FF.
-fn name_bytes(name: &str) -> Option<Vec<u8>> {
+pub(crate) fn name_bytes(name: &str) -> Option<Vec<u8>> {
     name.chars()
         .map(|c| u8::try_from(u32::from(c)).ok())
         .collect()

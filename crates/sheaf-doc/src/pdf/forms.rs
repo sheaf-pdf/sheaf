@@ -1,5 +1,6 @@
-//! Text fields' appearances through `pdf-forms` (M10 slice 6), and a
-//! check box or radio group's rules (M10 slice 8).
+//! Text fields', check boxes' and radio buttons' appearances through
+//! `pdf-forms` (M10 slices 6 and 8), and a check box or radio group's rules
+//! (M10 slice 8).
 //!
 //! **Making one.** A text field's appearance is made from plain data
 //! ([`text_with_fallback`]): what the field shows ([`TextField`]: its text, flags
@@ -20,6 +21,13 @@
 //! with, by what each is) with the fallback's glyphs it draws
 //! ([`MadeWithFallback`]), or why none could be made ([`Unmade`]); a font
 //! that can't be read is an [`Error`].
+//!
+//! A check box's or radio button's ([`check_box`], [`radio_button`]) are
+//! made from what it shows ([`ToggleButton`]: its caption, which names its
+//! mark), the same [`WidgetLook`] and default appearance string, and the
+//! resource that names ZapfDingbats, the mark's font: the normal and down
+//! appearances of its on state and of `Off`, an `Off` one none where it
+//! would paint nothing ([`ToggleAppearances`]).
 //!
 //! **A group's rules.** What pressing a check box or radio button, or
 //! setting its field's value, does to each widget's state and to the
@@ -45,8 +53,9 @@
 //! [`Streams`]: super::Streams
 
 pub use pdf_forms::appearance::{
-    Appearance, Fallback as FieldFallback, FieldFont, MadeWithFallback, TextField, Unmade,
-    WidgetLook, text_with_fallback,
+    Appearance, Fallback as FieldFallback, FieldFont, MadeWithFallback, TextField,
+    ToggleAppearances, ToggleButton, Unmade, WidgetLook, check_box, radio_button,
+    text_with_fallback,
 };
 pub use pdf_forms::{Cap, Error, FieldFlags, Limits, Quadding};
 

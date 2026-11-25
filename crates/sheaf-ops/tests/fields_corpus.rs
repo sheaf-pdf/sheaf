@@ -621,7 +621,11 @@ fn made_by_sheaf(
     let said = font_said(&font, look);
     let name = name.unwrap_or_default();
     let res = appearance::font_res(&font, src.id(), 0, &name, |_| ObjectId::new(1, 0));
-    let made = appearance::make(&Look::Text(look.clone()), DaFont { font: &font, res });
+    let da_font = DaFont {
+        font: font.clone(),
+        res,
+    };
+    let made = appearance::make(&Look::Text(look.clone()), |_| Ok(da_font));
     match made {
         Ok(made) => {
             let form = made.form(Slot::Normal).expect("a text widget's /N");
@@ -1057,12 +1061,13 @@ fn fill_and_compare(
             .filter(|w| w.page == page)
             .map(|w| (w.aid, w))
             .collect();
-        let mut overlay: HashMap<AnnotId, Stream> = overlay_appearances(&st, page, &inputs)?
-            .into_iter()
-            .collect();
+        let mut overlay: HashMap<(AnnotId, Part), Stream> =
+            (overlay_appearances(&st, page, &inputs)?.into_iter())
+                .map(|(aid, part, form)| ((aid, part), form))
+                .collect();
         for (aid, w) in &made_here {
             let at = format!("page {}, widget {}", index + 1, w.object.number);
-            match (forms.get(aid), overlay.remove(aid)) {
+            match (forms.get(aid), overlay.remove(&(*aid, Part::Ap))) {
                 (Some(saved), Some(over)) => match Form::of(&over)? == *saved {
                     true => out.overlaid += 1,
                     false => out
@@ -1078,9 +1083,9 @@ fn fill_and_compare(
                 (None, Some(_)) => {}
             }
         }
-        for aid in overlay.keys() {
+        for (aid, part) in overlay.keys() {
             out.failed.push(format!(
-                "page {}: the overlay makes a form for {aid:?}, not filled",
+                "page {}: the overlay makes a form for {aid:?} ({part:?}), not filled",
                 index + 1
             ));
         }

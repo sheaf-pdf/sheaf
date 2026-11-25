@@ -2,19 +2,22 @@
 //! widget's appearance is made from, as plain data out of the model, by
 //! its kind ([`Look`], [`look`]), with what every kind shares read once
 //! ([`Frame`]: the box, `/MK`, the border and the `/DA`); which widgets need
-//! one made ([`stale`]); the font it's drawn in, read once a name from its
+//! one made ([`stale`]), and which show a state their file's doesn't
+//! ([`state_changed`]); the font it's drawn in, read once a name from its
 //! source's `/DR` (`read_font`, through
 //! [`Source::field_font`](crate::Source::field_font), and [`font`]); the
 //! name the appearance gives that font ([`font_res_id`], [`font_res`]); the
 //! caps it's made under ([`limits`]); and the making ([`make`]), which is
 //! pdf-forms': its `/DA` parser, encoders, layout, borders, `/MK /R` and
-//! `/Tx BMC`, and text in runs of the field's font and sheaf's fallback
+//! `/Tx BMC`, text in runs of the field's font and sheaf's fallback
 //! font ([`Fallback`](crate::content::Fallback), M10 slice 7) for what the
-//! field's can't draw. What's made is a form for each slot of the
-//! widget's `/AP` ([`Made`], [`Slot`]).
+//! field's can't draw, and a check box's or radio button's mark in
+//! ZapfDingbats. What's made is a form for each slot of the widget's `/AP`
+//! ([`Made`], [`Slot`]).
 //!
 //! Each kind is a module of its own: a text field's widget (`text`,
-//! [`TextLook`]). What they share is here.
+//! [`TextLook`]) and a check box's or radio button's (`toggle`,
+//! [`ToggleLook`]). What they share is here.
 //!
 //! What's sheaf's and stays here: the model and its records, which widgets
 //! are made, the caps, a source's font cache, the names a made form gives
@@ -25,7 +28,7 @@
 use std::fmt;
 use std::sync::{Arc, LazyLock};
 
-use super::field::{self, Border, BorderStyle, FieldKind, Value};
+use super::field::{self, Border, BorderStyle, FieldKind};
 use crate::annot::AnnotId;
 use crate::content::{Glyphs, Objects, Unkept};
 use crate::model::{DocState, FieldNode, Widget};
@@ -39,11 +42,15 @@ use crate::source::{FieldFontRead, Source};
 use crate::store::BlobId;
 
 mod text;
+mod toggle;
 
 pub use text::TextLook;
+pub use toggle::{ToggleLook, state_changed};
 
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod toggle_tests;
 
 /// What one widget's appearance is made from, by its kind: owned plain data
 /// out of the model, as [`look`] gives it, and what [`make`] makes it of.
@@ -53,6 +60,8 @@ pub(crate) mod tests;
 pub enum Look {
     /// A text field's widget.
     Text(TextLook),
+    /// A check box's or radio button's widget.
+    Toggle(ToggleLook),
 }
 
 impl Look {
@@ -60,6 +69,7 @@ impl Look {
     pub fn frame(&self) -> &Frame {
         match self {
             Look::Text(look) => &look.frame,
+            Look::Toggle(look) => &look.frame,
         }
     }
 }
@@ -142,12 +152,15 @@ impl Frame {
 }
 
 /// What widget `aid`'s appearance is made from, by its kind: a text
-/// field's widget's ([`TextLook`]). Every kind's frame is the widget's box,
-/// `/MK` and border, and its effective `/DA`: the widget's own, else the
-/// terminal's (its own or a parent's, as read), else its instance's form's
+/// field's widget's ([`TextLook`]), a check box's or radio button's
+/// ([`ToggleLook`]). Every kind's frame is the widget's box, `/MK` and
+/// border, and its effective `/DA`: the widget's own, else the terminal's
+/// (its own or a parent's, as read), else its instance's form's
 /// (`form_defaults`). [`Unmade::NotText`] for any other annotation, a
 /// widget whose field isn't a terminal, and a field of a kind no look is
-/// read for. It doesn't ask [`stale`]: a look is read for any widget.
+/// read for; [`Unmade::NotButton`] for a check box's or radio button's
+/// widget its field's group doesn't hold. It doesn't ask [`stale`]: a look
+/// is read for any widget.
 pub fn look(st: &DocState, aid: AnnotId) -> Result<Look, Unmade> {
     let found = (st.annot(aid).and_then(|rec| rec.widget())).and_then(|w| {
         let node = st.field(w.field)?;
@@ -158,6 +171,9 @@ pub fn look(st: &DocState, aid: AnnotId) -> Result<Look, Unmade> {
     };
     match term.kind {
         FieldKind::Text => Ok(Look::Text(text::look(st, w, node, term))),
+        FieldKind::CheckBox | FieldKind::Radio => {
+            toggle::look(st, aid, w, node, term).map(Look::Toggle)
+        }
         _ => Err(Unmade::NotText),
     }
 }
@@ -212,11 +228,22 @@ fn form_defaults<'a>(
     }
 }
 
-/// Where in a widget's `/AP` a made form goes.
+/// Where in a widget's `/AP` a made form goes. A check box's or radio
+/// button's go in state dictionaries: its on state's under the name it
+/// goes under ([`ToggleLook::on_state`]), `Off`'s under `Off`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Slot {
-    /// `/N`, the normal appearance: a text field's one form.
+    /// `/N`, the normal appearance: a text field's one form; a check box's
+    /// or radio button's on state's.
     Normal,
+    /// A check box's or radio button's normal appearance of `Off`, in
+    /// `/N`.
+    NormalOff,
+    /// `/D`, the down appearance: a check box's or radio button's on
+    /// state's.
+    Down,
+    /// A check box's or radio button's down appearance of `Off`, in `/D`.
+    DownOff,
 }
 
 /// What [`make`] makes of a look: each form, by the slot of the widget's
@@ -256,41 +283,48 @@ impl Made {
 /// widget's source reads it ([`font`]), and the resource its forms name
 /// that font by ([`font_res`]). What it can't draw is drawn in the
 /// fallback.
-pub struct DaFont<'a> {
-    pub font: &'a FieldFont,
+pub struct DaFont {
+    pub font: Arc<FieldFont>,
     pub res: Res,
 }
 
-/// `look`'s appearance, a form for each slot of its widget's `/AP`, in
-/// `font` and the fallback font ([`Fallback::SANS`]) for what that can't
-/// draw, under [`limits`]: a text field's widget's, its `/N` alone
-/// (`text`). Pure: the same look, font and name give the same bytes and
-/// glyphs. It doesn't ask [`stale`]: whatever reads a look for a widget
-/// nothing changed makes one as for any other.
+/// `look`'s appearance, a form for each slot of its widget's `/AP`, under
+/// [`limits`]: a text field's widget's, its `/N` alone (`text`), in the
+/// font its `/DA` names and the fallback font ([`Fallback::SANS`]) for
+/// what that can't draw; a check box's or radio button's, its on state's
+/// and `Off`'s normal and down forms (`toggle`), the mark in ZapfDingbats.
+/// `font` gives the `/DA`'s font for the name the `/DA` gives (none where
+/// it names none), and is asked only by a kind that draws in it: a check
+/// box's or radio button's mark isn't, so its `/DA`'s font is never read,
+/// and can't refuse it. Pure: the same look, font and name give the same
+/// bytes and glyphs. It doesn't ask [`stale`]: whatever reads a look for a
+/// widget nothing changed makes one as for any other.
 ///
 /// [`Fallback::SANS`]: crate::content::Fallback::SANS
-pub fn make(look: &Look, font: DaFont<'_>) -> Result<Made, Unmade> {
+pub fn make(
+    look: &Look,
+    font: impl FnOnce(Option<&[u8]>) -> Result<DaFont, Unmade>,
+) -> Result<Made, Unmade> {
     match look {
-        Look::Text(look) => text::make(look, font),
+        Look::Text(look) => text::make(look, font(look.frame.font_name().as_deref())?),
+        Look::Toggle(look) => toggle::make(look),
     }
 }
 
-/// The text a text field's value shows, borrowed: none and an empty one
-/// alike.
-fn shows(value: Option<&Value>) -> &str {
-    match value {
-        Some(Value::Text(text)) => text,
-        _ => "",
-    }
-}
-
-/// Whether widget `aid` needs its appearance made: it's a text field's
-/// widget whose terminal's text isn't what its source's field held as read
-/// (no value and an empty one are the same), or whose field was read from
-/// no source, or isn't among its source's fields as read. Until an op can
-/// change anything else of a widget, its value is all that can make the
-/// file's appearance wrong. False for anything else, a check box among
-/// them. A map lookup and a compare of two strings.
+/// Whether widget `aid` needs its appearance made, by its kind:
+///
+/// - a text field's widget whose terminal's text isn't what its source's
+///   field held as read (no value and an empty one are the same), or whose
+///   field was read from no source, or isn't among its source's fields as
+///   read: its value is all an op can change that makes the file's
+///   appearance wrong;
+/// - a check box's or radio button's widget that shows a state its source
+///   widget didn't as read ([`state_changed`]) and whose file's normal
+///   appearance has no on state (none, a stream, or `Off` alone): one
+///   that has keeps its appearances, and only its `/AS` moves.
+///
+/// False for anything else. A map lookup or two and a compare of two
+/// strings.
 pub fn stale(st: &DocState, aid: AnnotId) -> bool {
     let Some(w) = st.annot(aid).and_then(|rec| rec.widget()) else {
         return false;
@@ -298,15 +332,13 @@ pub fn stale(st: &DocState, aid: AnnotId) -> bool {
     let Some(node) = st.field(w.field) else {
         return false;
     };
-    let Some(term) = (node.term.as_deref()).filter(|t| t.kind == FieldKind::Text) else {
+    let Some(term) = node.term.as_deref() else {
         return false;
     };
-    let Some(src) = &node.src else {
-        return true;
-    };
-    match src.src.form().field_by_object(src.id) {
-        Some(read) => shows(read.value.as_ref()) != shows(term.value.as_ref()),
-        None => true,
+    match term.kind {
+        FieldKind::Text => text::stale(node, term),
+        FieldKind::CheckBox | FieldKind::Radio => toggle::stale(st, aid, w),
+        _ => false,
     }
 }
 
@@ -439,6 +471,7 @@ pub fn unmade_kind(why: &Unmade) -> String {
         Unmade::NotFinite => "not-finite".into(),
         Unmade::Limit(cap) => format!("limit:{}", cap_kind(*cap)),
         Unmade::NotText => "not-text".into(),
+        Unmade::NotButton => "not-button".into(),
         Unmade::FontNotBindable => "font-not-bindable".into(),
         Unmade::Unreadable(u) => format!("unreadable:{}", why_kind(u.why)),
         _ => "other".into(),

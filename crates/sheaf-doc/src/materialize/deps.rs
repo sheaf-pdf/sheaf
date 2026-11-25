@@ -496,16 +496,8 @@ impl<'a> Deps<'a> {
         if !self.keys.insert(ObjKey::Annot(a)) {
             return;
         }
-        self.keys.extend(
-            [
-                Part::Ap,
-                Part::Companion,
-                Part::CompanionAp,
-                Part::FileSpec,
-                Part::Popup,
-            ]
-            .map(|part| ObjKey::AnnotPart(a, part)),
-        );
+        self.keys
+            .extend(Part::ALL.map(|part| ObjKey::AnnotPart(a, part)));
         // A replacement is listed with its StrikeOut: one that came or
         // went changes its page's `/Annots`.
         let replaces = |st: &DocState| {

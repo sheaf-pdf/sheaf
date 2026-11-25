@@ -405,9 +405,13 @@ fn ours_made(src: &Source, look: &TextLook, text: &str, copy: u32) -> (Made, Mad
         FontAt::Entry(_) => ObjectId::new(0, 0),
     };
     let res = appearance::font_res(&font, src.id(), copy, &name, written);
-    let ours = appearance::make(&look, DaFont { font: &font, res });
+    let da_font = |res| {
+        let font = font.clone();
+        move |_: Option<&[u8]>| Ok::<_, Unmade>(DaFont { font, res })
+    };
+    let ours = appearance::make(&look, da_font(res));
     let theirs = match font.res() {
-        Some(res) => appearance::make(&look, DaFont { font: &font, res }),
+        Some(res) => appearance::make(&look, da_font(res)),
         None => Err(Unmade::FontNotBindable),
     };
     (ours, theirs)
@@ -606,7 +610,8 @@ fn lines_of(path: &str, store: &Arc<Store>, src: &Src) -> Vec<String> {
                 .zip(aid)
                 .and_then(|(st, aid)| match appearance::look(st, aid) {
                     Ok(Look::Text(look)) => Some(look),
-                    Err(_) => None,
+                    // A text field as its file is read: never a button.
+                    Ok(Look::Toggle(_)) | Err(_) => None,
                 });
             let Some(look) = look else {
                 counts.unlooked += 1;

@@ -119,6 +119,8 @@ mod saving;
 mod saving_tests;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod toggle_ap_tests;
 pub mod verify;
 #[cfg(test)]
 pub(crate) mod watermark_tests;

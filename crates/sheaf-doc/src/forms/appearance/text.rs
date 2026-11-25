@@ -1,7 +1,8 @@
 //! A text field's widget (M10 slice 6): what its appearance is made from
 //! ([`TextLook`]: the field's value, flags, `/MaxLen` and justification
-//! beside the widget's [`Frame`]), and its making by pdf-forms
-//! ([`text_with_fallback`]) in the field's font and the fallback font.
+//! beside the widget's [`Frame`]), which widgets need theirs made
+//! (`stale`), and its making by pdf-forms ([`text_with_fallback`]) in the
+//! field's font and the fallback font.
 
 use std::fmt;
 use std::sync::{Arc, LazyLock};
@@ -70,6 +71,30 @@ pub(super) fn look(st: &DocState, w: &Widget, node: &FieldNode, term: &Terminal)
     }
 }
 
+/// Whether a widget of `node`, a text field whose terminal is `term`, needs
+/// its appearance made ([`stale`](super::stale)): its text isn't what its
+/// source's field held as read (no value and an empty one are the same),
+/// or the field was read from no source, or isn't among its source's
+/// fields as read.
+pub(super) fn stale(node: &FieldNode, term: &Terminal) -> bool {
+    let Some(src) = &node.src else {
+        return true;
+    };
+    match src.src.form().field_by_object(src.id) {
+        Some(read) => shows(read.value.as_ref()) != shows(term.value.as_ref()),
+        None => true,
+    }
+}
+
+/// The text a text field's value shows, borrowed: none and an empty one
+/// alike.
+fn shows(value: Option<&Value>) -> &str {
+    match value {
+        Some(Value::Text(text)) => text,
+        _ => "",
+    }
+}
+
 /// The text a text field's value shows: none and an empty one alike.
 fn text_of(value: Option<&Value>) -> Arc<str> {
     static EMPTY: LazyLock<Arc<str>> = LazyLock::new(|| Arc::from(""));
@@ -88,7 +113,7 @@ fn text_of(value: Option<&Value>) -> Arc<str> {
 /// it draws in the fallback: none where `font` draws all of the text, and
 /// then the form names `font` alone, byte for byte as one font draws it. A
 /// cluster neither draws is [`Unmade::Unencodable`].
-pub(super) fn make(look: &TextLook, font: DaFont<'_>) -> Result<Made, Unmade> {
+pub(super) fn make(look: &TextLook, font: DaFont) -> Result<Made, Unmade> {
     let limits = limits();
     let da = look.frame.da(&limits);
     let mut field = TextField::new(&look.text);

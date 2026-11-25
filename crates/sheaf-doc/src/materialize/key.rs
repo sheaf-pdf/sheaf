@@ -49,7 +49,7 @@ pub enum ObjKey {
     /// An annotation: a mark, another tool's comment or link, or a widget.
     /// A merged widget's key names the same number as its field's.
     Annot(AnnotId),
-    /// An object a mark writes beside its dictionary.
+    /// An object a mark or a widget writes beside its dictionary.
     AnnotPart(AnnotId, Part),
     /// A field's dictionary: for a field merged with its one widget
     /// (ISO 32000-1 12.7.3.1), the one object both are.
@@ -115,11 +115,12 @@ pub enum ObjKey {
     Container(u32),
 }
 
-/// What a mark writes beside its dictionary, and another tool's comment
-/// its pop-up.
+/// What a mark or a widget writes beside its dictionary, and another
+/// tool's comment its pop-up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Part {
-    /// Its appearance stream, `/AP /N`.
+    /// Its appearance stream, `/AP /N`: a check box's or radio button's,
+    /// its on state's in `/N`.
     Ap,
     /// A replacement's StrikeOut, the companion of its Caret.
     Companion,
@@ -130,6 +131,29 @@ pub enum Part {
     /// Another tool's comment's pop-up window (`/Popup`), which goes with
     /// it.
     Popup,
+    /// A check box's or radio button's normal appearance of `Off`, in
+    /// `/AP /N` (M10 slice 8).
+    ApOff,
+    /// A widget's down appearance, `/AP /D`: a check box's or radio
+    /// button's, its on state's in `/D`.
+    ApDown,
+    /// A check box's or radio button's down appearance of `Off`, in
+    /// `/AP /D`.
+    ApDownOff,
+}
+
+impl Part {
+    /// Every part, in their keys' order.
+    pub const ALL: [Part; 8] = [
+        Part::Ap,
+        Part::Companion,
+        Part::FileSpec,
+        Part::CompanionAp,
+        Part::Popup,
+        Part::ApOff,
+        Part::ApDown,
+        Part::ApDownOff,
+    ];
 }
 
 /// A name tree of the catalog's `/Names`.
@@ -240,6 +264,9 @@ impl ObjKey {
                     Part::FileSpec => 2,
                     Part::CompanionAp => 3,
                     Part::Popup => 4,
+                    Part::ApOff => 5,
+                    Part::ApDown => 6,
+                    Part::ApDownOff => 7,
                 });
             }
             ObjKey::Field(id) => {
@@ -354,6 +381,9 @@ mod tests {
             ObjKey::AnnotPart(AnnotId(1), Part::FileSpec),
             ObjKey::AnnotPart(AnnotId(1), Part::CompanionAp),
             ObjKey::AnnotPart(AnnotId(1), Part::Popup),
+            ObjKey::AnnotPart(AnnotId(1), Part::ApOff),
+            ObjKey::AnnotPart(AnnotId(1), Part::ApDown),
+            ObjKey::AnnotPart(AnnotId(1), Part::ApDownOff),
             ObjKey::Field(FieldId(1)),
             ObjKey::Bookmark(OutlineId(1)),
             ObjKey::Labels,
@@ -466,6 +496,13 @@ mod tests {
             ObjKey::AnnotPart(AnnotId(2), Part::Popup).bytes(),
             [8, 0, 0, 0, 0, 0, 0, 0, 2, 4]
         );
+        assert_eq!(
+            ObjKey::AnnotPart(AnnotId(2), Part::ApDownOff).bytes(),
+            [8, 0, 0, 0, 0, 0, 0, 0, 2, 7]
+        );
+        let mut parts = Part::ALL.to_vec();
+        parts.sort();
+        assert_eq!(parts, Part::ALL, "in their keys' order");
     }
 
     /// Each form instance of one file's bytes has a copy of its own, fixed

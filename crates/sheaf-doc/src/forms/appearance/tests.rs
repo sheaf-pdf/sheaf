@@ -77,8 +77,9 @@ fn made_in_two(src: &Source, look: &TextLook) -> Result<Made, Unmade> {
 }
 
 /// `look` made in `font`, named by `res`.
-fn make_text(look: &TextLook, font: &FieldFont, res: Res) -> Result<Made, Unmade> {
-    make(&Look::Text(look.clone()), DaFont { font, res })
+fn make_text(look: &TextLook, font: &Arc<FieldFont>, res: Res) -> Result<Made, Unmade> {
+    let font = font.clone();
+    make(&Look::Text(look.clone()), |_| Ok(DaFont { font, res }))
 }
 
 /// The one form a text widget's look makes: `/N`'s, and no other.
@@ -217,8 +218,8 @@ fn the_da_and_q_are_the_widget_s_then_the_field_s_then_the_form_s() {
 
 /// What the look holds is the model's: the box, `/MK`, the border and its
 /// dashes, the flags and `/MaxLen`; a widget with no border is width 1,
-/// solid; a check box's widget, or another annotation, has none, refused
-/// as not a text field's.
+/// solid; a check box's widget is a toggle's look; a signature's, or
+/// another annotation, has none, refused as not a text field's.
 #[test]
 fn the_look_is_the_model_s_plain_data() {
     let mut f = Form::new(1);
@@ -242,6 +243,7 @@ fn the_look_is_the_model_s_plain_data() {
     let b = f.text("b", 0, [10.0, 600.0, 60.0, 615.0]);
     f.fill(b, "Trenton");
     f.check_box("box", 0, [10.0, 500.0, 20.0, 510.0], true);
+    f.signature("sig", 0, [10.0, 400.0, 60.0, 420.0]);
     let d = open(&f.bytes(), None);
     let look = look_of(&d, "a", 0);
     let frame = &look.frame;
@@ -269,8 +271,10 @@ fn the_look_is_the_model_s_plain_data() {
     );
     let as_look = format!("{:?}", Look::Text(b.clone()));
     assert!(!as_look.contains("Trenton"), "{as_look}");
+    let check = super::look(d.state(), widget_of(&d, "box", 0));
+    assert!(matches!(check, Ok(Look::Toggle(_))), "{check:?}");
     assert_eq!(
-        super::look(d.state(), widget_of(&d, "box", 0)),
+        super::look(d.state(), widget_of(&d, "sig", 0)),
         Err(Unmade::NotText)
     );
 }
@@ -440,10 +444,10 @@ fn frame() -> Frame {
 
 /// Helvetica, as a field whose `/DR` lacks its font draws in it, and its
 /// own resource.
-fn helvetica() -> (FieldFont, Res) {
+fn helvetica() -> (Arc<FieldFont>, Res) {
     let font = FieldFont::standard(Std14::Helvetica);
     let res = font.res().expect("a fallback's dictionary");
-    (font, res)
+    (Arc::new(font), res)
 }
 
 /// Each kind of reason is named by hand, in sheaf's words: none is a
@@ -492,6 +496,7 @@ fn every_kind_is_named_by_hand() {
         (Unmade::NoBox, "no-box"),
         (Unmade::NotFinite, "not-finite"),
         (Unmade::NotText, "not-text"),
+        (Unmade::NotButton, "not-button"),
         (Unmade::FontNotBindable, "font-not-bindable"),
     ];
     for (why, name) in plain {
@@ -663,7 +668,8 @@ fn hostile_plain_data_is_refused_by_kind_or_made() {
 
 /// Whether a widget needs its appearance made: not as read; when its text
 /// moved, cleared too; not when it's put back, or a field without one is
-/// given an empty one; never for a check box.
+/// given an empty one; never for a check box no fill changes (a pressed
+/// one's are `toggle_tests`').
 #[test]
 fn a_widget_is_stale_while_its_text_isn_t_the_file_s() {
     let mut f = Form::new(1);
