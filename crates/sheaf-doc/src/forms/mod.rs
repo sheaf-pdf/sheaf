@@ -2,15 +2,18 @@
 //! source with the facts sheaf shows about the form ([`read`]), what its
 //! signatures allow after them ([`sigs`]), the form check ([`check`]):
 //! what in a file's form other viewers would trip on, or what a save would
-//! carry where it shouldn't; a text field's appearance made from the
-//! model's plain data through pdf-forms ([`appearance`]); and a check box
-//! or radio field's group, what a press or a value puts by the family's
-//! rules ([`group`]).
+//! carry where it shouldn't; a widget's appearances made from the model's
+//! plain data through pdf-forms, a text field's, a check box's or radio
+//! button's, a combo box's or list box's and a push button's
+//! ([`appearance`]); and a check box or radio field's group, what a press
+//! or a value puts by the family's rules ([`group`]), which M10 slice 9's
+//! lowering of a value calls.
 //!
 //! Tests build forms in code ([`fixture`]) and read real ones from Greg's
 //! corpus ([`corpus`]). Both are compiled for this crate's tests and, with
 //! the `fixtures` feature, for other crates' tests. A dump of the corpus's
-//! text widgets (`dump`) sets sheaf's reading of each beside pdf-forms'.
+//! text, button and choice widgets (`dump`) sets sheaf's reading of each
+//! beside pdf-forms', and the appearances each makes.
 
 pub mod appearance;
 pub mod check;

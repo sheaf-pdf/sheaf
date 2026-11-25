@@ -459,10 +459,14 @@ tier-codes:
 # What sheaf writes on every form held to the Arlington PDF Model with
 # pdf-lint (backlog F22): a mark, a header and footer and recognized text,
 # saved as planned, then a Rewrite, each save's objects checked; the
-# form's own aren't. SHEAF_ARLINGTON_ONLY=<paths, comma-separated> narrows
-# it to a few forms; SHEAF_ARLINGTON_SAVES=<file> writes each save's
-# counts there, a line each, to set one run beside another.
-[doc("pdf-lint over what sheaf writes on every form: a mark, a header and footer, recognized text, then a Rewrite (SHEAF_ARLINGTON_ONLY narrows it, SHEAF_ARLINGTON_SAVES writes each save's counts)")]
+# form's own aren't. A form with check boxes or radio buttons whose file
+# has no on state has a save of its own (M10 slice 8): each pressed and
+# the document rewritten, so the appearances made of them are checked,
+# with how many were pressed, made and not. SHEAF_ARLINGTON_ONLY=<paths,
+# comma-separated> narrows it to a few forms; SHEAF_ARLINGTON_SAVES=<file>
+# writes each save's counts there, a line each, to set one run beside
+# another.
+[doc("pdf-lint over what sheaf writes on every form: a mark, a header and footer, recognized text, then a Rewrite, and its unmade toggles pressed (SHEAF_ARLINGTON_ONLY narrows it, SHEAF_ARLINGTON_SAVES writes each save's counts)")]
 [group('corpus')]
 tier-arlington:
     scripts/test-capped.sh cargo test -p sheaf-ops --test arlington -- --ignored --nocapture
@@ -564,26 +568,32 @@ content-dump out:
 annots-dump out:
     SHEAF_ANNOTS_DUMP="{{ absolute_path(out) }}" scripts/test-capped.sh cargo test -p sheaf-doc --release --lib -- --ignored --nocapture --exact annot::corpus::annots_dump
 
-# Every text widget of every form in the corpus's manifest, as sheaf reads
-# it and as pdf-forms' read layer does, written to `out`, numbers, names
-# and checksums only: a line a file (its form's class, and how many text
-# widgets the two read alike, read otherwise, or only one of them reads),
-# and one a text widget, by its page, slot and object: the plain data
-# sheaf's model gives of it (its value's length and checksum, never the
-# value; flags, `/MaxLen`, justification, box, `/MK` colors and rotation,
-# border, and its effective `/DA` parsed), `=` where the family's reading
-# is the same or the parts that differ and the family's of each, the font
-# its `/DA` names (by reference, direct, missing and the face it falls
-# back to; its kind, program, `/BaseFont` and `/Encoding`), and the
-# appearance made of it for a sample value from the family's reading and
-# from sheaf's (its size, whether it overflowed, its content's length and
-# checksum, or why none is made), with what of the two differs. It
-# asserts nothing: run it before and after a change to what
-# reads a form or makes a text field's appearance, or a move of the PDF
-# layer's pin, over the same corpus, and `diff` the two files;
-# SHEAF_FIELDS_DUMP_ONLY=<a corpus path> prints that file's lines. Two
-# runs over the same code write the same file.
-[doc("Every corpus text widget as sheaf and pdf-forms read it, and the appearance made of it, a line each, written to a file: diff two runs across a change to forms")]
+# Every text, button and choice widget of every form in the corpus's
+# manifest, as sheaf reads it and as pdf-forms' read layer does, written
+# to `out`, numbers, names and checksums only: a line a file (its form's
+# class, and how many text widgets the two read alike, read otherwise, or
+# only one of them reads), and one a text widget, by its page, slot and
+# object: the plain data sheaf's model gives of it (its value's length and
+# checksum, never the value; flags, `/MaxLen`, justification, box, `/MK`
+# colors and rotation, border, and its effective `/DA` parsed), `=` where
+# the family's reading is the same or the parts that differ and the
+# family's of each, the font its `/DA` names (by reference, direct,
+# missing and the face it falls back to; its kind, program, `/BaseFont`
+# and `/Encoding`), and the appearance made of it for a sample value from
+# the family's reading and from sheaf's (its size, whether it overflowed,
+# its content's length and checksum, or why none is made), with what of
+# the two differs. Buttons and choices (M10 slice 8) are lines of kinds of
+# their own, `toggle`, `choice` and `push`, with a `buttons` line a file
+# that has any, so the text and file lines are as they were: each its
+# look's parts (a toggle's mark and the name its on state goes under, a
+# choice's text or labels, selection and top, a push button's captions,
+# each by length and checksum) and its frame's, beside the family's, and
+# each slot's form made of it as it is. It asserts nothing: run it before
+# and after a change to what reads a form or makes a widget's appearance,
+# or a move of the PDF layer's pin, over the same corpus, and `diff` the
+# two files; SHEAF_FIELDS_DUMP_ONLY=<a corpus path> prints that file's
+# lines. Two runs over the same code write the same file.
+[doc("Every corpus text, button and choice widget as sheaf and pdf-forms read it, and the appearances made of it, a line each, written to a file: diff two runs across a change to forms")]
 [group('corpus')]
 fields-dump out:
     SHEAF_FIELDS_DUMP="{{ absolute_path(out) }}" scripts/test-capped.sh cargo test -p sheaf-doc --release --lib -- --ignored --nocapture --exact forms::dump::fields_dump

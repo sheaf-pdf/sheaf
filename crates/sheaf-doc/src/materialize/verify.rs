@@ -43,12 +43,19 @@
 //!   asks about first isn't checked here: signatures a Rewrite breaks,
 //!   `/SigFlags` and the XFA copy kept as read, earlier revisions; nor a
 //!   value with no appearance: a page delete leaves one where the chosen
-//!   button's widget went, and from M10 slice 6 a text field's widget
-//!   whose value changed and whose appearance pdf-forms can't make is
-//!   written with none (beside the file's `/V`, which no save writes
-//!   before M10 slice 9's fills). A made appearance (`AnnotPart(aid, Ap)`)
-//!   is an object of the save's own, as a mark's is, and checked as every
-//!   other: its references, its font's among them, resolve.
+//!   button's widget went, and a widget whose appearance pdf-forms can't
+//!   make is written with none (from M10 slice 6 a text field's whose
+//!   value changed; from M10 slice 8 a combo box's or list box's whose
+//!   value changed, a push button's whose captions did, and a check box's
+//!   or radio button's whose state did), beside the file's `/V`, which no
+//!   save writes before M10 slice 9's fills. A check box's or radio
+//!   button's `/AS` is the model's from M10 slice 8, so until then a save
+//!   can hold an `/AS` its field's `/V` doesn't name, which isn't asked
+//!   here either. A made appearance (each form under `AnnotPart(aid,
+//!   part)`: `Ap`, and a button's `ApOff`, `ApDown`, `ApDownOff` and
+//!   `ApRollover`) is an object of the save's own, as a mark's is, and
+//!   checked as every other: its references, its font's among them (a
+//!   mark's ZapfDingbats too), resolve.
 //! - **Reading back**, in debug builds: every object reads back from the
 //!   bytes as the graph has it, through the file's keys when it keeps its
 //!   encryption, so no string or stream went out in the clear, and an

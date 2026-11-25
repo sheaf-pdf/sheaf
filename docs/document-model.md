@@ -1824,6 +1824,99 @@ of this, and a user sees nothing new.
   character, nine of them `DEL`, or one of the Private Use Area). The 318 forms that can't be filled (XFA alone, three that don't
   open, a tree past sheaf's depth) are held by name.
 
+## Button and choice appearances through pdf-forms (M10 slice 8)
+
+A check box's, radio button's, combo box's, list box's or push button's
+widget whose model changed in a way its file's appearance doesn't show
+gets its appearances made anew by pdf-forms, from plain data out of the
+model, and bound as a text field's are (above). No op changes one yet:
+before M10 slice 9's `SetFieldValues`, only a test's put reaches any of
+this (`tx::fixture`'s `press`, `set_buttons`, `choose` and `caption`,
+each one version, as slice 9's op will be one transaction).
+
+- **A group's rules** (`forms::group`, over pdf-forms' `group`, the
+  door's `pdf::forms::group`): `buttons(st, field)` reads a check box or
+  radio field into the family's plain data, by each widget's place among
+  its field's widgets as the family counts them (`WidgetProps.index`; a
+  field's own dictionary that's a widget beside kid widgets after them),
+  with its on state's name (`WidgetProps.on_state`: the least name of
+  its `/AP /N` that names a stream and isn't `Off`, PDFium's rule; else
+  its index where the field has `/Opt`, `FieldProps.has_opt`; else
+  `Yes`), its export value (`/Opt`'s entry at its place: a button
+  field's `/Opt` keeps its places, an item that's no text an empty one)
+  and whether it's on. `Buttons::press`, `set_state` and `set_export`
+  give a `Change` (the field's value, the state of each widget that
+  moves, and the export value data export writes), which is what slice
+  9's lowering puts; NoToggleToOff, RadiosInUnison and check boxes of
+  distinct on states acting as radios are the family's. A widget the
+  model doesn't hold (on a page template) has no on state and is never
+  put; a page the tree lists twice puts both records; a widget that
+  shows no `/AS` and stays off is put `/Off`. Over every corpus form,
+  each check box and radio field's group is the family's own reading
+  (63,116 fields and 76,925 widgets alike), but for held classes: 36
+  fields whose own dictionary is a widget beside kids (the family has no
+  place for it), widgets on no page, and fields only one reader reads.
+- **The plain data** (`look(st, aid)`): `Look::Toggle` (`ToggleLook`:
+  whether it's a radio button's, its `/MK /CA`, which names its mark, and
+  its on state's name as the group names it), `Look::Choice`
+  (`ChoiceLook`: a combo box's text, the label of the first option its
+  value selects, else the value as it is; or a list box's options, those
+  its value selects and its `/TI`, `FieldProps.top`, the selection by the
+  value alone, as `/I` isn't modeled, every option of a selected export
+  value highlighted) and `Look::Push` (`PushLook`: `/MK /CA`, `/RC` and
+  `/AC`, none with `/MK /TP 1`; whether `/H` is `/P` or `/T`,
+  `WidgetProps.pressed`; whether it has a `/DA` at all, 12 points where
+  it hasn't; `Unmade::Icon` where `/MK /I` is a stream and `/TP` isn't
+  0), each with the widget's `Frame`. Each `Debug` prints lengths and
+  flags, never a caption, a label or a name.
+- **What's made** (`stale`): a check box's or radio button's widget that
+  shows a state its file's doesn't (`state_changed`) and whose file's
+  `/AP /N` has no on state, the whole set, as PDFium makes every state at
+  once; one whose file has an on state keeps its appearances, and only
+  its `/AS` moves. A choice's widget whose value's texts moved (an empty
+  text isn't no value: it selects an option whose export value is
+  empty). A push button's whose captions moved. `/AS` is written from
+  the model where it changed (added where the file has none); `/V`, `/I`
+  and `/MK` stay the file's until slice 9, so a test's save can hold an
+  `/AS` the file's `/V` doesn't name.
+- **The making** (`appearance::make`): a toggle by `check_box` or
+  `radio_button`, its on state's and `Off`'s normal and down forms
+  (`Slot::Normal`, `NormalOff`, `Down`, `DownOff`), an `Off` none where
+  it paints nothing (a check box's down `Off` always paints the pressed
+  gray), the mark in ZapfDingbats as the standard 14 font is written by
+  name, one dictionary a file, its `/DA` font never read; a choice by
+  `combo_box` (with its drop button) or `list_box`, as many options from
+  the top as sheaf reads of an `/Opt` (10,000); a push button by
+  `push_button`, its normal form and, where `/H` calls for them, its
+  rollover and down ones (`Slot::Rollover`, `Down`). A choice and a push
+  button draw in the field's font and the fallback font (`WithFallback`
+  over `Fallback::recording`, which notes each glyph the fallback draws;
+  a refused make's glyphs go with it, never into a subset).
+- **The binding**: each form under its part of the widget's key,
+  `AnnotPart(aid, Ap)` (`/N`, a toggle's on state's), `ApOff`, `ApDown`,
+  `ApDownOff` and `ApRollover`; a toggle's `/AP` is `<< /N << /on … /Off
+  … >> /D << … >> >>`, `on` the name a press puts in `/AS`, and a push
+  button's `<< /N … /R … /D … >>`. The overlay asks `stale` and
+  `state_changed` as the save does, and draws the same forms.
+- **How it's held.** Each look's and `stale`'s unit tests; the emitter's
+  (`toggle_ap_tests`, `choice_ap_tests`, `push_ap_tests`: by a Rewrite
+  and an Append, an overlay's forms the save's part for part, and a
+  toggle's on a field merged with its widget and one apart, a duplicate's
+  and an inserted file's); sheaf-ops' `buttons.rs`, each case drawn beside PDFium's own
+  appearance for the same state, value or captions, drawn appearances
+  only inside the widget's box: every toggle's frame normal and down (36
+  each), every choice (10) and every push button's normal, rollover and
+  down forms, 0 px apart, each with a twin past the tolerance; a mark,
+  a ZapfDingbats glyph where PDFium fills a path of its own, by where its
+  ink reaches (its centre and extent within 0.04 of the box's centre
+  square and a pixel an edge); `interop.rs`'s qpdf, pdftoppm and pdf.js;
+  `just fields-dump`, each corpus button and choice widget's look beside
+  the family's reading and the forms each makes, alike on all but the
+  classes the group's comparison holds; pdf-lint over a form built in
+  code of each kind changed, by a Rewrite and an Append, and in `just
+  tier-arlington` over every corpus form whose check boxes or radio
+  buttons have no on state, each pressed and rewritten.
+
 ## Undo/redo: snapshots, not inverse commands
 
 Three candidates were considered:

@@ -33,9 +33,11 @@
 //!   ([`appearance::stale`]), its appearances are made anew too, each form
 //!   under its part (`Part::Ap`, `ApOff`, `ApDown`, `ApDownOff`), its `/AP`
 //!   `<< /N << /on … /Off … >> /D << /on … /Off … >> >>`, no `/Off` where
-//!   the maker made none, `on` the name a press puts in `/AS`. One whose
-//!   file's has keeps it, and only `/AS` moves. Its field's `/V` is the
-//!   file's, as a text field's is, until M10 slice 9.
+//!   the maker made none, `on` the name a press puts in `/AS`; the mark
+//!   drawn in ZapfDingbats as the standard 14 font is written by name, one
+//!   dictionary a file however many forms name it. One whose file's has
+//!   keeps it, and only `/AS` moves. Its field's `/V` is the file's, as a
+//!   text field's is, until M10 slice 9.
 //! - **A combo box's or list box's widget whose value changed**
 //!   ([`appearance::stale`]) gets its appearance made anew as a text
 //!   field's is, in the field's font and the fallback: one form under

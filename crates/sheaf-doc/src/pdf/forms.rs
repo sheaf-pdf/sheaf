@@ -54,12 +54,16 @@
 //! data sheaf fills from its model (`crate::forms::group`).
 //!
 //! **Reading a form.** The family's own reading of a form's field tree
-//! and of a widget for its appearance (`read`, `Form`, `Field`,
-//! `FieldKind`, `Widget`, `widget_text`, `WidgetText`, under PDFium's
-//! rules) is set beside sheaf's in tests alone: sheaf reads its form
-//! itself (`crate::forms::read`), as its model holds widgets the tree
-//! doesn't reach, copies of a form and ids of its own, and hands the maker
-//! plain data from that model.
+//! and of a widget for its appearances (`read`, `Form`, `Field`,
+//! `FieldKind`, `Widget`; a text field's widget, `widget_text`,
+//! `WidgetText`; a check box's or radio button's, `widget_toggle`,
+//! `WidgetToggle`; a push button's, `widget_push`, `WidgetPush`; what a
+//! combo box or list box shows, `field_choice`, `FieldChoice`, and its
+//! widget, `widget_choice`, `WidgetChoice`; a check box or radio field's
+//! group, `field_group`; each under PDFium's rules) is set beside sheaf's
+//! in tests alone: sheaf reads its form itself (`crate::forms::read`), as
+//! its model holds widgets the tree doesn't reach, copies of a form and
+//! ids of its own, and hands the makers plain data from that model.
 //!
 //! A font is read from a source's objects through [`Resolve`] and
 //! [`Streams`]; `crate::content::Objects` is any of sheaf's sources as
@@ -87,10 +91,10 @@ pub mod group {
 }
 
 /// The family's reading of a form, which tests set beside sheaf's: its
-/// field tree, its fields and their widgets, and a widget of a text field
-/// read for its appearance.
+/// field tree, its fields and their widgets, and a widget of each kind
+/// read for its appearances, a choice field's what it shows.
 #[cfg(test)]
-pub use pdf_forms::appearance::WidgetText;
+pub use pdf_forms::appearance::{FieldChoice, WidgetChoice, WidgetPush, WidgetText, WidgetToggle};
 #[cfg(test)]
 pub use pdf_forms::{Field, FieldKind, Form, Widget};
 
@@ -140,4 +144,62 @@ pub fn widget_text<'a, 'o: 'a, R: Resolve<'o> + Streams + Copy>(
     limits: &Limits,
 ) -> Result<WidgetText<'a>, Unmade> {
     pdf_forms::appearance::widget_text(field, widget, objects, RULES, None, limits, &mut ())
+}
+
+/// `widget` of `field`, a check box or radio field, as the family reads it
+/// for its appearances from `objects` under PDFium's rules and `limits`:
+/// whether it's a radio button's, its `/MK /CA`, the name its on state goes
+/// under, the widget's box, `/MK` and border, and its effective `/DA`
+/// parsed.
+#[cfg(test)]
+pub fn widget_toggle<'o, R: Resolve<'o> + Copy>(
+    field: &Field<'o>,
+    widget: &Widget<'o>,
+    objects: R,
+    limits: &Limits,
+) -> Result<WidgetToggle, Unmade> {
+    pdf_forms::appearance::widget_toggle(field, widget, objects, RULES, limits, &mut ())
+}
+
+/// `widget` of `field`, a push button field, as the family reads it for its
+/// appearances from `objects` under PDFium's rules and `limits`: its
+/// captions, whether its `/H` calls for rollover and down appearances, the
+/// widget's box, `/MK` and border, and its effective `/DA` parsed (a size
+/// of 12 where it has none at all).
+#[cfg(test)]
+pub fn widget_push<'o, R: Resolve<'o> + Copy>(
+    field: &Field<'o>,
+    widget: &Widget<'o>,
+    objects: R,
+    limits: &Limits,
+) -> Result<WidgetPush, Unmade> {
+    pdf_forms::appearance::widget_push(field, widget, objects, RULES, limits, &mut ())
+}
+
+/// What `field`, a combo box or list box field, shows, as the family reads
+/// it from `objects` under PDFium's rules and `limits`, once for all its
+/// widgets: a combo box's text, or a list box's labels, the options
+/// selected (by `/I` where it agrees with `/V`) and its top.
+#[cfg(test)]
+pub fn field_choice<'o, R: Resolve<'o> + Copy>(
+    field: &Field<'o>,
+    objects: R,
+    limits: &Limits,
+) -> Result<FieldChoice, Unmade> {
+    pdf_forms::appearance::field_choice(field, objects, RULES, limits, &mut ())
+}
+
+/// `widget` of `field`, a combo box or list box field, as the family reads
+/// it for its appearance from `objects` under PDFium's rules and `limits`:
+/// what the field shows (`choice`, [`field_choice`]'s), the widget's box,
+/// `/MK` and border, and its effective `/DA` parsed.
+#[cfg(test)]
+pub fn widget_choice<'o, 'c, R: Resolve<'o> + Copy>(
+    field: &Field<'o>,
+    widget: &Widget<'o>,
+    choice: &'c FieldChoice,
+    objects: R,
+    limits: &Limits,
+) -> Result<WidgetChoice<'c>, Unmade> {
+    pdf_forms::appearance::widget_choice(field, widget, choice, objects, RULES, limits, &mut ())
 }
