@@ -9,14 +9,16 @@
 //! Bates numbers, and a recognized word. And qpdf, for the tests that ask
 //! it what it makes of a file, and the pool's sample, for the tiers that
 //! take it. And text fields drawn by sheaf and by PDFium, for the pixel
-//! checks and the other renderers ([`fields`]), and what an appearance
-//! draws, set beside another's within a rounding ([`drawn`]).
+//! checks and the other renderers ([`fields`]), and buttons and choices
+//! so ([`buttons`]), and what an appearance draws, set beside another's
+//! within a rounding ([`drawn`]).
 
 #![allow(dead_code)]
 // The tests' scratch files go in the temp directory, which clippy.toml
 // bans outside tests; each test that includes this is a crate of its own.
 #![allow(clippy::disallowed_methods)]
 
+pub mod buttons;
 pub mod drawn;
 pub mod fields;
 
