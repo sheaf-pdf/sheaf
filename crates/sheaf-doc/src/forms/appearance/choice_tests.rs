@@ -510,3 +510,41 @@ fn a_choice_is_made_within_sheaf_s_caps() {
     let long = "x".repeat(crate::source::Limits::DEFAULT.forms.text + 1);
     assert_eq!(made(&combo(&long)).unwrap_err(), Unmade::Limit(Cap::Text));
 }
+
+/// Which options a value selects is the family's rule with no `/I`
+/// (`selected_options`), read from sheaf's options without a copy: export
+/// values given twice, in any order, an empty one, one no option has, and
+/// no value at all.
+#[test]
+fn what_a_value_selects_is_the_familys_rule() {
+    use super::choice::selected;
+    use crate::pdf::forms::{FieldOption, selected_options};
+    let exports = ["b", "a", "", "b", "c", "a", "é"];
+    let options: Vec<Choice> = (exports.iter())
+        .map(|&e| Choice {
+            export: e.into(),
+            shown: format!("shown {e}").into(),
+        })
+        .collect();
+    let family: Vec<FieldOption> = exports.iter().map(|&e| FieldOption::new(e)).collect();
+    let cases: [&[&str]; 9] = [
+        &[],
+        &["a"],
+        &["b", "a"],
+        &["a", "b", "a"],
+        &[""],
+        &["zz"],
+        &["c", "zz", ""],
+        &["é", "c"],
+        &["B"],
+    ];
+    for values in cases {
+        assert_eq!(
+            selected(&options, values),
+            selected_options(&family, &[], values),
+            "{values:?}"
+        );
+    }
+    assert_eq!(selected(&options, &["b", "a"]), [0, 1, 3, 5]);
+    assert_eq!(selected(&options, &[]), [] as [usize; 0]);
+}

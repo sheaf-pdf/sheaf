@@ -5,7 +5,8 @@
 //! its making by pdf-forms ([`combo_box`], [`list_box`]) in the field's font
 //! and the fallback font.
 //!
-//! **What a value shows** is the family's rule ([`selected_options`]), over
+//! **What a value shows** is the family's rule (`selected_options` with no
+//! `/I`, which a test sets beside sheaf's `selected`), over
 //! the value alone: `/I` isn't modeled, so every option whose export value
 //! is one of the value's is selected, and a combo box shows the first one's
 //! label, else the value as it is (an editable combo box's outside its
@@ -18,9 +19,7 @@ use super::{DaFont, Frame, Made, Slot, frame, limits};
 use crate::content::{Fallback, Glyphs};
 use crate::forms::field::{Choice, FieldKind, Value};
 use crate::model::{DocState, FieldNode, Terminal, Widget};
-use crate::pdf::forms::{
-    ComboBox, FieldOption, ListBox, Unmade, combo_box, list_box, selected_options,
-};
+use crate::pdf::forms::{ComboBox, ListBox, Unmade, combo_box, list_box};
 use crate::pdf::gfx::WithFallback;
 
 /// What one combo box's or list box's widget's appearance is made from:
@@ -89,7 +88,7 @@ impl fmt::Debug for ChoiceShows {
 
 /// Widget `w`'s look, `node` its field and `term` that field's terminal, a
 /// combo box or list box: what its value shows among its options
-/// ([`selected_options`], by the value alone), its `/TI` for a list box,
+/// (`selected`, by the value alone), its `/TI` for a list box,
 /// and its frame.
 pub(super) fn look(st: &DocState, w: &Widget, node: &FieldNode, term: &Terminal) -> ChoiceLook {
     let options = &term.props.options;
@@ -110,20 +109,21 @@ pub(super) fn look(st: &DocState, w: &Widget, node: &FieldNode, term: &Terminal)
 }
 
 /// The indexes in `options` of those `values` select, as the family finds
-/// them with no `/I` ([`selected_options`]): every option whose export
-/// value is one of them, sorted, each once.
-fn selected(options: &[Choice], values: &[&str]) -> Vec<usize> {
-    if values.is_empty() {
-        return Vec::new();
-    }
-    let options: Vec<FieldOption> = (options.iter())
-        .map(|o| FieldOption::new(&*o.export))
-        .collect();
-    selected_options(&options, &[], values)
+/// them with no `/I` (`selected_options`, which a test sets beside this):
+/// every option whose export value is one of them, in order, each once.
+/// Read from the options as the field's record shares them: no option is
+/// copied, however many the field has and however many widgets show it.
+pub(super) fn selected(options: &[Choice], values: &[&str]) -> Vec<usize> {
+    let mut given = values.to_vec();
+    given.sort_unstable();
+    (options.iter().enumerate())
+        .filter(|(_, o)| given.binary_search(&&*o.export).is_ok())
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// A combo box's text for `value`: the label of the first option its
-/// first text selects ([`selected`]), else that text as it is, else, with
+/// first text selects (the first of [`selected`]'s), else that text as it is, else, with
 /// no value, none. A value of several texts shows its first, as the family
 /// and PDFium show one.
 fn combo_text(options: &[Choice], value: Option<&Value>) -> Arc<str> {
@@ -136,8 +136,8 @@ fn combo_text(options: &[Choice], value: Option<&Value>) -> Arc<str> {
     let Some(first) = first else {
         return EMPTY.clone();
     };
-    match selected(options, &[&**first]).first() {
-        Some(&i) => options[i].shown.clone(),
+    match options.iter().find(|o| o.export == *first) {
+        Some(option) => option.shown.clone(),
         None => first.clone(),
     }
 }

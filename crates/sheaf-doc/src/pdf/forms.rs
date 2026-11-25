@@ -36,8 +36,9 @@
 //! field's, then the fallback, a program that records each glyph it draws
 //! (pdf-gfx's [`ProgramFont`](super::gfx::ProgramFont) in a
 //! [`WithFallback`](super::gfx::WithFallback)). Which options a value
-//! selects ([`selected_options`], over each option's export value,
-//! [`FieldOption`]) is the family's rule too.
+//! selects is the family's rule too ([`selected_options`], over each
+//! option's export value, [`FieldOption`]), which sheaf follows over its
+//! own options without copying them, and tests set beside its own.
 //!
 //! A push button's ([`push_button`]) are made from its captions and whether
 //! it has rollover and down appearances ([`PushButton`]), the same
@@ -77,7 +78,9 @@ pub use pdf_forms::appearance::{
     PushAppearances, PushButton, TextField, ToggleAppearances, ToggleButton, Unmade, WidgetLook,
     check_box, combo_box, list_box, push_button, radio_button, text_with_fallback,
 };
-pub use pdf_forms::{Cap, Error, FieldFlags, FieldOption, Limits, Quadding, selected_options};
+pub use pdf_forms::{Cap, Error, FieldFlags, Limits, Quadding};
+#[cfg(test)]
+pub use pdf_forms::{FieldOption, selected_options};
 
 /// A check box or radio group's rules, over plain data: which widgets a
 /// press or a value turns on and off, the field's value and export value,
