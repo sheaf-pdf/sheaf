@@ -1,8 +1,8 @@
 //! Ops as tests write them (M10.5 slice 11): a version made of the user's
 //! ops, the pages, bookmarks and files they name, and a fixture's marks
-//! said as the ops that make and change them; and a field's fill, which
-//! no op makes yet. For tests here and in other crates (the `fixtures`
-//! feature).
+//! said as the ops that make and change them; and a field's fill, and a
+//! check box's or radio button's press or value, which no op makes yet.
+//! For tests here and in other crates (the `fixtures` feature).
 
 use std::sync::Arc;
 
@@ -16,9 +16,12 @@ use sheaf_edit::{
 
 use super::{Actor, Commit, CommitOpts, EditError, JobKind, Tx};
 use crate::annot::{Annot, AnnotId, AnnotKind};
-use crate::forms::Value;
+use crate::forms::{Change, FieldId, Value, buttons};
 use crate::labels::LabelSpec;
-use crate::model::{Document, FieldNode, GroupId, GroupKind, OutlineId, PageId, Terminal};
+use crate::model::{
+    AnnotBody, AnnotRec, Document, FieldNode, GroupId, GroupKind, OutlineId, PageId, Terminal,
+    Widget,
+};
 use crate::prim::{Key, Val};
 use crate::store::{BlobId, Src};
 use crate::text_layer::TextLayer;
@@ -87,7 +90,67 @@ pub fn fill(doc: &mut Document, name: &str, value: &str) {
     term.value = Some(Value::Text(value.into()));
     node.term = Some(Arc::new(term));
     let val = Some(Val::Field(Arc::new(node)));
-    doc.put_for_test(Key::Field(id), val, "fill");
+    doc.put_for_test(vec![(Key::Field(id), val)], "fill");
+}
+
+/// Widget `widget` of `doc` pressed, by the group's rules
+/// ([`crate::forms::group`]): its field's value and every widget whose
+/// state that changes, put as one version, as M10 slice 9's
+/// `SetFieldValues` will lower a press. A press that changes nothing (a
+/// radio button that's on, in a field with NoToggleToOff) is no version.
+/// Panics where `widget` isn't a check box's or radio button's.
+pub fn press(doc: &mut Document, widget: AnnotId) {
+    let st = doc.state();
+    let rec = st.annot(widget).and_then(AnnotRec::widget);
+    let field = rec
+        .unwrap_or_else(|| panic!("{widget:?} is no widget"))
+        .field;
+    let group = buttons(st, field).expect("a check box or radio field");
+    let change = group.press(widget).expect("one of its field's widgets");
+    put_change(doc, field, &change, "press");
+}
+
+/// The check box or radio field of `doc` whose full name is `name` given
+/// the value `state`, a state's name (`Off` for none), by the group's
+/// rules: put as [`press`] puts one. Panics where no such field has that
+/// name.
+pub fn set_buttons(doc: &mut Document, name: &str, state: &str) {
+    let st = doc.state();
+    let field = (st.field_named(name)).unwrap_or_else(|| panic!("no field is named {name:?}"));
+    let group = buttons(st, field).expect("a check box or radio field");
+    let change = group.set_state(state);
+    put_change(doc, field, &change, "set");
+}
+
+/// `change` of field `field`'s group put in `doc` as one version,
+/// labelled `label`: the field, where its value changes, and each widget
+/// whose state does. Nothing to put is no version.
+pub fn put_change(doc: &mut Document, field: FieldId, change: &Change, label: &str) {
+    let st = doc.state();
+    let node = st.field(field).expect("the field");
+    let term = node.term.as_deref().expect("a terminal field");
+    let mut puts = Vec::new();
+    if term.value.as_ref() != Some(&change.value) {
+        let mut term = Terminal::clone(term);
+        term.value = Some(change.value.clone());
+        let mut node = FieldNode::clone(node);
+        node.term = Some(Arc::new(term));
+        puts.push((Key::Field(field), Some(Val::Field(Arc::new(node)))));
+    }
+    for (aid, state) in &change.states {
+        let rec = st.annot(*aid).expect("its widget");
+        let mut w = Widget::clone(rec.widget().expect("a widget"));
+        w.state = Some(state.to_string());
+        let body = AnnotBody::Widget(Arc::new(w));
+        let rec = AnnotRec {
+            page: rec.page,
+            body,
+        };
+        puts.push((Key::Annot(*aid), Some(Val::Annot(rec))));
+    }
+    if !puts.is_empty() {
+        doc.put_for_test(puts, label);
+    }
 }
 
 /// What the pages `ops` insert or put in place from files the store holds

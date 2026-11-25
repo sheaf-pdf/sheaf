@@ -2,8 +2,10 @@
 //! source with the facts sheaf shows about the form ([`read`]), what its
 //! signatures allow after them ([`sigs`]), the form check ([`check`]):
 //! what in a file's form other viewers would trip on, or what a save would
-//! carry where it shouldn't; and a text field's appearance made from the
-//! model's plain data through pdf-forms ([`appearance`]).
+//! carry where it shouldn't; a text field's appearance made from the
+//! model's plain data through pdf-forms ([`appearance`]); and a check box
+//! or radio field's group, what a press or a value puts by the family's
+//! rules ([`group`]).
 //!
 //! Tests build forms in code ([`fixture`]) and read real ones from Greg's
 //! corpus ([`corpus`]). Both are compiled for this crate's tests and, with
@@ -19,6 +21,7 @@ mod dump;
 pub mod field;
 #[cfg(any(test, feature = "fixtures"))]
 pub mod fixture;
+pub mod group;
 pub mod read;
 pub mod rules;
 pub mod sigs;
@@ -29,6 +32,7 @@ mod tests;
 
 pub use check::{Finding, Report, check, check_file, check_latest};
 pub use field::{Field, FieldId, FieldKind, Value, Widget};
+pub use group::{Buttons, Change, buttons};
 pub use read::{FileForm, FormClass, FormFacts, read};
 
 /// The full name of a node named `partial` under one named `up`: the two

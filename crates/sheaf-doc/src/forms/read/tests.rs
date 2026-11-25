@@ -768,6 +768,186 @@ fn a_field_is_found_by_its_object() {
     assert_eq!(form.field_by_object(ObjectId::new(99_999, 0)), None);
 }
 
+/// A widget is found by its object, as read, a widget on two pages by its
+/// first.
+#[test]
+fn a_widget_is_found_by_its_object() {
+    let mut f = every_kind();
+    let page = f.pages[0];
+    let root = f.dict(page).get(b"Parent").unwrap().as_reference().unwrap();
+    let mut kids = f
+        .pdf
+        .get_dictionary(root)
+        .unwrap()
+        .get(b"Kids")
+        .unwrap()
+        .clone();
+    kids.as_array_mut().unwrap().push(page.into());
+    f.dict(root).set("Kids", kids);
+    f.dict(root).set("Count", 3);
+    let form = read_back(&mut f);
+    assert_eq!(form.widgets.len(), 3, "the first page listed again");
+    for w in form.widgets.values().flatten() {
+        let found = form.widget_by_object(w.object).expect("found");
+        assert_eq!(found, w, "on its pages alike");
+        let first = form
+            .widgets
+            .values()
+            .flatten()
+            .find(|o| o.object == w.object);
+        assert!(std::ptr::eq(found, first.unwrap()), "its first page's");
+    }
+    assert_eq!(form.widget_by_object(ObjectId::new(99_999, 0)), None);
+}
+
+/// A widget's place among its field's widgets: its own dictionary's 0, or
+/// in `/Kids` order among the kids that are widgets, a kid listed twice
+/// where it's first; a field that is a widget itself and has kid widgets
+/// too holds its own dictionary after them, where PDFium counts none of
+/// it.
+#[test]
+fn a_widget_has_its_place_among_its_fields_widgets() {
+    let mut f = Form::new(1);
+    let own = f.check_box("own", 0, row(0), false);
+    let r = f.radio("r", 0, &[row(1), row(2), row(3)], Some(1));
+    let kids = f.widgets_of(r);
+    // A kid listed twice is read once, where it's first.
+    let mut listed: Vec<Object> = kids.iter().map(|&k| Object::from(k)).collect();
+    listed.insert(1, kids[2].into());
+    f.dict(r).set("Kids", listed);
+    // A field that is also a widget, with kid widgets.
+    let (both, both_kids) = f.buttons(
+        "both",
+        0,
+        &[
+            crate::forms::fixture::Button::at(4, Some("a"), Some("Off")),
+            crate::forms::fixture::Button::at(5, Some("b"), Some("Off")),
+        ],
+    );
+    let rect: Vec<Object> = row(6).iter().map(|&v| Object::from(v)).collect();
+    f.dict(both).set("Type", Object::name("Annot"));
+    f.dict(both).set("Subtype", Object::name("Widget"));
+    f.dict(both).set("Rect", rect);
+    let mut annots = f.annots(0);
+    annots.push(both);
+    f.set_annots(0, &annots);
+    let form = read_back(&mut f);
+    let index = |id: ObjectId| form.widget_by_object(id).expect("on a page").index;
+    assert_eq!(index(own), 0);
+    assert_eq!(
+        kids.iter().map(|&k| index(k)).collect::<Vec<_>>(),
+        [0, 2, 1]
+    );
+    assert_eq!(index(both_kids[0]), 0);
+    assert_eq!(index(both_kids[1]), 1);
+    assert_eq!(index(both), 2, "after its kids");
+}
+
+/// A state of `/AP /N`: its name, and whether its value is a stream.
+type States<'a> = (&'a [u8], bool);
+
+/// A widget's on state: of `/AP /N`'s names whose value is a stream, not
+/// empty and not `Off`, the least by its bytes; none where `/N` is one
+/// stream, or no such name's value is a stream. `states` keeps every
+/// name, in order.
+#[test]
+fn a_widgets_on_state_is_the_least_name_of_a_stream() {
+    let mut f = Form::new(1);
+    let ap = |f: &mut Form, names: &[States]| {
+        let mut n = crate::pdf::Dictionary::new();
+        for &(name, stream) in names {
+            let value = match stream {
+                true => f.pdf.add_object(Stream::new(dictionary! {}, Vec::new())),
+                false => f.pdf.add_object(literal("not a stream")),
+            };
+            n.set(name, value);
+        }
+        n
+    };
+    let cases: [(&[States], Option<&str>); 6] = [
+        (
+            &[(b"Zeta", true), (b"Alpha", true), (b"Off", true)],
+            Some("Alpha"),
+        ),
+        (&[(b"Off", true), (b"On", false)], None),
+        (&[(b"Off", true), (b"", true)], None),
+        (&[(b"B", false), (b"C", true), (b"Off", true)], Some("C")),
+        (&[(b"Off", true)], None),
+        // By its bytes: 0x90 after `Y`.
+        (&[(b"\x90x", true), (b"Yes", true)], Some("Yes")),
+    ];
+    let mut ids = Vec::new();
+    for (i, (names, _)) in cases.iter().enumerate() {
+        let id = f.check_box(&format!("c{i}"), 0, row(i), false);
+        let n = ap(&mut f, names);
+        f.dict(id).set("AP", dictionary! { "N" => n });
+        ids.push(id);
+    }
+    let stream = f.check_box("stream", 0, row(7), false);
+    let single = f.pdf.add_object(Stream::new(dictionary! {}, Vec::new()));
+    f.dict(stream).set("AP", dictionary! { "N" => single });
+    let form = read_back(&mut f);
+    for (i, (names, on)) in cases.iter().enumerate() {
+        let w = form.widget_by_object(ids[i]).unwrap();
+        assert_eq!(w.on_state.as_deref(), *on, "case {i}");
+        let all: Vec<String> = (names.iter())
+            .map(|(n, _)| n.iter().map(|&b| char::from(b)).collect())
+            .collect();
+        assert_eq!(w.states, all, "case {i}");
+    }
+    let w = form.widget_by_object(stream).unwrap();
+    assert_eq!((w.on_state.as_deref(), w.has_appearance), (None, true));
+}
+
+/// A field has `/Opt` where its own or a parent's is an array, an empty
+/// one too, and not where it's none or no array; a button field's keeps
+/// each item's place, one that is no text an empty option, and a choice
+/// field's leaves it out, each from one array they share.
+#[test]
+fn a_fields_opt_is_read_for_its_kind() {
+    let mut f = Form::new(1);
+    let none = f.check_box("none", 0, row(0), false);
+    let empty = f.check_box("empty", 0, row(1), false);
+    f.dict(empty).set("Opt", Vec::<Object>::new());
+    let name = f.check_box("name", 0, row(2), false);
+    f.dict(name).set("Opt", Object::name("x"));
+    let kid = f.check_box("kid", 0, row(3), false);
+    let parent = f.group("parent", &[kid]);
+    f.dict(parent).set("Opt", vec![literal("p")]);
+    let items = vec![
+        literal("x"),
+        5.into(),
+        Object::from(vec![literal("y"), literal("Y")]),
+        Object::from(vec![literal("short")]),
+        literal("z"),
+    ];
+    let shared = f.pdf.add_object(Object::from(items));
+    let button = f.check_box("button", 0, row(4), false);
+    f.dict(button).set("Opt", shared);
+    let choice = f.choice("choice", 0, row(5), &[], true);
+    f.dict(choice).set("Opt", shared);
+    let direct = f.check_box("direct", 0, row(6), false);
+    f.dict(direct)
+        .set("Opt", vec![literal("a"), Object::null(), literal("b")]);
+    let form = read_back(&mut f);
+    let read = |id: ObjectId| {
+        let field = form.field_by_object(id).unwrap();
+        let exports: Vec<&str> = field.options.iter().map(|o| &*o.export).collect();
+        (field.has_opt, exports.join("|"))
+    };
+    assert_eq!(read(none), (false, String::new()));
+    assert_eq!(read(empty), (true, String::new()));
+    assert_eq!(read(name), (false, String::new()));
+    assert_eq!(read(kid), (true, "p".into()));
+    assert_eq!(read(button), (true, "x||y||z".into()));
+    assert_eq!(read(choice), (true, "x|y|z".into()));
+    assert_eq!(read(direct), (true, "a||b".into()));
+    let shown: Vec<&str> = (form.field_by_object(choice).unwrap().options.iter())
+        .map(|o| &*o.shown)
+        .collect();
+    assert_eq!(shown, ["x", "Y", "z"]);
+}
+
 /// What damage reads as: no fields, and a reason.
 fn assert_damaged(f: &mut Form, why: &str) {
     assert_damaged_within(f, Limits::DEFAULT.forms, why);

@@ -1,4 +1,5 @@
-//! Text fields' appearances through `pdf-forms` (M10 slice 6).
+//! Text fields' appearances through `pdf-forms` (M10 slice 6), and a
+//! check box or radio group's rules (M10 slice 8).
 //!
 //! **Making one.** A text field's appearance is made from plain data
 //! ([`text_with_fallback`]): what the field shows ([`TextField`]: its text, flags
@@ -20,6 +21,14 @@
 //! ([`MadeWithFallback`]), or why none could be made ([`Unmade`]); a font
 //! that can't be read is an [`Error`].
 //!
+//! **A group's rules.** What pressing a check box or radio button, or
+//! setting its field's value, does to each widget's state and to the
+//! value ([`group`]: [`Group`](group::Group) of
+//! [`GroupWidget`](group::GroupWidget)s, by [`GroupKind`](group::GroupKind)),
+//! and the name a made on state goes under
+//! ([`on_state_name`](group::on_state_name)), are the family's, over plain
+//! data sheaf fills from its model (`crate::forms::group`).
+//!
 //! **Reading a form.** The family's own reading of a form's field tree
 //! and of a widget for its appearance (`read`, `Form`, `Field`,
 //! `FieldKind`, `Widget`, `widget_text`, `WidgetText`, under PDFium's
@@ -40,6 +49,17 @@ pub use pdf_forms::appearance::{
     WidgetLook, text_with_fallback,
 };
 pub use pdf_forms::{Cap, Error, FieldFlags, Limits, Quadding};
+
+/// A check box or radio group's rules, over plain data: which widgets a
+/// press or a value turns on and off, the field's value and export value,
+/// and the name each widget's on state goes under. For tests, the
+/// family's own reading of a field's group ([`FieldGroup`](group::FieldGroup),
+/// by [`field_group`]).
+pub mod group {
+    #[cfg(test)]
+    pub use pdf_forms::group::FieldGroup;
+    pub use pdf_forms::group::{Group, GroupKind, GroupWidget, on_state_name};
+}
 
 /// The family's reading of a form, which tests set beside sheaf's: its
 /// field tree, its fields and their widgets, and a widget of a text field
@@ -67,6 +87,20 @@ pub fn read<'o, R: Resolve<'o>>(
     limits: &Limits,
 ) -> Result<Option<Form<'o>>, Error> {
     Form::read(objects, catalog, RULES, limits)
+}
+
+/// `field`'s widgets as a group, as the family reads them from `objects`
+/// under PDFium's rules and `limits`: the kind, the flags, whether it has
+/// `/Opt`, each widget's on state and export value by its place among the
+/// field's widgets, and each one's state as its `/AS` has it. None for a
+/// field that is neither a check box nor a radio field.
+#[cfg(test)]
+pub fn field_group<'o, R: Resolve<'o>>(
+    field: &Field<'o>,
+    objects: R,
+    limits: &Limits,
+) -> Result<Option<group::FieldGroup>, Error> {
+    field.group(objects, RULES, limits)
 }
 
 /// `widget` of `field`, a text field, as the family reads it for its

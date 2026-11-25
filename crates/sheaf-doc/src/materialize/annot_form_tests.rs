@@ -822,7 +822,7 @@ fn owned_keys_survive_set_save_undo_save_reopen() {
                 let mut form = crate::model::FormDoc::clone(d.state().form());
                 let order: Vec<_> = form.calc_order.iter().rev().copied().collect();
                 form.calc_order = order.into();
-                d.put_for_test(Key::Form, Some(Val::Form(Arc::new(form))), "order");
+                d.put_for_test(vec![(Key::Form, Some(Val::Form(Arc::new(form))))], "order");
             }),
         ),
     ];

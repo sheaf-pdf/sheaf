@@ -124,6 +124,8 @@ fn widget(field: u64, state: Option<&str>) -> Widget {
             align: None,
             actions: Vec::new(),
             has_appearance: true,
+            index: 0,
+            on_state: None,
         }),
     }
 }
@@ -143,6 +145,7 @@ fn terminal(kind: FieldKind, value: Option<Value>) -> Terminal {
             align: None,
             max_len: None,
             options: Arc::from([]),
+            has_opt: false,
             tooltip: None,
             actions: Vec::new(),
         }),

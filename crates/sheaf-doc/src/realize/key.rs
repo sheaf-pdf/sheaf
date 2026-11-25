@@ -874,11 +874,15 @@ impl Feed for WidgetProps {
             align,
             actions,
             has_appearance,
+            index,
+            on_state,
         } = self;
         sum.feed(border)
             .feed(align)
             .feed(actions)
-            .feed(has_appearance);
+            .feed(has_appearance)
+            .feed(index)
+            .feed(on_state);
     }
 }
 
@@ -942,6 +946,7 @@ impl Feed for FieldProps {
             align,
             max_len,
             options,
+            has_opt,
             tooltip,
             actions,
         } = self;
@@ -949,6 +954,7 @@ impl Feed for FieldProps {
             .feed(align)
             .feed(max_len)
             .feed(options)
+            .feed(has_opt)
             .feed(tooltip)
             .feed(actions);
     }

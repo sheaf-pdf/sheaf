@@ -1382,15 +1382,20 @@ impl Document {
         )
     }
 
-    /// `val` put at `key` as a version of its own, labelled `label`: what
-    /// no op sets yet (a fill, the form's calculation order), for tests of
-    /// what a save writes of it. Its step names an op it doesn't run. Open
-    /// to the `fixtures` feature for [`fill`](crate::tx::fixture::fill).
+    /// Each value of `puts` put at its key, all of them as one version,
+    /// labelled `label`: what no op sets yet (a fill, a press of a check
+    /// box, the form's calculation order), for tests of what a save
+    /// writes of it, a press's field and widgets undone together as an
+    /// op's would be. Its step names an op it doesn't run. Open to the
+    /// `fixtures` feature for [`fill`](crate::tx::fixture::fill) and
+    /// [`press`](crate::tx::fixture::press).
     #[cfg(any(test, feature = "fixtures"))]
-    pub(crate) fn put_for_test(&mut self, key: Key, val: Option<Val>, label: &str) {
+    pub(crate) fn put_for_test(&mut self, puts: Vec<(Key, Option<Val>)>, label: &str) {
         let before = self.state().clone();
         let mut rec = crate::prim::Rec::new(before.clone());
-        rec.put(key, val);
+        for (key, val) in puts {
+            rec.put(key, val);
+        }
         let (state, prims) = rec.finish();
         let step = Step {
             op: Arc::new(ResolvedOp::SetPageLabels { ranges: None }),

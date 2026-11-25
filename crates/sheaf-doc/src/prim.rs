@@ -498,7 +498,9 @@ impl HeapSize for Mk {
 
 impl HeapSize for WidgetProps {
     fn heap_size(&self) -> usize {
-        self.border.as_ref().map_or(0, |b| buf(&b.dash)) + self.actions.heap_size()
+        self.border.as_ref().map_or(0, |b| buf(&b.dash))
+            + self.actions.heap_size()
+            + self.on_state.heap_size()
     }
 }
 

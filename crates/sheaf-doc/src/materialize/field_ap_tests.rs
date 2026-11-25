@@ -71,7 +71,10 @@ fn fill_id(d: &mut Document, id: FieldId, value: &str) {
     let mut term = Terminal::clone(node.term.as_deref().expect("a terminal"));
     term.value = Some(Value::Text(value.into()));
     node.term = Some(Arc::new(term));
-    d.put_for_test(Key::Field(id), Some(Val::Field(Arc::new(node))), "fill");
+    d.put_for_test(
+        vec![(Key::Field(id), Some(Val::Field(Arc::new(node))))],
+        "fill",
+    );
 }
 
 /// A widget's `/AP` in `pdf`, references followed.

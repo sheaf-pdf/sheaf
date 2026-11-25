@@ -739,8 +739,12 @@ pub struct FieldProps {
     /// `/MaxLen`, as the file has it.
     pub max_len: Option<u32>,
     /// `/Opt`: a choice field's items, or a check box's or radio group's
-    /// export values.
+    /// export values, by its widgets' [`index`](WidgetProps::index).
     pub options: Arc<[Choice]>,
+    /// `/Opt` is an array, an empty one too: a check box's or radio
+    /// group's widgets with no on state of their own are named by their
+    /// indexes.
+    pub has_opt: bool,
     /// `/TU`: what the field is for, in words.
     pub tooltip: Option<String>,
     /// Its own `/AA`: keystroke, format, validate and calculate.
@@ -760,6 +764,7 @@ impl Terminal {
                 align: field.align,
                 max_len: field.max_len,
                 options: field.options.clone(),
+                has_opt: field.has_opt,
                 tooltip: field.tooltip.clone(),
                 actions: field.actions.clone(),
             }),
@@ -934,6 +939,15 @@ pub struct WidgetProps {
     pub actions: Vec<(Trigger, Action)>,
     /// It has a normal appearance: a stream, or states.
     pub has_appearance: bool,
+    /// Its place among its field's widgets in its file, from 0, as the
+    /// field tree is read: what its field's `/Opt` entry and a check
+    /// box's or radio button's group go by. A duplicate's copy has its
+    /// original's; a page the page tree lists twice shows one widget at
+    /// one index twice.
+    pub index: u32,
+    /// The name of its normal appearance's on state in its file, as the
+    /// family reads one: none where it has no states.
+    pub on_state: Option<String>,
 }
 
 impl Widget {
@@ -961,6 +975,8 @@ impl Widget {
                 align: w.align,
                 actions: w.actions.clone(),
                 has_appearance: w.has_appearance,
+                index: w.index,
+                on_state: w.on_state.clone(),
             }),
         }
     }

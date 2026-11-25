@@ -29,7 +29,10 @@
 //! direct objects aren't read. A full name joins the `/T`s from the root
 //! down, as PDFium's does, passing over a node with none or an empty one.
 //! Values, options and actions many fields share are read once, so a
-//! value a thousand fields inherit is one string.
+//! value a thousand fields inherit is one string. An `/Opt` is read once
+//! for both of the ways a field takes it: a choice field's items, which
+//! leave out an item that is no text, and a check box's or radio group's
+//! export values, which keep its place.
 //!
 //! Every node of the tree is numbered, in tree order (M10.5 §4): a
 //! terminal field's id is its node's.
@@ -72,6 +75,10 @@ pub struct FileForm {
     /// Where each terminal field is among `fields`, by its object
     /// ([`field_by_object`](Self::field_by_object)).
     by_object: HashMap<ObjectId, usize>,
+    /// Where each widget is in `widgets`, by its object: the page and its
+    /// place among the page's, the first page's of a widget on two
+    /// ([`widget_by_object`](Self::widget_by_object)).
+    widget_at: HashMap<ObjectId, (u32, usize)>,
 }
 
 impl FileForm {
@@ -79,6 +86,14 @@ impl FileForm {
     /// field of the model's was read as, found without a scan.
     pub fn field_by_object(&self, id: ObjectId) -> Option<&Field> {
         self.fields.get(*self.by_object.get(&id)?)
+    }
+
+    /// The widget whose dictionary is object `id`, as read: what a widget
+    /// of the model's was read as, found without a scan. A widget on two
+    /// pages is read on each alike; this is the first page's.
+    pub fn widget_by_object(&self, id: ObjectId) -> Option<&Widget> {
+        let &(page, at) = self.widget_at.get(&id)?;
+        self.widgets.get(&page)?.get(at)
     }
 }
 
@@ -371,12 +386,19 @@ pub fn read(src: &Source) -> FileForm {
     let by_object = (fields.iter().enumerate())
         .map(|(i, f)| (f.object, i))
         .collect();
+    let mut widget_at = HashMap::new();
+    for (&page, list) in &widgets {
+        for (at, w) in list.iter().enumerate() {
+            widget_at.entry(w.object).or_insert((page, at));
+        }
+    }
     FileForm {
         facts,
         nodes,
         fields,
         widgets,
         by_object,
+        widget_at,
     }
 }
 
@@ -409,7 +431,41 @@ struct Inherited<'a> {
     da: Option<Arc<str>>,
     align: Option<u8>,
     max_len: Option<u32>,
-    options: Option<Arc<[Choice]>>,
+    options: Option<Opt>,
+}
+
+/// An `/Opt` as read, once, in both of the ways a field takes it.
+#[derive(Clone)]
+struct Opt {
+    /// It is an array, an empty one too.
+    array: bool,
+    /// A choice field's items: each item that is text, or a pair of text.
+    items: Arc<[Choice]>,
+    /// A check box's or radio group's export values: every item in its
+    /// place, one that is no text an option of empty text. `items` itself
+    /// where every item is text.
+    exports: Arc<[Choice]>,
+}
+
+impl Opt {
+    /// What a field of `kind` takes of it.
+    fn for_kind(&self, kind: FieldKind) -> Arc<[Choice]> {
+        match kind {
+            FieldKind::CheckBox | FieldKind::Radio => self.exports.clone(),
+            _ => self.items.clone(),
+        }
+    }
+}
+
+/// Where a widget of the field tree belongs.
+#[derive(Clone, Copy)]
+struct WidgetOf {
+    /// Its field, by its index in `fields`.
+    field: usize,
+    /// It's a kid rather than the field's own dictionary.
+    kid: bool,
+    /// Its place among its field's widgets ([`Widget::index`]).
+    index: u32,
 }
 
 struct Reader<'a, P: Objects + ?Sized> {
@@ -417,9 +473,8 @@ struct Reader<'a, P: Objects + ?Sized> {
     limits: FormLimits,
     nodes: Vec<Node>,
     fields: Vec<Field>,
-    /// Each widget's field (by index in `fields`), and whether it's a kid
-    /// rather than the field's own dictionary.
-    widget_of: HashMap<ObjectId, (usize, bool)>,
+    /// Each widget's field, and its place among the field's.
+    widget_of: HashMap<ObjectId, WidgetOf>,
     seen: HashSet<ObjectId>,
     /// The fields from the root down to the one being read.
     path: HashSet<ObjectId>,
@@ -431,7 +486,7 @@ struct Reader<'a, P: Objects + ?Sized> {
     damaged: Option<String>,
     /// What's been read from objects many fields can share.
     values: HashMap<ObjectId, Option<Value>>,
-    options: HashMap<ObjectId, Arc<[Choice]>>,
+    options: HashMap<ObjectId, Opt>,
     actions: HashMap<ObjectId, Option<Action>>,
 }
 
@@ -599,9 +654,6 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             .and_then(Object::as_array)
             .unwrap_or_default();
         let mut widgets = Vec::new();
-        if is_widget(dict) {
-            widgets.push((id, false));
-        }
         let mut field_kids = false;
         self.path.insert(id);
         for kid in kids.iter().filter_map(Object::as_reference) {
@@ -623,6 +675,13 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             }
         }
         self.path.remove(&id);
+        // The field's own dictionary, when it's a widget too, after its
+        // kids that are: PDFium counts a field's widgets as the family
+        // does, its kids, or itself where it has none, so each kid's place
+        // among them is theirs.
+        if is_widget(dict) {
+            widgets.push((id, false));
+        }
         if widgets.is_empty() && field_kids {
             return;
         }
@@ -634,11 +693,13 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         if self.damaged.is_some() {
             return;
         }
-        let index = self.fields.len();
-        for (w, kid) in widgets {
-            self.widget_of.insert(w, (index, kid));
+        let field = self.fields.len();
+        for ((w, kid), index) in widgets.into_iter().zip(0..) {
+            self.widget_of.insert(w, WidgetOf { field, kid, index });
         }
         let kind = FieldKind::of(here.ft, here.flags);
+        let has_opt = here.options.as_ref().is_some_and(|o| o.array);
+        let options = here.options.map(|o| o.for_kind(kind));
         self.fields.push(Field {
             id: me,
             object: id,
@@ -650,7 +711,8 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             da: here.da,
             align: here.align,
             max_len: here.max_len,
-            options: here.options.unwrap_or_else(|| Arc::from([])),
+            options: options.unwrap_or_else(|| Arc::from([])),
+            has_opt,
             tooltip: tooltip.map(|t| t.to_string()),
             actions,
             outside: 0,
@@ -688,17 +750,19 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         value
     }
 
-    /// `/Opt`: each item a string, or an export value and what's shown.
-    fn choices(&mut self, opt: &Object) -> Arc<[Choice]> {
+    /// `/Opt`: each item a string, or an export value and what's shown;
+    /// read once for a choice field and for a button field ([`Opt`]).
+    fn choices(&mut self, opt: &Object) -> Opt {
         if let Some(id) = opt.as_reference()
             && let Some(choices) = self.options.get(&id)
         {
             return choices.clone();
         }
-        let items = resolve(self.pdf, opt)
-            .and_then(Object::as_array)
-            .unwrap_or_default();
+        let array = resolve(self.pdf, opt).and_then(Object::as_array);
+        let items = array.unwrap_or_default();
         let mut choices = Vec::new();
+        // The button field's reading, once an item isn't text.
+        let mut exports: Option<Vec<Choice>> = None;
         if items.len() > self.limits.items {
             let n = self.limits.items;
             self.damage(format!("an /Opt has more than {n} items"));
@@ -707,22 +771,40 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
                 let pair = resolve(self.pdf, item).and_then(Object::as_array);
                 let (export, shown) = match pair {
                     Some([export, shown, ..]) => (self.text(export), self.text(shown)),
-                    Some(_) => continue,
+                    Some(_) => (None, None),
                     None => {
                         let text = self.text(item);
                         (text.clone(), text)
                     }
                 };
-                if let (Some(export), Some(shown)) = (export, shown) {
-                    choices.push(Choice { export, shown });
+                match (export, shown) {
+                    (Some(export), Some(shown)) => {
+                        let choice = Choice { export, shown };
+                        if let Some(exports) = &mut exports {
+                            exports.push(choice.clone());
+                        }
+                        choices.push(choice);
+                    }
+                    _ => {
+                        let empty: Arc<str> = Arc::from("");
+                        (exports.get_or_insert_with(|| choices.clone())).push(Choice {
+                            export: empty.clone(),
+                            shown: empty,
+                        });
+                    }
                 }
             }
         }
-        let choices: Arc<[Choice]> = choices.into();
+        let items: Arc<[Choice]> = choices.into();
+        let read = Opt {
+            array: array.is_some(),
+            exports: exports.map_or_else(|| items.clone(), Arc::from),
+            items,
+        };
         if let Some(id) = opt.as_reference() {
-            self.options.insert(id, choices.clone());
+            self.options.insert(id, read.clone());
         }
-        choices
+        read
     }
 
     /// A string's or stream's text, at most [`FormLimits::text`] bytes of
@@ -831,7 +913,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
                     .collect()
             });
             for &(slot, id) in widgets.iter() {
-                let (field, kid) = self.widget_of[&id];
+                let of = self.widget_of[&id];
                 count += 1;
                 if count > self.limits.widgets {
                     let n = self.limits.widgets;
@@ -841,7 +923,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
                 let Some(d) = pdf.dictionary(id) else {
                     continue;
                 };
-                let widget = self.widget(id, d, self.fields[field].id, slot, kid);
+                let widget = self.widget(id, d, self.fields[of.field].id, slot, of);
                 if self.damaged.is_some() {
                     return out;
                 }
@@ -849,9 +931,9 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             }
         }
         let listed: HashSet<ObjectId> = arrays.into_values().flatten().map(|(_, id)| id).collect();
-        for (id, &(field, _)) in &self.widget_of {
+        for (id, of) in &self.widget_of {
             if !listed.contains(id) {
-                let outside = &mut self.fields[field].outside;
+                let outside = &mut self.fields[of.field].outside;
                 *outside = outside.saturating_add(1);
             }
         }
@@ -864,9 +946,10 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         d: &Dictionary,
         field: FieldId,
         slot: usize,
-        kid: bool,
+        of: WidgetOf,
     ) -> Widget {
         let pdf = self.pdf;
+        let kid = of.kid;
         let get = |key: &[u8]| d.get(key).and_then(|o| resolve(pdf, o));
         let rect = get(b"Rect")
             .and_then(Object::as_array)
@@ -943,6 +1026,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             .and_then(|ap| ap.get(b"N"))
             .and_then(|n| resolve(pdf, n));
         let mut states = Vec::new();
+        let mut on_state = None;
         if let Some(PdfValue::Dict(n)) = normal.map(Object::value) {
             for (name, _) in n.iter() {
                 if !self.spend(name.len()) {
@@ -950,6 +1034,8 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
                 }
                 states.push(latin1(name));
             }
+            // One of the names just counted, so nothing more is.
+            on_state = on_state_of(pdf, n);
         }
         let has_appearance = match normal.map(Object::value) {
             Some(PdfValue::Stream(_)) => true,
@@ -966,6 +1052,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             object: id,
             merged: !kid,
             slot,
+            index: of.index,
             rect,
             flags: number(pdf, d, b"F").unwrap_or(0) as u32,
             da,
@@ -974,10 +1061,26 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             align,
             state,
             states,
+            on_state,
             has_appearance,
             actions,
         }
     }
+}
+
+/// The name of the on state of a normal appearance's states `n`: of its
+/// names that aren't empty or `Off` and whose value is a stream, the least
+/// by its bytes, as the family reads one under PDFium's rules (as PDFium
+/// keeps a dictionary's names in order). Only the names are sorted, and a
+/// value is followed until one is a stream.
+fn on_state_of<P: Objects + ?Sized>(pdf: &P, n: &Dictionary) -> Option<String> {
+    let mut names: Vec<(&[u8], &Object)> = (n.iter())
+        .filter(|(name, _)| !name.is_empty() && *name != b"Off")
+        .collect();
+    names.sort_by_key(|&(name, _)| name);
+    let is_stream = |o: &Object| resolve(pdf, o).is_some_and(|o| o.as_stream().is_some());
+    let (name, _) = names.into_iter().find(|&(_, o)| is_stream(o))?;
+    Some(latin1(name))
 }
 
 /// A value read before the field's kind was known, made to fit it: a
