@@ -319,7 +319,8 @@ pub struct Mk {
     pub down: Option<String>,
     /// `/TP`: where a push button's caption goes beside its icon, 0 the
     /// caption alone, 1 the icon alone: an integer, or a real taken toward
-    /// 0, within `i32` (as PDFium reads one); none where it's neither.
+    /// 0, its low 32 bits, as the family reads it; none where it's
+    /// neither.
     pub text_position: Option<i32>,
     /// `/I` is a stream: a push button's normal icon, which sheaf doesn't
     /// draw.

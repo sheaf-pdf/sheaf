@@ -1114,15 +1114,17 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
     }
 }
 
-/// `/MK /TP`, `o` followed: an integer, or a finite real taken toward 0,
-/// each held within `i32`, as PDFium reads a number as an integer; none
-/// for anything else.
+/// `/MK /TP`, `o` followed, as the family's annotation reader reads it
+/// under PDFium's rules: an integer, or a finite real taken toward 0, its
+/// low 32 bits kept (a number past `i32` wraps; no file is known to have
+/// one); none for anything else.
 fn text_position(o: &Object) -> Option<i32> {
-    match o.as_integer() {
-        Some(n) => Some(n.clamp(i32::MIN.into(), i32::MAX.into()) as i32),
-        // `as` takes a real toward 0 and holds it within `i32`.
-        None => o.as_number().filter(|v| v.is_finite()).map(|v| v as i32),
-    }
+    let n = match o.as_integer() {
+        Some(n) => n,
+        // `as` takes a real toward 0 and holds it within `i64`.
+        None => o.as_number().filter(|v| v.is_finite())? as i64,
+    };
+    Some(n as i32)
 }
 
 /// Widget `d`'s normal appearance, `/AP /N`, each followed: a stream, or

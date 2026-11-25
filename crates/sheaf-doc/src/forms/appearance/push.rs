@@ -6,7 +6,8 @@
 //!
 //! **What's read is the family's rule** (its read layer's `widget_push`):
 //! the captions are `/MK /CA`, `/RC` and `/AC`, none shown with `/MK /TP 1`
-//! (the icon alone); a widget whose `/MK /I` is a stream and whose `/TP`
+//! (the icon alone, `/TP` read as the family's annotation reader reads
+//! it); a widget whose `/MK /I` is a stream and whose `/TP`
 //! isn't 0 shows an icon, which isn't drawn ([`Unmade::Icon`]); `/H /P` or
 //! `/T` calls for the rollover and down appearances; with no `/DA` at all
 //! (the widget's, its field's or its form's) the captions are drawn at 12

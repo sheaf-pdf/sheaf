@@ -1956,6 +1956,33 @@ mod tests {
         assert_eq!(field(&icon, "ours.vs"), "-");
     }
 
+    /// A push button's `/MK /TP` past `i32` is read by both alike: its low
+    /// 32 bits, so `4294967297` is 1, the icon alone, and no caption is
+    /// shown; one that is 0 so (2 to the 32nd) shows its caption.
+    #[test]
+    fn a_text_position_past_i32_is_the_familys() {
+        let mut f = Form::new(1);
+        for (i, tp) in [(1i64 << 32) + 1, 1 << 32].into_iter().enumerate() {
+            let y = 400.0 - 30.0 * i as f32;
+            let push = f.push_button(&format!("push{i}"), 0, [10.0, y, 110.0, y + 20.0], "Go");
+            let mk = dictionary! { "CA" => literal("Go"), "TP" => tp };
+            f.dict(push).set("MK", mk);
+        }
+        let store = Store::new();
+        let kind = BlobKind::file(Path::new("tp.pdf"), None);
+        let src = store.open(f.bytes().into(), kind).unwrap();
+        let lines = lines_of("tp.pdf", &store, &src);
+        let captions: Vec<String> = (0..2)
+            .map(|slot| {
+                let push = fields(&lines, slot);
+                assert_eq!(field(&push, "family"), "=", "slot {slot}: {push:?}");
+                assert_eq!(field(&push, "ours.vs"), "=", "slot {slot}: {push:?}");
+                field(&push, "caption").to_string()
+            })
+            .collect();
+        assert_eq!(captions, [text_sum(""), text_sum("Go")]);
+    }
+
     /// Two readings of a button or choice: the family's parts that differ
     /// or sheaf's lacks, with the family's value, and sheaf's that the
     /// family's lacks, as `-`; none where they're the same.

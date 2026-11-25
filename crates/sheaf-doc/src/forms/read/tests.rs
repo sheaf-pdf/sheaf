@@ -901,7 +901,8 @@ fn a_widgets_on_state_is_the_least_name_of_a_stream() {
 
 /// A push button's `/MK` and `/H`: its three captions, each a text and
 /// followed where it's a reference; `/TP` an integer, a real taken toward
-/// 0, one past `i32` held within it, and none where it's no number; `/I` an
+/// 0, one past `i32` its low 32 bits (as the family reads it), and none
+/// where it's no number; `/I` an
 /// icon only where it's a stream, followed; `/H /P`, `/T` and the string
 /// `(P)` pressed, `/I`, `/N`, `/O` and none not. A widget with no `/MK` has
 /// none of them.
@@ -912,12 +913,14 @@ fn a_push_button_s_captions_icon_and_highlight_are_read() {
     let icon = f
         .pdf
         .add_object(Stream::new(dictionary! {}, b"0 g".to_vec()));
-    let tps: [(Object, Option<i32>); 5] = [
+    let tps: [(Object, Option<i32>); 7] = [
         (Object::from(1), Some(1)),
         (Object::from(2.9), Some(2)),
         (Object::from(-0.5), Some(0)),
-        (Object::from(1i64 << 40), Some(i32::MAX)),
+        (Object::from(1i64 << 40), Some(0)),
         (literal("1"), None),
+        (Object::from((1i64 << 32) + 1), Some(1)),
+        (Object::from(4_294_967_297.0), Some(1)),
     ];
     let mut ids = Vec::new();
     for (i, (tp, _)) in tps.iter().enumerate() {
@@ -943,11 +946,11 @@ fn a_push_button_s_captions_icon_and_highlight_are_read() {
     ];
     let mut his = Vec::new();
     for (i, (h, _)) in highlights.iter().enumerate() {
-        let id = f.push_button(&format!("h{i}"), 0, row(6 + i), "Go");
+        let id = f.push_button(&format!("h{i}"), 0, row(7 + i), "Go");
         f.dict(id).set("H", h.clone());
         his.push(id);
     }
-    let bare = f.push_button("bare", 0, row(13), "Go");
+    let bare = f.push_button("bare", 0, row(14), "Go");
     f.dict(bare).remove(b"MK");
     let form = read_back(&mut f);
     for (i, (_, tp)) in tps.iter().enumerate() {
