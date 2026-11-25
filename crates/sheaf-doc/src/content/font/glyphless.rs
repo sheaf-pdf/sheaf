@@ -77,11 +77,16 @@ impl DrawFont for Glyphless {
         false
     }
 
+    /// Never: it draws every character, as the one glyph it has.
+    fn falls_back(&self) -> bool {
+        false
+    }
+
     /// Half an em a CID, by their count, as it has always been reckoned:
     /// the same as the sum of each character's advance, without its
     /// rounding in a text of tens of thousands of characters, and nothing
-    /// for no text.
-    fn width(&self, s: &str, size: f32) -> f32 {
+    /// for no text. What [`DrawFont::width`] is, as it never falls back.
+    fn width_alone(&self, s: &str, size: f32) -> f32 {
         s.encode_utf16().count() as f32 * 500.0 * size / 1000.0
     }
 

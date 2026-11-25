@@ -175,7 +175,7 @@ pub(super) fn target(profile: Profile) -> SaveTarget {
 }
 
 /// `input` Rewritten as `profile` says.
-fn write(input: &SaveInput, profile: Profile) -> Output {
+pub(super) fn write(input: &SaveInput, profile: Profile) -> Output {
     materialize(input, &rewrite_plan(), target(profile), &NoProgress).unwrap()
 }
 

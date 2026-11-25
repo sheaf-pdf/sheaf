@@ -535,10 +535,20 @@ impl Page<'_> {
         }
         let page = cx.placeholder(ObjKey::Page(self.id));
         main.set("P", page.clone());
-        // An appearance an Append doesn't write isn't drawn.
+        // An appearance an Append doesn't write isn't drawn: what it draws
+        // in the fallback is joined where its form is written, and only
+        // there, as the form written is what binds the subset.
         let ap = ObjKey::AnnotPart(aid, Part::Ap);
         if cx.writes(&ap) {
-            let form = sink::form(cx, drawn.bbox, drawn.matrix, drawn.content, &drawn.needs);
+            let annot::Drawing { ap: drawn, glyphs } = drawn;
+            let form = sink::form(
+                cx,
+                drawn.bbox,
+                drawn.matrix,
+                drawn.content,
+                &drawn.needs,
+                &glyphs,
+            );
             cx.push(ap, Object::from(form));
         }
         main.set("AP", dictionary! { "N" => cx.placeholder(ap) });
@@ -562,7 +572,15 @@ impl Page<'_> {
         if let Some((mut dict, drawn)) = companions.into_iter().next() {
             let ap = ObjKey::AnnotPart(aid, Part::CompanionAp);
             if cx.writes(&ap) {
-                let form = sink::form(cx, drawn.bbox, drawn.matrix, drawn.content, &drawn.needs);
+                let annot::Drawing { ap: drawn, glyphs } = drawn;
+                let form = sink::form(
+                    cx,
+                    drawn.bbox,
+                    drawn.matrix,
+                    drawn.content,
+                    &drawn.needs,
+                    &glyphs,
+                );
                 cx.push(ap, Object::from(form));
             }
             dict.set("AP", dictionary! { "N" => cx.placeholder(ap) });
@@ -853,8 +871,10 @@ impl Cx<'_> {
     /// Pinned appearance `ap` as a form in the file, drawn from its inputs
     /// as the mark it was drawn from is ([`annot::appearance`]), with the
     /// stamp's page it holds: its dictionary now, its content as it's
-    /// written ([`ObjKey::Pinned`], once a file), the same each time. Its
-    /// placeholder, `/BBox` and `/Matrix`, the drawing's.
+    /// written ([`ObjKey::Pinned`], once a file), the same each time, what
+    /// it draws in the fallback joined where its dictionary is made, which
+    /// is where it's written. Its placeholder, `/BBox` and `/Matrix`, the
+    /// drawing's.
     fn pinned(&mut self, ap: &Arc<PinnedAp>) -> (Object, Rect, Affine) {
         let inputs = &ap.inputs;
         // The stamp's page named by its form, not its number, which an
@@ -870,15 +890,15 @@ impl Cx<'_> {
                 }),
             _ => None,
         };
-        let drawn = annot::appearance(&inputs.annot(), page);
+        let annot::Drawing { ap: drawn, glyphs } = annot::appearance(&inputs.annot(), page);
         let (bbox, matrix) = (Rect::from(drawn.bbox), Affine::from(drawn.matrix));
         let id = self.push_deferred(ObjKey::Pinned(ap.digest), |cx| {
-            let mut dict = sink::form_dict(cx, drawn.bbox, drawn.matrix, &drawn.needs);
+            let mut dict = sink::form_dict(cx, drawn.bbox, drawn.matrix, &drawn.needs, &glyphs);
             dict.set("Filter", Object::name("FlateDecode"));
             let ap = ap.clone();
             let data = move || {
                 let drawn = annot::appearance(&ap.inputs.annot(), page);
-                super::deflated(&drawn.content)
+                super::deflated(&drawn.ap.content)
             };
             super::Deferred {
                 dict,

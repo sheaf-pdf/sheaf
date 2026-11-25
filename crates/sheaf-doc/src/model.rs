@@ -1721,7 +1721,7 @@ impl Document {
         if parts.steps.len() > 1 {
             coalesce(&mut parts.steps);
         }
-        // Text the built-in fonts can't draw is told once a document.
+        // Text no font sheaf bundles can draw is told once a document.
         let mut notices = std::mem::take(&mut parts.notices);
         let mut tell = !self.told_unencodable;
         notices.retain(|n| *n != Notice::Unencodable || std::mem::take(&mut tell));
@@ -4521,7 +4521,7 @@ mod tests {
         }
     }
 
-    /// Text the built-in fonts can't draw (M10.5 proposal 22): a FreeText
+    /// Text no font sheaf bundles can draw (M10.5 proposal 22): a FreeText
     /// in Japanese draws a `?` for each character, its `/Contents` keeps
     /// the text exactly, and the reader is told once however many such
     /// edits come. A header/footer is read the same way.

@@ -7954,8 +7954,8 @@ mod tests {
 
     /// A watermark set from its dialog is one op committed on the version
     /// the dialog opened on (M10.5 slice 16): one undo step called
-    /// "Watermark", or "Background", the notice its line, with text the
-    /// built-in fonts can't draw said; the pages draw it with no copy made
+    /// "Watermark", or "Background", the notice its line, with text no
+    /// font sheaf bundles can draw said; the pages draw it with no copy made
     /// of them, and an undo takes it off. Set again as it is, it says so.
     #[test]
     #[cfg(target_os = "linux")]
@@ -7989,7 +7989,7 @@ mod tests {
                     assert_eq!(doc.model.undo_label(), Some("Background"));
                     let said = doc.notice.as_deref().unwrap_or_default();
                     let unencodable = "Add a background to page 2. Some characters can't be \
-                        drawn in the built-in fonts and show as “?” in the file; the text \
+                        drawn in any font sheaf has and show as “?” in the file; the text \
                         itself is kept";
                     assert_eq!(said, unencodable);
                     view.undo(cx);
@@ -8182,8 +8182,8 @@ mod tests {
 
     /// A header and footer set from its dialog is one op committed on the
     /// version the dialog opened on (M10.5 slice 17): one undo step called
-    /// "Header & footer", the notice its line, with text the built-in fonts
-    /// can't draw said; the pages draw it with no copy made of them, and an
+    /// "Header & footer", the notice its line, with text no font sheaf
+    /// bundles can draw said; the pages draw it with no copy made of them, and an
     /// undo puts back the one before. Set again as it is, it says so.
     #[test]
     #[cfg(target_os = "linux")]
@@ -8217,7 +8217,7 @@ mod tests {
                     assert_eq!(doc.model.undo_label(), Some("Header & footer"));
                     let said = doc.notice.as_deref().unwrap_or_default();
                     let unencodable = "Set the header and footer. Some characters can't be \
-                        drawn in the built-in fonts and show as “?” in the file; the text \
+                        drawn in any font sheaf has and show as “?” in the file; the text \
                         itself is kept";
                     assert_eq!(said, unencodable);
                     view.undo(cx);

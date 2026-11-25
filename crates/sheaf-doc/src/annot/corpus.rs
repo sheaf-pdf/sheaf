@@ -10,17 +10,17 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
-use crate::annot::{Annot, Box2, Pt, emission};
+use crate::annot::{Annot, Box2, Drawing, Pt, emission};
 use crate::attachments::Objects;
 use crate::content::Unkept;
 use crate::content::corpus::{each_dumped, written};
 use crate::content::sink::{self, Sink};
-use crate::content::{Res, Reserved};
+use crate::content::{Glyphs, Res, Reserved};
 use crate::file::{ForeignAnnot, Found, InFile, is_ours, walk};
 use crate::forms::corpus::Corpus;
 use crate::geom::{Affine, Rect};
 use crate::import::{NotAMark, convert_page};
-use crate::pdf::annots::{self, SynthesizedAp};
+use crate::pdf::annots;
 use crate::pdf::{Dictionary, Object, ObjectId, Value};
 use crate::serialize::built::{Held, StampForm};
 use crate::source::ObjRef;
@@ -175,6 +175,10 @@ impl Sink for Asked {
         ObjectId::new(self.0.len() as u32, 0)
     }
 
+    /// Nothing is written, so there's no subset to join to: the fallback's
+    /// marker among the resources says the appearance draws in it.
+    fn fallback(&mut self, _: &Glyphs) {}
+
     fn reserved(&mut self, _: Option<&Object>) -> Reserved {
         Reserved::default()
     }
@@ -182,9 +186,11 @@ impl Sink for Asked {
 
 /// What appearance `ap` of dictionary `dict`, as a save writes them,
 /// says: the dictionary written, the appearance's box, its content and
-/// the resources its form binds, each `category/name/id`, under names
-/// that start with `prefix`.
-fn made(line: &mut Line, prefix: &str, dict: &Dictionary, ap: SynthesizedAp) {
+/// the resources its form binds, each `category/name/id`, and, only where
+/// it draws some, how many glyphs it draws in the fallback font
+/// (`fallback=`), under names that start with `prefix`.
+fn made(line: &mut Line, prefix: &str, dict: &Dictionary, ap: Drawing) {
+    let Drawing { ap, glyphs } = ap;
     let mut out = Vec::new();
     match crate::pdf::write::write(&mut out, &Object::from(dict.clone())) {
         Ok(()) => line.bytes(&format!("{prefix}dict"), &out),
@@ -192,7 +198,7 @@ fn made(line: &mut Line, prefix: &str, dict: &Dictionary, ap: SynthesizedAp) {
     }
     line.bits(&format!("{prefix}bbox"), &rect_bits(Rect::from(ap.bbox)));
     let mut asked = Asked::default();
-    let form = sink::form_dict(&mut asked, ap.bbox, ap.matrix, &ap.needs);
+    let form = sink::form_dict(&mut asked, ap.bbox, ap.matrix, &ap.needs, &glyphs);
     let resources = form.get(b"Resources").and_then(Object::as_dict);
     let mut needs = Vec::new();
     for (i, id) in asked.0.iter().enumerate() {
@@ -208,6 +214,9 @@ fn made(line: &mut Line, prefix: &str, dict: &Dictionary, ap: SynthesizedAp) {
         needs.push(format!("{bound}/{id:032x}"));
     }
     line.field(&format!("{prefix}needs"), &needs.join(","));
+    if !glyphs.is_empty() {
+        line.field(&format!("{prefix}fallback"), &glyphs.len().to_string());
+    }
     line.bytes(&format!("{prefix}content"), &ap.content);
 }
 

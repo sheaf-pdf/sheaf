@@ -8,13 +8,14 @@
 //!   `/Artifact` whose property list (`/Type /Pagination`, its kind's
 //!   `/Subtype`, and `/SHEF_Gen` naming the generator) is named in the
 //!   page's `/Properties`, its graphics state isolated in `q`…`Q`. A
-//!   watermark's text is in its [`FontChoice`]'s standard 14 face (a
-//!   character the face can't draw is `?`); an image or a PDF's page is
+//!   watermark's text is in its [`FontChoice`]'s standard 14 face, and in
+//!   the fallback font sheaf bundles where the face lacks a character
+//!   ([`Drawn::glyphs`]; one neither has is `?`); an image or a PDF's page is
 //!   [`Art`] the emitter gives it, `scale` of the page's width wide. It's
 //!   placed in a cell of a 3×3 grid over the page, 36 pt in from a side it
 //!   keeps to, its rotated bounding box inside. The header and footer's
 //!   slots are each an artifact of their own, `/Header` or `/Footer`, their
-//!   text in the spec's face along the page as it shows, their tokens read
+//!   text in the spec's face (and the fallback) along the page as it shows, their tokens read
 //!   of the page [`PageCtx`] says ([`header`]). [`layout_digest`] is its
 //!   digest alone (`/L`), what a block laid out alike again is told by.
 //! - [`recipe_digest`]: what a generator draws on each page it's on, which
@@ -42,7 +43,7 @@ use sheaf_edit::{FontChoice, GridPos, HeaderFooterSpec, Z};
 
 use crate::annot::{Box2, Pt};
 use crate::content::{
-    Color, ContentWriter, DrawFont, DrawText, GState, PaginationKind, Res, ResBody, ResId,
+    Color, ContentWriter, DrawFont, DrawText, GState, Glyphs, PaginationKind, Res, ResBody, ResId,
     Reserved, ResourceNeeds, Std14, place_form, std14_of,
 };
 use crate::geom::{Affine, Geom, Rect};
@@ -60,6 +61,9 @@ pub struct Drawn {
     /// it draws nothing there.
     pub ops: Arc<[u8]>,
     pub res: ResourceNeeds,
+    /// What its text draws in the fallback font, which whatever binds
+    /// `res` joins: none where its face draws it all.
+    pub glyphs: Glyphs,
     /// A digest of what it draws: its operators and the resources they
     /// draw with, by their ids, never their names.
     pub layout_digest: u128,
@@ -104,11 +108,12 @@ pub fn layout(
     reserved: &Reserved,
     private: Private,
 ) -> Drawn {
-    let drawn = write(g, ctx, art, private, |out| {
+    let drawn = write(g, ctx, art, private, |out, glyphs| {
         let (ops, res) = out.named(reserved);
         Drawn {
             ops: ops.into(),
             res,
+            glyphs: glyphs.clone(),
             layout_digest: digest(out),
         }
     });
@@ -118,7 +123,8 @@ pub fn layout(
 /// [`layout`]'s digest alone: what a block of it there says it is
 /// (`/L`), with no names to choose.
 pub fn layout_digest(g: &Generator, ctx: &PageCtx, art: Option<&Art>) -> u128 {
-    write(g, ctx, art, Private::Keep, digest).unwrap_or_else(|| Drawn::empty().layout_digest)
+    write(g, ctx, art, Private::Keep, |out, _| digest(out))
+        .unwrap_or_else(|| Drawn::empty().layout_digest)
 }
 
 /// A digest of what `out` draws: its content named as though no page's
@@ -132,13 +138,14 @@ fn digest(out: &ContentWriter) -> u128 {
     sheaf_util::checksum(&bytes)
 }
 
-/// What [`layout`] writes, handed to `done`: None when it draws nothing.
+/// What [`layout`] writes, handed to `done` with what its text draws in
+/// the fallback font: None when it draws nothing.
 fn write<R>(
     g: &Generator,
     ctx: &PageCtx,
     art: Option<&Art>,
     private: Private,
-    done: impl FnOnce(&ContentWriter) -> R,
+    done: impl FnOnce(&ContentWriter, &Glyphs) -> R,
 ) -> Option<R> {
     match &g.spec {
         GenSpec::Watermark(wm) => watermark((g, private), wm, &ctx.geom, art, done),
@@ -170,7 +177,7 @@ fn header_footer<R>(
     (g, private): (&Generator, Private),
     hf: &HeaderFooterSpec,
     ctx: &PageCtx,
-    done: impl FnOnce(&ContentWriter) -> R,
+    done: impl FnOnce(&ContentWriter, &Glyphs) -> R,
 ) -> Option<R> {
     let face = std14_of(hf.font);
     let lines = header::layout(hf, &g.frozen, ctx, &face);
@@ -184,6 +191,7 @@ fn header_footer<R>(
     let ex = to_user.apply(Pt { x: 1.0, y: 0.0 });
     let ey = to_user.apply(Pt { x: 0.0, y: 1.0 });
     let mut out = ContentWriter::new();
+    let mut glyphs = Glyphs::new();
     for line in &lines {
         let kind = match line.header {
             true => PaginationKind::Header,
@@ -199,12 +207,13 @@ fn header_footer<R>(
         out.fill_color(Color::rgb8(hf.color));
         out.set_font(&face, line.size);
         out.text_matrix([ex.x - o.x, ex.y - o.y, o.x - ey.x, o.y - ey.y, at.x, at.y]);
-        out.show_text(&face, &line.text);
+        let (drawn, _) = out.show_text(&face, line.size, &line.text);
+        glyphs.merge(&drawn);
         out.end_text();
         out.restore();
         out.end_marked();
     }
-    Some(done(&out))
+    Some(done(&out, &glyphs))
 }
 
 /// Watermark `wm`, generator `g`'s, on a page of `geom`, its image or page
@@ -214,7 +223,7 @@ fn watermark<R>(
     wm: &WatermarkGen,
     geom: &Geom,
     art: Option<&Art>,
-    done: impl FnOnce(&ContentWriter) -> R,
+    done: impl FnOnce(&ContentWriter, &Glyphs) -> R,
 ) -> Option<R> {
     let size = geom.shown();
     // What it draws, its size before it's turned, in points, and its
@@ -278,6 +287,7 @@ fn watermark<R>(
     state.stroke_alpha = Some(opacity);
     out.gstate(state);
     out.transform(frame.array());
+    let mut glyphs = Glyphs::new();
     match &draws {
         Draws::Text {
             face,
@@ -288,7 +298,7 @@ fn watermark<R>(
             out.begin_text();
             out.fill_color(Color::rgb8(*color));
             out.set_font(face, *size);
-            out.show_text(face, text);
+            (glyphs, _) = out.show_text(face, *size, text);
             out.end_text();
         }
         Draws::Image(res, turns) => {
@@ -309,7 +319,7 @@ fn watermark<R>(
     }
     out.restore();
     out.end_marked();
-    Some(done(&out))
+    Some(done(&out, &glyphs))
 }
 
 /// The image or page `placed` is (an image when `image`), as a resource
@@ -360,6 +370,7 @@ impl Drawn {
         Drawn {
             ops: Arc::from([]),
             res: ResourceNeeds::default(),
+            glyphs: Glyphs::new(),
             layout_digest: sheaf_util::checksum(&[]),
         }
     }

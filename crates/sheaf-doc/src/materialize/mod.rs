@@ -84,6 +84,8 @@ pub mod copy;
 pub mod deps;
 pub mod emit;
 #[cfg(test)]
+mod fallback_tests;
+#[cfg(test)]
 mod field_ap_tests;
 #[cfg(test)]
 mod flatten_tests;
@@ -306,6 +308,7 @@ fn rewrite(
     };
     let mut e = emit::emit(&input.target, EmitScope::All, base, &plan.transforms, p)?;
     let drawn = std::mem::take(&mut e.drawn);
+    let fallback = e.fallback.take();
     let allowed_drops = std::mem::take(&mut e.allowed_drops);
     let crypt = match target.profile.encryption {
         Encryption::Keep => src.crypt().cloned(),
@@ -618,6 +621,10 @@ fn rewrite(
         identity: stable.then_some(blob),
         keys,
     };
+    // Its own subset of the fallback font, where the file holds it.
+    let fallbacks = (fallback.into_iter())
+        .filter(|(id, _)| map.keys.contains_key(&ObjKey::Res(*id)))
+        .collect();
     let record = OutputRecord {
         version: input.version,
         path: target.path.clone(),
@@ -644,6 +651,7 @@ fn rewrite(
         tree: Arc::new(shape),
         drawn: Arc::new(drawn),
         transforms: plan.transforms.as_slice().into(),
+        fallbacks,
     };
     Ok(Output {
         bytes: out,

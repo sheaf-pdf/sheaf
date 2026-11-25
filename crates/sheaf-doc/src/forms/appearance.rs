@@ -5,26 +5,31 @@
 //! through [`Source::field_font`](crate::Source::field_font), and
 //! [`font`]), the name the appearance gives that font ([`font_res_id`],
 //! [`font_res`]), the caps it's made under ([`limits`]), and the making
-//! ([`make`]), which is pdf-forms' ([`crate::pdf::forms::text`]): its
-//! `/DA` parser, encoders, layout, borders, `/MK /R` and `/Tx BMC`.
+//! ([`make`]), which is pdf-forms' ([`crate::pdf::forms::text_with_fallback`]):
+//! its `/DA` parser, encoders, layout, borders, `/MK /R` and `/Tx BMC`, and
+//! a value in runs of the field's font and sheaf's fallback font
+//! ([`Fallback`](crate::content::Fallback), M10 slice 7) for what the
+//! field's can't draw.
 //!
 //! What's sheaf's and stays here: the model and its records, which widgets
-//! are made, the caps, a source's font cache, and the names a made form
-//! gives a font. Nothing here writes: the emitter binds what [`make`]
-//! gives where a mark's appearance is bound.
+//! are made, the caps, a source's font cache, the names a made form gives
+//! a font, and which fallback it draws in. Nothing here writes: the
+//! emitter binds what [`make`] gives, the fallback's glyphs with it, where
+//! a mark's appearance is bound.
 
 use std::fmt;
 use std::sync::{Arc, LazyLock};
 
 use super::field::{self, Border, BorderStyle, FieldKind, Value};
 use crate::annot::AnnotId;
-use crate::content::{Objects, Unkept};
+use crate::content::{Fallback, Objects, Unkept};
 use crate::model::{DocState, FieldNode, Widget};
 use crate::pdf::annots::Cap as AnnotsCap;
 use crate::pdf::content::{Color, Res, ResBody, ResId};
 use crate::pdf::fonts::Std14;
 use crate::pdf::forms::{
-    Appearance, Cap, Error, FieldFlags, FieldFont, Limits, Quadding, TextField, Unmade, WidgetLook,
+    Cap, Error, FieldFlags, FieldFont, Limits, MadeWithFallback, Quadding, TextField, Unmade,
+    WidgetLook, text_with_fallback,
 };
 use crate::pdf::gfx::{BoxBorder, BoxBorderStyle, DefaultAppearance};
 use crate::pdf::{ObjectId, Why};
@@ -334,11 +339,22 @@ pub fn font_res(
     Res::named(font_res_id(blob, copy, at), body).expect("an object written is a resource")
 }
 
-/// `look`'s appearance in `font`, named by `font_res`: its `/DA` parsed
+/// `look`'s appearance in `font`, named by `font_res`, and the fallback
+/// font ([`Fallback::SANS`]) for what `font` can't draw: its `/DA` parsed
 /// (none, or one that doesn't parse, is the empty one: Helvetica at an
-/// automatic size), then pdf-forms' maker under [`limits`]. Pure: the same
-/// look, font and name give the same bytes.
-pub fn make(look: &TextLook, font: &FieldFont, font_res: Res) -> Result<Appearance, Unmade> {
+/// automatic size), then pdf-forms' maker under [`limits`]
+/// ([`text_with_fallback`]), each grapheme cluster in the first of the two
+/// that draws the whole of it. What's made is the appearance and the
+/// glyphs it draws in the fallback, which whatever writes its form joins
+/// where it binds it ([`sink::form`]): none where `font` draws all of the
+/// text, and then the appearance names `font` alone, byte for byte as
+/// one font draws it. A cluster neither draws is
+/// [`Unmade::Unencodable`]. Pure: the same look, font and name give the
+/// same bytes and glyphs.
+///
+/// [`text_with_fallback`]: crate::pdf::forms::text_with_fallback
+/// [`sink::form`]: crate::content::sink::form
+pub fn make(look: &TextLook, font: &FieldFont, font_res: Res) -> Result<MadeWithFallback, Unmade> {
     let limits = limits();
     let da = parsed(&look.da, &limits);
     let mut field = TextField::new(&look.text);
@@ -351,7 +367,9 @@ pub fn make(look: &TextLook, font: &FieldFont, font_res: Res) -> Result<Appearan
     widget.rotation = i32::from(look.rotation);
     let Border { width, style, dash } = &look.border;
     widget.border = BoxBorder::new(*width, box_style(*style)).with_dash(dash);
-    crate::pdf::forms::text(&field, &widget, &da, font_res, &font.layout(), &limits)
+    let fallback = Fallback::SANS.field();
+    let layout = font.layout();
+    text_with_fallback(&field, &widget, &da, font_res, &layout, &fallback, &limits)
 }
 
 /// Which kind of reason `why` is that an appearance wasn't made, as a

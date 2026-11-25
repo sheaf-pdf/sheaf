@@ -1314,7 +1314,13 @@ impl Run {
             },
             "set-header-footer" => {
                 let n = rng.u8(..);
-                let mut spec = fx::header(&format!("h{n}"));
+                // A quarter of them drawing a letter Helvetica lacks in
+                // the fallback font (M10 slice 7), the draws as they were.
+                let text = match n % 4 {
+                    0 => format!("\u{141}h{n}"),
+                    _ => format!("h{n}"),
+                };
+                let mut spec = fx::header(&text);
                 // Live tokens, which a reorder or a label change lays out
                 // again, or Bates numbers, fixed when it's set.
                 match rng.u8(..4) {

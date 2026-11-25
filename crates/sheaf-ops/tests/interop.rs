@@ -56,12 +56,23 @@
 //! --check`, and poppler's `pdftoppm` draws it with its ink where it draws
 //! PDFium's.
 //!
+//! From M10 slice 7 a text field's value and a note, each drawn in its
+//! font and, for what that lacks, the fallback font sheaf bundles, written
+//! either way, pass `qpdf --check`; PDFium, pdftoppm and pdf.js each draw
+//! the file pixel for pixel as they draw it with the whole program in
+//! place of its subset (so each reads the subset's `/CIDToGIDMap` stream
+//! right), their ink in the same boxes, and pdf.js reads the value and the
+//! note back from their appearances. The map's size after Flate is held
+//! under a bound.
+//!
 //! qpdf is `$SHEAF_QPDF`, else `qpdf` on the PATH; pdf.js is `node` on the
-//! PATH with `$SHEAF_PDFJS`, pdfjs-dist's `legacy/build/pdf.mjs`; pdftoppm
-//! is `$SHEAF_PDFTOPPM`, else `pdftoppm` on the PATH. A test whose tools
-//! are missing says so and passes. Run with
+//! PATH with `$SHEAF_PDFJS`, pdfjs-dist's `legacy/build/pdf.mjs`, which
+//! draws through the canvas pdfjs-dist installs beside it
+//! (`@napi-rs/canvas`); pdftoppm is `$SHEAF_PDFTOPPM`, else `pdftoppm` on
+//! the PATH. A test whose tools are missing says so and passes. Run with
 //! `cargo test -p sheaf-ops --test interop -- --ignored --nocapture`.
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1561,9 +1572,13 @@ fn poppler_drew(pdftoppm: &Path, path: &Path) -> Raster {
         .arg(path)
         .arg(&prefix))
     .unwrap_or_else(|e| panic!("pdftoppm, {}: {e}", path.display()));
-    let ppm = std::fs::read(prefix.with_extension("poppler.ppm")).unwrap();
+    ppm(&std::fs::read(prefix.with_extension("poppler.ppm")).unwrap())
+}
+
+/// A binary PPM (`P6`, 8 bits a sample) as an RGBA raster, opaque.
+fn ppm(bytes: &[u8]) -> Raster {
     // P6, its width, its height and 255, each after one white-space byte.
-    let mut words = ppm.splitn(5, |b| b.is_ascii_whitespace());
+    let mut words = bytes.splitn(5, |b| b.is_ascii_whitespace());
     let mut word = || {
         std::str::from_utf8(words.next().unwrap())
             .unwrap()
@@ -1628,5 +1643,263 @@ fn text_field_appearances_pass_qpdf_and_poppler_draws_them_where_pdfium_s() {
         failed.len()
     );
     assert!(failed.is_empty(), "{failed:#?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What pdf.js draws of a file's first page, at two pixels a point and
+/// with its annotations' appearances (pdf.js's default), as a binary PPM to
+/// the path given third; then each annotation's subtype and the text pdf.js
+/// reads of its appearance, its lines joined by `\n`. The standard 14 fonts
+/// a file doesn't embed are drawn in pdf.js's own faces, beside it.
+const PDFJS_DRAWN: &str = r#"
+import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const [lib, file, out] = process.argv.slice(2);
+const pdfjs = await import(pathToFileURL(lib).href);
+const standardFontDataUrl = new URL("../../standard_fonts/", pathToFileURL(lib)).pathname;
+const data = new Uint8Array(readFileSync(file));
+const doc = await pdfjs.getDocument({ data, standardFontDataUrl, verbosity: 0 }).promise;
+const page = await doc.getPage(1);
+const viewport = page.getViewport({ scale: 2 });
+const { width, height } = viewport;
+const { canvas, context } = doc.canvasFactory.create(width, height);
+await page.render({ canvas, canvasContext: context, viewport }).promise;
+const rgba = context.getImageData(0, 0, width, height).data;
+const rgb = Buffer.alloc(width * height * 3);
+for (let i = 0, j = 0; i < rgba.length; i += 4, j += 3) {
+  rgb[j] = rgba[i];
+  rgb[j + 1] = rgba[i + 1];
+  rgb[j + 2] = rgba[i + 2];
+}
+writeFileSync(out, Buffer.concat([Buffer.from(`P6\n${width} ${height}\n255\n`), rgb]));
+for (const annotation of await page.getAnnotations()) {
+  const text = (annotation.textContent ?? []).join("\n");
+  console.log(`${annotation.subtype} ${JSON.stringify(text)}`);
+}
+"#;
+
+sheaf_doc::both_ways!(
+    #[ignore = "needs qpdf, pdftoppm, or node and pdf.js"]
+    text_in_two_fonts_draws_alike_in_other_readers,
+    text_in_two_fonts_draws_alike_in_other_readers_appended: two_fonts_drawn
+);
+
+/// What a note in [`two_fonts_drawn`] says: three cities' names, each with
+/// letters Helvetica's WinAnsi lacks, in Latin, Greek and Cyrillic.
+const CITIES: &str = "\u{141}\u{f3}d\u{17a}, \u{391}\u{3b8}\u{3ae}\u{3bd}\u{3b1}, \
+                      \u{41c}\u{43e}\u{441}\u{43a}\u{432}\u{430}";
+
+/// How many bytes, after Flate, the `/CIDToGIDMap` of [`two_fonts_drawn`]'s
+/// subset may take: 80 as measured, for its 14 glyphs, the last of them
+/// glyph 795 of the program, so a map of 1,592 bytes before Flate (two a
+/// CID; at most 7,768, for the program's 3,884 glyphs). Unfiltered, it
+/// would be past this.
+const MAP_AFTER_FLATE: usize = 256;
+
+/// How many pixels a side of what one reader inks in an annotation's box
+/// may lie from where PDFium inks it: anti-aliasing, and the faces poppler
+/// draws the standard 14 in.
+const INK_APART: usize = 2;
+
+/// From M10 slice 7 a text field's value and a note, each drawn in its
+/// font and the fallback font sheaf bundles for what Helvetica lacks,
+/// written `how`: the file holds one subset of the fallback, passes `qpdf
+/// --check`, and PDFium (appearances only), pdftoppm and pdf.js each draw
+/// it pixel for pixel as they draw the same file with the whole program in
+/// place of the subset ([`with_whole_fallback`]), and not as they draw its
+/// twin, the subset's map taken away ([`with_identity_map`]), so each reads
+/// the subset's `/CIDToGIDMap` stream right; their ink is in the same
+/// boxes, within [`INK_APART`], and pdf.js reads the value and the note
+/// back from their appearances. The map's size after Flate is held under
+/// [`MAP_AFTER_FLATE`].
+///
+/// [`with_whole_fallback`]: sheaf_doc::content::fixture::with_whole_fallback
+/// [`with_identity_map`]: sheaf_doc::content::fixture::with_identity_map
+fn two_fonts_drawn(how: How) {
+    use sheaf_doc::content::fixture::{
+        FALLBACK_TEXT, fallback_subsets, subsets_hold, with_identity_map, with_whole_fallback,
+    };
+    use sheaf_doc::pdf::{Document as Pdf, StreamExt};
+    use sheaf_render::PageIndex;
+    use sheaf_render::pdfium::PdfiumEngine;
+
+    let (qpdf, pdftoppm, pdfjs) = (qpdf(), pdftoppm(), pdfjs());
+    let dir = scratch(&format!("interop-two-fonts-{how:?}"));
+    let mut form = Form::new(1);
+    form.text("Name", 0, [72.0, 600.0, 400.0, 624.0]);
+    let base = common::write(&dir, "two-fonts.pdf", &mut form);
+    let mut doc = common::open(&base);
+    sheaf_doc::tx::fixture::fill(&mut doc, "Name", FALLBACK_TEXT);
+    let page = doc.page(0).unwrap();
+    let mut cities = note(CITIES);
+    cities.kind = AnnotKind::FreeText {
+        rect: Box2 {
+            x: 72.0,
+            y: 300.0,
+            w: 300.0,
+            h: 40.0,
+        },
+        size: 14.0,
+    };
+    let c = doc.commit_ops(vec![add(page, &cities)], "Note").unwrap();
+    assert!(c.notices.is_empty(), "{how:?}: {:?}", c.notices);
+    let bytes = how.write(&doc);
+    let saved = dir.join(format!("two-fonts-{how:?}.pdf"));
+    std::fs::write(&saved, &bytes).unwrap();
+
+    // One subset, every code shown in it a glyph of its cut with a text.
+    let subsets = fallback_subsets(&bytes);
+    let [(font, glyphs)] = subsets.as_slice() else {
+        panic!("{how:?}: {} subsets, not one", subsets.len());
+    };
+    let shown = subsets_hold(&bytes);
+    assert!(shown > 0, "{how:?}: nothing shown in the subset");
+
+    // Its map, as the save wrote it: Flate, and small.
+    let pdf = Pdf::load_mem(&bytes).unwrap();
+    let resolved = |object: &Object| pdf.dereference(object).unwrap().1.clone();
+    let font = pdf.get_dictionary(*font).unwrap();
+    let descendants = resolved(font.get(b"DescendantFonts").unwrap());
+    let descendant = resolved(&descendants.as_array().unwrap()[0]);
+    let map = resolved(descendant.as_dict().unwrap().get(b"CIDToGIDMap").unwrap());
+    let map = map.as_stream().expect("a subset's map is a stream");
+    let filter = map.dict.get(b"Filter").and_then(Object::as_name);
+    assert_eq!(
+        filter,
+        Some(&b"FlateDecode"[..]),
+        "{how:?}: its map's filter"
+    );
+    let (stored, decoded) = (
+        map.raw_bytes().len(),
+        map.decompressed_content().unwrap().len(),
+    );
+    let last = glyphs.iter().max().unwrap();
+    println!(
+        "{how:?}: one subset of {} glyphs, the last {last}, {shown} codes shown in it; its \
+         /CIDToGIDMap {decoded} bytes, {stored} after Flate",
+        glyphs.len()
+    );
+    assert_eq!(
+        decoded,
+        2 * (usize::from(*last) + 1),
+        "{how:?}: two bytes a CID"
+    );
+    assert!(
+        stored < MAP_AFTER_FLATE,
+        "{how:?}: {stored} bytes after Flate"
+    );
+
+    if let Some(qpdf) = &qpdf {
+        run(Command::new(qpdf).arg("--check").arg(&saved))
+            .unwrap_or_else(|e| panic!("qpdf --check, {how:?}: {e}"));
+        println!("qpdf --check, {how:?}: passes");
+    }
+
+    // The same file with the whole program for its subset, and its twin,
+    // the subset's map taken away: neither has a map stream.
+    let [whole, twin] = [
+        ("whole", with_whole_fallback(&bytes)),
+        ("twin", with_identity_map(&bytes)),
+    ]
+    .map(|(what, made)| {
+        assert_eq!(subsets_hold(&made), 0, "{how:?}, {what}: no map");
+        let path = dir.join(format!("two-fonts-{how:?}-{what}.pdf"));
+        std::fs::write(&path, made).unwrap();
+        path
+    });
+
+    // Each annotation's box, by its subtype, in pixels from the top left.
+    let mut boxes = Vec::new();
+    let annots = pdf
+        .get_page_annotations(pdf.page_iter().next().unwrap())
+        .unwrap();
+    for annot in annots {
+        let subtype = annot.get(b"Subtype").and_then(Object::as_name).unwrap();
+        let rect = resolved(annot.get(b"Rect").unwrap());
+        let [x0, y0, x1, y1]: [f64; 4] = (rect.as_array().unwrap().iter())
+            .map(|n| n.as_number().unwrap())
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+        let px = |v: f64| (2.0 * v) as usize;
+        let at = [px(x0), px(792.0 - y1), px(x1) + 1, px(792.0 - y0) + 1];
+        boxes.push((String::from_utf8_lossy(subtype).into_owned(), at));
+    }
+    let names: Vec<&str> = boxes.iter().map(|(s, _)| s.as_str()).collect();
+    assert_eq!(names, ["Widget", "FreeText"], "{how:?}");
+
+    // Each reader's drawing of the file, of it whole and of its twin: the
+    // first two the same pixels, the twin's not.
+    let pdfium = |path: &Path| {
+        let bytes = std::fs::read(path).unwrap();
+        let engine = PdfiumEngine::open_bytes(bytes.into(), None).unwrap();
+        fields::flat_at(&engine, PageIndex(0), 2 * 612).unwrap()
+    };
+    let pdfjs_drew = |pdfjs: &Path, script: &Path, path: &Path| {
+        let out = path.with_extension("pdfjs.ppm");
+        let said = run(Command::new("node")
+            .arg(script)
+            .arg(pdfjs)
+            .arg(path)
+            .arg(&out))
+        .unwrap_or_else(|e| panic!("pdf.js, {}: {e}", path.display()));
+        (ppm(&std::fs::read(&out).unwrap()), said)
+    };
+    let files = [&saved, &whole, &twin];
+    let mut drawn = vec![("PDFium", files.map(|p| pdfium(p)))];
+    if let Some(pdftoppm) = &pdftoppm {
+        drawn.push(("pdftoppm", files.map(|p| poppler_drew(pdftoppm, p))));
+    }
+    if let Some(pdfjs) = &pdfjs {
+        let script = dir.join("drawn.mjs");
+        std::fs::write(&script, PDFJS_DRAWN).unwrap();
+        let [(ours, said), (whole, _), (twin, _)] = files.map(|p| pdfjs_drew(pdfjs, &script, p));
+        println!("pdf.js, {how:?}, its annotations:\n{said}");
+        let read = said.lines().map(|line| line.split_once(' ').unwrap());
+        // By subtype: pdf.js lists widgets after other annotations.
+        let read: BTreeMap<&str, String> = read
+            .map(|(subtype, text)| (subtype, serde_json::from_str(text).unwrap()))
+            .collect();
+        let want = [("Widget", FALLBACK_TEXT), ("FreeText", CITIES)];
+        let want: BTreeMap<&str, String> = want.iter().map(|&(s, t)| (s, t.into())).collect();
+        assert_eq!(read, want, "{how:?}: what pdf.js reads of the appearances");
+        drawn.push(("pdf.js", [ours, whole, twin]));
+    }
+    let mut inks: Vec<(&str, Vec<[usize; 4]>)> = Vec::new();
+    for (reader, [ours, whole, twin]) in &drawn {
+        let page = [0, 0, ours.width as usize, ours.height as usize];
+        let [apart, twin_apart] =
+            [whole, twin].map(|other| fields::differing_in(ours, other, page));
+        let inked: Vec<[usize; 4]> = (boxes.iter())
+            .map(|(subtype, at)| {
+                (fields::ink_box(ours, *at))
+                    .unwrap_or_else(|| panic!("{how:?}, {reader}: no ink in the {subtype}"))
+            })
+            .collect();
+        println!(
+            "{how:?}, {reader}: {apart} px apart from the whole program's, {twin_apart} from the \
+             twin's; ink {inked:?}"
+        );
+        assert_eq!(
+            apart, 0,
+            "{how:?}, {reader}: the subset draws as the whole program"
+        );
+        assert!(
+            twin_apart > 0,
+            "{how:?}, {reader}: the twin draws as the subset"
+        );
+        inks.push((reader, inked));
+    }
+    let (_, pdfium_ink) = &inks[0];
+    for (reader, inked) in &inks[1..] {
+        for ((subtype, _), (ours, theirs)) in boxes.iter().zip(inked.iter().zip(pdfium_ink)) {
+            let near = (ours.iter().zip(theirs)).all(|(a, b)| a.abs_diff(*b) <= INK_APART);
+            assert!(
+                near,
+                "{how:?}, {reader}: the {subtype} inked at {ours:?}, PDFium {theirs:?}"
+            );
+        }
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

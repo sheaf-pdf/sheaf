@@ -20,3 +20,11 @@ empty	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=	51:8de544d8643927a
 navy on blue	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=9	ovf=0	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	185:7858378cfb41cb2ceac8ab631c804298
 cmyk	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=9	ovf=0	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	146:a3bc5056df01922c2915958d5d46cb66
 by reference	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=ShLYJ5MN:5e13d6355d605a0327f2d9f1167a87d8	134:c61712cb47caf5700b21d202695c7c3c
+two fonts	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=ShNIXJDR:6a2e91c457fd0b38e1a943c60d7b25f2+ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	286:3b4e52cd256b3aa767e1ca14e2e65fe7	fallback=2
+two fonts by reference	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=ShNIXJDR:6a2e91c457fd0b38e1a943c60d7b25f2+ShLYJ5MN:5e13d6355d605a0327f2d9f1167a87d8	286:85ce5f8fd09fcf5c7377c8080ee4c394	fallback=2
+two fonts decomposed	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=ShNIXJDR:6a2e91c457fd0b38e1a943c60d7b25f2+ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	286:3b4e52cd256b3aa767e1ca14e2e65fe7	fallback=2
+two fonts right	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=ShNIXJDR:6a2e91c457fd0b38e1a943c60d7b25f2+ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	293:6424545b400d0ccfb6b4b6433f367062	fallback=2
+two fonts multiline	bbox=0 0 200 60	matrix=1 0 0 1 0 0	size=10	ovf=0	needs=ShNIXJDR:6a2e91c457fd0b38e1a943c60d7b25f2+ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	427:0aab3f7b1da7a3a7ad60329f7d1846f5	fallback=2
+two fonts comb	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=ShNIXJDR:6a2e91c457fd0b38e1a943c60d7b25f2+ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	581:d1af04ae4d12e22244bcfcbc0ab56bfb	fallback=2
+two fonts auto size	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=ShNIXJDR:6a2e91c457fd0b38e1a943c60d7b25f2+ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	286:3b4e52cd256b3aa767e1ca14e2e65fe7	fallback=2
+two fonts password	bbox=0 0 200 20	matrix=1 0 0 1 0 0	size=12	ovf=0	needs=ShWMNLLO:b31ab5babf0445a2a50ae8ab6340c26e	143:68d1071e7068de583059405652d9a879

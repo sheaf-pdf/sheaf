@@ -1,7 +1,7 @@
 //! Text fields' appearances through `pdf-forms` (M10 slice 6).
 //!
 //! **Making one.** A text field's appearance is made from plain data
-//! ([`text`]): what the field shows ([`TextField`]: its text, flags
+//! ([`text_with_fallback`]): what the field shows ([`TextField`]: its text, flags
 //! ([`FieldFlags`]), maximum length and justification ([`Quadding`])),
 //! the widget's box and what's drawn around it ([`WidgetLook`], its border
 //! pdf-gfx's [`BoxBorder`](super::gfx::BoxBorder)), its default
@@ -11,11 +11,14 @@
 //! a catalog names by [`FieldFont::find_in_catalog`], the walk there the
 //! family's, or a standard 14 font where that has none; a direct font
 //! that holds references lends its dictionary, [`FieldFont::direct`], for
-//! the writer to write as an object), under
-//! the family's caps ([`Limits`], [`Cap`]). What comes back is the form
-//! XObject's parts ([`Appearance`]: its box, its matrix, its content and
-//! what that draws with, by what each is), or why none could be made
-//! ([`Unmade`]); a font that can't be read is an [`Error`].
+//! the writer to write as an object), and the fallback font for what
+//! that font can't draw ([`FieldFallback`]: its program and the resource
+//! content names it by; M10 slice 7), under the family's caps
+//! ([`Limits`], [`Cap`]). What comes back is the form XObject's parts
+//! ([`Appearance`]: its box, its matrix, its content and what that draws
+//! with, by what each is) with the fallback's glyphs it draws
+//! ([`MadeWithFallback`]), or why none could be made ([`Unmade`]); a font
+//! that can't be read is an [`Error`].
 //!
 //! **Reading a form.** The family's own reading of a form's field tree
 //! and of a widget for its appearance (`read`, `Form`, `Field`,
@@ -32,7 +35,10 @@
 //! [`Resolve`]: super::Resolve
 //! [`Streams`]: super::Streams
 
-pub use pdf_forms::appearance::{Appearance, FieldFont, TextField, Unmade, WidgetLook, text};
+pub use pdf_forms::appearance::{
+    Appearance, Fallback as FieldFallback, FieldFont, MadeWithFallback, TextField, Unmade,
+    WidgetLook, text_with_fallback,
+};
 pub use pdf_forms::{Cap, Error, FieldFlags, Limits, Quadding};
 
 /// The family's reading of a form, which tests set beside sheaf's: its

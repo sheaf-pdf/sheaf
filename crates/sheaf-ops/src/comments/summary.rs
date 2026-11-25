@@ -4,7 +4,9 @@
 //! [`list`]'s, in its order and with its numbers, so it matches the CSV
 //! and text exports. Text is Helvetica in WinAnsi, as all of sheaf's
 //! generated text is (decision 11), a tickmark's check or cross in
-//! ZapfDingbats; each sheet is written with the content toolkit's
+//! ZapfDingbats, and what neither has in the fallback font sheaf bundles
+//! (M10 slice 7), whose glyphs each sheet keeps beside its content
+//! ([`SheetContent`]); each sheet is written with the content toolkit's
 //! [`ContentWriter`]. The sheets are made in memory ([`Built`]), each page
 //! drawn as a form of the pages as they print, read back as a source,
 //! written through sheaf's serializer, and inserted into a document of no
@@ -17,7 +19,8 @@ use anyhow::{Result, bail};
 use in_progress::NoProgress;
 use sheaf_doc::Box2;
 use sheaf_doc::content::{
-    Color, ContentWriter, DrawFont, DrawText, Paint, Res, Reserved, Std14, place_form, wrap_with,
+    Color, ContentWriter, DrawFont, DrawText, Glyphs, Paint, Res, Reserved, Std14, Uses,
+    place_form, wrap_with,
 };
 use sheaf_doc::export::ExportFrom;
 use sheaf_doc::geom::Rect;
@@ -343,7 +346,7 @@ impl Picture {
             w: pw,
             h: ph,
         };
-        place_form(sheet, Res::written(id), bbox, matrix, shown);
+        place_form(&mut sheet.content, Res::written(id), bbox, matrix, shown);
         sheet.stroke_rect(left, top - ph, pw, ph, RULE, 0.75);
         // Each number at its comment's top-left as the page shows.
         const R: f32 = 7.0;
@@ -457,53 +460,68 @@ trait Draw {
     fn disc(&mut self, cx: f32, cy: f32, r: f32, color: [f32; 3]);
 }
 
-impl Draw for ContentWriter {
+/// A sheet being drawn: its content, and what its text draws in the
+/// fallback font, which its page joins where it binds what the content
+/// draws with.
+#[derive(Default)]
+struct SheetContent {
+    content: ContentWriter,
+    glyphs: Glyphs,
+}
+
+impl Draw for SheetContent {
     fn label(&mut self, x: f32, y: f32, size: f32, bold: bool, color: [f32; 3], s: &str) {
-        self.begin_text();
-        self.fill_color(Color::Rgb(color));
-        self.text_move(x, y);
+        let w = &mut self.content;
+        w.begin_text();
+        w.fill_color(Color::Rgb(color));
+        w.text_move(x, y);
         for (font, run) in runs(s, bold) {
-            self.set_font(font, size);
-            self.show_text(font, &run);
+            w.set_font(font, size);
+            let (drawn, _) = w.show_text(font, size, &run);
+            self.glyphs.merge(&drawn);
         }
-        self.end_text();
+        w.end_text();
     }
 
     fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 3]) {
-        self.fill_color(Color::Rgb(color));
-        self.rect(x, y, w, h);
-        self.paint(Paint::Fill);
+        let c = &mut self.content;
+        c.fill_color(Color::Rgb(color));
+        c.rect(x, y, w, h);
+        c.paint(Paint::Fill);
     }
 
     fn stroke_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 3], line: f32) {
-        self.save();
-        self.line_width(line);
-        self.stroke_color(Color::Rgb(color));
-        self.rect(x, y, w, h);
-        self.paint(Paint::Stroke);
-        self.restore();
+        let c = &mut self.content;
+        c.save();
+        c.line_width(line);
+        c.stroke_color(Color::Rgb(color));
+        c.rect(x, y, w, h);
+        c.paint(Paint::Stroke);
+        c.restore();
     }
 
     fn hline(&mut self, x0: f32, x1: f32, y: f32, color: [f32; 3], line: f32) {
-        self.save();
-        self.line_width(line);
-        self.stroke_color(Color::Rgb(color));
-        self.move_to(x0, y);
-        self.line_to(x1, y);
-        self.paint(Paint::Stroke);
-        self.restore();
+        let c = &mut self.content;
+        c.save();
+        c.line_width(line);
+        c.stroke_color(Color::Rgb(color));
+        c.move_to(x0, y);
+        c.line_to(x1, y);
+        c.paint(Paint::Stroke);
+        c.restore();
     }
 
     /// Four Béziers.
     fn disc(&mut self, cx: f32, cy: f32, r: f32, color: [f32; 3]) {
         let k = r * 0.5523;
-        self.fill_color(Color::Rgb(color));
-        self.move_to(cx + r, cy);
-        self.curve_to(cx + r, cy + k, cx + k, cy + r, cx, cy + r);
-        self.curve_to(cx - k, cy + r, cx - r, cy + k, cx - r, cy);
-        self.curve_to(cx - r, cy - k, cx - k, cy - r, cx, cy - r);
-        self.curve_to(cx + k, cy - r, cx + r, cy - k, cx + r, cy);
-        self.paint(Paint::Fill);
+        let c = &mut self.content;
+        c.fill_color(Color::Rgb(color));
+        c.move_to(cx + r, cy);
+        c.curve_to(cx + r, cy + k, cx + k, cy + r, cx, cy + r);
+        c.curve_to(cx - k, cy + r, cx - r, cy + k, cx - r, cy);
+        c.curve_to(cx - r, cy - k, cx - k, cy - r, cx, cy - r);
+        c.curve_to(cx + k, cy - r, cx + r, cy - k, cx + r, cy);
+        c.paint(Paint::Fill);
     }
 }
 
@@ -512,7 +530,7 @@ struct Writer {
     built: Built,
     size: PageSize,
     margin: f32,
-    sheets: Vec<ContentWriter>,
+    sheets: Vec<SheetContent>,
 }
 
 impl Writer {
@@ -542,10 +560,10 @@ impl Writer {
     }
 
     fn new_sheet(&mut self) {
-        self.sheets.push(ContentWriter::new());
+        self.sheets.push(SheetContent::default());
     }
 
-    fn sheet(&mut self) -> &mut ContentWriter {
+    fn sheet(&mut self) -> &mut SheetContent {
         if self.sheets.is_empty() {
             self.new_sheet();
         }
@@ -573,8 +591,10 @@ impl Writer {
                 &number,
             );
             // Each font once in the file, however many sheets draw in it.
-            let (ops, needs) = sheet.finish(&Reserved::default());
-            self.built.page(Rect::new(0.0, 0.0, w, h), ops, &needs);
+            let SheetContent { content, glyphs } = sheet;
+            let (ops, needs) = content.finish(&Reserved::default());
+            self.built
+                .page(Rect::new(0.0, 0.0, w, h), ops, &Uses { needs, glyphs });
         }
         self.built.finish()
     }
@@ -670,7 +690,7 @@ mod tests {
                 (Std14::ZapfDingbats, "✔"),
             ]
         );
-        assert_eq!(Std14::ZapfDingbats.encode("✔✘").0, b"48");
+        assert_eq!(Std14::ZapfDingbats.encode_alone("✔✘").0, b"48");
         let width = measure("a✓", 10.0, true);
         assert_eq!(width, (556.0 + 846.0) * 10.0 / 1000.0);
     }

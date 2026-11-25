@@ -111,7 +111,9 @@ status.
   libraries (from images or PDF pages), and dynamic stamps with your name
   and the date. PDFlyer's tickmarks, connectors and calculator tape, which
   can pick numbers straight off the page. Measuring distance, perimeter and
-  area to scale. File attachments.
+  area to scale. File attachments. Text boxes, callouts, stamps, headers,
+  footers and watermarks draw the Latin, Greek and Cyrillic the standard
+  fonts lack in Noto Sans, embedded as a subset of the letters used.
 - **Review.** A Comments panel with threads, replies, status and
   checkmarks, filters and sorting (PDFlyer's Stamp and Note Summary
   included). Other tools' comments can be edited. Comment summaries as PDF,
@@ -256,4 +258,10 @@ decompressed by the brotli crates (BSD-3/MIT): `LICENSE-cmap-resources` and
 `pdf-fonts` following FreeType's
 routines, which libpdfium also builds in: portions of this software are
 copyright © 2026 The FreeType Project (www.freetype.org), under the FreeType
-License (`LICENSE-freetype`).
+License (`LICENSE-freetype`). Text a standard font can't draw is drawn in
+Noto Sans, copyright 2022 The Noto Project Authors, under the SIL Open Font
+License 1.1 (`LICENSE-noto-sans`), which sheaf builds in and embeds in the
+files it writes as a subset, cut by `pdf-fonts` with subsetter
+(MIT OR Apache-2.0). Unicode's character data comes with
+`unicode-normalization` and the ICU4X crates GPUI uses, under the Unicode
+License v3.

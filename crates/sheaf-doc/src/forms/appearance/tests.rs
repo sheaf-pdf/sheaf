@@ -4,16 +4,22 @@
 //! made, on forms built in code; and the corpus's IRS, NJ- and PA-40-style
 //! fonts, where the corpus is.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use unicode_normalization::UnicodeNormalization;
+
 use super::*;
+use crate::content::fixture::FALLBACK_TEXT;
 use crate::forms::corpus::Corpus;
 use crate::forms::field::flags;
 use crate::forms::fixture::{Form, Rect, STATE_TEXT, nj_helv, pa_arial, row};
 use crate::materialize::tests::{add, insert, open};
 use crate::model::Document;
 use crate::pdf::content::read_back;
+use crate::pdf::forms::Appearance;
+use crate::pdf::gfx::UnencodableChar;
 use crate::pdf::{Object, dictionary, literal};
 use crate::tx::fixture as fx;
 
@@ -52,6 +58,11 @@ fn look_of(d: &Document, name: &str, n: usize) -> TextLook {
 /// sheaf names it (copy 0); a font named by an entry bound to no object,
 /// which changes none of the content's bytes.
 fn made_in(src: &Source, look: &TextLook) -> Result<Appearance, Unmade> {
+    made_in_two(src, look).map(|made| made.appearance)
+}
+
+/// [`made_in`]'s appearance, and the fallback's glyphs it draws.
+fn made_in_two(src: &Source, look: &TextLook) -> Result<MadeWithFallback, Unmade> {
     let font = font(src, look).map_err(Unmade::from)?;
     let name = look.font_name().unwrap_or_default();
     let written = |at: FontAt<'_>| match at {
@@ -450,13 +461,63 @@ fn every_kind_is_named_by_hand() {
     }
 }
 
+/// A value is drawn in the field's font, and what that lacks in the
+/// fallback ([`Fallback::SANS`], named by its marker): a WinAnsi value
+/// names Helvetica alone and draws no glyph of the fallback; a name with
+/// `Ł` and `ễ` draws those two in it, each glyph with its text, and
+/// nothing else; decomposed, it draws as composed, byte for byte. A
+/// cluster neither font draws, a CJK ideograph or an emoji, leaves it
+/// unmade, `unencodable`, at its byte offset in the text.
+#[test]
+fn a_value_is_drawn_in_the_field_s_font_then_the_fallback() {
+    let (font, res) = helvetica();
+    let made = |text: &str| {
+        let look = TextLook {
+            text: text.into(),
+            ..plain()
+        };
+        make(&look, &font, res.clone())
+    };
+    let ids =
+        |a: &Appearance| -> BTreeSet<ResId> { a.needs.0.iter().map(|n| n.res.id()).collect() };
+    let marker = Fallback::SANS.res().id();
+
+    let winansi = made("Camden \u{d6}l\u{e7}er \u{20ac}").unwrap();
+    assert!(winansi.glyphs.is_empty());
+    assert_eq!(ids(&winansi.appearance), BTreeSet::from([res.id()]));
+
+    let two = made(FALLBACK_TEXT).unwrap();
+    assert_eq!(ids(&two.appearance), BTreeSet::from([res.id(), marker]));
+    let program = Fallback::SANS.program();
+    let texts: Vec<(u16, &str)> = two.glyphs.iter().collect();
+    let mut want: Vec<(u16, &str)> = ["\u{141}", "\u{1ec5}"]
+        .map(|c| (program.glyph(c.chars().next().unwrap()).unwrap(), c))
+        .into_iter()
+        .collect();
+    want.sort();
+    assert_eq!(texts, want, "Ł and ễ, each with its text");
+    let decomposed: String = FALLBACK_TEXT.nfd().collect();
+    assert_ne!(decomposed, FALLBACK_TEXT);
+    assert_eq!(made(&decomposed), Ok(two), "drawn composed");
+
+    for (text, at, character) in [
+        ("Camden \u{738b}", 7, '\u{738b}'),
+        ("\u{1f600}", 0, '\u{1f600}'),
+        ("\u{141}ukasz \u{1f600}!", 8, '\u{1f600}'),
+    ] {
+        let want = Unmade::Unencodable(UnencodableChar { at, character });
+        assert_eq!(made(text), Err(want), "{at}");
+        assert_eq!(unmade_kind(&made(text).unwrap_err()), "unencodable");
+    }
+}
+
 /// Plain data no file should give, but a model edited by hand might: a
 /// typed refusal or an appearance, never a panic.
 #[test]
 fn hostile_plain_data_is_refused_by_kind_or_made() {
     use crate::pdf::forms::Cap;
     let (font, res) = helvetica();
-    let made = |look: TextLook| make(&look, &font, res.clone());
+    let made = |look: TextLook| make(&look, &font, res.clone()).map(|made| made.appearance);
     let comb = flags::COMB;
     let p = plain;
     assert_eq!(made(TextLook { width: 0.0, ..p() }), Err(Unmade::NoBox));
@@ -696,24 +757,84 @@ fn golden_cases() -> Vec<(&'static str, TextLook, bool)> {
             false,
         ),
         ("by reference", p(), true),
+        // In two fonts (M10 slice 7): what Helvetica lacks drawn in the
+        // fallback, named by its marker.
+        ("two fonts", two(p()), false),
+        ("two fonts by reference", two(p()), true),
+        (
+            "two fonts decomposed",
+            TextLook {
+                text: FALLBACK_TEXT.nfd().collect::<String>().into(),
+                ..p()
+            },
+            false,
+        ),
+        ("two fonts right", two(TextLook { align: 2, ..p() }), false),
+        (
+            "two fonts multiline",
+            TextLook {
+                text: format!("{FALLBACK_TEXT}\n{multiline}").into(),
+                ..lines(b"/Helv 10 Tf 0 g")
+            },
+            false,
+        ),
+        (
+            "two fonts comb",
+            TextLook {
+                text: "\u{141}\u{f3}d\u{17a} 12".into(),
+                ..comb(0)
+            },
+            false,
+        ),
+        (
+            "two fonts auto size",
+            two(TextLook {
+                da: auto.to_vec(),
+                ..p()
+            }),
+            false,
+        ),
+        // A password's `*` is Helvetica's: nothing in the fallback.
+        (
+            "two fonts password",
+            two(TextLook {
+                flags: flags::PASSWORD,
+                ..p()
+            }),
+            false,
+        ),
     ]
+}
+
+/// `look` showing [`FALLBACK_TEXT`], which Helvetica draws but for `Ł`
+/// and `ễ`.
+fn two(look: TextLook) -> TextLook {
+    TextLook {
+        text: FALLBACK_TEXT.into(),
+        ..look
+    }
 }
 
 /// A made appearance as a line of the golden: its box, matrix, size,
 /// whether it overflowed, what it draws with (each need's name and the
-/// resource's id), and its content's length and checksum; or why it
-/// wasn't made.
-fn golden_line(case: &str, made: &Result<Appearance, Unmade>) -> String {
-    let a = match made {
-        Ok(a) => a,
+/// resource's id: the fallback by its marker's, as the emitter names it),
+/// and its content's length and checksum, then, where it draws in the
+/// fallback, how many glyphs (`fallback=`); or why it wasn't made.
+fn golden_line(case: &str, made: &Result<MadeWithFallback, Unmade>) -> String {
+    let (a, glyphs) = match made {
+        Ok(made) => (&made.appearance, &made.glyphs),
         Err(why) => return format!("{case}\tunmade:{why}"),
     };
     let (b, m) = (&a.bbox, &a.matrix);
     let needs: Vec<String> = (a.needs.0.iter())
         .map(|n| format!("{}:{:032x}", String::from_utf8_lossy(&n.name), n.res.id().0))
         .collect();
+    let fallback = match glyphs.len() {
+        0 => String::new(),
+        n => format!("\tfallback={n}"),
+    };
     format!(
-        "{case}\tbbox={} {} {} {}\tmatrix={} {} {} {} {} {}\tsize={}\tovf={}\tneeds={}\t{}:{}",
+        "{case}\tbbox={} {} {} {}\tmatrix={} {} {} {} {} {}\tsize={}\tovf={}\tneeds={}\t{}:{}{fallback}",
         b.x0,
         b.y0,
         b.x1,

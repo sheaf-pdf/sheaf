@@ -375,9 +375,9 @@ fn headers_keep_the_invariants() {
     }
 }
 
-/// Text its face can't draw is said when it's set (once a document); so is
-/// a label it comes to draw, by new labels, that its face can't, and only
-/// on a page it's on.
+/// Text no font sheaf bundles draws (漢) is said when it's set (once a
+/// document); so is a label it comes to draw, by new labels, that none
+/// can, and only on a page it's on.
 #[test]
 fn a_label_its_face_cant_draw_is_said() {
     let mut d = doc_of(3, &[]);
@@ -386,22 +386,45 @@ fn a_label_its_face_cant_draw_is_said() {
     let c = commit(&mut d, Actor::User, vec![set]).unwrap();
     assert!(c.notices.is_empty(), "{:?}", c.notices);
     let labels = |start| Op::SetPageLabels {
-        ranges: Some(vec![fx::label(start, LabelStyle::Decimal, "Ω-", 1)]),
+        ranges: Some(vec![fx::label(start, LabelStyle::Decimal, "漢-", 1)]),
     };
     // From the third page: not on the header's page, which is "1".
     let c = commit(&mut d, Actor::User, vec![labels(p2)]).unwrap();
     assert!(c.notices.is_empty(), "{:?}", c.notices);
     let c = commit(&mut d, Actor::User, vec![labels(p0)]).unwrap();
     assert_eq!(c.notices, [Notice::Unencodable]);
-    assert_eq!(d.state().label_of(p0).as_deref(), Some("Ω-1"));
+    assert_eq!(d.state().label_of(p0).as_deref(), Some("漢-1"));
 
     let mut d = doc_of(1, &[]);
-    let set = fx::set_header(fx::header("Ωmega <<1>>"), None);
+    let set = fx::set_header(fx::header("漢mega <<1>>"), None);
     let c = commit(&mut d, Actor::User, vec![set]).unwrap();
     assert_eq!(c.notices, [Notice::Unencodable]);
     let fine = fx::set_header(fx::header("Œuvre <<1>> <<label>>"), None);
     let mut d = doc_of(1, &[]);
     let c = commit(&mut d, Actor::User, vec![fine]).unwrap();
+    assert!(c.notices.is_empty(), "{:?}", c.notices);
+}
+
+/// Text its face can't draw but the fallback font sheaf bundles can (Ω,
+/// Ł) says nothing when it's set, nor a label it comes to draw in it (M10
+/// slice 7).
+#[test]
+fn a_label_the_fallback_draws_says_nothing() {
+    let mut d = doc_of(3, &[]);
+    let p0 = d.page(0).unwrap();
+    let set = fx::set_header(fx::header("<<label>>"), Some(&[p0]));
+    let c = commit(&mut d, Actor::User, vec![set]).unwrap();
+    assert!(c.notices.is_empty(), "{:?}", c.notices);
+    let labels = Op::SetPageLabels {
+        ranges: Some(vec![fx::label(p0, LabelStyle::Decimal, "Ω-", 1)]),
+    };
+    let c = commit(&mut d, Actor::User, vec![labels]).unwrap();
+    assert!(c.notices.is_empty(), "{:?}", c.notices);
+    assert_eq!(d.state().label_of(p0).as_deref(), Some("Ω-1"));
+
+    let mut d = doc_of(1, &[]);
+    let set = fx::set_header(fx::header("Ωmega Łukasz <<1>>"), None);
+    let c = commit(&mut d, Actor::User, vec![set]).unwrap();
     assert!(c.notices.is_empty(), "{:?}", c.notices);
 }
 

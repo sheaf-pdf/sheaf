@@ -273,8 +273,18 @@ fn canon(pdf: &LazyPdf, o: &Object, depth: u8) -> String {
 }
 
 /// [`canon`] of a dictionary, its keys in order, but those that change
-/// with how the stream it heads is written.
+/// with how the stream it heads is written. A subset of the fallback font
+/// (M10 slice 7) is said as one, not by value: an Append binds a subset
+/// the saved file holds that draws its glyphs, which may hold more than a
+/// Rewrite's of the same state; what each file draws in one is read by
+/// `subsets_hold` instead ([`reopens_as_rewritten`]).
 fn dict(pdf: &LazyPdf, d: &Dictionary, depth: u8) -> String {
+    let name = |key: &[u8]| d.get(key).and_then(Object::as_name);
+    let subset = name(b"BaseFont")
+        .is_some_and(|n| n.len() == 7 + 16 && n[6] == b'+' && &n[7..] == b"NotoSans-Regular");
+    if subset && name(b"Subtype") == Some(b"Type0") {
+        return "<<a subset of the fallback font>>".into();
+    }
     let mut entries: Vec<String> = (d.iter())
         .filter(|(k, _)| !matches!(*k, b"Length" | b"Filter" | b"DecodeParms"))
         .map(|(k, v)| format!("/{} {}", String::from_utf8_lossy(k), canon(pdf, v, depth)))
@@ -522,8 +532,18 @@ fn opened_at(doc: &Document) -> Option<Dest> {
 fn reopens_as_rewritten(doc: &Document, dir: &Path, what: &str) {
     assert!(!doc.is_dirty(), "{what}");
     let fresh = dir.join("fresh.pdf");
-    std::fs::write(&fresh, How::Rewritten.write(doc)).unwrap();
+    let rewritten = How::Rewritten.write(doc);
+    std::fs::write(&fresh, &rewritten).unwrap();
     let saved = doc.file().expect("a saved file").0.clone();
+    // What each draws in the fallback font, each code a glyph of its
+    // subset with its text, the same in both.
+    let in_fallback = crate::content::fixture::subsets_hold;
+    let drawn = in_fallback(&std::fs::read(&saved).unwrap());
+    assert_eq!(
+        drawn,
+        in_fallback(&rewritten),
+        "{what}: drawn in the fallback"
+    );
     let differ = differences(&reopened(&saved), &reopened(&fresh));
     assert!(
         differ.is_empty(),

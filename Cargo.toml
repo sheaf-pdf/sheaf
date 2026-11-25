@@ -103,17 +103,22 @@ pdf-crypt = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main" }
 pdf-structure = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", features = ["zlib-rs"] }
 pdf-content-streams = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main" }
 # Without their defaults: pdf-fonts reads programs and Adobe's predefined
-# CMaps and embeds nothing; pdf-gfx interprets content and writes it
-# again, and of its own features takes only what lays text out in a font.
-pdf-fonts = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", default-features = false, features = ["programs", "predefined-cmaps"] }
-pdf-gfx = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", default-features = false, features = ["text-layout"] }
+# CMaps, and embeds a TrueType program cut to the glyphs a file draws
+# (`embed`, which brings subsetter, pinned by pdf-fonts): the fallback
+# font sheaf bundles (M10 slice 7). pdf-gfx interprets content and writes
+# it again, and of its own features takes what lays text out in a font or
+# in several (`text-layout`), and an embedded program as one of them
+# (`embed`).
+pdf-fonts = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", default-features = false, features = ["programs", "predefined-cmaps", "embed"] }
+pdf-gfx = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", default-features = false, features = ["text-layout", "embed"] }
 # Without its defaults too: `programs` would turn pdf-gfx's on, under the
 # interpreter; `text-layout` is pdf-gfx's, which sheaf takes already.
 pdf-annots = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", default-features = false, features = ["text-layout"] }
 # And pdf-forms, for its text fields' appearances: `programs` would turn
 # pdf-gfx's on, as pdf-annots' would; `text-layout`, which makes them, is
-# pdf-annots' and pdf-gfx's, which sheaf takes already.
-pdf-forms = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", default-features = false, features = ["text-layout"] }
+# pdf-annots' and pdf-gfx's, which sheaf takes already; `embed` draws a
+# value in its field's font and the fallback font for what that can't.
+pdf-forms = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", default-features = false, features = ["text-layout", "embed"] }
 # And pdf-semantics, for the common structures sheaf reads and writes
 # (the page tree's walk, name and number trees, XMP's conformance claims,
 # the date a mark is made at): without its defaults, as the family's own

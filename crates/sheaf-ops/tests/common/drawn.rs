@@ -440,6 +440,43 @@ fn numbers_alike(a: &Option<Vec<f32>>, b: &Option<Vec<f32>>) -> bool {
     }
 }
 
+/// Whether `ours` and `theirs` paint the same paths the same, each number
+/// within [`EPS`]. Else the first that differs.
+fn paints_alike(ours: &Drawn, theirs: &Drawn) -> Result<(), String> {
+    if ours.paints.len() != theirs.paints.len() {
+        return Err(format!(
+            "paints:{}/{}",
+            ours.paints.len(),
+            theirs.paints.len()
+        ));
+    }
+    for (i, (a, b)) in ours.paints.iter().zip(&theirs.paints).enumerate() {
+        let what = match () {
+            _ if a.how != b.how => "how",
+            _ if !shapes_alike(&a.shape, &b.shape) => "shape",
+            _ if !colors_alike(&a.color, &b.color) => "color",
+            _ => continue,
+        };
+        return Err(format!("paint{i}:{what}"));
+    }
+    Ok(())
+}
+
+/// Whether `ours` and `theirs` draw alike but for their text: the same box
+/// and matrix, and the same paths painted the same (a background, a
+/// border), each number within [`EPS`]; the glyphs and the clips aren't
+/// asked. Else the first thing that differs, as [`alike`] says it. What
+/// holds of two appearances whose text is in different fonts.
+pub fn frame_alike(ours: &Drawn, theirs: &Drawn) -> Result<(), String> {
+    if !numbers_alike(&ours.bbox, &theirs.bbox) {
+        return Err("bbox".into());
+    }
+    if !numbers_alike(&ours.matrix, &theirs.matrix) {
+        return Err("matrix".into());
+    }
+    paints_alike(ours, theirs)
+}
+
 /// Whether `ours` and `theirs` draw alike: the same box and matrix, the
 /// same glyphs in the same fonts and colors at the same sizes and places,
 /// and the same paths painted the same, each number within [`EPS`]; and the
@@ -475,22 +512,7 @@ pub fn alike(ours: &Drawn, theirs: &Drawn) -> Result<(), String> {
         };
         return Err(format!("glyph{i}:{what}"));
     }
-    if ours.paints.len() != theirs.paints.len() {
-        return Err(format!(
-            "paints:{}/{}",
-            ours.paints.len(),
-            theirs.paints.len()
-        ));
-    }
-    for (i, (a, b)) in ours.paints.iter().zip(&theirs.paints).enumerate() {
-        let what = match () {
-            _ if a.how != b.how => "how",
-            _ if !shapes_alike(&a.shape, &b.shape) => "shape",
-            _ if !colors_alike(&a.color, &b.color) => "color",
-            _ => continue,
-        };
-        return Err(format!("paint{i}:{what}"));
-    }
+    paints_alike(ours, theirs)?;
     let same_clips = ours.clips.len() == theirs.clips.len()
         && (ours.clips.iter().zip(&theirs.clips)).all(|(a, b)| shapes_alike(a, b));
     if same_clips {

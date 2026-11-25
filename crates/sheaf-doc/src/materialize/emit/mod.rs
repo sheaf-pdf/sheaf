@@ -19,6 +19,21 @@
 //! - [`form`]: the field tree and the form's dictionary, from the records
 //!   and [`FormDoc`](crate::model::FormDoc), with save policy's transforms.
 //!
+//! **The fallback font** (M10 slice 7): what an emission draws in it names
+//! its marker ([`Fallback::res`]), whose placeholder stands for the subset
+//! and says the PDF version a Type 0 font needs. What writes a drawing
+//! that binds it joins the glyphs it draws there ([`Sink::fallback`]);
+//! once all are joined, `finish` makes the placeholder the subset's key
+//! (`Syms::rekey`): for an Append, the latest subset the saved file
+//! holds that draws them all ([`SaveRecord::fallbacks`]), which nothing
+//! writes again; else a subset of them, written as an ordinary resource
+//! keyed by its objects' digest ([`Emission::fallback`]), as every Rewrite
+//! and overlay writes its own. A page's own resources that bind it are
+//! keyed again then by the subset they bind (`rebind`), so pages alike but
+//! for it never share one dictionary: what's joined is everything that
+//! writes a binding draws, a page's every block whose names its resources
+//! bind among it, a block the saved file has too.
+//!
 //! Some keys are written at the number of the primary's object they are
 //! (§11.5's model-owned identities, [`Emission::owned`]): copy 0 of a
 //! primary page; an annotation, field or bookmark read from the primary
@@ -89,7 +104,7 @@ use super::plan::{Note, Private, SaveTransform, Unheld};
 use super::record::{DrawnBlocks, SaveRecord};
 use crate::annot::{Annot, AnnotId};
 use crate::content::sink::{self, Sink};
-use crate::content::{GenId, Res, ResBody, Reserved};
+use crate::content::{Fallback, GenId, Glyphs, Res, ResBody, ResId, Reserved, draws_all};
 use crate::forms::field::annot_flags;
 use crate::model::{AnnotBody, DocState, FormRef, PageId};
 use crate::realize::{MarkDraw, ViewInputs};
@@ -141,6 +156,11 @@ pub struct Emission {
     /// finds nothing new.
     pub form_keys: Vec<ObjKey>,
     pub form_touched: bool,
+    /// The fallback font's subset it writes, by its resource's id, and the
+    /// glyphs it holds: None where nothing it writes draws in the font, or
+    /// an Append binds a subset the saved file holds
+    /// ([`SaveRecord::fallbacks`]).
+    pub fallback: Option<(ResId, Glyphs)>,
 }
 
 /// The live redraws a save's section makes (§11.9): what the removal
@@ -346,6 +366,20 @@ impl Syms {
     pub fn keys(&self) -> &[ObjKey] {
         &self.keys
     }
+
+    /// `from`'s placeholder made `to`'s: what named one names the other,
+    /// and `from` none. For a key known only once everything that names it
+    /// is drawn (the fallback font's subset, by its digest). Nothing where
+    /// `from` has no placeholder; `to` must have none of its own, or two
+    /// placeholders would name it.
+    pub(crate) fn rekey(&mut self, from: ObjKey, to: ObjKey) {
+        let Some(i) = self.index.remove(&from) else {
+            return;
+        };
+        let had = self.index.insert(to, i);
+        assert!(had.is_none(), "{to:?} had a placeholder of its own");
+        self.keys[i as usize] = to;
+    }
 }
 
 /// A PDF version, as a header or the catalog's `/Version` gives it.
@@ -360,7 +394,8 @@ impl PdfVersion {
     pub const XREF_STREAMS: PdfVersion = PdfVersion::new(1, 5);
     /// AES encryption (`/AESV2`).
     pub const AES: PdfVersion = PdfVersion::new(1, 6);
-    /// CIDFonts (ISO 32000-1 9.7.4), which an OCR layer's text is in.
+    /// CIDFonts (ISO 32000-1 9.7.4), which an OCR layer's text is in, and
+    /// the fallback font's subset.
     pub const CID_FONTS: PdfVersion = PdfVersion::new(1, 2);
     /// Marked-content artifacts with property lists (14.8.2.2), which a
     /// header and footer are drawn as.
@@ -490,6 +525,16 @@ pub(crate) struct Cx<'a> {
     /// copy 0 of them leave out ([`Emission::removed_annots`] once nothing
     /// is written at their numbers).
     pub(crate) left_out: Vec<ObjectId>,
+    /// Every glyph drawn in the fallback font by what this emission writes
+    /// that binds it ([`Sink::fallback`]), and whether anything bound it:
+    /// the placeholder of its marker's key stands for the subset, which
+    /// [`finish`] chooses once every glyph is joined ([`subset`]).
+    fallback: Glyphs,
+    fallback_bound: bool,
+    /// The page resources ([`ObjKey::PageRes`]) that bind the fallback's
+    /// marker, by the keys they're drawn under: [`subset`] keys them again
+    /// by the subset they bind ([`content::with_subset`]).
+    fallback_res: BTreeSet<ObjKey>,
 }
 
 impl<'a> Cx<'a> {
@@ -539,6 +584,9 @@ impl<'a> Cx<'a> {
             allowed: BTreeSet::new(),
             redrawn: HashSet::new(),
             left_out: Vec::new(),
+            fallback: Glyphs::new(),
+            fallback_bound: false,
+            fallback_res: BTreeSet::new(),
         }
     }
 
@@ -816,8 +864,18 @@ impl Sink for Cx<'_> {
         Some(items.iter().map(|o| self.sym(o, &scope)).collect())
     }
 
+    /// The fallback font's marker ([`Fallback::res`]) is a placeholder of
+    /// its own key, which nothing is written at: the subset it stands for
+    /// is the emission's to choose once every glyph is joined ([`subset`]).
+    /// Bound, it needs the PDF version a Type 0 font does, said now, so an
+    /// Append onto an older file says it in its catalog.
     fn resource(&mut self, res: &Res) -> ObjectId {
         let id = res.id();
+        if Fallback::SANS.is(res) {
+            self.fallback_bound = true;
+            self.needs(PdfVersion::CID_FONTS);
+            return self.syms.id(ObjKey::Res(id));
+        }
         let key = |i: usize| match i {
             0 => ObjKey::Res(id),
             i => ObjKey::ResPart(id, i as u32),
@@ -838,6 +896,10 @@ impl Sink for Cx<'_> {
             self.push_once(key(i), |cx| part(cx, obj, &key));
         }
         self.push_once(key(0), |cx| part(cx, &objects[0], &key))
+    }
+
+    fn fallback(&mut self, glyphs: &Glyphs) {
+        self.fallback.merge(glyphs);
     }
 
     fn reserved(&mut self, resources: Option<&Object>) -> Reserved {
@@ -1065,6 +1127,9 @@ fn finish(mut cx: Cx, p: &dyn Progress) -> Result<Emission> {
         let (key, obj) = next?;
         cx.push(key, obj);
     }
+    // Every glyph is joined now: before `reached`, which reads keys
+    // through the placeholders.
+    let fallback = subset(&mut cx);
     if cx.closure.unreadable > 0 {
         cx.notes.push(Note(format!(
             "{} objects the copied pages refer to couldn't be read, and were left out",
@@ -1144,7 +1209,90 @@ fn finish(mut cx: Cx, p: &dyn Progress) -> Result<Emission> {
         aliases,
         form_keys,
         form_touched,
+        fallback,
     })
+}
+
+/// The fallback font's subset `cx` binds, once everything it writes that
+/// draws in the font joined its glyphs: its marker's placeholder made the
+/// subset's key ([`Syms::rekey`]), so all that named the marker names the
+/// subset. An Append binds the latest subset the saved file holds that
+/// draws every glyph joined ([`draws_all`]) and whose key the saved map
+/// has, so nothing of it is written; only where none does is a subset of
+/// the joined glyphs written, as a Rewrite and an overlay write theirs, an
+/// ordinary resource keyed by its objects' digest ([`Fallback::subset`]):
+/// what's returned, beside its glyphs. None where nothing binds it.
+///
+/// Bound with no glyph joined is a missed join, a bug: logged, and a
+/// subset of none written, so no reference dangles. Glyphs joined where
+/// nothing binds the font are logged and dropped.
+///
+/// The page resources that bind the marker are keyed again by the subset
+/// chosen ([`rebind`]).
+fn subset(cx: &mut Cx) -> Option<(ResId, Glyphs)> {
+    let sans = Fallback::SANS;
+    let marker = ObjKey::Res(sans.res().id());
+    let glyphs = std::mem::take(&mut cx.fallback);
+    if !cx.fallback_bound {
+        if !glyphs.is_empty() {
+            log::error!(
+                "{} glyphs were joined in the fallback font, but nothing written binds it: no \
+                 subset is written",
+                glyphs.len()
+            );
+        }
+        return None;
+    }
+    if glyphs.is_empty() {
+        log::error!("the fallback font is bound with no glyph joined: a subset of none is written");
+    }
+    if let Some(record) = cx.saved() {
+        let saved = (record.fallbacks.iter().rev()).find(|(id, subset)| {
+            record.map.get(&ObjKey::Res(*id)).is_some() && draws_all(subset, &glyphs)
+        });
+        if let Some(&(id, _)) = saved {
+            cx.syms.rekey(marker, ObjKey::Res(id));
+            rebind(cx, id);
+            return None;
+        }
+    }
+    let written = sans.subset(&glyphs);
+    let id = written.id();
+    cx.syms.rekey(marker, ObjKey::Res(id));
+    rebind(cx, id);
+    cx.resource(&written);
+    Some((id, glyphs))
+}
+
+/// Each page's own resources that bind the fallback's marker, keyed again
+/// by `subset`, the subset it stands for ([`content::with_subset`]):
+/// whatever holds the key moves with it (the placeholders, the object
+/// pushed, what's made and the dictionary kept), and an Append that finds
+/// the new key in the saved map writes none of it, as the saved file
+/// holds the same resources bound to the same subset. A page's resources
+/// are the one object keyed by digest that binds the marker and whose key
+/// doesn't decide what's drawn through it: a form's is its drawing's (a
+/// mark's appearance, a flattened one by its inputs), a block names it
+/// through its page's.
+fn rebind(cx: &mut Cx, subset: ResId) {
+    for from in std::mem::take(&mut cx.fallback_res) {
+        let to = content::with_subset(from, subset);
+        cx.syms.rekey(from, to);
+        if let Some(resources) = cx.page_res.remove(&from) {
+            cx.page_res.insert(to, resources);
+        }
+        if cx.made.remove(&from) {
+            cx.made.insert(to);
+        }
+        let writes = cx.writes(&to);
+        cx.objects.retain_mut(|(key, _)| {
+            if *key != from {
+                return true;
+            }
+            *key = to;
+            writes
+        });
+    }
 }
 
 /// An Append's objects, into `cx`: the pages whose dictionaries are in

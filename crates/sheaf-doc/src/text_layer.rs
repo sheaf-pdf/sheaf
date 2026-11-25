@@ -173,13 +173,13 @@ pub(crate) fn block(
                 if gap > 0.1 {
                     w.text_matrix(tm(pr, r.bottom()).array());
                     w.horizontal_scale(200.0 * gap / fs);
-                    w.show_text(&Glyphless, " ");
+                    w.show_text(&Glyphless, fs, " ");
                 }
             }
             // Each CID advances half an em, so scale n half-ems to the box.
             w.text_matrix(tm(r.x, r.bottom()).array());
             w.horizontal_scale(200.0 * r.w / (fs * n as f32));
-            w.show_text(&Glyphless, &word.text);
+            w.show_text(&Glyphless, fs, &word.text);
             prev_right = Some(r.right());
         }
     }
@@ -452,6 +452,7 @@ mod tests {
         let one = layer(vec![word("Hi", 10.0, 20.0, 20.0, 10.0)], Rotation::R0);
         let first = res.object(&mut pdf, &font(&one));
         let second = res.object(&mut pdf, &font(&two_lines()));
+        res.finish(&mut pdf);
         assert_eq!(first, second, "one font a save");
         let type0 = pdf.get_dictionary(first).unwrap();
         assert_eq!(

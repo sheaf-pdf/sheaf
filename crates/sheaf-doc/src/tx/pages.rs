@@ -365,7 +365,8 @@ pub(crate) fn replace(
 }
 
 /// The page labels: `ranges`, or none. A header whose `<<label>>` draws a
-/// label its face can't draw all of is said ([`Notice::Unencodable`]).
+/// label no font sheaf bundles can draw all of is said
+/// ([`Notice::Unencodable`]).
 pub(crate) fn set_labels(lw: &mut Lower, ranges: Option<Vec<LabelSpec>>) {
     let labels = (ranges.filter(|r| !r.is_empty())).map(|r| Val::Labels(r.into()));
     lw.rec.put(Key::Labels, labels);
@@ -404,7 +405,7 @@ fn bring_in(
 /// what its stems name in the store ([`super::resolve::incoming`] put
 /// them there); a connector keeps its partner only if the partner came
 /// too; and a reply to a mark, ours or another tool's, follows it to its
-/// new name. Whether any mark draws text the built-in fonts can't.
+/// new name. Whether any mark draws text no font sheaf bundles can.
 fn annots_in(
     lw: &mut Lower,
     src: &Src,

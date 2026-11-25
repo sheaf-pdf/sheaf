@@ -18,14 +18,18 @@ use crate::pdf::{
 use in_progress::NoProgress;
 
 use super::append_tests::{appended_in_place, planned_in_place, written};
-use super::emit::{self, EmitBase, EmitScope, Overlay, RotatePolicy, SymObject};
+use super::emit::{
+    self, Emission, EmitBase, EmitScope, Overlay, PdfVersion, RotatePolicy, SymObject,
+};
 use super::key::{ObjKey, Part};
 use super::removal_tests::{opened, scratch, warned};
 use super::tests::{add, insert, lazy, open, rewrite, span};
 use super::*;
 use crate::annot::AnnotId;
+use crate::content::fixture::{FALLBACK_TEXT, fallback_subsets, subsets_hold};
+use crate::content::{Fallback, Glyphs};
 use crate::forms::appearance::tests::shown;
-use crate::forms::fixture::{Form, row};
+use crate::forms::fixture::{Form, Rect, row};
 use crate::forms::{FieldId, Value};
 use crate::model::{Document, FieldNode, PageId, Terminal};
 use crate::prim::{Key, Val};
@@ -681,4 +685,526 @@ fn an_appearance_that_can_t_be_made_leaves_no_ap() {
     let ((), _) = warned(|| assert!(overlay_form(&d, p0, aid).is_none()));
     let page = d.state().order()[0];
     assert!(!untouched(d.state(), page, &ViewInputs::screen()));
+}
+
+/// A WinAnsi value's form, as a Rewrite and an Append write it, the whole
+/// Rewrite and the Append's section: the bytes the code before the
+/// fallback font (M10 slice 7) wrote, held as literals taken from it, its
+/// length and checksum each. The form names `/DR`'s Helvetica alone, and
+/// nothing is written in the fallback.
+#[test]
+fn a_winansi_value_s_form_is_the_bytes_it_was() {
+    let held = |bytes: &[u8]| (bytes.len(), sheaf_util::checksum_hex(bytes));
+    let at = |len: usize, sum: &str| (len, sum.to_string());
+    let (mut f, a, _) = two_fields();
+    let helv = f.helv;
+    let bytes = table(&mut f);
+    let mut d = open(&bytes, None);
+    let [aid] = widgets_of(&d, "a")[..] else {
+        panic!("one widget")
+    };
+    fx::fill(&mut d, "a", "Camden \u{d6}l\u{e7}er");
+    let out = rewrite(&d, Profile::default());
+    let pdf = lazy(&out.bytes, None);
+    let ap = out.record.map.keys[&ObjKey::AnnotPart(aid, Part::Ap)];
+    let form = span(&pdf, &out.bytes, ap).unwrap();
+    assert_eq!(held(form), at(260, "a05b80a7d9917226804cc8d8d5fd512a"));
+    assert_eq!(
+        held(&out.bytes),
+        at(1924, "be547f601ed382a7eedcaa01e393409f")
+    );
+    assert_eq!(saved_form(&pdf, a).1, [helv]);
+    assert_eq!(subsets_hold(&out.bytes), 0);
+    assert!(out.record.fallbacks.is_empty());
+
+    let dir = scratch();
+    let (path, mut d) = opened(&dir, "a.pdf", &bytes);
+    fx::fill(&mut d, "a", "Camden \u{d6}l\u{e7}er");
+    let (_, section) = appended_in_place(&mut d).unwrap();
+    let ap = d.saved_record().unwrap().map.keys[&ObjKey::AnnotPart(aid, Part::Ap)];
+    let now = std::fs::read(&path).unwrap();
+    let pdf = lazy(&now, None);
+    let form = span(&pdf, &now, ap).unwrap();
+    assert_eq!(held(form), at(260, "a05b80a7d9917226804cc8d8d5fd512a"));
+    assert_eq!(held(&section), at(525, "e783325316140b12fdd9a10dff9a44fb"));
+    assert_eq!(subsets_hold(&now), 0);
+    assert!(d.saved_record().unwrap().fallbacks.is_empty());
+}
+
+// ----- in two fonts (M10 slice 7) -------------------------------------------
+
+/// The numbers in the fallback font's whole program of the glyphs that
+/// draw `chars`, a character each.
+fn glyphs_of(chars: &str) -> BTreeSet<u16> {
+    let program = Fallback::SANS.program();
+    (chars.chars())
+        .map(|c| program.glyph(c).expect("a character the fallback draws"))
+        .collect()
+}
+
+/// The glyph numbers `glyphs` keeps.
+fn numbers(glyphs: &Glyphs) -> BTreeSet<u16> {
+    glyphs.iter().map(|(glyph, _)| glyph).collect()
+}
+
+/// The fonts the form a widget's `/AP /N` names in `bytes` binds.
+fn bound(bytes: &[u8], widget: ObjectId) -> BTreeSet<ObjectId> {
+    saved_form(&lazy(bytes, None), widget)
+        .1
+        .into_iter()
+        .collect()
+}
+
+/// How many objects a subset of `glyphs` is written as.
+fn parts(glyphs: &Glyphs) -> usize {
+    match Fallback::SANS.subset(glyphs).body() {
+        crate::content::ResBody::Objects(objects) => objects.len(),
+        body => panic!("a subset's objects, not {body:?}"),
+    }
+}
+
+/// A Rewrite of a value the field's font can't draw all of draws the rest
+/// in the fallback: one subset, holding only the glyphs the value draws in
+/// it, which the form binds beside `/DR`'s Helvetica, each code it shows
+/// a glyph of the cut program with a text; the record says the subset and
+/// the map has it. Two widgets' glyphs are one subset, which both forms
+/// bind. A Rewrite starts the record's subsets again: its own.
+#[test]
+fn a_rewrite_writes_one_subset_of_what_its_widgets_draw_in_the_fallback() {
+    let (mut f, a, b) = two_fields();
+    let helv = f.helv;
+    let bytes = table(&mut f);
+    let mut d = open(&bytes, None);
+    fx::fill(&mut d, "a", FALLBACK_TEXT);
+    let out = rewrite(&d, Profile::default());
+    let subsets = fallback_subsets(&out.bytes);
+    let [(font, codes)] = &subsets[..] else {
+        panic!("one subset: {subsets:?}")
+    };
+    assert_eq!(*codes, glyphs_of("\u{141}\u{1ec5}"), "Ł and ễ alone");
+    assert_eq!(subsets_hold(&out.bytes), 2);
+    assert_eq!(bound(&out.bytes, a), BTreeSet::from([helv, *font]));
+    let [(id, glyphs)] = &out.record.fallbacks[..] else {
+        panic!("the record's subset")
+    };
+    assert_eq!(out.record.map.keys[&ObjKey::Res(*id)], *font);
+    assert_eq!(numbers(glyphs), *codes);
+    assert!(out.record.pdf_version >= PdfVersion::CID_FONTS);
+
+    fx::fill(&mut d, "b", "\u{d6}l\u{e7}er \u{143}owak");
+    let out = rewrite(&d, Profile::default());
+    let subsets = fallback_subsets(&out.bytes);
+    let [(font, codes)] = &subsets[..] else {
+        panic!("one subset of both: {subsets:?}")
+    };
+    assert_eq!(*codes, glyphs_of("\u{141}\u{1ec5}\u{143}"));
+    assert_eq!(subsets_hold(&out.bytes), 3);
+    assert_eq!(bound(&out.bytes, a), BTreeSet::from([helv, *font]));
+    assert_eq!(bound(&out.bytes, b), BTreeSet::from([helv, *font]));
+    assert_eq!(out.record.fallbacks.len(), 1);
+}
+
+/// Appends in a row onto one file, each through [`subsets_hold`], the
+/// saved file each one's prefix: the first draws `Ł` and `Ń`, which no
+/// subset the record knows has, and writes one of them with the widget and
+/// its form; one with `ễ` too writes a second, of `ễ` alone, the first as
+/// it was. Then each binds the latest saved subset that draws its glyphs
+/// and writes no font: one widget of two changed to `Ł` alone (fewer than
+/// the first holds) binds the first's object; `ễ`, the second's; `Ń`, the
+/// first's again, as the record carries both; a WinAnsi value names
+/// Helvetica alone. Reopened, the record knows no subset (nothing reads
+/// one back), so an Append that draws `Ł` writes one more: said, and
+/// held. A Rewrite in place then starts the record's subsets again (its
+/// own; a widget it copies as the file has it keeps its form's), and an
+/// Append after it binds the Rewrite's.
+#[test]
+fn appends_bind_a_saved_subset_and_write_one_only_for_new_glyphs() {
+    let dir = scratch();
+    let (mut f, a, b) = two_fields();
+    let helv = f.helv;
+    let empty = f.text("empty", 0, row(1));
+    let bytes = table(&mut f);
+    let (path, mut d) = opened(&dir, "a.pdf", &bytes);
+    let [aw] = widgets_of(&d, "a")[..] else {
+        panic!("one widget")
+    };
+    let [bw] = widgets_of(&d, "b")[..] else {
+        panic!("one widget")
+    };
+    let [ew] = widgets_of(&d, "empty")[..] else {
+        panic!("one widget")
+    };
+    let form_at =
+        |d: &Document, aid| d.saved_record().unwrap().map.keys[&ObjKey::AnnotPart(aid, Part::Ap)];
+    let now = || std::fs::read(&path).unwrap();
+
+    // A planned Append of a fill: a subset of Ł and Ń.
+    fx::fill(&mut d, "empty", "\u{141}ukasz \u{143}owak");
+    let (base, section) = planned_in_place(&mut d);
+    let record = d.saved_record().unwrap();
+    let [(s1, g1)] = &record.fallbacks[..] else {
+        panic!("one subset")
+    };
+    let (s1, g1) = (*s1, g1.clone());
+    assert_eq!(numbers(&g1), glyphs_of("\u{141}\u{143}"));
+    let s1_at = record.map.keys[&ObjKey::Res(s1)];
+    let wrote = written(base.len(), &section, &path);
+    assert!(wrote.contains(&empty) && wrote.contains(&form_at(&d, ew)) && wrote.contains(&s1_at));
+    assert_eq!(wrote.len(), 2 + parts(&g1), "{wrote:?}");
+    assert_eq!(fallback_subsets(&now()), [(s1_at, numbers(&g1))]);
+    assert_eq!(bound(&now(), empty), BTreeSet::from([helv, s1_at]));
+    assert_eq!(subsets_hold(&now()), 2);
+
+    // `ễ`, which no saved subset has: a second subset, of it alone.
+    fx::fill(&mut d, "a", "Nguy\u{1ec5}n");
+    let (base, section) = appended_in_place(&mut d).unwrap();
+    let record = d.saved_record().unwrap();
+    let [(first, _), (s2, g2)] = &record.fallbacks[..] else {
+        panic!("two subsets")
+    };
+    assert_eq!(*first, s1);
+    let (s2, g2) = (*s2, g2.clone());
+    assert_eq!(numbers(&g2), glyphs_of("\u{1ec5}"));
+    let s2_at = record.map.keys[&ObjKey::Res(s2)];
+    let wrote = written(base.len(), &section, &path);
+    assert!(wrote.contains(&a) && wrote.contains(&form_at(&d, aw)) && wrote.contains(&s2_at));
+    assert_eq!(wrote.len(), 2 + parts(&g2), "{wrote:?}");
+    let both = [(s1_at, numbers(&g1)), (s2_at, numbers(&g2))];
+    assert_eq!(fallback_subsets(&now()), both);
+    assert_eq!(bound(&now(), a), BTreeSet::from([helv, s2_at]));
+    assert_eq!(subsets_hold(&now()), 3);
+
+    // Each a widget of two, its glyphs a saved subset's: no font written.
+    // `ễ` alone draws nothing in Helvetica, which its form doesn't name.
+    for (field, widget, aid, value, fonts) in [
+        ("b", b, bw, "\u{141}uk", vec![helv, s1_at]),
+        ("empty", empty, ew, "\u{1ec5}", vec![s2_at]),
+        ("b", b, bw, "\u{143}owak", vec![helv, s1_at]),
+    ] {
+        fx::fill(&mut d, field, value);
+        let (base, section) = appended_in_place(&mut d).unwrap();
+        let wrote = written(base.len(), &section, &path);
+        assert_eq!(wrote, BTreeSet::from([widget, form_at(&d, aid)]), "{value}");
+        assert_eq!(bound(&now(), widget), BTreeSet::from_iter(fonts), "{value}");
+        assert_eq!(fallback_subsets(&now()), both, "{value}");
+        assert_eq!(d.saved_record().unwrap().fallbacks.len(), 2);
+    }
+    // What the file shows now: `a`'s `ễ`, `b`'s `Ń`, `empty`'s `ễ`.
+    assert_eq!(subsets_hold(&now()), 3);
+
+    // A WinAnsi value: no font.
+    fx::fill(&mut d, "a", "Camden \u{d6}l\u{e7}er");
+    let (base, section) = appended_in_place(&mut d).unwrap();
+    let wrote = written(base.len(), &section, &path);
+    assert_eq!(wrote, BTreeSet::from([a, form_at(&d, aw)]));
+    assert_eq!(bound(&now(), a), BTreeSet::from([helv]));
+    assert_eq!(fallback_subsets(&now()), both);
+
+    // Reopened: no subset known, so one more is written, though the file
+    // holds one that draws `Ł`.
+    let mut d = crate::open::file(&path, None).unwrap().doc;
+    assert!(d.saved_record().unwrap().fallbacks.is_empty());
+    let [aw] = widgets_of(&d, "a")[..] else {
+        panic!("one widget")
+    };
+    fx::fill(&mut d, "a", "\u{141}");
+    let (base, section) = appended_in_place(&mut d).unwrap();
+    let record = d.saved_record().unwrap();
+    let [(s3, g3)] = &record.fallbacks[..] else {
+        panic!("one subset")
+    };
+    assert_eq!(numbers(g3), glyphs_of("\u{141}"));
+    let s3_at = record.map.keys[&ObjKey::Res(*s3)];
+    let wrote = written(base.len(), &section, &path);
+    assert_eq!(wrote.len(), 2 + parts(g3), "{wrote:?}");
+    let subsets = fallback_subsets(&now());
+    assert_eq!(subsets.len(), 3);
+    assert_eq!(subsets[2], (s3_at, numbers(g3)));
+    assert_eq!(bound(&now(), a), BTreeSet::from([s3_at]));
+    subsets_hold(&now());
+
+    // A Rewrite in place: its own subset alone; an Append after it binds it.
+    fx::fill(&mut d, "b", "\u{141}\u{143}");
+    save_with(
+        &mut d,
+        &path,
+        SaveHow::Rewrite,
+        &AskAnswers::default(),
+        &NoProgress,
+    )
+    .unwrap();
+    let record = d.saved_record().unwrap();
+    let [(s4, g4)] = &record.fallbacks[..] else {
+        panic!("the Rewrite's subset")
+    };
+    assert_eq!(numbers(g4), glyphs_of("\u{141}\u{143}"));
+    let s4_at = record.map.keys[&ObjKey::Res(*s4)];
+    // Beside it, the file's `empty` widget as it was, which reads no value
+    // since the reopen (no save writes `/V` before M10 slice 9), so isn't
+    // made anew: its form and that form's subset copied, which the record
+    // doesn't list.
+    let subsets = fallback_subsets(&now());
+    assert_eq!(subsets.len(), 2, "{subsets:?}");
+    assert!(subsets.contains(&(s4_at, numbers(g4))), "{subsets:?}");
+    assert!(subsets.iter().any(|(_, codes)| *codes == numbers(&g2)));
+    fx::fill(&mut d, "a", "\u{143}");
+    let (base, section) = appended_in_place(&mut d).unwrap();
+    let wrote = written(base.len(), &section, &path);
+    assert_eq!(wrote, BTreeSet::from([a, form_at(&d, aw)]));
+    assert_eq!(bound(&now(), a), BTreeSet::from([s4_at]));
+    // `a`'s `Ń`, `b`'s `ŁŃ`, and the copied `ễ`.
+    assert_eq!(subsets_hold(&now()), 4);
+}
+
+/// An Append onto a file older than PDF 1.2, which has no Type 0 fonts,
+/// says 1.2 in the catalog where it binds the fallback, and the record
+/// says it; a WinAnsi value onto the same file writes no catalog.
+#[test]
+fn an_append_onto_an_older_file_says_the_version_its_subset_needs() {
+    let dir = scratch();
+    let (mut f, _, _) = two_fields();
+    f.pdf.version = "1.1".into();
+    let empty = f.text("empty", 0, row(1));
+    let bytes = table(&mut f);
+    let (path, mut d) = opened(&dir, "a.pdf", &bytes);
+    let catalog = d.saved_record().unwrap().map.keys[&ObjKey::Catalog];
+    assert_eq!(d.saved_record().unwrap().pdf_version, PdfVersion::new(1, 1));
+    fx::fill(&mut d, "a", "Camden");
+    let (base, section) = appended_in_place(&mut d).unwrap();
+    assert!(!written(base.len(), &section, &path).contains(&catalog));
+    assert_eq!(d.saved_record().unwrap().pdf_version, PdfVersion::new(1, 1));
+
+    fx::fill(&mut d, "empty", "\u{141}ukasz");
+    let (base, section) = appended_in_place(&mut d).unwrap();
+    let wrote = written(base.len(), &section, &path);
+    assert!(
+        wrote.contains(&catalog) && wrote.contains(&empty),
+        "{wrote:?}"
+    );
+    let now = std::fs::read(&path).unwrap();
+    let pdf = lazy(&now, None);
+    let version = pdf.catalog().unwrap().get(b"Version").cloned();
+    assert_eq!(
+        version.as_ref().and_then(Object::as_name),
+        Some(b"1.2".as_slice())
+    );
+    assert_eq!(d.saved_record().unwrap().pdf_version, PdfVersion::CID_FONTS);
+    assert_eq!(subsets_hold(&now), 1);
+}
+
+/// A text field on page `page` whose one widget is a kid of its own at
+/// `rect`, not merged with it, and the widget.
+fn kid_field(f: &mut Form, name: &str, page: usize, rect: Rect) -> (ObjectId, ObjectId) {
+    let field = f.pdf.add_object(dictionary! {
+        "FT" => Object::name("Tx"), "T" => literal(name), "DA" => literal("/Helv 10 Tf 0 g"),
+    });
+    let r: Vec<Object> = rect.iter().map(|&v| Object::from(v)).collect();
+    let kid = f.pdf.add_object(dictionary! {
+        "Type" => Object::name("Annot"), "Subtype" => Object::name("Widget"),
+        "Rect" => r, "F" => 4, "P" => f.pages[page], "Parent" => field,
+    });
+    f.dict(field).set("Kids", vec![Object::from(kid)]);
+    let mut annots = f.annots(page);
+    annots.push(kid);
+    f.set_annots(page, &annots);
+    let mut fields = f.fields();
+    fields.push(field);
+    f.set_fields(&fields);
+    (field, kid)
+}
+
+/// What an overlay of `d` for the screen emits for `scope`.
+fn overlaid(d: &Document, page: PageId, scope: EmitScope) -> Emission {
+    let st = d.state();
+    let inputs = ViewInputs::screen();
+    let overlay = Overlay {
+        src: st.def(page).unwrap().base.src.clone(),
+        inputs: &inputs,
+        rotate: RotatePolicy::KeepBase,
+        arts: None,
+    };
+    emit::emit(st, scope, EmitBase::Overlay(&overlay), &[], &NoProgress).unwrap()
+}
+
+/// The keys of resources the form `e` writes under `AnnotPart(aid, Ap)`
+/// binds a font name to.
+fn binds(e: &Emission, aid: AnnotId) -> BTreeSet<ObjKey> {
+    let key = ObjKey::AnnotPart(aid, Part::Ap);
+    let (_, form) = (e.objects.iter().find(|(k, _)| *k == key))
+        .unwrap_or_else(|| panic!("{key:?} isn't written"));
+    let SymObject::Built(form) = form else {
+        panic!("a built form")
+    };
+    let fonts = (form.as_stream().unwrap().dict.get(b"Resources"))
+        .and_then(Object::as_dict)
+        .and_then(|r| r.get(b"Font"))
+        .and_then(Object::as_dict)
+        .unwrap();
+    (fonts.iter())
+        .filter_map(|(_, v)| e.syms.key(v.as_reference()?))
+        .filter(|k| matches!(k, ObjKey::Res(_)))
+        .collect()
+}
+
+/// Whether `e` writes `key`.
+fn emits(e: &Emission, key: ObjKey) -> bool {
+    e.objects.iter().any(|(k, _)| *k == key)
+}
+
+/// An overlay's form for a widget in two fonts is the save's, its box,
+/// matrix, content and names. Each emission writes the subset of what it
+/// draws: a widget merged with its field is the field's object, which an
+/// overlay's frame writes for its group's pages, so the frame's one subset
+/// holds what every such widget on them draws and a page's delta writes
+/// none; a kid widget is its page's, so each page's delta, emitted apart,
+/// writes a subset of what it draws, neither the other's, and two with
+/// the same glyphs share one by key.
+#[test]
+fn an_overlay_s_form_is_the_save_s_and_each_emission_binds_its_own_subset() {
+    let (mut f, a, b) = two_fields();
+    kid_field(&mut f, "ka", 0, row(2));
+    kid_field(&mut f, "kb", 1, row(2));
+    let bytes = table(&mut f);
+    let mut d = open(&bytes, None);
+    let widget = |d: &Document, name| {
+        let [w] = widgets_of(d, name)[..] else {
+            panic!("one widget")
+        };
+        w
+    };
+    let (aw, bw, kaw, kbw) = (
+        widget(&d, "a"),
+        widget(&d, "b"),
+        widget(&d, "ka"),
+        widget(&d, "kb"),
+    );
+    fx::fill(&mut d, "a", FALLBACK_TEXT);
+    fx::fill(&mut d, "b", "\u{143}owak");
+    fx::fill(&mut d, "ka", "\u{17a}le");
+    fx::fill(&mut d, "kb", "\u{15b}wiat");
+    let out = rewrite(&d, Profile::default());
+    let pdf = lazy(&out.bytes, None);
+    let (p0, p1) = (d.page(0).unwrap(), d.page(1).unwrap());
+    for (page, aid, widget) in [(p0, aw, a), (p1, bw, b)] {
+        let over = overlay_form(&d, page, aid).expect("an overlay's form");
+        assert_eq!(over, saved_form(&pdf, widget).0, "{aid:?}");
+    }
+    assert_eq!(fallback_subsets(&out.bytes).len(), 1, "a save's one");
+    assert_eq!(subsets_hold(&out.bytes), 5, "Ł, ễ, Ń, ź, ś");
+
+    // The frame: the merged widgets' subset.
+    let frame = overlaid(&d, p0, EmitScope::Frame([p0, p1].into()));
+    let (id, glyphs) = frame.fallback.clone().expect("the frame's subset");
+    assert_eq!(numbers(&glyphs), glyphs_of("\u{141}\u{1ec5}\u{143}"));
+    assert!(binds(&frame, aw).contains(&ObjKey::Res(id)));
+    assert!(binds(&frame, bw).contains(&ObjKey::Res(id)));
+    assert!(emits(&frame, ObjKey::Res(id)));
+
+    // The deltas: each kid's, apart.
+    let (e0, e1) = (
+        overlaid(&d, p0, EmitScope::Delta(p0)),
+        overlaid(&d, p1, EmitScope::Delta(p1)),
+    );
+    let (id0, g0) = e0.fallback.clone().expect("page 1's subset");
+    let (id1, g1) = e1.fallback.clone().expect("page 2's subset");
+    assert_eq!(numbers(&g0), glyphs_of("\u{17a}"));
+    assert_eq!(numbers(&g1), glyphs_of("\u{15b}"));
+    assert_ne!(id0, id1);
+    assert!(binds(&e0, kaw).contains(&ObjKey::Res(id0)));
+    assert!(binds(&e1, kbw).contains(&ObjKey::Res(id1)));
+    assert!(emits(&e0, ObjKey::Res(id0)) && !emits(&e0, ObjKey::Res(id1)));
+    assert!(emits(&e1, ObjKey::Res(id1)) && !emits(&e1, ObjKey::Res(id0)));
+    assert!(!emits(&e0, ObjKey::AnnotPart(aw, Part::Ap)), "the frame's");
+
+    fx::fill(&mut d, "kb", "\u{17a}");
+    let (e0, e1) = (
+        overlaid(&d, p0, EmitScope::Delta(p0)),
+        overlaid(&d, p1, EmitScope::Delta(p1)),
+    );
+    assert_eq!(
+        e0.fallback.unwrap().0,
+        e1.fallback.unwrap().0,
+        "shared by key"
+    );
+}
+
+/// A value with a cluster neither the field's font nor the fallback
+/// draws, a CJK ideograph (`王`) or an emoji (`😀`), leaves its widget
+/// unmade as `unencodable`: no `/AP`, no subset, nothing in the record;
+/// the warning says the kind, never the text.
+#[test]
+fn a_value_neither_font_draws_is_unencodable() {
+    let (mut f, a, _) = two_fields();
+    let bytes = table(&mut f);
+    for value in ["\u{141}ukasz \u{738b}", "\u{1f600}"] {
+        let mut d = open(&bytes, None);
+        fx::fill(&mut d, "a", value);
+        let (out, said) = warned(|| rewrite(&d, Profile::default()));
+        let pdf = lazy(&out.bytes, None);
+        assert!(ap_dict(&pdf, a).is_none(), "{value}: no /AP");
+        assert_eq!(fallback_subsets(&out.bytes), [], "{value}");
+        assert_eq!(subsets_hold(&out.bytes), 0, "{value}");
+        assert!(out.record.fallbacks.is_empty(), "{value}");
+        let unmade: Vec<&String> = said.iter().filter(|w| w.contains("appearance")).collect();
+        assert_eq!(unmade.len(), 1, "{said:?}");
+        assert!(unmade[0].contains("unencodable"), "{said:?}");
+        assert!(
+            !said
+                .iter()
+                .any(|w| w.contains(value) || w.contains("ukasz"))
+        );
+    }
+}
+
+/// The same state in two fonts is written as the same bytes every time,
+/// and from other threads: the subset, its key and its number with them;
+/// and an overlay of a page of it is the same objects.
+#[test]
+fn a_state_in_two_fonts_is_written_alike_every_time_and_from_any_thread() {
+    let (mut f, _, _) = two_fields();
+    let bytes = table(&mut f);
+    let mut d = open(&bytes, None);
+    fx::fill(&mut d, "a", FALLBACK_TEXT);
+    fx::fill(&mut d, "b", "\u{143}owak");
+    let input = SaveInput::detached(&d.snapshot());
+    let once = super::tests::write(&input, Profile::default()).bytes;
+    assert_eq!(fallback_subsets(&once).len(), 1);
+    assert_eq!(subsets_hold(&once), 3);
+    let again = std::thread::scope(|scope| {
+        let threads: Vec<_> = (0..2)
+            .map(|_| scope.spawn(|| super::tests::write(&input, Profile::default()).bytes))
+            .collect();
+        (threads.into_iter())
+            .map(|t| t.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(super::tests::write(&input, Profile::default()).bytes, once);
+    assert_eq!(again, [once.clone(), once]);
+
+    let page = d.page(0).unwrap();
+    let delta = || {
+        let st = &input.target;
+        let inputs = ViewInputs::screen();
+        let overlay = Overlay {
+            src: st.def(page).unwrap().base.src.clone(),
+            inputs: &inputs,
+            rotate: RotatePolicy::KeepBase,
+            arts: None,
+        };
+        let scope = EmitScope::Pages([page].into());
+        let e = emit::emit(st, scope, EmitBase::Overlay(&overlay), &[], &NoProgress);
+        let e = e.unwrap();
+        assert!(e.fallback.is_some(), "the page's form draws in it");
+        let built: Vec<(ObjKey, Option<Object>)> = (e.objects.into_iter())
+            .map(|(key, obj)| match obj {
+                SymObject::Built(obj) => (key, Some(obj)),
+                _ => (key, None),
+            })
+            .collect();
+        (built, e.syms.keys().to_vec(), e.fallback.map(|(id, _)| id))
+    };
+    let first = delta();
+    let other = std::thread::scope(|scope| scope.spawn(delta).join().unwrap());
+    assert_eq!(delta(), first);
+    assert_eq!(other, first);
 }

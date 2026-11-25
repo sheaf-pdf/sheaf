@@ -572,3 +572,40 @@ fn the_comments_panel_lists_what_the_file_holds() {
         "a corpus with files added needs these measured again"
     );
 }
+
+/// A comment past what Helvetica has, a note saying "Łukasz Nguyễn" (M10
+/// slice 7), is in the summary as it says it, laid out either way: its
+/// text drawn in the fallback font sheaf bundles where Helvetica lacks a
+/// letter, each code a glyph of the subset its font is, which PDFium reads
+/// back; and on the printed page beside it, its appearance, too.
+#[test]
+fn the_summary_draws_a_comment_in_two_fonts() {
+    use sheaf_doc::content::fixture::subsets_hold;
+    let dir = scratch("two-fonts");
+    let mut doc = opened(&dir);
+    let pages: Vec<_> = doc.state().order().iter().copied().collect();
+    let name = "\u{141}ukasz Nguy\u{1ec5}n";
+    let note = mark(
+        AnnotKind::FreeText {
+            rect: Box2 {
+                x: 72.0,
+                y: 200.0,
+                w: 240.0,
+                h: 40.0,
+            },
+            size: 14.0,
+        },
+        [0, 0, 200],
+        name,
+    );
+    let note = placed(&doc, 0, note);
+    doc.commit_ops(vec![add(pages[0], &note)], "note").unwrap();
+    for (layout, n) in [(Layout::CommentsOnly, 1), (Layout::Pages, 2)] {
+        let path = dir.join(format!("{layout:?}.pdf"));
+        let bytes = summary(&doc, &CommentFilter::default(), layout, &path);
+        // Ł and ễ, in the list, and on the printed page beside it.
+        assert_eq!(subsets_hold(&bytes), 2 * n, "{layout:?}");
+        let text = engine(bytes).page_text(PageIndex(0)).unwrap();
+        assert_eq!(text.matches(name).count(), n, "{layout:?}: {text}");
+    }
+}

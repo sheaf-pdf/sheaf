@@ -31,8 +31,8 @@ use sheaf_edit::{
 
 use super::sink::{self, Sink};
 use super::{
-    BlockId, Concat, ContentWriter, DrawText, Fonts, GenId, Glyphless, Need, PaginationKind, Res,
-    Reserved, ResourceNeeds, Std14, fixture, interp,
+    BlockId, Concat, ContentWriter, DrawText, Fonts, GenId, Glyphless, Glyphs, Need,
+    PaginationKind, Res, Reserved, ResourceNeeds, Std14, fixture, interp,
 };
 use crate::annot::{Annot, AnnotId, AnnotKind, Box2};
 use crate::export::Export;
@@ -174,6 +174,10 @@ impl Sink for Asked {
         ObjectId::new(self.0.len() as u32, 0)
     }
 
+    /// Nothing is written, so there's no subset to join to: the fallback's
+    /// marker among the resources says the appearance draws in it.
+    fn fallback(&mut self, _: &Glyphs) {}
+
     fn reserved(&mut self, _: Option<&Object>) -> Reserved {
         Reserved::default()
     }
@@ -204,9 +208,9 @@ fn stamp_form(matrix: Affine) -> StampForm {
 /// drawing `stamp`: its content, its needs as its form's resources bind
 /// them, and its box.
 fn appearance(cases: &mut Cases, case: &str, a: &Annot, stamp: Option<StampForm>) {
-    let drawn = crate::annot::appearance(a, stamp);
+    let crate::annot::Drawing { ap: drawn, glyphs } = crate::annot::appearance(a, stamp);
     let mut asked = Asked::default();
-    let form = sink::form_dict(&mut asked, drawn.bbox, drawn.matrix, &drawn.needs);
+    let form = sink::form_dict(&mut asked, drawn.bbox, drawn.matrix, &drawn.needs, &glyphs);
     let resources = form.get(b"Resources").and_then(Object::as_dict);
     let mut fields = Vec::new();
     for (i, id) in asked.0.iter().enumerate() {
@@ -224,6 +228,10 @@ fn appearance(cases: &mut Cases, case: &str, a: &Annot, stamp: Option<StampForm>
     }
     let b = Rect::from(drawn.bbox);
     fields.push(format!("bbox={},{},{},{}", b.x0, b.y0, b.x1, b.y1));
+    // Only where it draws some: every other line is as it was.
+    if !glyphs.is_empty() {
+        fields.push(format!("fallback={}", glyphs.len()));
+    }
     cases.push(case, &drawn.content, fields);
 }
 
@@ -754,14 +762,14 @@ fn built(cases: &mut Cases) {
         w.begin_text();
         w.set_font(face, 12.0);
         w.text_move(72.0, 700.0);
-        w.show_text(face, line);
+        w.show_text(face, 12.0, line);
         w.next_line();
         w.set_font(&Glyphless, 8.0);
-        w.show_text(&Glyphless, line);
+        w.show_text(&Glyphless, 8.0, line);
         w.end_text();
         let (content, needs) = w.finish(&Reserved::default());
         cases.written(&format!("built:page{n}"), &content, &needs);
-        built.page(Rect::new(0.0, 0.0, 612.0, 792.0), content, &needs);
+        built.page(Rect::new(0.0, 0.0, 612.0, 792.0), content, &needs.into());
     }
     let bytes = built.finish().expect("a built PDF");
     cases.0.extend(pages("built:file", &bytes));
@@ -1287,6 +1295,196 @@ fn twice(cases: &mut Cases, make: fn() -> Vec<Case>) {
     cases.0.extend(first);
 }
 
+// ----- text in two fonts ----------------------------------------------------
+
+/// Text past what its standard 14 face draws, in the fallback beside it
+/// (M10 slice 7), after every case before it, which it leaves as it was:
+/// marks' appearances, a header and a watermark laid out, a page built in
+/// memory, and a file saved both ways. A line says how many glyphs it
+/// draws in the fallback (`fallback=`), and only where it draws some.
+fn two_fonts(cases: &mut Cases) {
+    let marks = forms::every_mark_kind();
+    let of = |kind: fn(&AnnotKind) -> bool| -> Annot {
+        (marks.iter().find(|a| kind(&a.kind)))
+            .expect("a mark of every kind")
+            .clone()
+    };
+    let free = Annot {
+        contents:
+            "\u{141}ukasz Nguy\u{1ec5}n \u{d6}l\u{e7}er, \u{3a9}mega and \u{41a}\u{438}\u{440}\
+                   \u{438}\u{43b}\u{43b}\u{438}\u{446}\u{430} \u{6f22} in enough words to wrap"
+                .into(),
+        ..of(|k| matches!(k, AnnotKind::FreeText { .. }))
+    };
+    appearance(cases, "appearance:FreeText:two-fonts", &free, None);
+    let decomposed = Annot {
+        contents: "\u{141}ukasz Nguye\u{302}\u{303}n".into(),
+        ..free.clone()
+    };
+    appearance(
+        cases,
+        "appearance:FreeText:two-fonts-decomposed",
+        &decomposed,
+        None,
+    );
+    let callout = Annot {
+        contents: "na\u{ef}ve \u{141}\u{f3}d\u{17a}".into(),
+        turn: Rotation::R270,
+        ..of(|k| matches!(k, AnnotKind::Callout { .. }))
+    };
+    appearance(cases, "appearance:Callout:two-fonts-turned", &callout, None);
+    let text_stamp = of(|k| matches!(k, AnnotKind::TextStamp { .. }));
+    let AnnotKind::TextStamp { rect, status, .. } = text_stamp.kind else {
+        unreachable!()
+    };
+    let stamp = Annot {
+        kind: AnnotKind::TextStamp {
+            rect,
+            text: "REVISED \u{141}\u{f3}d\u{17a}\nGE \u{6f22} 11/24/2026".into(),
+            status,
+        },
+        ..text_stamp
+    };
+    appearance(cases, "appearance:TextStamp:two-fonts", &stamp, None);
+    let connector = of(|k| matches!(k, AnnotKind::Connector { .. }));
+    let AnnotKind::Connector { rect, partner, .. } = connector.kind.clone() else {
+        unreachable!()
+    };
+    let labelled = Annot {
+        kind: AnnotKind::Connector {
+            rect,
+            label: "\u{3a9}1".into(),
+            partner,
+        },
+        ..connector
+    };
+    appearance(cases, "appearance:Connector:two-fonts", &labelled, None);
+
+    // A header and footer and a watermark, each line saying its glyphs.
+    let free_names = Reserved::default();
+    let mut g = header(FontChoice::Helvetica);
+    let GenSpec::HeaderFooter(spec) = &g.spec else {
+        unreachable!()
+    };
+    let mut spec = HeaderFooterSpec::clone(spec);
+    spec.texts[0] = "\u{141}ukasz \u{2013} <<file>>".into();
+    spec.texts[4] = "<<label>> \u{3a9} \u{6f22}".into();
+    g.spec = GenSpec::HeaderFooter(Arc::new(spec));
+    for r in [Rotation::R0, Rotation::R90] {
+        let case = format!("header:helvetica:two-fonts:{r:?}");
+        laid_out_in_two(cases, &case, &g, r, &free_names);
+    }
+    let draft = watermark(
+        words(
+            "\u{141}\u{f3}d\u{17a} \u{3a9} \u{6f22}",
+            FontChoice::HelveticaBold,
+            45.0,
+        ),
+        GridPos::Center,
+        Z::Over,
+    );
+    laid_out_in_two(
+        cases,
+        "watermark:text:two-fonts",
+        &draft,
+        Rotation::R0,
+        &free_names,
+    );
+
+    // A page built in memory: its subset, as the file holds it.
+    let mut built = Built::new();
+    let mut w = ContentWriter::new();
+    w.begin_text();
+    w.set_font(&Std14::TimesBold, 12.0);
+    w.text_move(72.0, 700.0);
+    let (glyphs, _) = w.show_text(
+        &Std14::TimesBold,
+        12.0,
+        "\u{141}ukasz \u{6f22} Nguy\u{1ec5}n",
+    );
+    w.end_text();
+    let (content, needs) = w.finish(&Reserved::default());
+    let mut fields = needs_of(&needs);
+    fields.push(format!("fallback={}", glyphs.len()));
+    cases.push("built:two-fonts:page", &content, fields);
+    built.page(
+        Rect::new(0.0, 0.0, 612.0, 792.0),
+        content,
+        &super::Uses { needs, glyphs },
+    );
+    let bytes = built.finish().expect("a built PDF");
+    cases.0.extend(pages("built:two-fonts:file", &bytes));
+}
+
+/// Generator `g` laid out on the page `r` turns, named clear of
+/// `reserved`, as [`laid_out`] says it, and how many glyphs it draws in
+/// the fallback.
+fn laid_out_in_two(cases: &mut Cases, case: &str, g: &Generator, r: Rotation, reserved: &Reserved) {
+    let ctx = ctx_of(&page_of(r));
+    let drawn = layout(g, &ctx, None, reserved, Private::Keep);
+    assert_eq!(drawn.layout_digest, layout_digest(g, &ctx, None), "{case}");
+    assert!(!drawn.glyphs.is_empty(), "{case} draws in the fallback");
+    let mut fields = needs_of(&drawn.res);
+    fields.push(format!("L={}", hex(drawn.layout_digest)));
+    fields.push(format!("fallback={}", drawn.glyphs.len()));
+    cases.push(case, &drawn.ops, fields);
+}
+
+/// A file of two pages edited in two fonts: a note and a text stamp on the
+/// first, a header and footer on both, a watermark on the second, and a
+/// note on the second flattened. Written as an Append and as a Rewrite.
+fn edited_in_two_fonts() -> Vec<Case> {
+    let (dir, mut doc) = opened(&file_of(&BODY[..2]));
+    let all = every_page(&doc);
+    let at = |x: f32, y: f32| Box2 {
+        x,
+        y,
+        w: 160.0,
+        h: 40.0,
+    };
+    let stamp = AnnotKind::TextStamp {
+        rect: at(300.0, 500.0),
+        text: "\u{141}\u{f3}d\u{17a}".into(),
+        status: false,
+    };
+    let note = |y: f32| AnnotKind::FreeText {
+        rect: at(100.0, y),
+        size: 11.0,
+    };
+    let marks = vec![
+        fx::add(all[0], &mark(note(200.0), "Nguy\u{1ec5}n \u{2013} \u{3a9}")),
+        fx::add(all[0], &mark(stamp, "")),
+        fx::add(all[1], &mark(note(300.0), "\u{141}ukasz")),
+    ];
+    doc.commit_ops(marks, "marks").expect("marks");
+    let mut header = fx::header("\u{141}ukasz <<1>> of <<N>>");
+    header.font = FontChoice::TimesRoman;
+    let generators = vec![
+        fx::set_watermark(
+            fx::watermark("\u{141}\u{f3}d\u{17a}"),
+            Z::Over,
+            Some(&all[1..]),
+        ),
+        fx::set_header(header, None),
+    ];
+    // Set on the day the golden was written, as `edited`'s header is.
+    let Ok(mut cx) = Arc::try_unwrap(doc.lower_cx(Actor::User)) else {
+        unreachable!("a context just made is held once");
+    };
+    cx.host.date = GOLDEN_DAY.into();
+    let mut tx = Document::tx_at(&doc.snapshot(), Arc::new(cx));
+    tx.apply_batch(generators, &in_progress::NoProgress)
+        .expect("generators");
+    doc.commit(tx, CommitOpts::labelled("generators"))
+        .expect("generators");
+    doc.commit_ops(vec![fx::flatten(&all[1..], FlattenSet::All)], "flatten")
+        .expect("flatten");
+    let mut cases = pages("file:two-fonts:append", &How::Appended.write(&doc));
+    cases.extend(pages("file:two-fonts:rewrite", &How::Rewritten.write(&doc)));
+    let _ = std::fs::remove_dir_all(dir);
+    cases
+}
+
 /// Every case, in the golden's order.
 fn cases() -> Cases {
     let mut cases = Cases::default();
@@ -1297,6 +1495,8 @@ fn cases() -> Cases {
     encoded(&mut cases);
     twice(&mut cases, edited);
     twice(&mut cases, stripped);
+    two_fonts(&mut cases);
+    twice(&mut cases, edited_in_two_fonts);
     cases
 }
 
