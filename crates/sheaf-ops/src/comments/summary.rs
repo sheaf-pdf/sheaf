@@ -574,7 +574,8 @@ impl Writer {
             );
             // Each font once in the file, however many sheets draw in it.
             let (ops, needs) = sheet.finish(&Reserved::default());
-            self.built.page(Rect::new(0.0, 0.0, w, h), ops, &needs);
+            self.built
+                .page(Rect::new(0.0, 0.0, w, h), ops, &needs.into());
         }
         self.built.finish()
     }

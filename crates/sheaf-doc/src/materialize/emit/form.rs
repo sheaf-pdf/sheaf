@@ -70,7 +70,7 @@ use crate::pdf::{
 use super::Cx;
 use crate::annot::AnnotId;
 use crate::attachments::tree_names;
-use crate::content::{Res, sink};
+use crate::content::{Glyphs, Res, sink};
 use crate::forms::appearance::{self, FontAt, TextLook};
 use crate::forms::{FieldId, FieldKind, Value};
 use crate::materialize::copy::Scope;
@@ -524,7 +524,8 @@ fn appearance(cx: &mut Cx, aid: AnnotId, src: &Src) -> Option<Object> {
     };
     let ap = ObjKey::AnnotPart(aid, Part::Ap);
     if cx.writes(&ap) {
-        let form = sink::form(cx, made.bbox, made.matrix, made.content, &made.needs);
+        let none = Glyphs::new();
+        let form = sink::form(cx, made.bbox, made.matrix, made.content, &made.needs, &none);
         cx.push(ap, Object::from(form));
     }
     Some(Object::from(dictionary! { "N" => cx.placeholder(ap) }))

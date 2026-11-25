@@ -89,7 +89,7 @@ use super::plan::{Note, Private, SaveTransform, Unheld};
 use super::record::{DrawnBlocks, SaveRecord};
 use crate::annot::{Annot, AnnotId};
 use crate::content::sink::{self, Sink};
-use crate::content::{GenId, Res, ResBody, Reserved};
+use crate::content::{Fallback, GenId, Glyphs, Res, ResBody, Reserved};
 use crate::forms::field::annot_flags;
 use crate::model::{AnnotBody, DocState, FormRef, PageId};
 use crate::realize::{MarkDraw, ViewInputs};
@@ -490,6 +490,11 @@ pub(crate) struct Cx<'a> {
     /// copy 0 of them leave out ([`Emission::removed_annots`] once nothing
     /// is written at their numbers).
     pub(crate) left_out: Vec<ObjectId>,
+    /// Every glyph drawn in the fallback font by what binds it in this
+    /// emission ([`Sink::fallback`]), and whether anything bound it: the
+    /// placeholder of its marker's key stands for the subset.
+    fallback: Glyphs,
+    fallback_bound: bool,
 }
 
 impl<'a> Cx<'a> {
@@ -539,6 +544,8 @@ impl<'a> Cx<'a> {
             allowed: BTreeSet::new(),
             redrawn: HashSet::new(),
             left_out: Vec::new(),
+            fallback: Glyphs::new(),
+            fallback_bound: false,
         }
     }
 
@@ -816,8 +823,15 @@ impl Sink for Cx<'_> {
         Some(items.iter().map(|o| self.sym(o, &scope)).collect())
     }
 
+    /// The fallback font's marker ([`Fallback::res`]) is a placeholder of
+    /// its own key, which nothing is written at: the subset it stands for
+    /// is the emission's to write once every glyph is joined.
     fn resource(&mut self, res: &Res) -> ObjectId {
         let id = res.id();
+        if Fallback::SANS.is(res) {
+            self.fallback_bound = true;
+            return self.syms.id(ObjKey::Res(id));
+        }
         let key = |i: usize| match i {
             0 => ObjKey::Res(id),
             i => ObjKey::ResPart(id, i as u32),
@@ -838,6 +852,10 @@ impl Sink for Cx<'_> {
             self.push_once(key(i), |cx| part(cx, obj, &key));
         }
         self.push_once(key(0), |cx| part(cx, &objects[0], &key))
+    }
+
+    fn fallback(&mut self, glyphs: &Glyphs) {
+        self.fallback.merge(glyphs);
     }
 
     fn reserved(&mut self, resources: Option<&Object>) -> Reserved {
@@ -1064,6 +1082,15 @@ fn finish(mut cx: Cx, p: &dyn Progress) -> Result<Emission> {
         p.check()?;
         let (key, obj) = next?;
         cx.push(key, obj);
+    }
+    // Nothing the emitter draws binds the fallback font yet: what did is
+    // said, as its subset isn't written.
+    if cx.fallback_bound || !cx.fallback.is_empty() {
+        log::error!(
+            "the fallback font was drawn in ({} glyphs), but the emitter doesn't write its \
+             subset: what draws in it names no font",
+            cx.fallback.len()
+        );
     }
     if cx.closure.unreadable > 0 {
         cx.notes.push(Note(format!(

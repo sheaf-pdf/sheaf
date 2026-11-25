@@ -25,6 +25,15 @@ pub use pdf_gfx::{
     encode_with, interpret_with,
 };
 
+/// Text in a font and a fallback for what it can't draw (M10 slice 7): a
+/// set of fonts, each face drawn under its resource ([`FontSet`],
+/// [`WithFallback`]), and the face that draws a grapheme cluster of text,
+/// the first that has all of it ([`face_for`]), or the character none
+/// draws ([`UnencodableChar`]). Every [`LayoutFont`](super::fonts::LayoutFont)
+/// is a set of one, and an embedded program is a `LayoutFont` too
+/// ([`Program`](super::fonts::Program)).
+pub use pdf_gfx::{FontSet, UnencodableChar, WithFallback, face_for};
+
 /// A box's border as a [`Canvas`] draws it ([`BoxBorder`], its
 /// [`BoxBorderStyle`]), and a default appearance string parsed
 /// ([`DefaultAppearance`]): what a text field's appearance is made with

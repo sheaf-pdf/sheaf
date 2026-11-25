@@ -1493,6 +1493,7 @@ pub fn write_marks(pdf: &mut Pdf, page: &mut Dictionary, marks: &[Mark]) {
         }
         pending = if stuck { Vec::new() } else { waiting };
     }
+    cx.finish(pdf);
     page.set("Annots", list);
 }
 

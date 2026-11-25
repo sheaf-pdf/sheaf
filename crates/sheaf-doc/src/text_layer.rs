@@ -452,6 +452,7 @@ mod tests {
         let one = layer(vec![word("Hi", 10.0, 20.0, 20.0, 10.0)], Rotation::R0);
         let first = res.object(&mut pdf, &font(&one));
         let second = res.object(&mut pdf, &font(&two_lines()));
+        res.finish(&mut pdf);
         assert_eq!(first, second, "one font a save");
         let type0 = pdf.get_dictionary(first).unwrap();
         assert_eq!(

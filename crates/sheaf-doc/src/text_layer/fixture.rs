@@ -110,7 +110,10 @@ fn block_resources(pdf: &mut Pdf) -> Dictionary {
 
 /// The glyphless font's objects, made in `pdf`: its Type0's number.
 fn glyphless(pdf: &mut Pdf) -> ObjectId {
-    ResObjects::default().object(pdf, &Glyphless.res())
+    let mut res = ResObjects::default();
+    let font = res.object(pdf, &Glyphless.res());
+    res.finish(pdf);
+    font
 }
 
 /// Helvetica, made in `pdf`.

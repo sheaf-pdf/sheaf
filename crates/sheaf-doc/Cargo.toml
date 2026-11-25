@@ -79,6 +79,10 @@ num-bigint = { version = "0.4", default-features = false }
 # Text in a mark's staleness digest is NFC, whatever another tool wrote
 # (M10.5 §3.6), and text is composed before a standard 14 font encodes it.
 unicode-normalization = "0.1"
+# Text cut into grapheme clusters, each drawn whole in the first font that
+# has all of it: a field's font or a mark's, else the fallback font (M10
+# slice 7).
+unicode-segmentation.workspace = true
 # What a change means for saving and signatures, as sets (M10.5 §7.1).
 bitflags.workspace = true
 # The date and time a mark's identity tokens are filled in with, as the

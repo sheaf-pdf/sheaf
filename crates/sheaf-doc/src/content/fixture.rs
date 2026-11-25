@@ -13,17 +13,29 @@
 //! system's where the system has the font. Only PDFium's stock Helvetica,
 //! which no `/Widths` can be given, is drawn without. [`every`] names
 //! each, and [`fuzz_page`] is the page the `interp` fuzz target draws on.
+//! And a page in the fallback font, a subset of it or the whole program
+//! ([`fallback_page`], [`whole_fallback_page`]), and the check of any
+//! PDF's subsets of it ([`subsets_hold`]), for every test that draws in
+//! it, other crates' too.
 //!
 //! Most draw in [`SQUARES`]: a Type3 font whose `a` is a square an em
 //! wide and `b` half one, from 0.2 em below the baseline to 0.8 above.
+
+use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 
 use crate::pdf::{
     Dictionary, Document as Pdf, Object, ObjectId, Stream, StreamExt, dictionary, literal,
 };
 use image::{Rgb, RgbImage};
 
-use super::interp::EncodedPage;
-use super::{Font, Glyphless, Objects, PageContent, Unkept, contents};
+use super::interp::{EncodedPage, Forms, Kind, Opts, Wants, interpret};
+use super::{
+    Concat, ContentWriter, Fallback, Font, Fonts, Glyphless, Glyphs, Objects, PageContent, Res,
+    Reserved, Unkept, Uses, contents,
+};
+use crate::pdf::fonts::{EmbedOptions, Program, embed_write};
+use crate::serialize::built::Built;
 use crate::source::Limits;
 
 /// A one-page PDF.
@@ -1634,4 +1646,268 @@ fn one_page(mut pdf: Pdf, content: &[u8], resources: Dictionary) -> Fixture {
     });
     pdf.trailer.set("Root", catalog);
     Fixture { pdf }
+}
+
+// ----- the fallback font ---------------------------------------------------
+
+/// A name the fallback font draws all of and no standard 14 font's
+/// encoding holds whole (`Ł`, `ễ`), composed (NFC).
+pub const FALLBACK_TEXT: &str = "\u{141}ukasz Nguy\u{1EC5}n \u{D6}l\u{E7}er";
+
+/// A Letter page, built in memory, saying `text` at 24 pt in the fallback
+/// font ([`Fallback`]) at 72, 700, drawn by hand: its codes the program's
+/// glyph numbers, its glyphs bound with what it draws with, and the
+/// subset written as the PDF finishes.
+pub fn fallback_page(text: &str) -> Vec<u8> {
+    page_in_fallback(text, false)
+}
+
+/// [`fallback_page`]'s page with the whole program embedded, not a
+/// subset: its descendant's `/CIDToGIDMap` `/Identity`, its codes the
+/// same. A subset, behind its map, draws what this draws.
+pub fn whole_fallback_page(text: &str) -> Vec<u8> {
+    page_in_fallback(text, true)
+}
+
+fn page_in_fallback(text: &str, whole: bool) -> Vec<u8> {
+    let sans = Fallback::SANS;
+    let mut glyphs = Glyphs::new();
+    let codes = (glyphs.add(sans.program(), text)).expect("text the fallback font draws");
+    let font = match whole {
+        false => sans.res(),
+        true => {
+            let mut whole = EmbedOptions::default();
+            whole.whole = true;
+            let objects = embed_write(sans.program(), &glyphs, &whole).expect("embedded whole");
+            std::mem::take(&mut glyphs);
+            Res::of(objects).expect("a font's objects")
+        }
+    };
+    let mut w = ContentWriter::new();
+    w.begin_text();
+    w.font(font, 24.0);
+    w.text_move(72.0, 700.0);
+    w.show(&codes);
+    w.end_text();
+    let (content, needs) = w.finish(&Reserved::default());
+    let mut built = Built::new();
+    let media = crate::geom::Rect::new(0.0, 0.0, 612.0, 792.0);
+    built.page(media, content, &Uses { needs, glyphs });
+    built.finish().expect("a built PDF")
+}
+
+/// How many codes the PDF `bytes` shows in subsets of the fallback font,
+/// each found to draw what it was drawn for, else a panic that says
+/// where: in its pages' content, the forms that draws, and each of their
+/// annotations' normal appearances, through the content interpreter.
+///
+/// A subset of the fallback is a font whose `/BaseFont` is a subset's
+/// tag and `+` before the bundled program's name, its descendant's
+/// `/CIDToGIDMap` a stream. Each code it shows, two bytes (its encoding
+/// `/Identity-H`), is a glyph's number in the whole program: the map
+/// takes it to a glyph the cut program (its `/FontFile2`, opened again)
+/// holds, not `.notdef` unless the code is 0, as wide as the whole
+/// program's; and its `/ToUnicode` gives it a text. 0 where nothing is
+/// shown in one, so a test can say that too.
+pub fn subsets_hold(bytes: &[u8]) -> usize {
+    let pdf = Pdf::load_mem(bytes).expect("a PDF that reads");
+    let mut subsets: HashMap<ObjectId, Option<Subset>> = HashMap::new();
+    let mut seen = 0;
+    let lim = Limits::DEFAULT;
+    let fonts = Fonts::for_text();
+    let opts = Opts {
+        forms: Forms::Descend,
+        wants: Wants {
+            text: true,
+            ..Wants::NONE
+        },
+    };
+    let mut held = |content: &Concat, resources: Option<&Object>, place: &str| {
+        let read = interpret(&pdf, content, resources, &lim, &fonts, opts, |event| {
+            let Kind::Text(show) = event.kind else {
+                return ControlFlow::Continue(());
+            };
+            let Some(id) = show.font.filter(|_| !show.stock).and_then(|f| f.id()) else {
+                return ControlFlow::Continue(());
+            };
+            let subset = subsets.entry(id).or_insert_with(|| Subset::read(&pdf, id));
+            if let Some(subset) = subset {
+                let (codes, odd) = show.string.as_chunks::<2>();
+                assert!(odd.is_empty(), "{place}: font {id:?} shows an odd byte");
+                for &code in codes {
+                    subset.holds(u16::from_be_bytes(code), &format!("{place}: font {id:?}"));
+                    seen += 1;
+                }
+            }
+            ControlFlow::Continue(())
+        });
+        read.unwrap_or_else(|e| panic!("{place}: its content doesn't read: {e}"));
+    };
+    for (index, page) in pdf.page_iter().enumerate() {
+        let dict = pdf.get_dictionary(page).expect("a page");
+        let content = PageContent::read(&pdf, &contents(dict), &lim).expect("its content");
+        held(
+            content.concat(),
+            dict.get(b"Resources"),
+            &format!("page {index}"),
+        );
+        let annots = dict.get(b"Annots").and_then(|a| pdf.dereference(a).ok());
+        let annots = annots.and_then(|(_, a)| a.as_array()).unwrap_or_default();
+        for (slot, annot) in annots.iter().enumerate() {
+            let annot = pdf.dereference(annot).ok().and_then(|(_, a)| a.as_dict());
+            let normal = annot
+                .and_then(|a| a.get(b"AP"))
+                .and_then(|ap| pdf.dereference(ap).ok()?.1.as_dict()?.get(b"N"));
+            let Some((_, normal)) = normal.and_then(|n| pdf.dereference(n).ok()) else {
+                continue;
+            };
+            // One appearance, or one a state.
+            let forms: Vec<&Object> = match normal.as_dict() {
+                Some(states) if normal.as_stream().is_none() => {
+                    (states.iter().map(|(_, form)| form)).collect()
+                }
+                _ => vec![normal],
+            };
+            for form in forms {
+                let Some(form) = pdf.dereference(form).ok().and_then(|(_, f)| f.as_stream()) else {
+                    continue;
+                };
+                let data = form
+                    .decompressed_content()
+                    .expect("an appearance that decodes");
+                let place = format!("page {index}, annotation {slot}");
+                held(&Concat::new(&[&data]), form.dict.get(b"Resources"), &place);
+            }
+        }
+    }
+    seen
+}
+
+/// A subset of the fallback font, read for [`subsets_hold`].
+struct Subset {
+    /// Its `/CIDToGIDMap`, decoded.
+    map: Vec<u8>,
+    /// Its program, cut.
+    cut: Program,
+    /// The codes its `/ToUnicode` gives a text.
+    texts: HashSet<u16>,
+}
+
+impl Subset {
+    /// Font `id` of `pdf`, where it's a subset of the fallback.
+    fn read(pdf: &Pdf, id: ObjectId) -> Option<Subset> {
+        let font = pdf.get_dictionary(id).ok()?;
+        let name = font.get(b"BaseFont").and_then(Object::as_name)?;
+        let (tag, base) = (name.get(..7)?, &name[7..]);
+        let tagged = tag[..6].iter().all(u8::is_ascii_uppercase) && tag[6] == b'+';
+        if !tagged || base != b"NotoSans-Regular" {
+            return None;
+        }
+        let at = |dict: &Dictionary, key: &[u8]| {
+            let object = dict
+                .get(key)
+                .unwrap_or_else(|| panic!("font {id:?} has no {key:?}"));
+            pdf.dereference(object).expect("what it names").1.clone()
+        };
+        let stream = |object: &Object| {
+            let stream = object.as_stream().expect("a stream");
+            stream
+                .decompressed_content()
+                .expect("a stream that decodes")
+        };
+        let descendant = at(font, b"DescendantFonts");
+        let descendant = pdf.dereference(&descendant.as_array().expect("an array")[0]);
+        let descendant = descendant
+            .expect("its descendant")
+            .1
+            .as_dict()
+            .expect("a font");
+        // A subset's map is a stream; `/Identity` maps a whole program.
+        let map = at(descendant, b"CIDToGIDMap");
+        map.as_stream()?;
+        assert_eq!(
+            font.get(b"Encoding").and_then(Object::as_name),
+            Some(&b"Identity-H"[..]),
+            "font {id:?}"
+        );
+        let descriptor = at(descendant, b"FontDescriptor");
+        let program = at(descriptor.as_dict().expect("a descriptor"), b"FontFile2");
+        let cut = Program::open(stream(&program), 0).expect("its program, cut, opens");
+        let texts = to_unicode_codes(&stream(&at(font, b"ToUnicode")));
+        Some(Subset {
+            map: stream(&map),
+            cut,
+            texts,
+        })
+    }
+
+    /// Whether `code` draws what it was drawn for, else a panic that says
+    /// `place`.
+    fn holds(&self, code: u16, place: &str) {
+        let at = 2 * usize::from(code);
+        let glyph = self
+            .map
+            .get(at..at + 2)
+            .map_or(0, |g| u16::from_be_bytes([g[0], g[1]]));
+        assert!(
+            glyph != 0 || code == 0,
+            "{place}: code {code} draws .notdef"
+        );
+        assert!(
+            glyph < self.cut.glyph_count(),
+            "{place}: code {code} draws glyph {glyph} of a program of {}",
+            self.cut.glyph_count()
+        );
+        assert_eq!(
+            self.cut.width(glyph),
+            Fallback::SANS.program().width(code),
+            "{place}: code {code} draws a glyph as wide as the program's {code}"
+        );
+        assert!(
+            self.texts.contains(&code),
+            "{place}: code {code} has no text"
+        );
+    }
+}
+
+/// The codes a `/ToUnicode` CMap gives a text: each of its `bfchar`
+/// entries, and each code of its `bfrange` ones.
+fn to_unicode_codes(cmap: &[u8]) -> HashSet<u16> {
+    let text = String::from_utf8_lossy(cmap);
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let hex = |w: &str| {
+        let digits = w.strip_prefix('<')?.strip_suffix('>')?;
+        u16::from_str_radix(digits, 16).ok()
+    };
+    let mut codes = HashSet::new();
+    let mut i = 0;
+    while i < words.len() {
+        match words[i] {
+            "beginbfchar" => {
+                i += 1;
+                while i + 1 < words.len() && words[i] != "endbfchar" {
+                    codes.extend(hex(words[i]));
+                    i += 2;
+                }
+            }
+            "beginbfrange" => {
+                i += 1;
+                while i + 2 < words.len() && words[i] != "endbfrange" {
+                    let (lo, hi) = (hex(words[i]), hex(words[i + 1]));
+                    codes.extend(lo.zip(hi).into_iter().flat_map(|(lo, hi)| lo..=hi));
+                    i += 2;
+                    // Its destination: a string, or an array of them.
+                    if words[i].starts_with('[') {
+                        while i < words.len() && !words[i].ends_with(']') {
+                            i += 1;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    codes
 }

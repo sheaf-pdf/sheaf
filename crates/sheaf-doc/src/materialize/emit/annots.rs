@@ -67,7 +67,7 @@ use crate::pdf::{Dictionary, Object, ObjectId, Stream, Value, dictionary, litera
 use super::{Cx, Shown};
 use crate::annot::{self, Annot, AnnotId, AnnotKind, Emitted};
 use crate::content::sink;
-use crate::content::{Res, ResId};
+use crate::content::{Glyphs, Res, ResId};
 use crate::geom::{Affine, Rect};
 use crate::materialize::copy::{self, Scope};
 use crate::materialize::key::{ObjKey, Part};
@@ -538,7 +538,15 @@ impl Page<'_> {
         // An appearance an Append doesn't write isn't drawn.
         let ap = ObjKey::AnnotPart(aid, Part::Ap);
         if cx.writes(&ap) {
-            let form = sink::form(cx, drawn.bbox, drawn.matrix, drawn.content, &drawn.needs);
+            let none = Glyphs::new();
+            let form = sink::form(
+                cx,
+                drawn.bbox,
+                drawn.matrix,
+                drawn.content,
+                &drawn.needs,
+                &none,
+            );
             cx.push(ap, Object::from(form));
         }
         main.set("AP", dictionary! { "N" => cx.placeholder(ap) });
@@ -562,7 +570,15 @@ impl Page<'_> {
         if let Some((mut dict, drawn)) = companions.into_iter().next() {
             let ap = ObjKey::AnnotPart(aid, Part::CompanionAp);
             if cx.writes(&ap) {
-                let form = sink::form(cx, drawn.bbox, drawn.matrix, drawn.content, &drawn.needs);
+                let none = Glyphs::new();
+                let form = sink::form(
+                    cx,
+                    drawn.bbox,
+                    drawn.matrix,
+                    drawn.content,
+                    &drawn.needs,
+                    &none,
+                );
                 cx.push(ap, Object::from(form));
             }
             dict.set("AP", dictionary! { "N" => cx.placeholder(ap) });
@@ -873,7 +889,8 @@ impl Cx<'_> {
         let drawn = annot::appearance(&inputs.annot(), page);
         let (bbox, matrix) = (Rect::from(drawn.bbox), Affine::from(drawn.matrix));
         let id = self.push_deferred(ObjKey::Pinned(ap.digest), |cx| {
-            let mut dict = sink::form_dict(cx, drawn.bbox, drawn.matrix, &drawn.needs);
+            let none = Glyphs::new();
+            let mut dict = sink::form_dict(cx, drawn.bbox, drawn.matrix, &drawn.needs, &none);
             dict.set("Filter", Object::name("FlateDecode"));
             let ap = ap.clone();
             let data = move || {

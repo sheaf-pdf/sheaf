@@ -574,6 +574,9 @@ pub fn gather(snap: &Snapshot, ours: &[AnnotId], theirs: &[AnnotId]) -> Result<C
             annots.push((index as u32, part_id));
         }
     }
+    // What our marks draw with is the writer's: written now, before the
+    // built PDF finishes its own.
+    cx.finish(built.pdf());
     let mut maps: HashMap<BlobId, HashMap<ObjectId, ObjectId>> = HashMap::new();
     for &id in theirs {
         let Some((page, f)) = st.annot(id).and_then(|a| Some((a.page, a.foreign()?))) else {

@@ -31,8 +31,8 @@ use sheaf_edit::{
 
 use super::sink::{self, Sink};
 use super::{
-    BlockId, Concat, ContentWriter, DrawText, Fonts, GenId, Glyphless, Need, PaginationKind, Res,
-    Reserved, ResourceNeeds, Std14, fixture, interp,
+    BlockId, Concat, ContentWriter, DrawText, Fonts, GenId, Glyphless, Glyphs, Need,
+    PaginationKind, Res, Reserved, ResourceNeeds, Std14, fixture, interp,
 };
 use crate::annot::{Annot, AnnotId, AnnotKind, Box2};
 use crate::export::Export;
@@ -174,6 +174,10 @@ impl Sink for Asked {
         ObjectId::new(self.0.len() as u32, 0)
     }
 
+    /// Nothing is written, so there's no subset to join to: the fallback's
+    /// marker among the resources says the appearance draws in it.
+    fn fallback(&mut self, _: &Glyphs) {}
+
     fn reserved(&mut self, _: Option<&Object>) -> Reserved {
         Reserved::default()
     }
@@ -206,7 +210,13 @@ fn stamp_form(matrix: Affine) -> StampForm {
 fn appearance(cases: &mut Cases, case: &str, a: &Annot, stamp: Option<StampForm>) {
     let drawn = crate::annot::appearance(a, stamp);
     let mut asked = Asked::default();
-    let form = sink::form_dict(&mut asked, drawn.bbox, drawn.matrix, &drawn.needs);
+    let form = sink::form_dict(
+        &mut asked,
+        drawn.bbox,
+        drawn.matrix,
+        &drawn.needs,
+        &Glyphs::new(),
+    );
     let resources = form.get(b"Resources").and_then(Object::as_dict);
     let mut fields = Vec::new();
     for (i, id) in asked.0.iter().enumerate() {
@@ -761,7 +771,7 @@ fn built(cases: &mut Cases) {
         w.end_text();
         let (content, needs) = w.finish(&Reserved::default());
         cases.written(&format!("built:page{n}"), &content, &needs);
-        built.page(Rect::new(0.0, 0.0, 612.0, 792.0), content, &needs);
+        built.page(Rect::new(0.0, 0.0, 612.0, 792.0), content, &needs.into());
     }
     let bytes = built.finish().expect("a built PDF");
     cases.0.extend(pages("built:file", &bytes));

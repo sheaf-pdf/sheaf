@@ -33,6 +33,13 @@
 //! [`Streams`]: super::Streams
 
 pub use pdf_forms::appearance::{Appearance, FieldFont, TextField, Unmade, WidgetLook, text};
+
+/// A text field's appearance in its font and a fallback for what that
+/// can't draw (M10 slice 7): the fallback's program and the resource the
+/// content names it by ([`FieldFallback`]), and the appearance with the
+/// fallback's glyphs it draws ([`MadeWithFallback`]), made by
+/// [`text_with_fallback`].
+pub use pdf_forms::appearance::{Fallback as FieldFallback, MadeWithFallback, text_with_fallback};
 pub use pdf_forms::{Cap, Error, FieldFlags, Limits, Quadding};
 
 /// The family's reading of a form, which tests set beside sheaf's: its

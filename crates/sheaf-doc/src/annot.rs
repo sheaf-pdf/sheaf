@@ -1173,7 +1173,11 @@ pub(crate) fn appearance(a: &Annot, stamp: Option<StampForm>) -> SynthesizedAp {
 pub(crate) fn pinned_pdf(ap: &Arc<PinnedAp>) -> anyhow::Result<Vec<u8>> {
     let mut built = Built::new();
     let form = FormRef::Pinned(ap.clone());
-    let made = WriteCx::new().stamp(&form, "", "a flattened mark", built.pdf());
+    // The appearance's resources are its writer's, the page's the PDF's:
+    // each finishes.
+    let mut cx = WriteCx::new();
+    let made = cx.stamp(&form, "", "a flattened mark", built.pdf());
+    cx.finish(built.pdf());
     built.form_page(made.context("its appearance couldn't be drawn")?);
     built.finish()
 }
@@ -2524,7 +2528,7 @@ pub fn tape_pdf(a: &Annot) -> Option<Vec<u8>> {
     tape_content(&mut w, at, *size, look, &tape, a.color, &page.from_view());
     let (content, needs) = w.finish(&Reserved::default());
     let mut built = Built::new();
-    built.page(page.media, content, &needs);
+    built.page(page.media, content, &needs.into());
     built
         .finish()
         .inspect_err(|e| log::warn!("a tape's picture: {e:#}"))
@@ -2816,6 +2820,7 @@ mod tests {
                 }
             }
         }
+        cx.finish(&mut pdf);
         // Helvetica, Helvetica-Bold and ZapfDingbats (the tick); every
         // mark at 0.8: those sheaf draws under one state, Normal, those
         // pdf-annots draws under its own, which names no blend, and the

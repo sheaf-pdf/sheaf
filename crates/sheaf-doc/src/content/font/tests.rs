@@ -245,7 +245,9 @@ fn fonts_as_resources() {
 
     let mut pdf = Pdf::with_version("1.7");
     pdf.add_object(dictionary! {});
-    let font = ResObjects::default().object(&mut pdf, &Glyphless.res());
+    let mut res = ResObjects::default();
+    let font = res.object(&mut pdf, &Glyphless.res());
+    res.finish(&mut pdf);
     assert_eq!(pdf.objects.len(), 7);
     let type0 = pdf.get_dictionary(font).unwrap();
     let cid = type0.get(b"DescendantFonts").unwrap().as_array().unwrap()[0]
@@ -465,4 +467,101 @@ fn every_character_encodes_as_it_always_has() {
         }
     }
     assert!(moved.is_empty(), "drawn otherwise:\n{}", moved.join("\n"));
+}
+
+// ----- the fallback font ---------------------------------------------------
+
+/// The fallback's program is the Noto project's Noto Sans Regular, opened
+/// once: its glyphs, a licence that lets it be embedded and cut, and how
+/// many characters its `cmap` maps.
+#[test]
+fn the_fallback_program_opens() {
+    let program = Fallback::SANS.program();
+    assert!(
+        std::ptr::eq(program, Fallback::SANS.program()),
+        "opened once"
+    );
+    assert_eq!(program.glyph_count(), 3884);
+    let embedding = program.embedding();
+    assert!(embedding.allows(&crate::pdf::fonts::EmbedOptions::default()));
+    assert!(embedding.subsetting && !embedding.bitmaps_only);
+    let mapped = ('\0'..=char::MAX).filter(|&c| program.glyph(c).is_some());
+    assert_eq!(mapped.count(), 2965);
+}
+
+/// It draws Latin, Greek and Cyrillic past WinAnsi, composed or not, line
+/// breaks apart; not CJK, emoji, Hebrew or Arabic, each refused at its
+/// first character's byte.
+#[test]
+fn the_fallback_covers_latin_greek_and_cyrillic() {
+    use crate::content::fixture::FALLBACK_TEXT;
+    use crate::pdf::gfx::UnencodableChar;
+
+    let sans = Fallback::SANS;
+    let decomposed: String = FALLBACK_TEXT.nfd().collect();
+    assert_ne!(decomposed, FALLBACK_TEXT);
+    let covered = [
+        FALLBACK_TEXT,
+        &decomposed,
+        "\u{395}\u{3BB}\u{3BB}\u{3B7}\u{3BD}\u{3B9}\u{3BA}\u{3AC}",
+        "\u{41A}\u{438}\u{440}\u{438}\u{43B}\u{43B}\u{438}\u{446}\u{430}",
+        "two\nlines\r\nhere",
+    ];
+    for text in covered {
+        assert_eq!(sans.covers(text), Ok(()), "{text:?}");
+    }
+    let refused = [
+        ("Mr \u{738B}", 3, '\u{738B}'),
+        ("ok \u{1F600}", 3, '\u{1F600}'),
+        ("\u{5E9}\u{5DC}\u{5D5}\u{5DD}", 0, '\u{5E9}'),
+        ("abc \u{645}\u{631}\u{62D}\u{628}\u{627}", 4, '\u{645}'),
+    ];
+    for (text, at, character) in refused {
+        assert_eq!(
+            sans.covers(text),
+            Err(UnencodableChar { at, character }),
+            "{text:?}"
+        );
+    }
+}
+
+/// Content names the fallback by a marker, the same resource every time
+/// and so the same name, which no resource of its objects is taken for.
+#[test]
+fn the_fallback_is_named_by_a_marker() {
+    let sans = Fallback::SANS;
+    let marker = sans.res();
+    assert_eq!(marker.id(), sans.res().id());
+    assert!(sans.is(&marker));
+    assert!(!sans.is(&Std14::Helvetica.res()) && !sans.is(&Glyphless.res()));
+    let ResBody::Objects(objects) = marker.body() else {
+        panic!("a marker is its dictionary")
+    };
+    assert!(!sans.is(&crate::content::Res::of(objects.clone()).unwrap()));
+    let named = || {
+        let mut w = crate::content::ContentWriter::new();
+        w.font(sans.res(), 12.0);
+        w.finish(&crate::content::Reserved::default())
+    };
+    assert_eq!(named(), named());
+}
+
+/// A subset is named by what it holds: the same glyphs, joined in any
+/// order, give the same resource; another glyph, another.
+#[test]
+fn equal_glyphs_give_an_equal_subset() {
+    let sans = Fallback::SANS;
+    let program = sans.program();
+    let (mut one, mut other) = (Glyphs::new(), Glyphs::new());
+    one.add(program, "\u{141}ukasz").unwrap();
+    one.add(program, "\u{D6}l\u{E7}er").unwrap();
+    other.add(program, "\u{D6}l\u{E7}er").unwrap();
+    let mut apart = Glyphs::new();
+    apart.add(program, "zsaku\u{141}").unwrap();
+    other.merge(&apart);
+    assert_eq!(one, other);
+    assert_eq!(sans.subset(&one).id(), sans.subset(&other).id());
+    let mut more = one.clone();
+    more.add(program, "\u{1EC5}").unwrap();
+    assert_ne!(sans.subset(&more).id(), sans.subset(&one).id());
 }

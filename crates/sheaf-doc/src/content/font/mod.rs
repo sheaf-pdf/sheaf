@@ -7,13 +7,19 @@
 //!   [`Glyphless`], OCR's invisible text; [`DrawText`] writes text in one.
 //! - [`Font`]: a file's font, its codes, widths and heights as PDFium
 //!   reads them, by the PDF layer; [`Fonts`], a source's, each read once.
+//! - [`Fallback`]: the font sheaf bundles to draw what another can't (M10
+//!   slice 7), embedded as a subset of the glyphs a file draws in it, and
+//!   bound late: content names a marker ([`Fallback::res`]), and what it
+//!   draws in it travels with what it draws with ([`Uses`]) to the sink
+//!   that writes the subset.
 //!
 //! Text a font can't encode draws `?` and is counted ([`Unencoded`]), so
 //! the writer can say so once; the text itself (`/Contents`, a recipe) is
 //! kept exactly. M10 slice 7's fallback font ends that, behind
-//! [`DrawFont`].
+//! [`DrawFont`], for what it draws.
 
 mod draw;
+mod fallback;
 mod glyphless;
 #[cfg(test)]
 mod tests;
@@ -26,10 +32,12 @@ use unicode_normalization::UnicodeNormalization;
 use crate::pdf::fonts::LayoutFont;
 
 pub use draw::DrawText;
+pub use fallback::{Fallback, Uses};
 pub use glyphless::Glyphless;
 
 pub use crate::pdf::fonts::{
-    Descendant, Font, FontApprox, FontKind, FontMetrics, FontProgram, Fonts, Std14, VerticalMetrics,
+    Descendant, Font, FontApprox, FontKind, FontMetrics, FontProgram, Fonts, Glyphs, Std14,
+    VerticalMetrics,
 };
 
 use super::Res;
@@ -44,12 +52,13 @@ pub struct Unencoded(pub usize);
 /// over them, written here once: a font says what it is ([`DrawFont::res`],
 /// [`DrawFont::composed`]) and takes the rest as given.
 ///
-/// Any font sheaf embeds is GID-preserving: a subset keeps each glyph's
-/// number from the whole font (CID = GID, `/CIDToGIDMap /Identity`), so
-/// the codes a string is drawn with depend only on the font and the text,
-/// and re-subsetting never changes them. [`Glyphless`], embedded whole,
-/// is the one exception: its CIDs are the text's UTF-16, all drawing its
-/// one glyph.
+/// Any font sheaf embeds draws a glyph by its number in the whole font: a
+/// code is that number, whatever subset a file embeds (each CID the
+/// glyph's number in the whole font, a `/CIDToGIDMap` stream taking it to
+/// the subset's own, as the [`Fallback`]'s does), so the codes a string is
+/// drawn with depend only on the font and the text, and re-subsetting
+/// never changes them. [`Glyphless`], embedded whole, is the one
+/// exception: its CIDs are the text's UTF-16, all drawing its one glyph.
 pub trait DrawFont: LayoutFont + Send + Sync {
     /// The font as a page resource: its dictionary and the objects it
     /// reaches, named by a digest of all of them, so a save writes one

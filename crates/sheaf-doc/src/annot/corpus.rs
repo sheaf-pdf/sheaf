@@ -15,7 +15,7 @@ use crate::attachments::Objects;
 use crate::content::Unkept;
 use crate::content::corpus::{each_dumped, written};
 use crate::content::sink::{self, Sink};
-use crate::content::{Res, Reserved};
+use crate::content::{Glyphs, Res, Reserved};
 use crate::file::{ForeignAnnot, Found, InFile, is_ours, walk};
 use crate::forms::corpus::Corpus;
 use crate::geom::{Affine, Rect};
@@ -175,6 +175,10 @@ impl Sink for Asked {
         ObjectId::new(self.0.len() as u32, 0)
     }
 
+    /// Nothing is written, so there's no subset to join to: the fallback's
+    /// marker among the resources says the appearance draws in it.
+    fn fallback(&mut self, _: &Glyphs) {}
+
     fn reserved(&mut self, _: Option<&Object>) -> Reserved {
         Reserved::default()
     }
@@ -192,7 +196,7 @@ fn made(line: &mut Line, prefix: &str, dict: &Dictionary, ap: SynthesizedAp) {
     }
     line.bits(&format!("{prefix}bbox"), &rect_bits(Rect::from(ap.bbox)));
     let mut asked = Asked::default();
-    let form = sink::form_dict(&mut asked, ap.bbox, ap.matrix, &ap.needs);
+    let form = sink::form_dict(&mut asked, ap.bbox, ap.matrix, &ap.needs, &Glyphs::new());
     let resources = form.get(b"Resources").and_then(Object::as_dict);
     let mut needs = Vec::new();
     for (i, id) in asked.0.iter().enumerate() {

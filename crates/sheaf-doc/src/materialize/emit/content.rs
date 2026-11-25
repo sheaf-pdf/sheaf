@@ -123,9 +123,9 @@ use crate::pdf::{
 use super::{Cx, Deferred, PdfVersion};
 use crate::content::sink::{self, Sink as _};
 use crate::content::{
-    self, Balance, BlockAt, BlockId, Concat, ContentWriter, GenId, Marker, NameSet, PagOrigin,
-    PageBlocks, PageContent, Pagination, PaginationKind, Pos, Res, ResBody, ResCx, ResId, ResKind,
-    Reserved, ResourceNeeds, Rewrite, SheafBlock, SpanAcross, SpliceError, Spliced,
+    self, Balance, BlockAt, BlockId, Concat, ContentWriter, GenId, Glyphs, Marker, NameSet,
+    PagOrigin, PageBlocks, PageContent, Pagination, PaginationKind, Pos, Res, ResBody, ResCx,
+    ResId, ResKind, Reserved, ResourceNeeds, Rewrite, SheafBlock, SpanAcross, SpliceError, Spliced,
 };
 use crate::generate::{self, Art};
 use crate::geom::Geom;
@@ -1243,7 +1243,7 @@ fn page_res(
             }
             resources.set(kind.key(), category);
         }
-        sink::bind(cx, needs, &mut resources);
+        sink::bind(cx, needs, &Glyphs::new(), &mut resources);
         cx.page_res.insert(key, resources);
     }
     let resources = cx.placeholder(key);

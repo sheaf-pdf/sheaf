@@ -605,6 +605,59 @@ fn plugin_text_leaves_field_values_out() {
     }
 }
 
+/// A page drawn in the fallback font (M10 slice 7), its subset's codes
+/// each its glyph's number in the whole program behind a `/CIDToGIDMap`
+/// stream: PDFium draws it, pixel for pixel, as it draws the page with
+/// the whole program embedded under `/Identity`, ink where the text is
+/// and nowhere else, and reads the text back.
+#[test]
+fn pdfium_draws_and_reads_a_page_in_the_fallback_font() {
+    use sheaf_doc::content::fixture::{
+        FALLBACK_TEXT, fallback_page, subsets_hold, whole_fallback_page,
+    };
+    use sheaf_image::raster::PixelFormat;
+    use sheaf_render::Job;
+    let render = |bytes: &[u8]| {
+        let engine = PdfiumEngine::open_bytes(bytes.into(), None).unwrap();
+        let job = Job::Page {
+            width: 1224,
+            rotation: Rotation::R0,
+        };
+        engine.render(PageIndex(0), job, PixelFormat::Rgba).unwrap()
+    };
+    let subset = fallback_page(FALLBACK_TEXT);
+    assert_eq!(subsets_hold(&subset), FALLBACK_TEXT.chars().count());
+    let drawn = render(&subset);
+    let whole = render(&whole_fallback_page(FALLBACK_TEXT));
+    assert_eq!((drawn.width, drawn.height), (whole.width, whole.height));
+    assert!(
+        drawn.data == whole.data,
+        "the subset draws as the whole program"
+    );
+    // Two pixels a point, from the top: the line's baseline is 92 pt down,
+    // its ascent 26 pt above it and its descent 7 pt below, from 72 pt in.
+    let (mut inside, mut outside) = (0, 0);
+    for (i, px) in drawn.data.chunks(4).enumerate() {
+        let (x, y) = (i % drawn.width as usize, i / drawn.width as usize);
+        let line = (2 * 70..2 * 420).contains(&x) && (2 * 60..2 * 106).contains(&y);
+        match (px[..3] != [255, 255, 255], line) {
+            (true, true) => inside += 1,
+            (true, false) => outside += 1,
+            _ => {}
+        }
+    }
+    println!("the fallback's line: {inside} px of ink, {outside} outside");
+    assert!(inside > 2000, "{inside} px of ink");
+    assert_eq!(outside, 0);
+    let chars = pdfium_s(&subset, 0);
+    assert_eq!(
+        words(&chars),
+        ["\u{141}ukasz", "Nguy\u{1EC5}n", "\u{D6}l\u{E7}er"]
+    );
+    let read: String = chars.glyphs.iter().map(|g| g.ch).collect();
+    assert_eq!(read, FALLBACK_TEXT);
+}
+
 sheaf_doc::both_ways!(
     a_saved_block_over_an_unbalanced_base_stays_in_place,
     a_saved_block_over_an_unbalanced_base_stays_in_place_appended: block_in_place

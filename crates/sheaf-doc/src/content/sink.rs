@@ -9,6 +9,12 @@
 //! A dictionary and what a sink reads for it are in one space: a built
 //! PDF's object numbers, or the emitter's placeholders.
 //!
+//! What content draws in the fallback font ([`Fallback`]) is joined where
+//! its resources are bound ([`bind`], [`form`] and [`form_dict`] take its
+//! [`Glyphs`] beside its needs and call [`Sink::fallback`] themselves), so
+//! nothing binds the fallback's marker without joining what it draws: the
+//! sink writes the subset once it has them all.
+//!
 //! [`ContentWriter`]: super::ContentWriter
 
 use crate::pdf::content::Limits;
@@ -16,7 +22,7 @@ use crate::pdf::gfx::{Matrix, Rect};
 use crate::pdf::{Dictionary, Object, ObjectId, Stream, StreamExt, Value, dictionary, resolve_fn};
 use crate::source;
 
-use super::{Res, ResKind, Reserved, ResourceNeeds};
+use super::{Fallback, Glyphs, Res, ResKind, Reserved, ResourceNeeds};
 
 /// What content's resources are read through and written to.
 pub trait Sink {
@@ -27,8 +33,17 @@ pub trait Sink {
     /// The array object `id` is.
     fn array(&mut self, id: ObjectId) -> Option<Vec<Object>>;
 
-    /// `res`'s object, written once however many pages draw with it.
+    /// `res`'s object, written once however many pages draw with it. The
+    /// fallback's marker ([`Fallback::res`]) is given the number its subset
+    /// is written at, once every glyph is joined ([`Sink::fallback`]).
     fn resource(&mut self, res: &Res) -> ObjectId;
+
+    /// Joins `glyphs`, drawn in the fallback font by content whose
+    /// resources are being bound, to the subset of it the sink writes: the
+    /// font it gave the marker's number ([`Sink::resource`]). [`bind`]
+    /// calls it with what it binds, so nothing binds the marker without
+    /// joining what it draws.
+    fn fallback(&mut self, glyphs: &Glyphs);
 
     /// The names a page's `resources` binds, which new content keeps
     /// clear of.
@@ -61,8 +76,23 @@ pub fn resources(sink: &mut dyn Sink, page: &Dictionary) -> Dictionary {
 /// `needs` written through `sink` and bound in `resources`, a resources
 /// dictionary about to be written: each under its name in its category.
 /// A category that's a reference is copied in first, so a dictionary
-/// other pages share is never changed.
-pub fn bind(sink: &mut dyn Sink, needs: &ResourceNeeds, resources: &mut Dictionary) {
+/// other pages share is never changed. `glyphs`, what the content draws
+/// in the fallback font, are joined ([`Sink::fallback`]): content names
+/// the fallback if and only if it draws a glyph in it.
+pub fn bind(
+    sink: &mut dyn Sink,
+    needs: &ResourceNeeds,
+    glyphs: &Glyphs,
+    resources: &mut Dictionary,
+) {
+    debug_assert_eq!(
+        (needs.0.iter()).any(|need| Fallback::SANS.is(&need.res)),
+        !glyphs.is_empty(),
+        "content names the fallback font if and only if it draws a glyph in it"
+    );
+    if !glyphs.is_empty() {
+        sink.fallback(glyphs);
+    }
     for need in &needs.0 {
         let id = sink.resource(&need.res);
         let key = need.kind.key();
@@ -79,17 +109,19 @@ pub fn bind(sink: &mut dyn Sink, needs: &ResourceNeeds, resources: &mut Dictiona
 /// An appearance's form XObject, made from its parts: its box (`/BBox`),
 /// its matrix (`/Matrix`, where it isn't the identity), its content,
 /// compressed, and what that draws with, `needs`, written through `sink`
-/// once a file each and bound in its `/Resources` ([`bind`]). Whoever
-/// drew the appearance (`pdf::annots::SynthesizedAp`'s parts, a mark's,
-/// drawn by sheaf or by the family), its form is made here.
+/// once a file each and bound in its `/Resources` ([`bind`]), and
+/// `glyphs`, what it draws in the fallback font, joined. Whoever drew the
+/// appearance (`pdf::annots::SynthesizedAp`'s parts, a mark's, drawn by
+/// sheaf or by the family), its form is made here.
 pub fn form(
     sink: &mut dyn Sink,
     bbox: Rect,
     matrix: Matrix,
     content: Vec<u8>,
     needs: &ResourceNeeds,
+    glyphs: &Glyphs,
 ) -> Stream {
-    let mut form = Stream::new(form_dict(sink, bbox, matrix, needs), content);
+    let mut form = Stream::new(form_dict(sink, bbox, matrix, needs, glyphs), content);
     form.compress();
     form
 }
@@ -102,9 +134,10 @@ pub fn form_dict(
     bbox: Rect,
     matrix: Matrix,
     needs: &ResourceNeeds,
+    glyphs: &Glyphs,
 ) -> Dictionary {
     let mut resources = Dictionary::new();
-    bind(sink, needs, &mut resources);
+    bind(sink, needs, glyphs, &mut resources);
     let numbers = |n: &[f32]| Object::from(n.iter().copied().map(Object::from).collect::<Vec<_>>());
     let mut dict = dictionary! {
         "Type" => Object::name("XObject"),
@@ -179,9 +212,10 @@ mod tests {
         let mut res = ResObjects::default();
         let mut first = dictionary! { "Font" => shared_fonts };
         let mut second = Dictionary::new();
-        res.bind(&mut pdf, &needs, &mut first);
+        let none = Glyphs::new();
+        res.bind(&mut pdf, &needs, &none, &mut first);
         let count = pdf.objects.len();
-        res.bind(&mut pdf, &needs, &mut second);
+        res.bind(&mut pdf, &needs, &none, &mut second);
         assert_eq!(pdf.objects.len(), count, "nothing written twice");
         assert_eq!(first.get(b"Font").unwrap().as_dict().unwrap().len(), 2);
         assert_eq!(
@@ -220,6 +254,7 @@ mod tests {
         let q = q.0;
         let q = pdf.get_object(q).unwrap().as_stream().unwrap();
         assert_eq!(q.decompressed_content().unwrap(), b"q\n");
+        res.finish(&mut pdf);
     }
 
     /// A sink over a document's objects that writes nothing.
@@ -235,6 +270,10 @@ mod tests {
         }
 
         fn resource(&mut self, _: &Res) -> ObjectId {
+            unreachable!("nothing is written")
+        }
+
+        fn fallback(&mut self, _: &Glyphs) {
             unreachable!("nothing is written")
         }
 
@@ -266,6 +305,9 @@ mod tests {
             }
         }
 
+        /// Nothing is written, so there's no subset to join to.
+        fn fallback(&mut self, _: &Glyphs) {}
+
         fn reserved(&mut self, resources: Option<&Object>) -> Reserved {
             reserved_shallow(self, resources)
         }
@@ -290,7 +332,15 @@ mod tests {
         let numbers =
             |n: &[f32]| Object::from(n.iter().map(|&v| Object::from(v)).collect::<Vec<_>>());
         for matrix in [Matrix::IDENTITY, turned] {
-            let made = form(&mut Numbers(0), bbox, matrix, content.clone(), &needs);
+            let none = Glyphs::new();
+            let made = form(
+                &mut Numbers(0),
+                bbox,
+                matrix,
+                content.clone(),
+                &needs,
+                &none,
+            );
             let keys: Vec<&[u8]> = made.dict.iter().map(|(k, _)| k).collect();
             let mut expected: Vec<&[u8]> = vec![b"Type", b"Subtype", b"BBox"];
             if matrix != Matrix::IDENTITY {
@@ -318,7 +368,7 @@ mod tests {
                 Some(&Object::from(ObjectId::new(40, 0)))
             );
             assert_eq!(made.decompressed_content().unwrap(), content);
-            let alone = form_dict(&mut Numbers(0), bbox, matrix, &needs);
+            let alone = form_dict(&mut Numbers(0), bbox, matrix, &needs, &none);
             for (key, value) in alone.iter() {
                 assert_eq!(made.dict.get(key), Some(value));
             }
