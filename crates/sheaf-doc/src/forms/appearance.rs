@@ -1,15 +1,20 @@
-//! A text field's appearance, sheaf's half (M10 slice 6): what one widget's
-//! appearance is made from, as plain data out of the model ([`TextLook`],
-//! [`text_look`]), which widgets need one made ([`stale`]), the font it's
-//! drawn in, read once a name from its source's `/DR` (`read_font`,
-//! through [`Source::field_font`](crate::Source::field_font), and
-//! [`font`]), the name the appearance gives that font ([`font_res_id`],
-//! [`font_res`]), the caps it's made under ([`limits`]), and the making
-//! ([`make`]), which is pdf-forms' ([`crate::pdf::forms::text_with_fallback`]):
-//! its `/DA` parser, encoders, layout, borders, `/MK /R` and `/Tx BMC`, and
-//! a value in runs of the field's font and sheaf's fallback font
-//! ([`Fallback`](crate::content::Fallback), M10 slice 7) for what the
-//! field's can't draw.
+//! A widget's appearance, sheaf's half (M10 slices 6 and 8): what one
+//! widget's appearance is made from, as plain data out of the model, by
+//! its kind ([`Look`], [`look`]), with what every kind shares read once
+//! ([`Frame`]: the box, `/MK`, the border and the `/DA`); which widgets need
+//! one made ([`stale`]); the font it's drawn in, read once a name from its
+//! source's `/DR` (`read_font`, through
+//! [`Source::field_font`](crate::Source::field_font), and [`font`]); the
+//! name the appearance gives that font ([`font_res_id`], [`font_res`]); the
+//! caps it's made under ([`limits`]); and the making ([`make`]), which is
+//! pdf-forms': its `/DA` parser, encoders, layout, borders, `/MK /R` and
+//! `/Tx BMC`, and text in runs of the field's font and sheaf's fallback
+//! font ([`Fallback`](crate::content::Fallback), M10 slice 7) for what the
+//! field's can't draw. What's made is a form for each slot of the
+//! widget's `/AP` ([`Made`], [`Slot`]).
+//!
+//! Each kind is a module of its own: a text field's widget (`text`,
+//! [`TextLook`]). What they share is here.
 //!
 //! What's sheaf's and stays here: the model and its records, which widgets
 //! are made, the caps, a source's font cache, the names a made form gives
@@ -22,40 +27,51 @@ use std::sync::{Arc, LazyLock};
 
 use super::field::{self, Border, BorderStyle, FieldKind, Value};
 use crate::annot::AnnotId;
-use crate::content::{Fallback, Objects, Unkept};
+use crate::content::{Glyphs, Objects, Unkept};
 use crate::model::{DocState, FieldNode, Widget};
 use crate::pdf::annots::Cap as AnnotsCap;
 use crate::pdf::content::{Color, Res, ResBody, ResId};
 use crate::pdf::fonts::Std14;
-use crate::pdf::forms::{
-    Cap, Error, FieldFlags, FieldFont, Limits, MadeWithFallback, Quadding, TextField, Unmade,
-    WidgetLook, text_with_fallback,
-};
+use crate::pdf::forms::{Appearance, Cap, Error, FieldFont, Limits, Quadding, Unmade, WidgetLook};
 use crate::pdf::gfx::{BoxBorder, BoxBorderStyle, DefaultAppearance};
 use crate::pdf::{ObjectId, Why};
 use crate::source::{FieldFontRead, Source};
 use crate::store::BlobId;
 
+mod text;
+
+pub use text::TextLook;
+
 #[cfg(test)]
 pub(crate) mod tests;
 
-/// What one text widget's appearance is made from: owned plain data out of
-/// the model, as [`text_look`] gives it, and what [`make`] makes it of.
+/// What one widget's appearance is made from, by its kind: owned plain data
+/// out of the model, as [`look`] gives it, and what [`make`] makes it of.
 ///
-/// `Debug` prints lengths and numbers, never the text.
+/// `Debug` prints lengths and numbers, never a text.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Look {
+    /// A text field's widget.
+    Text(TextLook),
+}
+
+impl Look {
+    /// What's drawn around it, and its effective `/DA`.
+    pub fn frame(&self) -> &Frame {
+        match self {
+            Look::Text(look) => &look.frame,
+        }
+    }
+}
+
+/// What every kind of widget's appearance is drawn around and in, read
+/// once from the model (`frame`, as [`look`] reads a look): the widget's
+/// box, its `/MK` colors and rotation, its border, and its effective
+/// `/DA`.
+///
+/// `Debug` prints numbers and the `/DA`'s length, never its bytes.
 #[derive(Clone, PartialEq)]
-pub struct TextLook {
-    /// The text shown: the field's value now; once an op carries one, the
-    /// display string a format script gives for it (M10 slice 9), which
-    /// pdf-forms draws as it draws a value.
-    pub text: Arc<str>,
-    /// The field's `/Ff` (see [`field::flags`]).
-    pub flags: u32,
-    /// Its `/MaxLen`, as the file has it.
-    pub max_len: Option<u32>,
-    /// `/Q`: 0 left, 1 centered, 2 right. The widget's own, else its
-    /// field's, else its form's.
-    pub align: u8,
+pub struct Frame {
     /// The widget's box: its `/Rect`'s width and height.
     pub width: f32,
     pub height: f32,
@@ -72,13 +88,9 @@ pub struct TextLook {
     pub da: Vec<u8>,
 }
 
-impl fmt::Debug for TextLook {
+impl fmt::Debug for Frame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let TextLook {
-            text,
-            flags,
-            max_len,
-            align,
+        let Frame {
             width,
             height,
             background,
@@ -87,11 +99,7 @@ impl fmt::Debug for TextLook {
             border,
             da,
         } = self;
-        f.debug_struct("TextLook")
-            .field("text_len", &text.len())
-            .field("flags", &format_args!("{flags:#x}"))
-            .field("max_len", max_len)
-            .field("align", align)
+        f.debug_struct("Frame")
             .field("width", width)
             .field("height", height)
             .field("background", background)
@@ -103,58 +111,92 @@ impl fmt::Debug for TextLook {
     }
 }
 
-impl TextLook {
+impl Frame {
     /// The font name its `/DA` gives (`Tf`), parsed as [`make`] parses it:
     /// none where it names none, and the text is drawn in Helvetica.
     pub fn font_name(&self) -> Option<Vec<u8>> {
-        parsed(&self.da, &limits()).font_name
+        self.da(&limits()).font_name
+    }
+
+    /// Its `/DA` parsed as pdf-forms parses one under `limits`: none, or
+    /// one that doesn't parse, is the empty one, which draws in Helvetica
+    /// at an automatic size.
+    fn da(&self, limits: &Limits) -> DefaultAppearance {
+        match self.da.is_empty() {
+            true => DefaultAppearance::default(),
+            false => DefaultAppearance::parse(&self.da, &limits.annots.content).unwrap_or_default(),
+        }
+    }
+
+    /// The widget's box and what's drawn around it, as pdf-forms' makers
+    /// take them.
+    fn widget(&self) -> WidgetLook<'_> {
+        let mut widget: WidgetLook<'_> = WidgetLook::new(self.width, self.height);
+        widget.background = self.background.map(color);
+        widget.border_color = self.border_color.map(color);
+        widget.rotation = i32::from(self.rotation);
+        let Border { width, style, dash } = &self.border;
+        widget.border = BoxBorder::new(*width, box_style(*style)).with_dash(dash);
+        widget
     }
 }
 
-/// What widget `aid`'s appearance is made from, where it's a text field's
-/// widget: its terminal's value and flags, `/MaxLen` and `/Q`, the widget's
-/// box, `/MK` and border, and the effective `/DA`. The `/DA` and `/Q` are
-/// the widget's own, else the terminal's (its own or a parent's, as read),
-/// else its instance's form's: the document's ([`FormDoc`]) for an instance
-/// of the file the document opened, the instance's source's for another,
-/// as the emitter writes each instance's form (`Fields::defaults`). None
-/// for any other annotation, and for a widget whose field isn't a terminal.
-///
-/// [`FormDoc`]: crate::model::FormDoc
-pub fn text_look(st: &DocState, aid: AnnotId) -> Option<TextLook> {
-    let w = st.annot(aid)?.widget()?;
-    let node = st.field(w.field)?;
-    let term = node.term.as_deref()?;
-    if term.kind != FieldKind::Text {
-        return None;
+/// What widget `aid`'s appearance is made from, by its kind: a text
+/// field's widget's ([`TextLook`]). Every kind's frame is the widget's box,
+/// `/MK` and border, and its effective `/DA`: the widget's own, else the
+/// terminal's (its own or a parent's, as read), else its instance's form's
+/// (`form_defaults`). [`Unmade::NotText`] for any other annotation, a
+/// widget whose field isn't a terminal, and a field of a kind no look is
+/// read for. It doesn't ask [`stale`]: a look is read for any widget.
+pub fn look(st: &DocState, aid: AnnotId) -> Result<Look, Unmade> {
+    let found = (st.annot(aid).and_then(|rec| rec.widget())).and_then(|w| {
+        let node = st.field(w.field)?;
+        Some((w, node, node.term.as_deref()?))
+    });
+    let Some((w, node, term)) = found else {
+        return Err(Unmade::NotText);
+    };
+    match term.kind {
+        FieldKind::Text => Ok(Look::Text(text::look(st, w, node, term))),
+        _ => Err(Unmade::NotText),
     }
-    let (form_da, form_align) = form_defaults(st, w, node);
+}
+
+/// Widget `w`'s frame, `node` its field: its `/Rect`'s size, its `/MK`
+/// colors and rotation, its border (width 1, solid, where it has none), and
+/// the effective `/DA`, the widget's own, else its terminal's, else its
+/// instance's form's ([`form_defaults`]).
+fn frame(st: &DocState, w: &Widget, node: &FieldNode) -> Frame {
+    let term = node.term.as_deref();
+    let (form_da, _) = form_defaults(st, w, node);
     let da = (w.da.as_deref())
-        .or(term.props.da.as_deref())
-        .or(form_da.as_deref());
-    let border = (w.props.border.clone()).unwrap_or(Border::solid(1.0));
-    Some(TextLook {
-        text: text_of(term.value.as_ref()),
-        flags: term.flags,
-        max_len: term.props.max_len,
-        align: (w.props.align.or(term.props.align)).unwrap_or(form_align),
+        .or(term.and_then(|t| t.props.da.as_deref()))
+        .or(form_da);
+    Frame {
         width: w.rect[2] - w.rect[0],
         height: w.rect[3] - w.rect[1],
         background: w.mk.background,
         border_color: w.mk.border_color,
         rotation: w.mk.rotation,
-        border,
+        border: (w.props.border.clone()).unwrap_or(Border::solid(1.0)),
         // A `/DA` is held a character a byte (Latin-1), so its bytes come
         // back whole.
         da: da.map_or_else(Vec::new, |da| da.chars().map(|c| c as u8).collect()),
-    })
+    }
 }
 
 /// The `/DA` and `/Q` widget `w`'s instance's form gives the fields that
-/// set neither: the document's for an instance of the file it opened, else
-/// the instance's source's as read; the document's where the widget names
-/// no source.
-fn form_defaults(st: &DocState, w: &Widget, node: &FieldNode) -> (Option<Arc<str>>, u8) {
+/// set neither: the document's ([`FormDoc`]) for an instance of the file
+/// it opened, else the instance's source's as read; the document's where
+/// the widget names no source. As the emitter writes each instance's form
+/// (`Fields::defaults`).
+///
+/// [`FormDoc`]: crate::model::FormDoc
+fn form_defaults<'a>(
+    st: &'a DocState,
+    w: &'a Widget,
+    node: &'a FieldNode,
+) -> (Option<&'a str>, u8) {
     let doc = st.form();
     let inst = w.inst.src;
     let src = [&w.src, &node.src]
@@ -164,22 +206,77 @@ fn form_defaults(st: &DocState, w: &Widget, node: &FieldNode) -> (Option<Arc<str
     match src {
         Some(r) if Some(inst) != st.opened_file() => {
             let facts = &r.src.form().facts;
-            (facts.da.clone(), facts.align)
+            (facts.da.as_deref(), facts.align)
         }
-        _ => (doc.da.clone(), doc.align),
+        _ => (doc.da.as_deref(), doc.align),
     }
 }
 
-/// The text a text field's value shows: none and an empty one alike.
-fn text_of(value: Option<&Value>) -> Arc<str> {
-    static EMPTY: LazyLock<Arc<str>> = LazyLock::new(|| Arc::from(""));
-    match value {
-        Some(Value::Text(text)) => text.clone(),
-        _ => EMPTY.clone(),
+/// Where in a widget's `/AP` a made form goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Slot {
+    /// `/N`, the normal appearance: a text field's one form.
+    Normal,
+}
+
+/// What [`make`] makes of a look: each form, by the slot of the widget's
+/// `/AP` it goes in, and the glyphs they draw in the fallback font
+/// ([`Fallback::SANS`](crate::content::Fallback::SANS)), which whatever
+/// writes a form that names the fallback joins where it binds it
+/// ([`sink::form`](crate::content::sink::form)): none where the field's font
+/// draws all of the text.
+///
+/// `Debug` prints each form's slot and parts, and how many glyphs, never
+/// a glyph or its text.
+#[derive(Clone, PartialEq)]
+pub struct Made {
+    pub forms: Vec<(Slot, Appearance)>,
+    pub glyphs: Glyphs,
+}
+
+impl fmt::Debug for Made {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Made")
+            .field("forms", &self.forms)
+            .field("glyphs", &self.glyphs.len())
+            .finish()
     }
 }
 
-/// [`text_of`], borrowed.
+impl Made {
+    /// The form made for `slot`, where one was.
+    pub fn form(&self, slot: Slot) -> Option<&Appearance> {
+        (self.forms.iter())
+            .find(|(s, _)| *s == slot)
+            .map(|(_, form)| form)
+    }
+}
+
+/// The font a look's text is drawn in: the one its `/DA` names, as its
+/// widget's source reads it ([`font`]), and the resource its forms name
+/// that font by ([`font_res`]). What it can't draw is drawn in the
+/// fallback.
+pub struct DaFont<'a> {
+    pub font: &'a FieldFont,
+    pub res: Res,
+}
+
+/// `look`'s appearance, a form for each slot of its widget's `/AP`, in
+/// `font` and the fallback font ([`Fallback::SANS`]) for what that can't
+/// draw, under [`limits`]: a text field's widget's, its `/N` alone
+/// (`text`). Pure: the same look, font and name give the same bytes and
+/// glyphs. It doesn't ask [`stale`]: whatever reads a look for a widget
+/// nothing changed makes one as for any other.
+///
+/// [`Fallback::SANS`]: crate::content::Fallback::SANS
+pub fn make(look: &Look, font: DaFont<'_>) -> Result<Made, Unmade> {
+    match look {
+        Look::Text(look) => text::make(look, font),
+    }
+}
+
+/// The text a text field's value shows, borrowed: none and an empty one
+/// alike.
 fn shows(value: Option<&Value>) -> &str {
     match value {
         Some(Value::Text(text)) => text,
@@ -237,16 +334,6 @@ pub fn limits() -> Limits {
     limits
 }
 
-/// `da` parsed as pdf-forms parses a `/DA` under `limits`: none, or one
-/// that doesn't parse, is the empty one, which draws in Helvetica at an
-/// automatic size.
-fn parsed(da: &[u8], limits: &Limits) -> DefaultAppearance {
-    match da.is_empty() {
-        true => DefaultAppearance::default(),
-        false => DefaultAppearance::parse(da, &limits.annots.content).unwrap_or_default(),
-    }
-}
-
 /// The font a field whose `/DA` names `name` is drawn in, read from `src`:
 /// its form's `/DR /Font` entry of that name, found from the catalog and
 /// read by pdf-forms (`FieldFont::find_in_catalog`: the walk to
@@ -264,14 +351,15 @@ pub(crate) fn read_font(src: &Source, name: &[u8]) -> Result<FieldFont, Error> {
     }
 }
 
-/// The font `look` is drawn in, from `src`, its widget's source: the one
-/// its `/DA` names ([`Source::field_font`]), or Helvetica where it names
-/// none, as PDFium draws such a field.
-pub fn font(src: &Source, look: &TextLook) -> FieldFontRead {
+/// The font a widget whose `/DA` names `name` ([`Frame::font_name`]) is
+/// drawn in, from `src`, its widget's source: the one that names
+/// ([`Source::field_font`]), or Helvetica where it names none, as PDFium
+/// draws such a field.
+pub fn font(src: &Source, name: Option<&[u8]>) -> FieldFontRead {
     static HELVETICA: LazyLock<Arc<FieldFont>> =
         LazyLock::new(|| Arc::new(FieldFont::standard(Std14::Helvetica)));
-    match look.font_name() {
-        Some(name) => src.field_font(&name),
+    match name {
+        Some(name) => src.field_font(name),
         None => Ok(HELVETICA.clone()),
     }
 }
@@ -337,39 +425,6 @@ pub fn font_res(
     };
     let body = ResBody::Written(written(at));
     Res::named(font_res_id(blob, copy, at), body).expect("an object written is a resource")
-}
-
-/// `look`'s appearance in `font`, named by `font_res`, and the fallback
-/// font ([`Fallback::SANS`]) for what `font` can't draw: its `/DA` parsed
-/// (none, or one that doesn't parse, is the empty one: Helvetica at an
-/// automatic size), then pdf-forms' maker under [`limits`]
-/// ([`text_with_fallback`]), each grapheme cluster in the first of the two
-/// that draws the whole of it. What's made is the appearance and the
-/// glyphs it draws in the fallback, which whatever writes its form joins
-/// where it binds it ([`sink::form`]): none where `font` draws all of the
-/// text, and then the appearance names `font` alone, byte for byte as
-/// one font draws it. A cluster neither draws is
-/// [`Unmade::Unencodable`]. Pure: the same look, font and name give the
-/// same bytes and glyphs.
-///
-/// [`text_with_fallback`]: crate::pdf::forms::text_with_fallback
-/// [`sink::form`]: crate::content::sink::form
-pub fn make(look: &TextLook, font: &FieldFont, font_res: Res) -> Result<MadeWithFallback, Unmade> {
-    let limits = limits();
-    let da = parsed(&look.da, &limits);
-    let mut field = TextField::new(&look.text);
-    field.flags = FieldFlags::from_bits(look.flags);
-    field.max_len = look.max_len;
-    field.quadding = quadding(look.align);
-    let mut widget: WidgetLook<'_> = WidgetLook::new(look.width, look.height);
-    widget.background = look.background.map(color);
-    widget.border_color = look.border_color.map(color);
-    widget.rotation = i32::from(look.rotation);
-    let Border { width, style, dash } = &look.border;
-    widget.border = BoxBorder::new(*width, box_style(*style)).with_dash(dash);
-    let fallback = Fallback::SANS.field();
-    let layout = font.layout();
-    text_with_fallback(&field, &widget, &da, font_res, &layout, &fallback, &limits)
 }
 
 /// Which kind of reason `why` is that an appearance wasn't made, as a

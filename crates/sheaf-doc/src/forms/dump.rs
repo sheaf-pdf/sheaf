@@ -7,8 +7,8 @@
 //! appearance, beside what was there (M10 slice 6).
 //!
 //! **sheaf's reading** is the plain data its model holds for the widget
-//! ([`TextLook`], as [`text_look`] reads it from the file opened as a
-//! document): its text, flags, `/MaxLen` and justification (its own, else
+//! ([`TextLook`], as [`appearance::look`] reads it from the file opened as
+//! a document): its text, flags, `/MaxLen` and justification (its own, else
 //! its field's, else the form's); its box, `/MK` colors and rotation, and
 //! its border and dashes (none is the width of 1, solid, that a widget
 //! with no `/BS` and no `/Border` has); and its effective `/DA` (its own,
@@ -55,7 +55,7 @@ use crate::annot::AnnotId;
 use crate::content::corpus::{each_path, written};
 use crate::content::{Fallback, Objects, Unkept};
 use crate::forms::FormClass;
-use crate::forms::appearance::{self, FontAt, TextLook, text_look};
+use crate::forms::appearance::{self, DaFont, FontAt, Look, Slot, TextLook};
 use crate::forms::corpus::Corpus;
 use crate::forms::field::{self, Field, FieldKind};
 use crate::forms::fixture::sample;
@@ -104,13 +104,14 @@ struct Plain {
 
 impl Plain {
     /// What sheaf's model gives of a text widget ([`TextLook`], as
-    /// [`text_look`] reads it from the opened document), as [`Plain`]
-    /// says, its `/DA` parsed as the family parses one.
+    /// [`appearance::look`] reads it from the opened document), as
+    /// [`Plain`] says, its `/DA` parsed as the family parses one.
     fn of_look(look: &TextLook) -> Plain {
-        let da = match look.da.is_empty() {
+        let frame = &look.frame;
+        let da = match frame.da.is_empty() {
             true => DefaultAppearance::default(),
             false => {
-                (DefaultAppearance::parse(&look.da, &LIMITS.annots.content)).unwrap_or_default()
+                (DefaultAppearance::parse(&frame.da, &LIMITS.annots.content)).unwrap_or_default()
             }
         };
         Plain {
@@ -118,15 +119,15 @@ impl Plain {
             flags: look.flags,
             max_len: look.max_len,
             quadding: appearance::quadding(look.align),
-            width: look.width,
-            height: look.height,
-            background: look.background.map(appearance::color),
-            border_color: look.border_color.map(appearance::color),
-            rotation: i32::from(look.rotation),
+            width: frame.width,
+            height: frame.height,
+            background: frame.background.map(appearance::color),
+            border_color: frame.border_color.map(appearance::color),
+            rotation: i32::from(frame.rotation),
             border: (
-                look.border.width,
-                appearance::box_style(look.border.style),
-                look.border.dash.clone(),
+                frame.border.width,
+                appearance::box_style(frame.border.style),
+                frame.border.dash.clone(),
             ),
             da,
         }
@@ -357,18 +358,16 @@ where
 
 /// The family's appearance of `read` with its text `text`, in `font`, the
 /// family's reading of its `/DA`'s font, and the fallback: what
-/// [`made_name`] says.
-fn family_made(
-    read: &forms::WidgetText<'_>,
-    text: &str,
-    font: &Result<FieldFont, Error>,
-) -> Result<MadeWithFallback, Unmade> {
+/// [`made_name`] says, its one form `/N`'s, as sheaf's is.
+fn family_made(read: &forms::WidgetText<'_>, text: &str, font: &Result<FieldFont, Error>) -> Made {
     let font = font.as_ref().map_err(|e| Unmade::from(e.clone()))?;
     let res = font.res().ok_or(Unmade::FontNotBindable)?;
     let mut field = read.field();
     field.text = text;
     let look = read.look();
-    forms::text_with_fallback(
+    let MadeWithFallback {
+        appearance, glyphs, ..
+    } = forms::text_with_fallback(
         &field,
         &look,
         read.default_appearance(),
@@ -376,7 +375,11 @@ fn family_made(
         &font.layout(),
         &Fallback::SANS.field(),
         &LIMITS,
-    )
+    )?;
+    Ok(appearance::Made {
+        forms: vec![(Slot::Normal, appearance)],
+        glyphs,
+    })
 }
 
 /// sheaf's appearance of `look` with its text `text`, as the emitter makes
@@ -387,36 +390,43 @@ fn family_made(
 /// by an entry, which the emitter writes as an object of its own, is
 /// bound here to no object: the content's bytes are the same.
 fn ours_made(src: &Source, look: &TextLook, text: &str, copy: u32) -> (Made, Made) {
-    let look = TextLook {
+    let look = Look::Text(TextLook {
         text: text.into(),
         ..look.clone()
-    };
-    let font = match appearance::font(src, &look) {
+    });
+    let name = look.frame().font_name();
+    let font = match appearance::font(src, name.as_deref()) {
         Ok(font) => font,
         Err(e) => return (Err(e.clone().into()), Err(e.into())),
     };
-    let name = look.font_name().unwrap_or_default();
+    let name = name.unwrap_or_default();
     let written = |at: FontAt<'_>| match at {
         FontAt::Object(id) => id,
         FontAt::Entry(_) => ObjectId::new(0, 0),
     };
     let res = appearance::font_res(&font, src.id(), copy, &name, written);
-    let ours = appearance::make(&look, &font, res);
+    let ours = appearance::make(&look, DaFont { font: &font, res });
     let theirs = match font.res() {
-        Some(res) => appearance::make(&look, &font, res),
+        Some(res) => appearance::make(&look, DaFont { font: &font, res }),
         None => Err(Unmade::FontNotBindable),
     };
     (ours, theirs)
 }
 
 /// An appearance made, and the fallback's glyphs it draws; or why none was.
-type Made = Result<MadeWithFallback, Unmade>;
+type Made = Result<appearance::Made, Unmade>;
+
+/// A text widget's one form, made: `/N`'s.
+fn normal(made: &appearance::Made) -> &Appearance {
+    made.form(Slot::Normal)
+        .expect("a text widget's normal form")
+}
 
 /// An appearance as the dump says it: its size, whether it overflowed, its
 /// content's length and checksum and the resources it draws with, by their
 /// ids; or `unmade:` and why.
 fn made_name(made: &Made) -> String {
-    match made.as_ref().map(|m| &m.appearance) {
+    match made.as_ref().map(normal) {
         Ok(a) => {
             let needs: Vec<String> = (a.needs.0.iter())
                 .map(|need| format!("{:032x}", need.res.id().0))
@@ -439,7 +449,7 @@ fn made_name(made: &Made) -> String {
 /// that differ, `made` where one is made and the other isn't.
 fn versus(ours: &Made, theirs: &Made) -> String {
     fn appearance(m: &Made) -> Result<&Appearance, &Unmade> {
-        m.as_ref().map(|m| &m.appearance)
+        m.as_ref().map(normal)
     }
     match (appearance(ours), appearance(theirs)) {
         (Ok(a), Ok(b)) => {
@@ -592,7 +602,12 @@ fn lines_of(path: &str, store: &Arc<Store>, src: &Src) -> Vec<String> {
             line.field("field", &id_of(Some(field.object)));
             line.field("merged", &u8::from(w.merged).to_string());
             let aid = aids.get(&(page, w.object)).copied();
-            let look = st.zip(aid).and_then(|(st, aid)| text_look(st, aid));
+            let look = st
+                .zip(aid)
+                .and_then(|(st, aid)| match appearance::look(st, aid) {
+                    Ok(Look::Text(look)) => Some(look),
+                    Err(_) => None,
+                });
             let Some(look) = look else {
                 counts.unlooked += 1;
                 line.field("look", "-");

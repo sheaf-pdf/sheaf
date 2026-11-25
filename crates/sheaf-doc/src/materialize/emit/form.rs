@@ -62,16 +62,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::pdf::forms::{FieldFont, MadeWithFallback, Unmade};
-use crate::pdf::{
-    Dictionary, LazyPdf, Object, ObjectId, StringFormat, Value as PdfValue, dictionary, literal,
-};
+use crate::pdf::forms::FieldFont;
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, StringFormat, Value as PdfValue, literal};
 
 use super::Cx;
 use crate::annot::AnnotId;
 use crate::attachments::tree_names;
-use crate::content::{Res, sink};
-use crate::forms::appearance::{self, FontAt, TextLook};
+use crate::content::{Fallback, Glyphs, Res, sink};
+use crate::forms::appearance::{self, DaFont, FontAt, Made, Slot};
 use crate::forms::{FieldId, FieldKind, Value};
 use crate::materialize::copy::Scope;
 use crate::materialize::key::{NameTree, ObjKey, Part};
@@ -499,24 +497,27 @@ pub(crate) fn widget(
 
 /// Widget `aid`'s appearance, made anew for its text field's value as the
 /// model holds it ([`appearance::stale`]) and bound as a mark's is: made
-/// by pdf-forms from the model's plain data ([`appearance::text_look`]) in
-/// the font its `/DA` names in `src`'s `/DR`, `src` the source the widget
-/// was read from, under that source's name (a merged `/DR` may have
-/// renamed it; it's still the same object), and the fallback font for
-/// what that can't draw, pushed under `AnnotPart(aid, Ap)` where the
-/// emission writes it, the fallback's glyphs it draws joined there and
-/// only there, as what's written is what binds them. The widget's `/AP`:
-/// `<< /N … >>`, nothing else of the file's (its `/D` and `/R` would show
-/// the old value). None where none can be made: the widget is written
-/// with no `/AP`, so no file shows a value the field no longer holds, and
-/// a warning says which kind, never the text.
+/// by pdf-forms from the model's plain data ([`appearance::look`]) in the
+/// font its `/DA` names in `src`'s `/DR`, `src` the source the widget was
+/// read from, under that source's name (a merged `/DR` may have renamed
+/// it; it's still the same object), and the fallback font for what that
+/// can't draw; each form it makes ([`Made`]) pushed under its part of
+/// `AnnotPart(aid, …)` where the emission writes it (a text's one form,
+/// `/N`'s, under `Part::Ap`), the fallback's glyphs joined to a form that
+/// draws in it and only there, as what's written is what binds them. The
+/// widget's `/AP`: a key for each form (`<< /N … >>` for a text field's),
+/// nothing else of the file's (its `/D` and `/R` would show the old
+/// value). None where none can be made: the widget is written with no
+/// `/AP`, so no file shows a value the field no longer holds, and a
+/// warning says which kind, never the text.
 fn appearance(cx: &mut Cx, aid: AnnotId, src: &Src) -> Option<Object> {
-    let made = (appearance::text_look(cx.st, aid).ok_or(Unmade::NotText)).and_then(|look| {
-        let font = appearance::font(src, &look)?;
-        let res = font_res(cx, &font, src, &look);
-        appearance::make(&look, &font, res)
+    let made = appearance::look(cx.st, aid).and_then(|look| {
+        let name = look.frame().font_name();
+        let font = appearance::font(src, name.as_deref())?;
+        let res = font_res(cx, &font, src, name.as_deref().unwrap_or_default());
+        appearance::make(&look, DaFont { font: &font, res })
     });
-    let made = match made {
+    let Made { forms, glyphs } = match made {
         Ok(made) => made,
         Err(why) => {
             let why = appearance::unmade_kind(&why);
@@ -524,37 +525,36 @@ fn appearance(cx: &mut Cx, aid: AnnotId, src: &Src) -> Option<Object> {
             return None;
         }
     };
-    let ap = ObjKey::AnnotPart(aid, Part::Ap);
-    if cx.writes(&ap) {
-        let MadeWithFallback {
-            appearance, glyphs, ..
-        } = made;
-        let (bbox, matrix) = (appearance.bbox, appearance.matrix);
-        let form = sink::form(
-            cx,
-            bbox,
-            matrix,
-            appearance.content,
-            &appearance.needs,
-            &glyphs,
-        );
-        cx.push(ap, Object::from(form));
+    let none = Glyphs::new();
+    let mut ap = Dictionary::new();
+    for (slot, form) in forms {
+        let (part, name) = match slot {
+            Slot::Normal => (Part::Ap, "N"),
+        };
+        let key = ObjKey::AnnotPart(aid, part);
+        if cx.writes(&key) {
+            let draws = (form.needs.0.iter()).any(|need| Fallback::SANS.is(&need.res));
+            let glyphs = if draws { &glyphs } else { &none };
+            let (bbox, matrix) = (form.bbox, form.matrix);
+            let form = sink::form(cx, bbox, matrix, form.content, &form.needs, glyphs);
+            cx.push(key, Object::from(form));
+        }
+        ap.set(name, cx.placeholder(key));
     }
-    Some(Object::from(dictionary! { "N" => cx.placeholder(ap) }))
+    Some(Object::from(ap))
 }
 
-/// The resource a made appearance names `font` by, `font` the one
-/// `look`'s `/DA` names in `src`'s `/DR` ([`appearance::font_res`]): its
-/// own where it reaches nothing else (a fallback, or a direct entry with
-/// no reference), written once a file; else named by where it is in
-/// `src` and bound to that, copy 0 of it as `/DR` is written, so an
-/// appearance of any copy of the form names the font `/DR` names and no
-/// copy of it: a font `/DR` holds by reference, that object; a direct
-/// entry that holds references, the dictionary the font lends
-/// (`FieldFont::direct`, pdf-forms': the one it read) written as an
-/// object of its own, once, under [`ObjKey::Res`].
-fn font_res(cx: &mut Cx, font: &FieldFont, src: &Src, look: &TextLook) -> Res {
-    let name = look.font_name().unwrap_or_default();
+/// The resource a made appearance names `font` by, `font` the one `name`,
+/// its widget's `/DA`'s font, names in `src`'s `/DR`
+/// ([`appearance::font_res`]): its own where it reaches nothing else (a
+/// fallback, or a direct entry with no reference), written once a file;
+/// else named by where it is in `src` and bound to that, copy 0 of it as
+/// `/DR` is written, so an appearance of any copy of the form names the
+/// font `/DR` names and no copy of it: a font `/DR` holds by reference,
+/// that object; a direct entry that holds references, the dictionary the
+/// font lends (`FieldFont::direct`, pdf-forms': the one it read) written
+/// as an object of its own, once, under [`ObjKey::Res`].
+fn font_res(cx: &mut Cx, font: &FieldFont, src: &Src, name: &[u8]) -> Res {
     let scope = Scope { src, copy: 0 };
     let written = |at: FontAt<'_>| match at {
         FontAt::Object(id) => (cx.sym(&Object::from(id), &scope).as_reference())
@@ -566,7 +566,7 @@ fn font_res(cx: &mut Cx, font: &FieldFont, src: &Src, look: &TextLook) -> Res {
             cx.push_once(key, |cx| cx.sym(&Object::from(entry), &scope))
         }
     };
-    appearance::font_res(font, src.id(), 0, &name, written)
+    appearance::font_res(font, src.id(), 0, name, written)
 }
 
 /// `out`, built from `read`, object `r`, pushed under `key`: as the file

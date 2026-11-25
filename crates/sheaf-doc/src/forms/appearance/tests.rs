@@ -11,6 +11,7 @@ use std::sync::Arc;
 use unicode_normalization::UnicodeNormalization;
 
 use super::*;
+use crate::content::Fallback;
 use crate::content::fixture::FALLBACK_TEXT;
 use crate::forms::corpus::Corpus;
 use crate::forms::field::flags;
@@ -18,7 +19,6 @@ use crate::forms::fixture::{Form, Rect, STATE_TEXT, nj_helv, pa_arial, row};
 use crate::materialize::tests::{add, insert, open};
 use crate::model::Document;
 use crate::pdf::content::read_back;
-use crate::pdf::forms::Appearance;
 use crate::pdf::gfx::UnencodableChar;
 use crate::pdf::{Object, dictionary, literal};
 use crate::tx::fixture as fx;
@@ -51,25 +51,43 @@ fn widget_of(d: &Document, name: &str, n: usize) -> AnnotId {
 /// The look of widget `n` of the field named `name`.
 fn look_of(d: &Document, name: &str, n: usize) -> TextLook {
     let aid = widget_of(d, name, n);
-    text_look(d.state(), aid).unwrap_or_else(|| panic!("{name}: a text widget"))
+    match look(d.state(), aid) {
+        Ok(Look::Text(look)) => look,
+        other => panic!("{name}: a text widget: {other:?}"),
+    }
 }
 
 /// `look`'s appearance in the font its `/DA` names in `src`, named as
 /// sheaf names it (copy 0); a font named by an entry bound to no object,
 /// which changes none of the content's bytes.
 fn made_in(src: &Source, look: &TextLook) -> Result<Appearance, Unmade> {
-    made_in_two(src, look).map(|made| made.appearance)
+    made_in_two(src, look).map(normal)
 }
 
 /// [`made_in`]'s appearance, and the fallback's glyphs it draws.
-fn made_in_two(src: &Source, look: &TextLook) -> Result<MadeWithFallback, Unmade> {
-    let font = font(src, look).map_err(Unmade::from)?;
-    let name = look.font_name().unwrap_or_default();
+fn made_in_two(src: &Source, look: &TextLook) -> Result<Made, Unmade> {
+    let name = look.frame.font_name();
+    let font = font(src, name.as_deref()).map_err(Unmade::from)?;
     let written = |at: FontAt<'_>| match at {
         FontAt::Object(id) => id,
         FontAt::Entry(_) => ObjectId::new(0, 0),
     };
-    make(look, &font, font_res(&font, src.id(), 0, &name, written))
+    let res = font_res(&font, src.id(), 0, &name.unwrap_or_default(), written);
+    make_text(look, &font, res)
+}
+
+/// `look` made in `font`, named by `res`.
+fn make_text(look: &TextLook, font: &FieldFont, res: Res) -> Result<Made, Unmade> {
+    make(&Look::Text(look.clone()), DaFont { font, res })
+}
+
+/// The one form a text widget's look makes: `/N`'s, and no other.
+fn normal(made: Made) -> Appearance {
+    let mut forms = made.forms.into_iter();
+    let (slot, form) = forms.next().expect("a form");
+    let next = forms.next().map(|(slot, _)| slot);
+    assert_eq!((slot, next), (Slot::Normal, None), "a text's /N alone");
+    form
 }
 
 /// The bytes the content's one `Tj` shows.
@@ -162,7 +180,7 @@ fn the_da_and_q_are_the_widget_s_then_the_field_s_then_the_form_s() {
     let mut d = open(&levels(), None);
     let said = |d: &Document, name: &str, n: usize| {
         let look = look_of(d, name, n);
-        (String::from_utf8(look.da).unwrap(), look.align)
+        (String::from_utf8(look.frame.da).unwrap(), look.align)
     };
     let cases = [
         ("own", 0, "/Helv 12 Tf 1 0 0 rg", 2),
@@ -184,12 +202,12 @@ fn the_da_and_q_are_the_widget_s_then_the_field_s_then_the_form_s() {
     let st = d.state();
     let theirs = TextLook {
         text: "Sample 123".into(),
-        ..text_look(st, widget_of(&d, "theirs", 0)).unwrap()
+        ..look_of(&d, "theirs", 0)
     };
     assert_eq!(st.form().da.as_deref(), Some("/Helv 0 Tf 0 g"));
     assert_ne!(st.opened_file(), Some(other.src.id()));
     // Drawn in its own source's Times, by name: its /DR has none.
-    let font = font(&other.src, &theirs).unwrap();
+    let font = font(&other.src, theirs.frame.font_name().as_deref()).unwrap();
     assert!(font.is_fallback());
     let made = made_in(&other.src, &theirs).unwrap();
     assert_eq!(made.font_size, 11.0);
@@ -199,7 +217,8 @@ fn the_da_and_q_are_the_widget_s_then_the_field_s_then_the_form_s() {
 
 /// What the look holds is the model's: the box, `/MK`, the border and its
 /// dashes, the flags and `/MaxLen`; a widget with no border is width 1,
-/// solid; a check box's widget, or another annotation, has none.
+/// solid; a check box's widget, or another annotation, has none, refused
+/// as not a text field's.
 #[test]
 fn the_look_is_the_model_s_plain_data() {
     let mut f = Form::new(1);
@@ -225,29 +244,35 @@ fn the_look_is_the_model_s_plain_data() {
     f.check_box("box", 0, [10.0, 500.0, 20.0, 510.0], true);
     let d = open(&f.bytes(), None);
     let look = look_of(&d, "a", 0);
-    assert_eq!((look.width, look.height), (100.0, 20.0));
+    let frame = &look.frame;
+    assert_eq!((frame.width, frame.height), (100.0, 20.0));
     assert_eq!(look.flags, flags::COMB | flags::MULTILINE);
     assert_eq!(look.max_len, Some(7));
-    assert_eq!(look.background, Some(field::Color::Gray(1.0)));
-    assert_eq!(look.border_color, Some(field::Color::Rgb([0.0, 0.0, 1.0])));
-    assert_eq!(look.rotation, 90);
+    assert_eq!(frame.background, Some(field::Color::Gray(1.0)));
+    assert_eq!(frame.border_color, Some(field::Color::Rgb([0.0, 0.0, 1.0])));
+    assert_eq!(frame.rotation, 90);
     let dashed = Border {
         width: 2.0,
         style: BorderStyle::Dashed,
         dash: vec![4.0, 2.0],
     };
-    assert_eq!(look.border, dashed);
+    assert_eq!(frame.border, dashed);
     assert_eq!(&*look.text, "");
     let b = look_of(&d, "b", 0);
     assert_eq!(&*b.text, "Trenton");
-    assert_eq!(b.border, Border::solid(1.0));
+    assert_eq!(b.frame.border, Border::solid(1.0));
     // Never the text in its Debug.
     let debug = format!("{b:?}");
     assert!(
         !debug.contains("Trenton") && debug.contains("text_len: 7"),
         "{debug}"
     );
-    assert_eq!(text_look(d.state(), widget_of(&d, "box", 0)), None);
+    let as_look = format!("{:?}", Look::Text(b.clone()));
+    assert!(!as_look.contains("Trenton"), "{as_look}");
+    assert_eq!(
+        super::look(d.state(), widget_of(&d, "box", 0)),
+        Err(Unmade::NotText)
+    );
 }
 
 /// The IRS's navy, `0 0 0.502 rg`, is the text's color: a field of a
@@ -272,10 +297,10 @@ fn an_irs_field_is_drawn_in_its_navy() {
     let st = d.state();
     let mut navy = 0;
     for (aid, _) in st.annots() {
-        let Some(mut look) = text_look(st, aid) else {
+        let Ok(Look::Text(mut look)) = super::look(st, aid) else {
             continue;
         };
-        if !look.da.ends_with(b" 0.502 rg") {
+        if !look.frame.da.ends_with(b" 0.502 rg") {
             continue;
         }
         look.text = "Sample 123".into();
@@ -298,7 +323,10 @@ const ARIAL_CODES: &[u8] = b"\x8e \xdb \xd1 \xd2 \xd3";
 fn state_look(name: &str) -> TextLook {
     TextLook {
         text: STATE_TEXT.into(),
-        da: format!("/{name} 10 Tf 0 g").into_bytes(),
+        frame: Frame {
+            da: format!("/{name} 10 Tf 0 g").into_bytes(),
+            ..frame()
+        },
         ..plain()
     }
 }
@@ -368,11 +396,14 @@ fn a_missing_font_falls_back_by_name() {
     assert!(matches!(by_reference, Some(ResBody::Written(_))));
     // No font named: Helvetica.
     let look = TextLook {
-        da: b"0 g".to_vec(),
+        frame: Frame {
+            da: b"0 g".to_vec(),
+            ..frame()
+        },
         ..plain()
     };
-    assert_eq!(look.font_name(), None);
-    let font = font(&src, &look).unwrap();
+    assert_eq!(look.frame.font_name(), None);
+    let font = font(&src, None).unwrap();
     assert_eq!(base(&font).as_deref(), Some("Helvetica"));
     let made = made_in(&src, &look).unwrap();
     assert!(
@@ -390,6 +421,13 @@ fn plain() -> TextLook {
         flags: 0,
         max_len: None,
         align: 0,
+        frame: frame(),
+    }
+}
+
+/// A plain look's frame ([`plain`]).
+fn frame() -> Frame {
+    Frame {
         width: 200.0,
         height: 20.0,
         background: None,
@@ -476,7 +514,7 @@ fn a_value_is_drawn_in_the_field_s_font_then_the_fallback() {
             text: text.into(),
             ..plain()
         };
-        make(&look, &font, res.clone())
+        make_text(&look, &font, res.clone())
     };
     let ids =
         |a: &Appearance| -> BTreeSet<ResId> { a.needs.0.iter().map(|n| n.res.id()).collect() };
@@ -484,10 +522,13 @@ fn a_value_is_drawn_in_the_field_s_font_then_the_fallback() {
 
     let winansi = made("Camden \u{d6}l\u{e7}er \u{20ac}").unwrap();
     assert!(winansi.glyphs.is_empty());
-    assert_eq!(ids(&winansi.appearance), BTreeSet::from([res.id()]));
+    assert_eq!(ids(&normal(winansi)), BTreeSet::from([res.id()]));
 
     let two = made(FALLBACK_TEXT).unwrap();
-    assert_eq!(ids(&two.appearance), BTreeSet::from([res.id(), marker]));
+    assert_eq!(
+        ids(&normal(two.clone())),
+        BTreeSet::from([res.id(), marker])
+    );
     let program = Fallback::SANS.program();
     let texts: Vec<(u16, &str)> = two.glyphs.iter().collect();
     let mut want: Vec<(u16, &str)> = ["\u{141}", "\u{1ec5}"]
@@ -496,6 +537,12 @@ fn a_value_is_drawn_in_the_field_s_font_then_the_fallback() {
         .collect();
     want.sort();
     assert_eq!(texts, want, "Ł and ễ, each with its text");
+    // What's made says how many glyphs, never which.
+    let debug = format!("{two:?}");
+    assert!(
+        debug.contains("glyphs: 2") && !debug.contains('\u{141}'),
+        "{debug}"
+    );
     let decomposed: String = FALLBACK_TEXT.nfd().collect();
     assert_ne!(decomposed, FALLBACK_TEXT);
     assert_eq!(made(&decomposed), Ok(two), "drawn composed");
@@ -517,23 +564,31 @@ fn a_value_is_drawn_in_the_field_s_font_then_the_fallback() {
 fn hostile_plain_data_is_refused_by_kind_or_made() {
     use crate::pdf::forms::Cap;
     let (font, res) = helvetica();
-    let made = |look: TextLook| make(&look, &font, res.clone()).map(|made| made.appearance);
+    let made = |look: TextLook| make_text(&look, &font, res.clone()).map(normal);
     let comb = flags::COMB;
     let p = plain;
-    assert_eq!(made(TextLook { width: 0.0, ..p() }), Err(Unmade::NoBox));
-    assert_eq!(made(TextLook { height: 0.0, ..p() }), Err(Unmade::NoBox));
+    let framed = |frame: Frame| TextLook { frame, ..p() };
+    let f = frame;
+    assert_eq!(
+        made(framed(Frame { width: 0.0, ..f() })),
+        Err(Unmade::NoBox)
+    );
+    assert_eq!(
+        made(framed(Frame { height: 0.0, ..f() })),
+        Err(Unmade::NoBox)
+    );
     assert!(
-        made(TextLook {
+        made(framed(Frame {
             width: f32::NAN,
-            ..p()
-        })
+            ..f()
+        }))
         .is_err()
     );
     assert!(
-        made(TextLook {
+        made(framed(Frame {
             height: f32::INFINITY,
-            ..p()
-        })
+            ..f()
+        }))
         .is_err()
     );
     let cells = TextLook {
@@ -555,16 +610,16 @@ fn hostile_plain_data_is_refused_by_kind_or_made() {
     assert!(matches!(made(unencodable), Err(Unmade::Unencodable(_))));
     // An empty or unreadable /DA draws in Helvetica at an automatic size.
     for da in [&b""[..], b"/Helv x Tf ((( rg", b"Tf Tf Tf", b"\xff\x00/"] {
-        let look = TextLook {
+        let look = framed(Frame {
             da: da.to_vec(),
-            ..p()
-        };
+            ..f()
+        });
         assert!(made(look).is_ok(), "{da:?}");
     }
     // A border wider than its box, dashes past reason, any rotation the
     // model holds, more text than a comb's cells, a box at the model's
     // reach: each made or refused, by kind.
-    let wide = TextLook {
+    let wide = framed(Frame {
         border: Border {
             width: 100.0,
             style: BorderStyle::Beveled,
@@ -572,20 +627,23 @@ fn hostile_plain_data_is_refused_by_kind_or_made() {
         },
         width: 10.0,
         height: 10.0,
-        ..p()
-    };
+        ..f()
+    });
     let _ = made(wide);
-    let dashes = TextLook {
+    let dashes = framed(Frame {
         border: Border {
             width: 1.0,
             style: BorderStyle::Dashed,
             dash: vec![1e30, 0.0, f32::MAX],
         },
-        ..p()
-    };
+        ..f()
+    });
     let _ = made(dashes);
     for rotation in [0, 90, 180, 270] {
-        assert!(made(TextLook { rotation, ..p() }).is_ok(), "{rotation}");
+        assert!(
+            made(framed(Frame { rotation, ..f() })).is_ok(),
+            "{rotation}"
+        );
     }
     let many = TextLook {
         flags: comb | flags::MULTILINE | flags::PASSWORD,
@@ -594,12 +652,12 @@ fn hostile_plain_data_is_refused_by_kind_or_made() {
         ..p()
     };
     assert!(made(many).unwrap().overflowed);
-    let far = TextLook {
+    let far = framed(Frame {
         width: 2_000_000.0,
         height: 2_000_000.0,
         da: b"/Helv 0 Tf 0 g".to_vec(),
-        ..p()
-    };
+        ..f()
+    });
     let _ = made(far);
 }
 
@@ -638,14 +696,18 @@ fn a_widget_is_stale_while_its_text_isn_t_the_file_s() {
 /// in `/DR`'s font by reference (else Helvetica, by its dictionary).
 fn golden_cases() -> Vec<(&'static str, TextLook, bool)> {
     let p = plain;
-    let bordered = |width: f32, style: BorderStyle, dash: &[f32]| TextLook {
-        border: Border {
-            width,
-            style,
-            dash: dash.to_vec(),
-        },
-        background: Some(field::Color::Gray(0.75)),
-        ..p()
+    let f = frame;
+    let framed = |frame: Frame| TextLook { frame, ..p() };
+    let bordered = |width: f32, style: BorderStyle, dash: &[f32]| {
+        framed(Frame {
+            border: Border {
+                width,
+                style,
+                dash: dash.to_vec(),
+            },
+            background: Some(field::Color::Gray(0.75)),
+            ..f()
+        })
     };
     let multiline = "First line\nand a second line long enough to wrap twice over in the box";
     let comb = |align: u8| TextLook {
@@ -657,9 +719,12 @@ fn golden_cases() -> Vec<(&'static str, TextLook, bool)> {
     };
     let lines = |da: &[u8]| TextLook {
         flags: flags::MULTILINE,
-        height: 60.0,
         text: multiline.into(),
-        da: da.to_vec(),
+        frame: Frame {
+            height: 60.0,
+            da: da.to_vec(),
+            ..f()
+        },
         ..p()
     };
     let auto = b"/Helv 0 Tf 0 g";
@@ -672,10 +737,10 @@ fn golden_cases() -> Vec<(&'static str, TextLook, bool)> {
         ("multiline", lines(b"/Helv 10 Tf 0 g"), false),
         (
             "auto size",
-            TextLook {
+            framed(Frame {
                 da: auto.to_vec(),
-                ..p()
-            },
+                ..f()
+            }),
             false,
         ),
         ("auto size multiline", lines(auto), false),
@@ -699,26 +764,26 @@ fn golden_cases() -> Vec<(&'static str, TextLook, bool)> {
         ),
         (
             "rotated 90",
-            TextLook {
+            framed(Frame {
                 rotation: 90,
-                ..p()
-            },
+                ..f()
+            }),
             false,
         ),
         (
             "rotated 180",
-            TextLook {
+            framed(Frame {
                 rotation: 180,
-                ..p()
-            },
+                ..f()
+            }),
             false,
         ),
         (
             "rotated 270",
-            TextLook {
+            framed(Frame {
                 rotation: 270,
-                ..p()
-            },
+                ..f()
+            }),
             false,
         ),
         (
@@ -739,21 +804,21 @@ fn golden_cases() -> Vec<(&'static str, TextLook, bool)> {
         ),
         (
             "navy on blue",
-            TextLook {
+            framed(Frame {
                 background: Some(field::Color::Rgb([0.9, 0.9, 1.0])),
                 border_color: Some(field::Color::Rgb([0.0, 0.0, 0.502])),
                 da: b"/Helv 9 Tf 0 0 0.502 rg".to_vec(),
-                ..p()
-            },
+                ..f()
+            }),
             false,
         ),
         (
             "cmyk",
-            TextLook {
+            framed(Frame {
                 border_color: Some(field::Color::Cmyk([0.0, 0.0, 0.0, 1.0])),
                 da: b"/Helv 9 Tf 0 0 0 1 k".to_vec(),
-                ..p()
-            },
+                ..f()
+            }),
             false,
         ),
         ("by reference", p(), true),
@@ -788,10 +853,10 @@ fn golden_cases() -> Vec<(&'static str, TextLook, bool)> {
         ),
         (
             "two fonts auto size",
-            two(TextLook {
+            two(framed(Frame {
                 da: auto.to_vec(),
-                ..p()
-            }),
+                ..f()
+            })),
             false,
         ),
         // A password's `*` is Helvetica's: nothing in the fallback.
@@ -820,9 +885,9 @@ fn two(look: TextLook) -> TextLook {
 /// resource's id: the fallback by its marker's, as the emitter names it),
 /// and its content's length and checksum, then, where it draws in the
 /// fallback, how many glyphs (`fallback=`); or why it wasn't made.
-fn golden_line(case: &str, made: &Result<MadeWithFallback, Unmade>) -> String {
+fn golden_line(case: &str, made: &Result<Made, Unmade>) -> String {
     let (a, glyphs) = match made {
-        Ok(made) => (&made.appearance, &made.glyphs),
+        Ok(made) => (&normal(made.clone()), &made.glyphs),
         Err(why) => return format!("{case}\tunmade:{why}"),
     };
     let (b, m) = (&a.bbox, &a.matrix);
@@ -869,8 +934,8 @@ fn golden() -> String {
     let mut out = String::new();
     for (case, look, reference) in golden_cases() {
         let made = match reference {
-            true => make(&look, &by_ref, named.clone()),
-            false => make(&look, &helv, helv_res.clone()),
+            true => make_text(&look, &by_ref, named.clone()),
+            false => make_text(&look, &helv, helv_res.clone()),
         };
         let _ = writeln!(out, "{}", golden_line(case, &made));
     }

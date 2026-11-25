@@ -1639,14 +1639,16 @@ of this, and a user sees nothing new.
   tree doesn't reach, instances of a form and ids, so pdf-forms' read
   layer (`Form::read`, `widget_text`) is only for tests, where `just
   fields-dump` sets the two readings beside each other; which widgets
-  are made (`stale`); the plain data (`TextLook`); the caps; a source's
+  are made (`stale`); the plain data (`Look`, `TextLook`); the caps; a source's
   font cache; and the binding, with the names a made form gives a font.
-- **The plain data** (`text_look(st, aid)`, none but for a text field's
-  widget): the terminal's value, which is the text shown (a format
-  script's display string, once slice 9's op carries one), its `/Ff` and
-  `/MaxLen`; the widget's box, `/MK` background, border color and
-  rotation, and its border's width, style and dash array (width 1,
-  solid, where it has none); and the effective `/DA` and `/Q`: the
+- **The plain data** (`look(st, aid)`, `Look::Text` for a text field's
+  widget, `Unmade::NotText` for anything else): the terminal's value,
+  which is the text shown (a format script's display string, once slice
+  9's op carries one), its `/Ff`, `/MaxLen` and effective `/Q`; and the
+  widget's frame (`Frame`, which every kind's look shares: its box, `/MK`
+  background, border color and rotation, its border's width, style and
+  dash array, width 1, solid, where it has none, and its effective
+  `/DA`). The effective `/DA` and `/Q` are the
   widget's own, else its terminal's (its own or a parent's, as read),
   else its instance's form's, the document's (`FormDoc`) for an instance
   of the file the document opened and its source's for another's, as
