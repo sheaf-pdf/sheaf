@@ -14,9 +14,11 @@
 //! which no `/Widths` can be given, is drawn without. [`every`] names
 //! each, and [`fuzz_page`] is the page the `interp` fuzz target draws on.
 //! And a page in the fallback font, a subset of it or the whole program
-//! ([`fallback_page`], [`whole_fallback_page`]), and the check of any
-//! PDF's subsets of it ([`subsets_hold`]), for every test that draws in
-//! it, other crates' too.
+//! ([`fallback_page`], [`whole_fallback_page`]), the check of any PDF's
+//! subsets of it ([`subsets_hold`]), and any PDF with its subsets given
+//! the whole program ([`with_whole_fallback`]) or their maps taken away
+//! ([`with_identity_map`]), for every test that draws in it, other crates'
+//! too.
 //!
 //! Most draw in [`SQUARES`]: a Type3 font whose `a` is a square an em
 //! wide and `b` half one, from 0.2 em below the baseline to 0.8 above.
@@ -1815,6 +1817,67 @@ pub fn fallback_subsets(bytes: &[u8]) -> Vec<(ObjectId, BTreeSet<u16>)> {
         found.push((id, to_unicode_codes(&cmap).into_iter().collect()));
     }
     found
+}
+
+/// The PDF `bytes` with each subset of the fallback font it holds
+/// ([`fallback_subsets`]) given the whole program in place of its cut, as
+/// [`whole_fallback_page`]'s font has it: its descendant's `/CIDToGIDMap`
+/// `/Identity`, its descriptor's `/FontFile2` the program as pdf-fonts
+/// writes it whole, and its codes, widths and `/ToUnicode` as they were.
+/// A subset, behind its map, draws what this draws: what another reader's
+/// drawing of `bytes` is held to. Written whole, its objects as `bytes`'
+/// newest revision has them.
+pub fn with_whole_fallback(bytes: &[u8]) -> Vec<u8> {
+    let sans = Fallback::SANS;
+    let mut glyphs = Glyphs::new();
+    glyphs
+        .add(sans.program(), "a")
+        .expect("a glyph of the program");
+    let mut whole = EmbedOptions::default();
+    whole.whole = true;
+    let objects = embed_write(sans.program(), &glyphs, &whole).expect("embedded whole");
+    // Its `/FontFile2`, the fourth of the objects pdf-fonts writes.
+    let program = objects.into_iter().nth(3).expect("a font's program");
+    let length = program.as_stream().and_then(|s| s.dict.get(b"Length1"));
+    assert!(length.is_some(), "the fourth object is the program");
+    with_identity_map_over(bytes, Some(program))
+}
+
+/// The PDF `bytes` with each subset of the fallback font it holds given
+/// `/CIDToGIDMap /Identity` over its cut program, as it is: each code, a
+/// glyph's number in the whole program, is then taken as one in the cut,
+/// so this draws what a reader that ignored the map would draw, not what
+/// `bytes` draws. [`with_whole_fallback`]'s twin, so a comparison with it
+/// can fail.
+pub fn with_identity_map(bytes: &[u8]) -> Vec<u8> {
+    with_identity_map_over(bytes, None)
+}
+
+/// `bytes`, each subset of the fallback font given `/CIDToGIDMap
+/// /Identity` and, where `program` is given, that as its `/FontFile2`.
+fn with_identity_map_over(bytes: &[u8], program: Option<Object>) -> Vec<u8> {
+    let mut pdf = Pdf::load_mem(bytes).expect("a PDF that reads");
+    let file = program.map(|program| pdf.add_object(program));
+    let reference =
+        |object: Option<&Object>| object.and_then(Object::as_reference).expect("a reference");
+    let subsets = fallback_subsets(bytes);
+    assert!(!subsets.is_empty(), "no subset of the fallback font");
+    for (font, _) in subsets {
+        let font = pdf.get_dictionary(font).expect("a font");
+        let descendants = font.get(b"DescendantFonts").expect("its CIDFont");
+        let descendants = pdf.dereference(descendants).expect("what it names").1;
+        let descendant = reference(descendants.as_array().and_then(|d| d.first()));
+        let cid_font = pdf.get_dictionary_mut(descendant).expect("a CIDFont");
+        cid_font.set("CIDToGIDMap", Object::name("Identity"));
+        let descriptor = reference(cid_font.get(b"FontDescriptor"));
+        if let Some(file) = file {
+            let descriptor = pdf.get_dictionary_mut(descriptor).expect("a descriptor");
+            descriptor.set("FontFile2", file);
+        }
+    }
+    let mut out = Vec::new();
+    pdf.save_to(&mut out).expect("written");
+    out
 }
 
 /// A subset of the fallback font, read for [`subsets_hold`].

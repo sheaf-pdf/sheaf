@@ -57,11 +57,13 @@
 //! holds what sheaf writes on every form of Greg's corpus, never the
 //! form's own objects: each is given a note, a header and footer and a
 //! recognized word, saved as planned, then rewritten, and what each save
-//! wrote is checked, a fault the form has carried as above. It prints what
-//! it checked: objects by table, keys, the checks not made and why, the
-//! keys the model doesn't list, and those the version deprecates or
-//! readers ignore; run on every form, its counts of forms and saves are
-//! asserted ([`FORMS`]). Skips when there's no corpus (see
+//! wrote is checked, a fault the form has carried as above. The header
+//! draws a name in two fonts, so each save writes a subset of the
+//! fallback font sheaf bundles, and its objects are checked too. It
+//! prints what it checked: objects by table, keys, the checks not made
+//! and why, the keys the model doesn't list, and those the version
+//! deprecates or readers ignore; run on every form, its counts of forms
+//! and saves are asserted ([`FORMS`]). Skips when there's no corpus (see
 //! `sheaf_doc::forms::corpus`).
 
 mod common;
@@ -77,6 +79,7 @@ use lint::{
     Allowance, Allowances, Finding, Hold, Made, Options, Report, Rule, Unlisted, Version, check,
     file_version, options, own_structure, read, written,
 };
+use sheaf_doc::content::fixture::FALLBACK_TEXT;
 use sheaf_doc::export::{Export, ExportFrom, Out, PRINT_ANSWERS, materialized};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::fixture::{Form, every_kind, every_mark_kind, mark_blobs, note};
@@ -90,7 +93,7 @@ use sheaf_doc::text_layer::fixture::layer;
 use sheaf_doc::text_layer::from_engine;
 use sheaf_doc::tx::fixture as fx;
 use sheaf_doc::{
-    Actor, AnnotKind, Blob, CommitOpts, Document, EditError, OcrWord, PageSize, Store,
+    Actor, AnnotKind, Blob, Box2, CommitOpts, Document, EditError, OcrWord, PageSize, Store,
 };
 use sheaf_edit::{
     BatesSpec, BlobSel, BookmarkPatch, Bring, GridPos, HeaderFooterSpec, LabelStyle, Margins, Op,
@@ -490,6 +493,49 @@ fn blocks(how: How) {
             "FontType1",
         ],
     );
+}
+
+sheaf_doc::both_ways!(text_in_two_fonts_holds, text_in_two_fonts_holds_appended: two_fonts);
+
+/// The tables [`two_fonts`] must check: the text box, and the subset of
+/// the fallback font sheaf bundles, its Type 0 font, CIDFont, descriptor,
+/// program, `/ToUnicode`, `/CIDSystemInfo` and widths (its `/CIDToGIDMap`
+/// stream is checked as a `Stream`).
+const TWO_FONTS: &[&str] = &[
+    "AnnotFreeText",
+    "FontType0",
+    "FontCIDType2",
+    "FontDescriptorCIDType2",
+    "FontFile2",
+    "ToUnicodeCMapStream",
+    "CIDSystemInfo",
+    "ArrayOfCIDGlyphMetricsW",
+];
+
+/// A text box and a header saying [`FALLBACK_TEXT`], which Helvetica draws
+/// in part and the fallback font sheaf bundles the rest of (M10 slice 7):
+/// the subset of it the save writes, each of its objects.
+fn two_fonts(how: How) {
+    let (path, mut doc) = opened(&format!("two-fonts-{how:?}"), 1);
+    let page = doc.page(0).unwrap();
+    let mut text = note();
+    text.kind = AnnotKind::FreeText {
+        rect: Box2 {
+            x: 72.0,
+            y: 300.0,
+            w: 300.0,
+            h: 40.0,
+        },
+        size: 12.0,
+    };
+    text.contents = FALLBACK_TEXT.into();
+    let ops = vec![
+        fx::add(page, &text),
+        fx::set_header(fx::header(FALLBACK_TEXT), None),
+    ];
+    let c = doc.commit_ops(ops, "Two fonts").unwrap();
+    assert!(c.notices.is_empty(), "{:?}", c.notices);
+    clean(&held(&mut doc, Some(how), &path), TWO_FONTS);
 }
 
 sheaf_doc::both_ways!(a_page_watermark_holds, a_page_watermark_holds_appended: page_watermark);
@@ -1833,15 +1879,20 @@ fn saves_of(
 
 /// `doc` given, in one version, a note and a recognized word on its first
 /// page, and the corpus tiers' header and footer, with Bates numbers, on
-/// every page: why the page took no word, when it didn't (its content
-/// can't be read, or it shows nothing to read a word on).
+/// every page, its header's right [`FALLBACK_TEXT`], which Helvetica draws
+/// in part and the fallback font sheaf bundles the rest of (M10 slice 7),
+/// so every save writes a subset of it: why the page took no word, when it
+/// didn't (its content can't be read, or it shows nothing to read a word
+/// on).
 fn given(doc: &mut Document) -> Result<Option<&'static str>, String> {
     let first = doc.page(0).ok_or("no pages")?;
     let snap = doc.snapshot();
     let mut tx = Document::tx_at(&snap, doc.lower_cx(Actor::User));
     (tx.apply(fx::add(first, &common::note(WORD)), &NoProgress))
         .map_err(|e| format!("no note: {e}"))?;
-    (tx.apply(fx::set_header(common::corpus_header(), None), &NoProgress))
+    let mut header = common::corpus_header();
+    header.texts[2] = FALLBACK_TEXT.into();
+    (tx.apply(fx::set_header(header, None), &NoProgress))
         .map_err(|e| format!("no header and footer: {e}"))?;
     let geom = snap.geom(first);
     let layer = from_engine(vec![common::word_on(&geom, WORD)], &geom, "corpus");

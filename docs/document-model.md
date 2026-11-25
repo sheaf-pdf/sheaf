@@ -878,11 +878,23 @@ on each side. `Content` is left as the fixtures' builder, and its
 - **Fonts drawn in** (`content::DrawFont`: `encode`, `width`, `wrap`,
   `covers`, `res`). `DrawFont` is sheaf's rules for text over the PDF
   layer's `LayoutFont` (pdf-gfx's: a font's metrics, a character's
-  advance and its codes): a character a font has no code for is written
-  as `?` where the font has one and counted (`Unencoded`), text is
-  composed (NFC) first where the font says so (`composed`), widths are
-  summed in glyph units and scaled once, and lines break as
-  `wrap_with` breaks them; a font gives only its resource, a `Res`.
+  advance and its codes): text is composed (NFC) first where the font
+  says so (`composed`), then, from M10 slice 7, drawn a grapheme cluster
+  at a time, each in the first of the font and the fallback font (below)
+  that has all of it (pdf-gfx's `face_for`, over `WithFallback`).
+  `encode` gives the runs (`TextRuns`: each run's face, `InFont::Own` or
+  `Fallback`, and its codes), the glyphs drawn in the fallback, and a
+  count of the characters neither draws (`Unencoded`), each written as
+  `?` in the font where the font has one. Text the font draws whole takes
+  the font alone's path (`encode_alone`, `width_alone`), its bytes and
+  widths as they always were; a cluster with a control character in it
+  stays the font's, and a font can keep to itself (`falls_back`:
+  Glyphless does). `covers` asks of the font alone. Widths are summed in
+  glyph units, as drawn, and scaled once, and lines break as `wrap_with`
+  breaks them; a font gives only its resource, a `Res`.
+  `DrawText::show_text` takes the size, so it can set the fallback with
+  `Tf` and the font again within a string, and gives back the glyphs it
+  drew in the fallback with the count.
   `Std14` is pdf-fonts' (from M18 slice 22; sheaf's own copy of it, its
   AFMs and its glyph lists went then): the 14 standard fonts with
   Adobe's Core 14 AFM widths, glyph boxes and heights and exact
@@ -900,15 +912,87 @@ on each side. `Content` is left as the fixtures' builder, and its
   subsets of real programs, and has no glyphless font): Tesseract's
   glyphless font, each UTF-16 code unit a CID as the text is written
   (never composed: a word is scaled by its count of units), read back
-  through its ToUnicode, so it draws any text. A font sheaf embeds keeps
-  its glyph ids (CID = GID); Glyphless, whose one glyph serves every
-  CID, is the exception, and the rule is for M10 slice 7's Noto subsets
-  (pdf-fonts' `embed`). These replace four encoders and three
+  through its ToUnicode, so it draws any text. A program sheaf embeds is
+  drawn by glyph number: a code is the glyph's number in the whole
+  program, behind a `/CIDToGIDMap` stream where the program is cut (the
+  fallback's subsets); Glyphless, whose one glyph serves every CID, is
+  the exception. These replace four encoders and three
   width tables (the header and footer's, the marks', the watermark's
   UTF-8 written as WinAnsi, and the summary's); marks, tapes, the header
   and footer, the watermark's text, OCR layers and the comment summary
   all draw through them. A tick draws ZapfDingbats' heavy check and
   cross (✔ ✘), as it always has.
+- **The fallback font** (`content::Fallback`, from M10 slice 7): Noto
+  Sans Regular, unhinted, from the Noto project's v2.015 release
+  (`crates/sheaf-doc/assets/`, under the SIL Open Font License 1.1),
+  built in and opened once. It draws the Latin, Greek and Cyrillic a
+  standard 14 face's encoding lacks (2,965 characters; no CJK, emoji,
+  Hebrew or Arabic): in marks, tapes, the header and footer, a
+  watermark's text and the comment summary, beside their face, and in a
+  text field's value beside the field's font (below). A file embeds a
+  subset of it, the glyphs the file draws in it, as pdf-fonts writes one
+  (`embed::write`): a Type 0 font over `/Identity-H` whose codes are each
+  glyph's number in the whole program; its CIDFontType2, with each
+  glyph's width in `/W` and a `/CIDToGIDMap` stream from those numbers to
+  the cut program's; its descriptor; `/FontFile2`, the program cut by
+  subsetter; and a `/ToUnicode` with each glyph's text. So a string's
+  codes depend on the text alone, never on what else a file draws in the
+  font. The map is two bytes a code up to the last glyph cut (at most
+  7,768 bytes); a name and three cities' 14 glyphs, the last glyph 795,
+  take 1,592 bytes, 80 after Flate.
+  - **Bound late.** Content names one resource for it,
+    `Fallback::res()`: a marker, the same in every output and never
+    written, so a drawing is the same bytes whatever else is drawn
+    beside it, and a block or form keyed by its bytes the same key. What
+    a drawing draws in it travels as a value beside what it names
+    (`content::Uses { needs, glyphs }`, `annot::Drawing { ap, glyphs }`,
+    a generator's `done`), never as a side effect, so a drawing kept and
+    bound again still says its glyphs. `sink::{bind, form, form_dict}`
+    take the glyphs with the needs and join them (`Sink::fallback`) where
+    the binding is written and only there, so nothing binds the marker
+    without joining what it draws. A sink gives the marker the object
+    number its subset will be, and checks at its finish that the marker
+    was bound if and only if some glyph was joined.
+  - **The emitter** binds the marker to a placeholder and, in `finish`
+    before the cross-reference is reached, chooses the subset, re-keys
+    the placeholder to it and writes it through the ordinary path: a
+    resource keyed by its objects' digest (`ObjKey::Res`, `ResPart`), so
+    equal glyphs are one object. A page's resources that bind it
+    (`ObjKey::PageRes`, keyed by names, not by what the page's blocks
+    draw) are re-keyed with the subset's id mixed in, so pages that share
+    a dictionary share a subset, and an Append that draws a new glyph
+    writes resources anew for the page it redraws and leaves another's
+    alone; a form's key (its bytes, or its inputs) decides its glyphs
+    already. A Type 0 font needs PDF 1.2, said where it's bound, so an
+    Append onto an older file writes `/Version 1.2`.
+  - **An Append binds a subset the file holds** where one draws every
+    glyph it joined: the save record keeps the subsets its file holds
+    (`SaveRecord::fallbacks`, in memory), and an Append binds the latest
+    whose key the saved map has and that draws them all (`draws_all`),
+    writing nothing of the font; only where none does is a subset of its
+    own glyphs written. A Rewrite and an overlay write their own, an
+    overlay's per emission (its frame's for widgets merged with their
+    field, a delta's for what it draws). A file as opened has none known,
+    so its first Append that draws in the fallback writes one, even where
+    the file holds one that would do.
+  - **Built PDFs** (`serialize::built`): `ResObjects` reserves the
+    subset's number when it's first bound and writes the subset when its
+    owner finishes (`ResObjects::finish`, `WriteCx::finish`,
+    `Built::finish`), which every owner does before its PDF is written; a
+    debug build asserts when one is dropped with its subset unwritten.
+    Two owners writing into one PDF (a flattened mark's page, an exchange
+    file) write a subset each.
+  - **Held** by `content::fixture::subsets_hold`, which every test that
+    draws in the fallback calls: each code a file shows in a subset maps
+    to a glyph of the cut program, as wide as the whole program's, with a
+    text. PDFium reads back a page, a field's value, marks, a header and
+    a watermark, the comment summary and each built owner's file; PDFium,
+    pdftoppm and pdf.js each draw a saved value and note in two fonts as
+    they draw the file with the whole program in place of its subset, and
+    pdf.js reads both back (`interop.rs`); pdf-lint checks a subset's
+    objects against the Arlington model, in a test and in every corpus
+    form's saves, whose header draws a name in two fonts
+    (`arlington.rs`).
 - **Text no font sheaf bundles can draw shows as `?`** in the drawing
   only: `/Contents`, the mark's JSON and the header's spec keep the exact
   text (ZapfDingbats has no `?`, so there the character is left out).
@@ -1619,9 +1703,14 @@ of this, and a user sees nothing new.
   `Fields::read_from` for a widget merged with its field): the look, its
   font, the font's resource, `appearance::make` (the `/DA` parsed, none
   or one that doesn't parse being Helvetica at an automatic size, then
-  pdf-forms' maker; pure), and the form pushed through
-  `content::sink::form` under `ObjKey::AnnotPart(aid, Part::Ap)` where
-  the emission writes it, as a mark's is. The widget's `/AP` is `<< /N …
+  pdf-forms' maker; pure: from M10 slice 7 `text_with_fallback`, which
+  draws a value in runs of the field's font and the fallback font sheaf
+  bundles, `Fallback::field()`, for the clusters the field's font can't,
+  and says the glyphs it drew in the fallback; a value the field's font
+  draws whole is the bytes it was, and names no second font), and the
+  form pushed through `content::sink::form`, with those glyphs, under
+  `ObjKey::AnnotPart(aid, Part::Ap)` where the emission writes it, as a
+  mark's is. The widget's `/AP` is `<< /N …
   >>` alone: the file's `/D` and `/R` would show the old value. The
   font's resource: a `/DR` font held by reference is named by
   `font_res_id` (a digest of its source's blob, copy 0 and its object)
@@ -1636,7 +1725,8 @@ of this, and a user sees nothing new.
   added to `/DR`: the form's own `/Resources` hold it, which every viewer
   draws, and adding it, for a viewer that makes appearances anew, would
   write the form's dictionary on a fill (slice 9, with a fill's save
-  rules). A stale widget's file `/AP` is never copied (`Closure::sym`
+  rules). Nor is the fallback font's subset: the form names it in its own
+  `/Resources`, and pdf-forms asks nothing of `/DR` for it. A stale widget's file `/AP` is never copied (`Closure::sym`
   would queue the old appearance's streams), and the "the file's object
   as it is" paths don't take it, so a Rewrite holds none of the old
   appearance's streams but one another widget, not made, names. An
@@ -1647,8 +1737,8 @@ of this, and a user sees nothing new.
   old value out of an earlier revision).
 - **What an unmade appearance does.** One pdf-forms can't make
   (`Unmade`: a box of no width or height, a number that isn't finite, a
-  character its font has no code for, past a cap, a font that can't be
-  read) leaves the widget with no `/AP` at all, so no file shows a value
+  character neither its font nor the fallback font draws, past a cap, a
+  font that can't be read) leaves the widget with no `/AP` at all, so no file shows a value
   the field no longer holds, and a warning names the kind of reason
   (`unmade_kind`: each kind named by hand, never a type's `Debug` text,
   so the fields dump and the tier's counts don't move with a rename in
@@ -1659,10 +1749,11 @@ of this, and a user sees nothing new.
   PDFium's form filler makes an appearance from `/V` for a widget with
   none, so such a widget would show its file's old value there and
   nothing in a viewer that draws appearances alone; before slice 9 only
-  a test reaches it. Of the corpus's 229,351 text widgets on pages, 744
-  are unmade for a sample value: 497 have no box and 247 have a
-  character their font can't encode (a fallback font draws these: M10
-  slice 7).
+  a test reaches it. Of the corpus's 229,351 text widgets on pages, 509
+  are unmade for a sample value: 497 have no box and 12 have a character
+  no font sheaf has draws (nine `DEL`, two other control characters and
+  one of the Private Use Area). 235 more, whose own font can't draw a
+  character of theirs, are drawn in two fonts since M10 slice 7.
 - **No save writes `/V` yet.** The emitter writes a stale widget's
   appearance and nothing of its field's value: `/V`, `/RV` and the
   password rule are slice 9's, with its op, after M18 slice 21's text
@@ -1686,10 +1777,14 @@ of this, and a user sees nothing new.
   fallbacks by name, hostile plain data, `stale`) and
   `appearance_golden.txt`, a line a case (each alignment, comb,
   multiline, an automatic size, each border style, `/MK /R`, a password,
-  an empty value), so a move of the family's pin that changes a byte is
+  an empty value, and from M10 slice 7 a value in two fonts: right-aligned,
+  by reference, decomposed, multiline, a comb, an automatic size, a
+  password), so a move of the family's pin that changes a byte is
   seen where CI runs; `materialize::field_ap_tests` the binding (a
   Rewrite, an Append, saves in a row, each kind of widget and of `/DR`
-  font, an overlay and a save alike, unmade). sheaf-ops' `fields.rs`
+  font, an overlay and a save alike, unmade; a WinAnsi value's form held
+  by its bytes from before the fallback; a subset of what a save's
+  widgets draw, and the Appends that bind a saved one or add their own). sheaf-ops' `fields.rs`
   sets each case's appearance beside PDFium's own for the same value
   (its form filler's, saved: [oracles](oracles.md)), drawn appearances
   only at 2 px a point inside the widget's box: each alignment, comb,
@@ -1702,8 +1797,10 @@ of this, and a user sees nothing new.
   comb's text, a dash array as given) are each held both ways. A realized
   page draws a changed field as its saved file does, and "é € — “ ”"
   reads back by sheaf's interpreter and by PDFium's text of the
-  flattened page. An ignored test in `interop.rs` runs `qpdf --check` on
-  each case's output and draws it with `pdftoppm`. `just tier-fields`
+  flattened page. "Łukasz Nguyễn Ölçer" in the f1040's first name field
+  draws inside its box and PDFium reads it back, given decomposed too. An
+  ignored test in `interop.rs` runs `qpdf --check` on each case's output
+  and draws it with `pdftoppm`. `just tier-fields`
   fills every corpus form's text fields: 220,981 fields and their
   229,351 widgets, 228,842 made (235 of them in two fonts, the field's
   and sheaf's fallback font for what it can't draw), each overlay's form
