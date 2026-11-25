@@ -982,12 +982,19 @@ fn a_fields_opt_is_read_for_its_kind() {
     let kid = f.check_box("kid", 0, row(3), false);
     let parent = f.group("parent", &[kid]);
     f.dict(parent).set("Opt", vec![literal("p")]);
+    let stream_text = (f.pdf).add_object(Stream::new(Dictionary::new(), b"s".to_vec()));
     let items = vec![
         literal("x"),
         5.into(),
         Object::from(vec![literal("y"), literal("Y")]),
         Object::from(vec![literal("short")]),
         literal("z"),
+        // An array of three, and a stream's text: a choice's options, no
+        // export values of a button's, as the family reads an option.
+        Object::from(vec![literal("t"), literal("T"), literal("more")]),
+        Object::from(stream_text),
+        Object::from(vec![Object::from(stream_text), literal("S")]),
+        literal("end"),
     ];
     let shared = f.pdf.add_object(Object::from(items));
     let button = f.check_box("button", 0, row(4), false);
@@ -1007,13 +1014,13 @@ fn a_fields_opt_is_read_for_its_kind() {
     assert_eq!(read(empty), (true, String::new()));
     assert_eq!(read(name), (false, String::new()));
     assert_eq!(read(kid), (true, "p".into()));
-    assert_eq!(read(button), (true, "x||y||z".into()));
-    assert_eq!(read(choice), (true, "x|y|z".into()));
+    assert_eq!(read(button), (true, "x||y||z||||end".into()));
+    assert_eq!(read(choice), (true, "x|y|z|t|s|s|end".into()));
     assert_eq!(read(direct), (true, "a||b".into()));
     let shown: Vec<&str> = (form.field_by_object(choice).unwrap().options.iter())
         .map(|o| &*o.shown)
         .collect();
-    assert_eq!(shown, ["x", "Y", "z"]);
+    assert_eq!(shown, ["x", "Y", "z", "T", "s", "S", "end"]);
 }
 
 /// What damage reads as: no fields, and a reason.

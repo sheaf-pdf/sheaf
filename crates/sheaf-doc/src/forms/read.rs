@@ -444,8 +444,9 @@ struct Opt {
     /// A choice field's items: each item that is text, or a pair of text.
     items: Arc<[Choice]>,
     /// A check box's or radio group's export values: every item in its
-    /// place, one that is no text an option of empty text. `items` itself
-    /// where every item is text.
+    /// place, as the family reads an option: a string, or an array of
+    /// exactly two strings; anything else an option of empty text.
+    /// `items` itself where every item is one of those.
     exports: Arc<[Choice]>,
 }
 
@@ -791,8 +792,12 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             let n = self.limits.items;
             self.damage(format!("an /Opt has more than {n} items"));
         } else {
+            let pdf = self.pdf;
+            let is_string = |o: &Object| {
+                resolve(pdf, o).is_some_and(|o| matches!(o.value(), PdfValue::String(..)))
+            };
             for item in items {
-                let pair = resolve(self.pdf, item).and_then(Object::as_array);
+                let pair = resolve(pdf, item).and_then(Object::as_array);
                 let (export, shown) = match pair {
                     Some([export, shown, ..]) => (self.text(export), self.text(shown)),
                     Some(_) => (None, None),
@@ -801,22 +806,31 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
                         (text.clone(), text)
                     }
                 };
-                match (export, shown) {
-                    (Some(export), Some(shown)) => {
-                        let choice = Choice { export, shown };
-                        if let Some(exports) = &mut exports {
-                            exports.push(choice.clone());
-                        }
-                        choices.push(choice);
-                    }
-                    _ => {
+                let choice = match (export, shown) {
+                    (Some(export), Some(shown)) => Some(Choice { export, shown }),
+                    _ => None,
+                };
+                // A button field's, as the family reads an option: a
+                // string, or an array of exactly two strings; anything
+                // else (a longer array, a stream's text) an empty one.
+                let strict = match pair {
+                    Some([export, shown]) => is_string(export) && is_string(shown),
+                    Some(_) => false,
+                    None => is_string(item),
+                };
+                let button = choice.clone().filter(|_| strict);
+                if button.is_none() || exports.is_some() {
+                    let empty = || {
                         let empty: Arc<str> = Arc::from("");
-                        (exports.get_or_insert_with(|| choices.clone())).push(Choice {
+                        Choice {
                             export: empty.clone(),
                             shown: empty,
-                        });
-                    }
+                        }
+                    };
+                    (exports.get_or_insert_with(|| choices.clone()))
+                        .push(button.unwrap_or_else(empty));
                 }
+                choices.extend(choice);
             }
         }
         let items: Arc<[Choice]> = choices.into();

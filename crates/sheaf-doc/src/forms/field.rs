@@ -194,9 +194,12 @@ pub struct Field {
     /// `/Opt`: a choice field's items, or a check box's or radio group's
     /// export values (one per widget, by its [`index`](Widget::index)).
     /// Shared with the fields that inherit it. A choice field's leaves
-    /// out an item that is no text; a check box's or radio group's keeps
-    /// its place, as an option of empty text, so each widget's entry is
-    /// still at its index.
+    /// out an item that is no text (a string or a stream, or an array
+    /// that starts with two of them); a check box's or radio group's is
+    /// read as the family reads an option, a string or an array of
+    /// exactly two strings, and keeps the place of anything else, as an
+    /// option of empty text, so each widget's entry is still at its
+    /// index.
     pub options: Arc<[Choice]>,
     /// `/Opt` is an array, its own or a parent field's, an empty one too:
     /// a check box's or radio group's widgets with no on state of their

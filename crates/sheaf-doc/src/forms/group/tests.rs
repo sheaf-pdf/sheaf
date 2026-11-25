@@ -24,7 +24,7 @@ use crate::materialize::tests::open;
 use crate::model::{DocState, Document};
 use crate::pdf::forms::group::{FieldGroup, on_state_name};
 use crate::pdf::forms::{self, Limits};
-use crate::pdf::{Object, ObjectId, literal};
+use crate::pdf::{Dictionary, Object, ObjectId, Stream, literal};
 use crate::store::{BlobKind, Store};
 use crate::tx::fixture as fx;
 
@@ -363,6 +363,44 @@ fn opt_gives_each_widget_its_export_value_by_its_index() {
     };
     assert_eq!(options("c"), ["x", "", "z"]);
     assert_eq!(options("l"), ["x", "z"]);
+}
+
+/// An `/Opt` item gives an export value only where it's an option as the
+/// family reads one, a string or an array of exactly two strings: an
+/// array of three, of one, and a stream's text each export `Yes`, as the
+/// family's own reading of the file has them.
+#[test]
+fn an_opt_item_that_is_no_option_exports_yes_as_the_familys() {
+    let mut f = Form::new(1);
+    let buttons: Vec<Button> = (0..6)
+        .map(|i| Button::at(i, Some("on"), Some("Off")))
+        .collect();
+    let (r, _) = f.buttons("r", RADIO, &buttons);
+    let text = (f.pdf).add_object(Stream::new(Dictionary::new(), b"s".to_vec()));
+    let opt = vec![
+        literal("a"),
+        Object::from(vec![literal("b"), literal("B")]),
+        Object::from(vec![literal("c"), literal("C"), literal("more")]),
+        Object::from(text),
+        Object::from(vec![literal("e")]),
+        Object::from(vec![Object::from(text), literal("F")]),
+    ];
+    f.dict(r).set("Opt", opt);
+    let o = Opened {
+        path: "built".into(),
+        doc: open(&f.bytes(), None),
+    };
+    let ours = group(&o.doc, "r");
+    let theirs = family_group(&o, r).expect("the family's group");
+    let (a, b) = (ours.group(), theirs.group());
+    let exports = |g: &Group<'_>| -> Vec<String> {
+        (0..6)
+            .map(|i| g.export_value(i).expect("a widget").into_owned())
+            .collect()
+    };
+    assert_eq!(exports(&a), ["a", "b", "Yes", "Yes", "Yes", "Yes"]);
+    assert_eq!(exports(&a), exports(&b));
+    assert!(ours.set_export("c").is_none(), "no widget exports it");
 }
 
 /// A value set by a state's name, or by an export value, and the export
