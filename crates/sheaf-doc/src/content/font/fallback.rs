@@ -25,28 +25,26 @@
 
 use std::sync::{Arc, OnceLock};
 
-use unicode_normalization::UnicodeNormalization;
-use unicode_segmentation::UnicodeSegmentation;
-
 use crate::content::{Res, ResBody, ResId, ResourceNeeds};
 use crate::pdf::fonts::{EmbedOptions, Glyphs, Program, embed_write};
 use crate::pdf::forms::FieldFallback;
-use crate::pdf::gfx::{UnencodableChar, face_for};
 use crate::pdf::{Object, dictionary};
 
-/// A font sheaf bundles to draw what another font can't. One today,
-/// [`Fallback::SANS`]; another face would be another value.
+/// The font sheaf bundles to draw what another font can't
+/// ([`Fallback::SANS`]): Noto Sans Regular, unhinted, from the Noto
+/// project's release v2.015 (`assets/NotoSans-Regular.ttf`; SIL Open Font
+/// License 1.1, `assets/LICENSE-NotoSans.txt`).
+///
+/// There is one. Text chooses it by name where it draws ([`DrawFont`]'s
+/// `encode` and `width`), and a sink joins every glyph drawn in it into
+/// one set ([`Sink::fallback`]), as do the values that carry them
+/// ([`Uses`], a save's record): a second face would give each of those
+/// its face, not only this type a second value.
+///
+/// [`DrawFont`]: crate::content::DrawFont
+/// [`Sink::fallback`]: crate::content::sink::Sink::fallback
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Fallback(Face);
-
-/// Which program a [`Fallback`] is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum Face {
-    /// Noto Sans Regular, unhinted, from the Noto project's release
-    /// v2.015 (`assets/NotoSans-Regular.ttf`; SIL Open Font License 1.1,
-    /// `assets/LICENSE-NotoSans.txt`).
-    Sans,
-}
+pub struct Fallback(());
 
 /// The marker's id: a number no resource's objects digest to, as it's
 /// no digest, so nothing a file holds is taken for it. Content names the
@@ -55,7 +53,7 @@ const SANS_MARKER: ResId = ResId(0x6a2e_91c4_57fd_0b38_e1a9_43c6_0d7b_25f2);
 
 impl Fallback {
     /// Noto Sans Regular.
-    pub const SANS: Fallback = Fallback(Face::Sans);
+    pub const SANS: Fallback = Fallback(());
 
     /// Its program's bytes, as the release has it.
     const SANS_PROGRAM: &[u8] = include_bytes!("../../../assets/NotoSans-Regular.ttf");
@@ -63,12 +61,10 @@ impl Fallback {
     /// Its program, opened once.
     pub fn program(self) -> &'static Program {
         static SANS: OnceLock<Program> = OnceLock::new();
-        match self.0 {
-            Face::Sans => SANS.get_or_init(|| {
-                Program::open(Fallback::SANS_PROGRAM, 0)
-                    .expect("the bundled program is a TrueType font pdf-fonts opens")
-            }),
-        }
+        SANS.get_or_init(|| {
+            Program::open(Fallback::SANS_PROGRAM, 0)
+                .expect("the bundled program is a TrueType font pdf-fonts opens")
+        })
     }
 
     /// The resource content names it by: a marker the same in every
@@ -76,22 +72,18 @@ impl Fallback {
     /// subset is written at ([`Fallback::is`] tells it).
     pub fn res(self) -> Res {
         static SANS: OnceLock<Res> = OnceLock::new();
-        match self.0 {
-            Face::Sans => SANS
-                .get_or_init(|| {
-                    // What it is, said, should a reader ever see it; it
-                    // binds nothing a reader draws.
-                    let marker = dictionary! {
-                        "Type" => Object::name("Font"),
-                        "Subtype" => Object::name("Type0"),
-                        "BaseFont" => Object::name("NotoSans-Regular"),
-                    };
-                    let objects: Arc<[Object]> = Arc::from([Object::from(marker)]);
-                    Res::named(SANS_MARKER, ResBody::Objects(objects))
-                        .expect("a dictionary is a resource")
-                })
-                .clone(),
-        }
+        SANS.get_or_init(|| {
+            // What it is, said, should a reader ever see it; it binds
+            // nothing a reader draws.
+            let marker = dictionary! {
+                "Type" => Object::name("Font"),
+                "Subtype" => Object::name("Type0"),
+                "BaseFont" => Object::name("NotoSans-Regular"),
+            };
+            let objects: Arc<[Object]> = Arc::from([Object::from(marker)]);
+            Res::named(SANS_MARKER, ResBody::Objects(objects)).expect("a dictionary is a resource")
+        })
+        .clone()
     }
 
     /// It as a text field's appearance draws in it ([`FieldFallback`],
@@ -103,34 +95,7 @@ impl Fallback {
 
     /// Whether `res` is its marker ([`Fallback::res`]).
     pub fn is(self, res: &Res) -> bool {
-        match self.0 {
-            Face::Sans => res.id() == SANS_MARKER,
-        }
-    }
-
-    /// Whether it draws all of `s`, as text is drawn in it: a grapheme
-    /// cluster at a time, each whole, composed (NFC) where it has the
-    /// composed form, else as given; a line break, which breaks a line and
-    /// draws nothing, apart. Where it doesn't, the first character of the
-    /// first cluster it can't draw, at its byte offset in `s`.
-    pub fn covers(self, s: &str) -> Result<(), UnencodableChar> {
-        let program = self.program();
-        let mut nfc = String::new();
-        for (at, cluster) in s.grapheme_indices(true) {
-            if cluster.chars().all(|c| matches!(c, '\r' | '\n')) {
-                continue;
-            }
-            nfc.clear();
-            nfc.extend(cluster.nfc());
-            if nfc != cluster && face_for(program, &nfc).is_ok() {
-                continue;
-            }
-            face_for(program, cluster).map_err(|e| UnencodableChar {
-                at: at + e.at,
-                character: e.character,
-            })?;
-        }
-        Ok(())
+        res.id() == SANS_MARKER
     }
 
     /// Its subset of `glyphs`, as a resource: the objects pdf-fonts writes

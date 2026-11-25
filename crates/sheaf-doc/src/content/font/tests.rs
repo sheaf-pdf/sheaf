@@ -502,42 +502,6 @@ fn the_fallback_program_opens() {
     assert_eq!(mapped.count(), 2965);
 }
 
-/// It draws Latin, Greek and Cyrillic past WinAnsi, composed or not, line
-/// breaks apart; not CJK, emoji, Hebrew or Arabic, each refused at its
-/// first character's byte.
-#[test]
-fn the_fallback_covers_latin_greek_and_cyrillic() {
-    use crate::content::fixture::FALLBACK_TEXT;
-    use crate::pdf::gfx::UnencodableChar;
-
-    let sans = Fallback::SANS;
-    let decomposed: String = FALLBACK_TEXT.nfd().collect();
-    assert_ne!(decomposed, FALLBACK_TEXT);
-    let covered = [
-        FALLBACK_TEXT,
-        &decomposed,
-        "\u{395}\u{3BB}\u{3BB}\u{3B7}\u{3BD}\u{3B9}\u{3BA}\u{3AC}",
-        "\u{41A}\u{438}\u{440}\u{438}\u{43B}\u{43B}\u{438}\u{446}\u{430}",
-        "two\nlines\r\nhere",
-    ];
-    for text in covered {
-        assert_eq!(sans.covers(text), Ok(()), "{text:?}");
-    }
-    let refused = [
-        ("Mr \u{738B}", 3, '\u{738B}'),
-        ("ok \u{1F600}", 3, '\u{1F600}'),
-        ("\u{5E9}\u{5DC}\u{5D5}\u{5DD}", 0, '\u{5E9}'),
-        ("abc \u{645}\u{631}\u{62D}\u{628}\u{627}", 4, '\u{645}'),
-    ];
-    for (text, at, character) in refused {
-        assert_eq!(
-            sans.covers(text),
-            Err(UnencodableChar { at, character }),
-            "{text:?}"
-        );
-    }
-}
-
 /// Content names the fallback by a marker, the same resource every time
 /// and so the same name, which no resource of its objects is taken for.
 #[test]
