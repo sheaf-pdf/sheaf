@@ -1562,7 +1562,8 @@ What stays sheaf's is said below, each with why.
   (`SynthesizedAp::drawn`), where the family's look isn't sheaf's: the
   underline, strikeout and squiggly (a replacement's struck text too),
   the note, the line and the dimension, free text and the callout (its
-  layout, and a `?` for what the standard 14 can't draw), a plain
+  layout, the fallback font for what the standard 14 face can't draw and
+  a `?` for what neither can), a plain
   ellipse (sheaf's curve constant is 0.5523 and its path open, the
   family's 0.5522847 and closed: up to 12 levels apart at 4 px/pt), and
   sheaf's own tools (the tape, the connector, the stamps). Replies and
@@ -1622,7 +1623,7 @@ a test's fill (`tx::fixture::fill`, or a `Prim` on a state) reaches any
 of this, and a user sees nothing new.
 
 - **What's pdf-forms', what's sheaf's.** pdf-forms makes the appearance
-  (`appearance::text`, over pdf-gfx and pdf-fonts): the `/DA` parser
+  (`appearance::text_with_fallback`, over pdf-gfx and pdf-fonts): the `/DA` parser
   (pdf-gfx's `DefaultAppearance`), the encoders for each `/Encoding`
   (WinAnsi, MacRoman, a font's built-in encoding, each with
   `/Differences`, by glyph name), the standard 14's widths, the layout
@@ -2591,7 +2592,8 @@ slice 9 every save was a Rewrite.
 What a save draws goes through `ContentWriter`, pdf-content-streams'
 writer (see Page content), its text through `DrawText`: marks' appearances (on pdf-gfx's `Canvas` over it, or pdf-annots' drawing: see Annotations through pdf-annots), tapes, the header and footer,
 OCR layers and the watermark's text, in the built-in fonts' exact
-encodings, where a character a font can't draw is a `?` in the drawing
+encodings and, from M10 slice 7, the fallback font for what a standard
+14 face can't draw; a character neither draws is a `?` in the drawing,
 and the text itself is kept. The resources they draw with are named
 `/Sh` and six characters of their digest, and are one object a file
 whichever marks and pages use them (bug 19): one mark of every kind
@@ -4920,9 +4922,9 @@ moved them onto `Generator` as fields, with `frozen`, for both kinds;
   Invalid. With no `image` or `pdf`, it keeps what the watermark at its
   z draws now, so a reopened image moves or scales without being
   embedded again (Invalid when nothing's drawn there). `replaces` is
-  `{Watermark}` over the content and `{Background}` under it. Text the
-  face can't draw all of is kept exactly and told
-  (`Notice::Unencodable`). It reads no content and no `Geom`: the layout
+  `{Watermark}` over the content and `{Background}` under it. Text
+  neither the face nor the fallback font can draw all of is kept exactly
+  and told (`Notice::Unencodable`). It reads no content and no `Geom`: the layout
   is the emitter's, so a watermark set before a later crop lands and is
   centred on the crop. Lines: "Add a watermark to all pages", "Add a
   background to pages 2, 3", "Change the watermark on …".
@@ -4965,7 +4967,7 @@ moved them onto `Generator` as fields, with `frozen`, for both kinds;
   pt in from a side it keeps to, its rotated bounding box inside; an
   image or page `scale` of the shown width wide, a JPEG's quarter turns
   honoured. Text is in the `FontChoice`'s standard 14 face, a character
-  it can't draw `?`. The content is `/Artifact /Sh… BDC q /Sh… gs cm …
+  it can't draw in the fallback font, and one neither can `?`. The content is `/Artifact /Sh… BDC q /Sh… gs cm …
   Q EMC`, its property list `<< /Type /Pagination /Subtype /Watermark
   (or /Background) /SHEF_Gen (g…) >>` named in `/Properties` like every
   resource it adds, its graphics state `/ca` and `/CA`. The layout's
@@ -5280,10 +5282,10 @@ its page tokens count the pages written.
   no `Geom`, and the order only when it numbers pages. Empty texts take
   it off; a spec `header::unfit` refuses (every slot blank, a size not
   above 0, a margin that isn't a number) or an empty `Pages` scope is
-  `EditError::Invalid`. Text its face can't draw, and a page label under
-  `<<label>>` it can't (`label_unencodable`, which reads the pages only
-  when a range's prefix can't be drawn), is drawn `?` and told
-  (`Notice::Unencodable`); `SetPageLabels` says it too when it makes a
+  `EditError::Invalid`. Text neither its face nor the fallback font can
+  draw, and a page label under `<<label>>` neither can
+  (`label_unencodable`, which reads the pages only when a range's prefix
+  can't be drawn), is drawn `?` and told (`Notice::Unencodable`); `SetPageLabels` says it too when it makes a
   label unencodable there. The same settings set again make no version.
 - **`RemoveHeaderFooter`** is Remove Watermark's lowering for the kinds
   `{Header, Footer}`: one `remove_generated` serves both. It narrows the
