@@ -72,8 +72,11 @@
 //! checked: objects by table, keys, the checks not made and why, the keys
 //! the model doesn't list, and those the version deprecates or readers
 //! ignore, and the widgets pressed and what was made of them; run on every
-//! form, its counts of forms and saves are asserted ([`FORMS`]). Skips
-//! when there's no corpus (see `sheaf_doc::forms::corpus`).
+//! form, its counts of forms and saves are asserted ([`FORMS`]), and what
+//! the pressed saves pressed and made, which is held beside the files'
+//! failures so one doesn't hide the other; a pressed widget whose
+//! appearance can be made and that the save wrote none for fails its
+//! form. Skips when there's no corpus (see `sheaf_doc::forms::corpus`).
 
 mod common;
 mod lint;
@@ -1747,6 +1750,12 @@ const FORMS: FormsBaseline = FormsBaseline {
         ("of one page, a Rewrite to a copy", 1488),
         (PRESSED, 47),
     ],
+    pressed: PressedBaseline {
+        pressed: &[("check box", 254), ("radio button", 53)],
+        stale: &[("check box", 254), ("radio button", 50)],
+        made: &[("check box", 254), ("radio button", 14)],
+        unmade: &[("radio button, no-box", 36)],
+    },
 };
 
 struct FormsBaseline {
@@ -1754,6 +1763,20 @@ struct FormsBaseline {
     files: usize,
     unopened: [(&'static str, usize); 2],
     saves: [(&'static str, usize); 5],
+    pressed: PressedBaseline,
+}
+
+/// What the pressed saves pressed and made over the whole corpus
+/// ([`Pressed`], summed), each by its kind: the widgets pressed, those to
+/// be made, those the save made, and those it made none for, by why (36
+/// radio buttons whose box has no size). Held whatever else the tier
+/// finds ([`Pressed::moved`]), so a save that stops making a toggle's
+/// appearances fails it.
+struct PressedBaseline {
+    pressed: &'static [(&'static str, usize)],
+    stale: &'static [(&'static str, usize)],
+    made: &'static [(&'static str, usize)],
+    unmade: &'static [(&'static str, usize)],
 }
 
 /// What [`pressed_save`]'s save is.
@@ -1801,6 +1824,80 @@ struct Pressed {
     /// Of those, the widgets it made none for, by kind and why
     /// (`appearance::unmade_kind`).
     unmade: BTreeMap<String, usize>,
+}
+
+impl Pressed {
+    /// Each of its counts that isn't `held`'s, as a line that says which
+    /// and both: none where every count is the one held.
+    fn moved(&self, held: &PressedBaseline) -> Vec<String> {
+        fn differ<K: AsRef<str>>(
+            what: &str,
+            counted: &BTreeMap<K, usize>,
+            held: &[(&'static str, usize)],
+        ) -> Option<String> {
+            let counted: BTreeMap<&str, usize> =
+                counted.iter().map(|(k, &n)| (k.as_ref(), n)).collect();
+            let held: BTreeMap<&str, usize> = held.iter().copied().collect();
+            (counted != held).then(|| format!("{what}: {counted:?}, held at {held:?}"))
+        }
+        [
+            differ("pressed", &self.pressed, held.pressed),
+            differ("pressed, to be made", &self.stale, held.stale),
+            differ("pressed, made", &self.made, held.made),
+            differ("pressed, not made", &self.unmade, held.unmade),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+}
+
+/// What [`pressed_save`] says of a widget whose appearance can be made and
+/// that the save wrote none for: a failure of its form.
+const NOT_WRITTEN: &str = "made, not written";
+
+/// The held counts hold themselves, and each count that moves is said: a
+/// save that makes no toggle, a class of unmade widgets that's new, and
+/// one that's gone.
+#[test]
+fn the_pressed_saves_counts_are_held() {
+    let counted = |held: &PressedBaseline| Pressed {
+        pressed: held.pressed.iter().copied().collect(),
+        stale: held.stale.iter().copied().collect(),
+        made: held.made.iter().copied().collect(),
+        unmade: (held.unmade.iter())
+            .map(|&(why, n)| (why.to_string(), n))
+            .collect(),
+    };
+    let held = &FORMS.pressed;
+    assert_eq!(counted(held).moved(held), [] as [String; 0]);
+    // Every widget to be made is made, or counted as not made.
+    let sum = |counts: &[(&str, usize)]| counts.iter().map(|&(_, n)| n).sum::<usize>();
+    assert_eq!(sum(held.stale), sum(held.made) + sum(held.unmade));
+
+    let mut none_made = counted(held);
+    none_made.made.clear();
+    let moved = none_made.moved(held);
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert!(
+        moved[0].starts_with("pressed, made: {}, held at"),
+        "{moved:?}"
+    );
+
+    let mut fewer = counted(held);
+    *fewer.made.get_mut("radio button").unwrap() -= 1;
+    *fewer
+        .unmade
+        .entry("radio button, no-box".into())
+        .or_default() += 1;
+    assert_eq!(fewer.moved(held).len(), 2);
+
+    let mut new_class = counted(held);
+    new_class.unmade.insert("check box, other".into(), 1);
+    new_class.unmade.remove("radio button, no-box");
+    let moved = new_class.moved(held);
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert!(moved[0].starts_with("pressed, not made:"), "{moved:?}");
 }
 
 /// One save's check, its findings sorted out.
@@ -1904,7 +2001,21 @@ fn what_sheaf_writes_on_every_form_holds_to_arlington() {
     for (path, why) in &failed {
         println!("{path}:\n  {why}");
     }
-    assert!(failed.is_empty(), "{} files failed", failed.len());
+    // What the pressed saves made is held beside the files' failures, not
+    // after them, so a file that fails for something else doesn't hide it.
+    let pressed_moved = match entries.len() == FORMS.manifest {
+        true => totals.pressed.moved(&FORMS.pressed),
+        false => Vec::new(),
+    };
+    for moved in &pressed_moved {
+        println!("the pressed saves' counts moved: {moved}");
+    }
+    assert!(
+        failed.is_empty() && pressed_moved.is_empty(),
+        "{} files failed, {} of the pressed saves' counts moved",
+        failed.len(),
+        pressed_moved.len()
+    );
     if entries.len() == FORMS.manifest {
         assert_eq!(totals.files, FORMS.files, "forms opened");
         let unopened: BTreeMap<&str, usize> = (FORMS.unopened.iter().copied())
@@ -2104,7 +2215,7 @@ fn pressed_save(
             let (kind, _) = kind_of(&doc, aid)?;
             let why = match appearance::look(st, aid) {
                 Ok(look) => match appearance::make(&look, no_font) {
-                    Ok(_) => "made, not written".to_string(),
+                    Ok(_) => NOT_WRITTEN.to_string(),
                     Err(why) => appearance::unmade_kind(&why),
                 },
                 Err(why) => why.kind(),
@@ -2116,12 +2227,22 @@ fn pressed_save(
     let record = doc
         .saved_record()
         .ok_or("the pressed save left no record")?;
+    let mut unwritten = 0;
     for (aid, kind, unmade) in stale {
         *pressed.stale.entry(kind).or_default() += 1;
         match (record.map.keys).contains_key(&ObjKey::AnnotPart(aid, Part::Ap)) {
             true => *pressed.made.entry(kind).or_default() += 1,
-            false => *pressed.unmade.entry(unmade).or_default() += 1,
+            false => {
+                unwritten += usize::from(unmade.ends_with(NOT_WRITTEN));
+                *pressed.unmade.entry(unmade).or_default() += 1;
+            }
         }
+    }
+    if unwritten > 0 {
+        return Err(format!(
+            "{PRESSED}: no appearance written for {unwritten} widgets whose state changed and \
+             that one can be made for"
+        ));
     }
     let (report, version) = save_checked(&doc, 0, strategy, &bytes)?;
     let held = (&doc, entry.path.as_str(), allowances);

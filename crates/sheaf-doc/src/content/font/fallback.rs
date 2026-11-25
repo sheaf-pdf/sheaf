@@ -89,7 +89,13 @@ impl Fallback {
 
     /// It as a text field's appearance draws in it ([`FieldFallback`],
     /// pdf-forms'): its program, named by its marker, so a field's
-    /// appearance binds it as any other drawing does.
+    /// appearance binds it as any other drawing does. A text field's
+    /// maker gives back the glyphs of what it draws alone (none of text
+    /// past a comb field's cells), so its subset is what's drawn and no
+    /// more; a drawing whose maker gives back none takes
+    /// [`recording`](Self::recording), which notes each glyph encoded.
+    /// Two ways on purpose: a text field's bytes stay as this one makes
+    /// them.
     pub fn field(self) -> FieldFallback<'static> {
         FieldFallback::new(self.res(), self.program())
     }

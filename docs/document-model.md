@@ -1644,8 +1644,8 @@ of this, and a user sees nothing new.
 - **The plain data** (`look(st, aid)`, `Look::Text` for a text field's
   widget; since M10 slice 8 `Look::Toggle` for a check box's or radio
   button's, `Look::Choice` for a combo box's or list box's and
-  `Look::Push` for a push button's, `Unmade::Icon` for one that shows an
-  icon; `Unmade::NotText` for anything else): the terminal's value,
+  `Look::Push` for a push button's; for anything else `NoLook` says why,
+  below): the terminal's value,
   which is the text shown (a format script's display string, once slice
   9's op carries one), its `/Ff`, `/MaxLen` and effective `/Q`; and the
   widget's frame (`Frame`, which every kind's look shares: its box, `/MK`
@@ -1843,17 +1843,25 @@ each one version, as slice 9's op will be one transaction).
   its `/AP /N` that names a stream and isn't `Off`, PDFium's rule; else
   its index where the field has `/Opt`, `FieldProps.has_opt`; else
   `Yes`), its export value (`/Opt`'s entry at its place: a button
-  field's `/Opt` keeps its places, an item that's no text an empty one)
-  and whether it's on. `Buttons::press`, `set_state` and `set_export`
+  field's `/Opt` keeps its places, and an item is an option as the family
+  reads one, a string or an array of exactly two strings, anything else
+  an empty one) and whether it's on. `Buttons::press`, `set_state` and `set_export`
   give a `Change` (the field's value, the state of each widget that
   moves, and the export value data export writes), which is what slice
   9's lowering puts; NoToggleToOff, RadiosInUnison and check boxes of
   distinct on states acting as radios are the family's. A widget the
-  model doesn't hold (on a page template) has no on state and is never
-  put; a page the tree lists twice puts both records; a widget that
-  shows no `/AS` and stays off is put `/Off`. Over every corpus form,
+  model doesn't hold (on a page template, or on a page since deleted)
+  keeps the on state its file gives it, which the field's record holds
+  for every index (`FieldProps.on_states`), so the rules name it as its
+  file does and a value set by a held widget's name turns that widget
+  on; it shows no state and is never put. A page the tree lists twice
+  puts both records; a widget that shows no `/AS` and stays off is put
+  `/Off`. One widget's on state's name needs no group
+  (`forms::group::on_state`, from its record and its field's), which is
+  what a toggle's look takes. Over every corpus form,
   each check box and radio field's group is the family's own reading
-  (63,116 fields and 76,925 widgets alike), but for held classes: 36
+  (63,116 fields, 76,925 widgets alike, and the names and export values
+  of the 109 the model holds no widget for), but for held classes: 36
   fields whose own dictionary is a widget beside kids (the family has no
   place for it), widgets on no page, and fields only one reader reads.
 - **The plain data** (`look(st, aid)`): `Look::Toggle` (`ToggleLook`:
@@ -1867,8 +1875,14 @@ each one version, as slice 9's op will be one transaction).
   `/AC`, none with `/MK /TP 1`; whether `/H` is `/P` or `/T`,
   `WidgetProps.pressed`; whether it has a `/DA` at all, 12 points where
   it hasn't; `Unmade::Icon` where `/MK /I` is a stream and `/TP` isn't
-  0), each with the widget's `Frame`. Each `Debug` prints lengths and
-  flags, never a caption, a label or a name.
+  0; `/TP` read as the family reads it), each with the widget's `Frame`.
+  Each `Debug` prints lengths and flags, never a caption, a label or a
+  name. Where no look is read, `look` says why in sheaf's own words
+  (`NoLook`: `NotWidget`, `Kind` for a signature's widget, or pdf-forms'
+  refusal of what was read, `Unmade::Icon`), never by the family's kind
+  checks, which mean what that crate says of a field it read. A look
+  costs a map lookup or two: none builds its field's group, and none
+  copies a choice's options.
 - **What's made** (`stale`): a check box's or radio button's widget that
   shows a state its file's doesn't (`state_changed`) and whose file's
   `/AP /N` has no on state, the whole set, as PDFium makes every state at
@@ -1891,7 +1905,13 @@ each one version, as slice 9's op will be one transaction).
   rollover and down ones (`Slot::Rollover`, `Down`). A choice and a push
   button draw in the field's font and the fallback font (`WithFallback`
   over `Fallback::recording`, which notes each glyph the fallback draws;
-  a refused make's glyphs go with it, never into a subset).
+  a refused make's glyphs go with it, never into a subset). A text
+  field's keeps M10 slice 7's way (`text_with_fallback` over
+  `Fallback::field`), on purpose: that maker gives back the glyphs of
+  what's drawn alone (none of text past a comb field's cells), so a text
+  field's subset stays byte for byte slice 7's, where the recording font
+  notes each glyph it encodes; the family has no such maker for a choice
+  or a push button, so those record.
 - **The binding**: each form under its part of the widget's key,
   `AnnotPart(aid, Ap)` (`/N`, a toggle's on state's), `ApOff`, `ApDown`,
   `ApDownOff` and `ApRollover`; a toggle's `/AP` is `<< /N << /on … /Off
@@ -1909,13 +1929,19 @@ each one version, as slice 9's op will be one transaction).
   down forms, 0 px apart, each with a twin past the tolerance; a mark,
   a ZapfDingbats glyph where PDFium fills a path of its own, by where its
   ink reaches (its centre and extent within 0.04 of the box's centre
-  square and a pixel an edge); `interop.rs`'s qpdf, pdftoppm and pdf.js;
+  square, a cross's width within 0.16, and a pixel an edge: pdf-forms'
+  own tolerances); `interop.rs`'s qpdf and pdftoppm, and pdf.js, which
+  reads each and warns of nothing but that it supports no push button
+  without an action, as these are;
   `just fields-dump`, each corpus button and choice widget's look beside
   the family's reading and the forms each makes, alike on all but the
   classes the group's comparison holds; pdf-lint over a form built in
   code of each kind changed, by a Rewrite and an Append, and in `just
   tier-arlington` over every corpus form whose check boxes or radio
-  buttons have no on state, each pressed and rewritten.
+  buttons have no on state, each pressed and rewritten, what was pressed
+  and made held to its counts (47 forms; 254 check boxes and 14 radio
+  buttons made, 36 radio buttons of no size not) and a widget whose
+  appearance can be made and wasn't written a failure of its form.
 
 ## Undo/redo: snapshots, not inverse commands
 
