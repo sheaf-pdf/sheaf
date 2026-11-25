@@ -62,7 +62,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::pdf::forms::{FieldFont, Unmade};
+use crate::pdf::forms::{FieldFont, MadeWithFallback, Unmade};
 use crate::pdf::{
     Dictionary, LazyPdf, Object, ObjectId, StringFormat, Value as PdfValue, dictionary, literal,
 };
@@ -70,7 +70,7 @@ use crate::pdf::{
 use super::Cx;
 use crate::annot::AnnotId;
 use crate::attachments::tree_names;
-use crate::content::{Glyphs, Res, sink};
+use crate::content::{Res, sink};
 use crate::forms::appearance::{self, FontAt, TextLook};
 use crate::forms::{FieldId, FieldKind, Value};
 use crate::materialize::copy::Scope;
@@ -502,8 +502,10 @@ pub(crate) fn widget(
 /// by pdf-forms from the model's plain data ([`appearance::text_look`]) in
 /// the font its `/DA` names in `src`'s `/DR`, `src` the source the widget
 /// was read from, under that source's name (a merged `/DR` may have
-/// renamed it; it's still the same object), pushed under
-/// `AnnotPart(aid, Ap)` where the emission writes it. The widget's `/AP`:
+/// renamed it; it's still the same object), and the fallback font for
+/// what that can't draw, pushed under `AnnotPart(aid, Ap)` where the
+/// emission writes it, the fallback's glyphs it draws joined there and
+/// only there, as what's written is what binds them. The widget's `/AP`:
 /// `<< /N … >>`, nothing else of the file's (its `/D` and `/R` would show
 /// the old value). None where none can be made: the widget is written
 /// with no `/AP`, so no file shows a value the field no longer holds, and
@@ -524,8 +526,18 @@ fn appearance(cx: &mut Cx, aid: AnnotId, src: &Src) -> Option<Object> {
     };
     let ap = ObjKey::AnnotPart(aid, Part::Ap);
     if cx.writes(&ap) {
-        let none = Glyphs::new();
-        let form = sink::form(cx, made.bbox, made.matrix, made.content, &made.needs, &none);
+        let MadeWithFallback {
+            appearance, glyphs, ..
+        } = made;
+        let (bbox, matrix) = (appearance.bbox, appearance.matrix);
+        let form = sink::form(
+            cx,
+            bbox,
+            matrix,
+            appearance.content,
+            &appearance.needs,
+            &glyphs,
+        );
         cx.push(ap, Object::from(form));
     }
     Some(Object::from(dictionary! { "N" => cx.placeholder(ap) }))

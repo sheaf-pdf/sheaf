@@ -32,7 +32,7 @@ use unicode_normalization::UnicodeNormalization;
 use crate::pdf::fonts::LayoutFont;
 
 pub use draw::DrawText;
-pub use fallback::{Fallback, Uses};
+pub use fallback::{Fallback, Uses, draws_all};
 pub use glyphless::Glyphless;
 
 pub use crate::pdf::fonts::{

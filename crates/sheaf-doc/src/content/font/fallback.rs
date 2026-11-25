@@ -30,6 +30,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::content::{Res, ResBody, ResId, ResourceNeeds};
 use crate::pdf::fonts::{EmbedOptions, Glyphs, Program, embed_write};
+use crate::pdf::forms::FieldFallback;
 use crate::pdf::gfx::{UnencodableChar, face_for};
 use crate::pdf::{Object, dictionary};
 
@@ -93,6 +94,13 @@ impl Fallback {
         }
     }
 
+    /// It as a text field's appearance draws in it ([`FieldFallback`],
+    /// pdf-forms'): its program, named by its marker, so a field's
+    /// appearance binds it as any other drawing does.
+    pub fn field(self) -> FieldFallback<'static> {
+        FieldFallback::new(self.res(), self.program())
+    }
+
     /// Whether `res` is its marker ([`Fallback::res`]).
     pub fn is(self, res: &Res) -> bool {
         match self.0 {
@@ -151,6 +159,18 @@ impl Fallback {
         let objects = embed_write(program, glyphs, &EmbedOptions::default())
             .expect("the bundled program is cut to any of its glyphs");
         Res::of(objects).expect("a font's objects are one at least, their streams in memory")
+    }
+}
+
+/// Whether a subset written of `subset` ([`Fallback::subset`]) draws every
+/// glyph of `glyphs`, each read back as the text it keeps for it: joined
+/// to it, nothing changes. What lets a save bind a subset a file already
+/// holds rather than write another.
+pub fn draws_all(subset: &Glyphs, glyphs: &Glyphs) -> bool {
+    glyphs.len() <= subset.len() && {
+        let mut joined = subset.clone();
+        joined.merge(glyphs);
+        joined == *subset
     }
 }
 

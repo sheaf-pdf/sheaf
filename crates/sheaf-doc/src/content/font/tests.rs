@@ -565,3 +565,30 @@ fn equal_glyphs_give_an_equal_subset() {
     more.add(program, "\u{1EC5}").unwrap();
     assert_ne!(sans.subset(&more).id(), sans.subset(&one).id());
 }
+
+/// A subset draws all of what it holds, each glyph with the text it keeps
+/// for it: the same glyphs, fewer, or none; not one more; and not a glyph
+/// it holds drawn for a text that would take the place of its own (a
+/// smaller, which [`Glyphs`] keeps), as its `/ToUnicode` would read it
+/// otherwise, while one drawn for a later text reads back as it does.
+#[test]
+fn a_subset_draws_all_of_what_it_holds() {
+    let program = Fallback::SANS.program();
+    let glyphs = |text: &str| {
+        let mut glyphs = Glyphs::new();
+        glyphs.add(program, text).unwrap();
+        glyphs
+    };
+    let held = glyphs("\u{141}\u{143}");
+    for drawn in [glyphs("\u{141}"), held.clone(), Glyphs::new()] {
+        assert!(draws_all(&held, &drawn), "{drawn:?}");
+    }
+    assert!(!draws_all(&held, &glyphs("\u{141}\u{1EC5}")));
+    assert!(!draws_all(&glyphs("\u{141}"), &held));
+    let l = program.glyph('\u{141}').unwrap();
+    let (mut smaller, mut later) = (Glyphs::new(), Glyphs::new());
+    smaller.insert(l, "A");
+    later.insert(l, "\u{179}");
+    assert!(!draws_all(&held, &smaller));
+    assert!(draws_all(&held, &later));
+}

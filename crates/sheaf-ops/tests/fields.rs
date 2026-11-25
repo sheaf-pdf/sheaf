@@ -24,10 +24,12 @@
 //! it's built with, which pdf-forms was held to.
 //!
 //! On every system, a realized page draws a changed field as its saved
-//! file does, appearances only and live; and "é € — “ ”" in the state
-//! forms' `/Helv` and `/Arial` reads back, by sheaf's interpreter over the
-//! made form and by PDFium's text of the page it flattened (the `/Arial`'s
-//! "€" as PDFium reads it on each system: [`pdfium_reads`]).
+//! file does, appearances only and live; "é € — “ ”" in the state forms'
+//! `/Helv` and `/Arial` reads back, by sheaf's interpreter over the made
+//! form and by PDFium's text of the page it flattened (the `/Arial`'s "€"
+//! as PDFium reads it on each system: [`pdfium_reads`]); and a name in the
+//! field's font and the fallback font (M10 slice 7), in an IRS form of the
+//! corpus, draws inside its box and reads back, composed.
 //!
 //! PDFium is sheaf's linked build (`scripts/fetch-pdfium.sh`). Needs
 //! libpdfium, like the app itself.
@@ -164,6 +166,59 @@ fn pdfium_reads(name: &str) -> &'static str {
     } else {
         STATE_TEXT
     }
+}
+
+/// The corpus's f1040, its first name field (`f1_14`, the left of the
+/// name row, at `[36 684 251.25 698]`), and that box on page 0 drawn two
+/// pixels a point: left, top, right, bottom.
+const F1040: &str = "forms/irs/f1040.pdf";
+const FIRST_NAME: &str = "topmostSubform[0].Page1[0].f1_14[0]";
+const FIRST_NAME_PX: [usize; 4] = [72, 188, 503, 216];
+
+/// "Łukasz Nguyễn Ölçer" filled into the f1040's first name field, whose
+/// font has no `Ł` or `ễ`, is drawn in it and the fallback font sheaf
+/// bundles (M10 slice 7): saved, the subset's every code is a glyph of
+/// its cut program with a text, the page drawn appearances only by PDFium
+/// changes inside the field's box alone, with ink there, and PDFium's text
+/// of the page gives the name back. Given decomposed (NFD), it's drawn
+/// composed: the same appearance, and PDFium reads it back composed (NFC).
+/// Where the corpus is.
+#[test]
+fn a_name_in_two_fonts_reads_back_from_an_irs_form() {
+    use sheaf_doc::content::fixture::{FALLBACK_TEXT, fallback_subsets, subsets_hold};
+    let Some(bytes) = common::corpus_form(F1040) else {
+        return;
+    };
+    let width = 2 * 612;
+    let drawn = |bytes: &[u8]| {
+        let engine = PdfiumEngine::open_bytes(bytes.to_vec().into(), None).unwrap();
+        common::fields::flat_at(&engine, PageIndex(0), width).unwrap()
+    };
+    let before = drawn(&bytes);
+    // Its NFD: `ễ` as `e` and two marks, `Ö` and `ç` as a letter and one
+    // (`Ł` has no decomposition).
+    let decomposed = "\u{141}ukasz Nguye\u{302}\u{303}n O\u{308}lc\u{327}er".to_string();
+    assert_ne!(decomposed, FALLBACK_TEXT);
+    let mut made = Vec::new();
+    for value in [FALLBACK_TEXT, &decomposed] {
+        let mut doc = common::opened(bytes.clone(), "f1040.pdf", None);
+        sheaf_doc::tx::fixture::fill(&mut doc, FIRST_NAME, value);
+        let saved = sheaf_doc::save::rewrite(&doc).unwrap();
+        assert_eq!(fallback_subsets(&saved).len(), 1, "one subset");
+        assert_eq!(subsets_hold(&saved), 2, "Ł and ễ");
+        let after = drawn(&saved);
+        let whole = [0, 0, after.width as usize, after.height as usize];
+        let changed = differing_in(&after, &before, whole);
+        let inside = differing_in(&after, &before, FIRST_NAME_PX);
+        println!("{value:?}\t{changed} px changed, {inside} inside its box");
+        assert!(inside > 300, "{inside} px drawn in the box");
+        assert_eq!(changed, inside, "nothing drawn outside the field's box");
+        let text = appearance_text(&saved, None, PageIndex(0)).unwrap();
+        assert!(text.contains(FALLBACK_TEXT), "PDFium reads {text:?}");
+        assert!(!text.contains(&decomposed));
+        made.push(after);
+    }
+    assert!(made[0].data == made[1].data, "NFD drawn as NFC");
 }
 
 /// Ours against PDFium's own appearance, case by case. Linux alone: see

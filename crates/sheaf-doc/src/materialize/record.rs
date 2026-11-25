@@ -24,6 +24,7 @@ use super::emit::PdfVersion;
 use super::key::ObjKey;
 use super::plan::{SaveTransform, StrategyKind};
 use crate::attachments::Objects;
+use crate::content::{Glyphs, ResId};
 use crate::effects::SigClass;
 use crate::model::{DocState, GenId, PageId, Snapshot, VersionId};
 use crate::prim::Key;
@@ -79,6 +80,13 @@ pub struct SaveRecord {
     /// What save policy already did to the file (§11.8), so a later save
     /// never repeats it.
     pub transforms: Arc<[SaveTransform]>,
+    /// The subsets of the fallback font the file holds that sheaf wrote
+    /// (M10 slice 7), each by its resource's id, which the map keys it by,
+    /// and the glyphs it holds, in the order they were written: what an
+    /// Append binds before it writes another. None for a file as opened,
+    /// as nothing reads a file's subsets back; a Rewrite's are its own, and
+    /// an Append carries the file's on with the one it wrote.
+    pub fallbacks: Arc<[(ResId, Glyphs)]>,
     /// What a document restored from the file's recovery sidecar holds
     /// that the file hasn't got, until a save writes it (§11.10): the
     /// document isn't what the file holds while there's one.
@@ -160,6 +168,7 @@ impl SaveRecord {
             tree: Arc::new(tree),
             drawn: Arc::default(),
             transforms: Arc::from([]),
+            fallbacks: Arc::from([]),
             pending_tail: None,
         }
     }
@@ -272,6 +281,7 @@ pub struct OutputRecord {
     pub tree: Arc<TreeShape>,
     pub drawn: Arc<DrawnBlocks>,
     pub transforms: Arc<[SaveTransform]>,
+    pub fallbacks: Arc<[(ResId, Glyphs)]>,
 }
 
 impl OutputRecord {
@@ -296,6 +306,7 @@ impl OutputRecord {
             tree: self.tree,
             drawn: self.drawn,
             transforms: self.transforms,
+            fallbacks: self.fallbacks,
             pending_tail: None,
         }
     }

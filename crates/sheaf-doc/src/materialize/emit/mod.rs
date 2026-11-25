@@ -19,6 +19,17 @@
 //! - [`form`]: the field tree and the form's dictionary, from the records
 //!   and [`FormDoc`](crate::model::FormDoc), with save policy's transforms.
 //!
+//! **The fallback font** (M10 slice 7): what an emission draws in it names
+//! its marker ([`Fallback::res`]), whose placeholder stands for the subset
+//! and says the PDF version a Type 0 font needs. What writes a drawing
+//! that binds it joins the glyphs it draws there ([`Sink::fallback`]);
+//! once all are joined, `finish` makes the placeholder the subset's key
+//! (`Syms::rekey`): for an Append, the latest subset the saved file
+//! holds that draws them all ([`SaveRecord::fallbacks`]), which nothing
+//! writes again; else a subset of them, written as an ordinary resource
+//! keyed by its objects' digest ([`Emission::fallback`]), as every Rewrite
+//! and overlay writes its own.
+//!
 //! Some keys are written at the number of the primary's object they are
 //! (§11.5's model-owned identities, [`Emission::owned`]): copy 0 of a
 //! primary page; an annotation, field or bookmark read from the primary
@@ -89,7 +100,7 @@ use super::plan::{Note, Private, SaveTransform, Unheld};
 use super::record::{DrawnBlocks, SaveRecord};
 use crate::annot::{Annot, AnnotId};
 use crate::content::sink::{self, Sink};
-use crate::content::{Fallback, GenId, Glyphs, Res, ResBody, Reserved};
+use crate::content::{Fallback, GenId, Glyphs, Res, ResBody, ResId, Reserved, draws_all};
 use crate::forms::field::annot_flags;
 use crate::model::{AnnotBody, DocState, FormRef, PageId};
 use crate::realize::{MarkDraw, ViewInputs};
@@ -141,6 +152,11 @@ pub struct Emission {
     /// finds nothing new.
     pub form_keys: Vec<ObjKey>,
     pub form_touched: bool,
+    /// The fallback font's subset it writes, by its resource's id, and the
+    /// glyphs it holds: None where nothing it writes draws in the font, or
+    /// an Append binds a subset the saved file holds
+    /// ([`SaveRecord::fallbacks`]).
+    pub fallback: Option<(ResId, Glyphs)>,
 }
 
 /// The live redraws a save's section makes (§11.9): what the removal
@@ -346,6 +362,20 @@ impl Syms {
     pub fn keys(&self) -> &[ObjKey] {
         &self.keys
     }
+
+    /// `from`'s placeholder made `to`'s: what named one names the other,
+    /// and `from` none. For a key known only once everything that names it
+    /// is drawn (the fallback font's subset, by its digest). Nothing where
+    /// `from` has no placeholder; `to` must have none of its own, or two
+    /// placeholders would name it.
+    pub(crate) fn rekey(&mut self, from: ObjKey, to: ObjKey) {
+        let Some(i) = self.index.remove(&from) else {
+            return;
+        };
+        let had = self.index.insert(to, i);
+        assert!(had.is_none(), "{to:?} had a placeholder of its own");
+        self.keys[i as usize] = to;
+    }
 }
 
 /// A PDF version, as a header or the catalog's `/Version` gives it.
@@ -360,7 +390,8 @@ impl PdfVersion {
     pub const XREF_STREAMS: PdfVersion = PdfVersion::new(1, 5);
     /// AES encryption (`/AESV2`).
     pub const AES: PdfVersion = PdfVersion::new(1, 6);
-    /// CIDFonts (ISO 32000-1 9.7.4), which an OCR layer's text is in.
+    /// CIDFonts (ISO 32000-1 9.7.4), which an OCR layer's text is in, and
+    /// the fallback font's subset.
     pub const CID_FONTS: PdfVersion = PdfVersion::new(1, 2);
     /// Marked-content artifacts with property lists (14.8.2.2), which a
     /// header and footer are drawn as.
@@ -490,9 +521,10 @@ pub(crate) struct Cx<'a> {
     /// copy 0 of them leave out ([`Emission::removed_annots`] once nothing
     /// is written at their numbers).
     pub(crate) left_out: Vec<ObjectId>,
-    /// Every glyph drawn in the fallback font by what binds it in this
-    /// emission ([`Sink::fallback`]), and whether anything bound it: the
-    /// placeholder of its marker's key stands for the subset.
+    /// Every glyph drawn in the fallback font by what this emission writes
+    /// that binds it ([`Sink::fallback`]), and whether anything bound it:
+    /// the placeholder of its marker's key stands for the subset, which
+    /// [`finish`] chooses once every glyph is joined ([`subset`]).
     fallback: Glyphs,
     fallback_bound: bool,
 }
@@ -825,11 +857,14 @@ impl Sink for Cx<'_> {
 
     /// The fallback font's marker ([`Fallback::res`]) is a placeholder of
     /// its own key, which nothing is written at: the subset it stands for
-    /// is the emission's to write once every glyph is joined.
+    /// is the emission's to choose once every glyph is joined ([`subset`]).
+    /// Bound, it needs the PDF version a Type 0 font does, said now, so an
+    /// Append onto an older file says it in its catalog.
     fn resource(&mut self, res: &Res) -> ObjectId {
         let id = res.id();
         if Fallback::SANS.is(res) {
             self.fallback_bound = true;
+            self.needs(PdfVersion::CID_FONTS);
             return self.syms.id(ObjKey::Res(id));
         }
         let key = |i: usize| match i {
@@ -1083,15 +1118,9 @@ fn finish(mut cx: Cx, p: &dyn Progress) -> Result<Emission> {
         let (key, obj) = next?;
         cx.push(key, obj);
     }
-    // Nothing the emitter draws binds the fallback font yet: what did is
-    // said, as its subset isn't written.
-    if cx.fallback_bound || !cx.fallback.is_empty() {
-        log::error!(
-            "the fallback font was drawn in ({} glyphs), but the emitter doesn't write its \
-             subset: what draws in it names no font",
-            cx.fallback.len()
-        );
-    }
+    // Every glyph is joined now: before `reached`, which reads keys
+    // through the placeholders.
+    let fallback = subset(&mut cx);
     if cx.closure.unreadable > 0 {
         cx.notes.push(Note(format!(
             "{} objects the copied pages refer to couldn't be read, and were left out",
@@ -1171,7 +1200,54 @@ fn finish(mut cx: Cx, p: &dyn Progress) -> Result<Emission> {
         aliases,
         form_keys,
         form_touched,
+        fallback,
     })
+}
+
+/// The fallback font's subset `cx` binds, once everything it writes that
+/// draws in the font joined its glyphs: its marker's placeholder made the
+/// subset's key ([`Syms::rekey`]), so all that named the marker names the
+/// subset. An Append binds the latest subset the saved file holds that
+/// draws every glyph joined ([`draws_all`]) and whose key the saved map
+/// has, so nothing of it is written; only where none does is a subset of
+/// the joined glyphs written, as a Rewrite and an overlay write theirs, an
+/// ordinary resource keyed by its objects' digest ([`Fallback::subset`]):
+/// what's returned, beside its glyphs. None where nothing binds it.
+///
+/// Bound with no glyph joined is a missed join, a bug: logged, and a
+/// subset of none written, so no reference dangles. Glyphs joined where
+/// nothing binds the font are logged and dropped.
+fn subset(cx: &mut Cx) -> Option<(ResId, Glyphs)> {
+    let sans = Fallback::SANS;
+    let marker = ObjKey::Res(sans.res().id());
+    let glyphs = std::mem::take(&mut cx.fallback);
+    if !cx.fallback_bound {
+        if !glyphs.is_empty() {
+            log::error!(
+                "{} glyphs were joined in the fallback font, but nothing written binds it: no \
+                 subset is written",
+                glyphs.len()
+            );
+        }
+        return None;
+    }
+    if glyphs.is_empty() {
+        log::error!("the fallback font is bound with no glyph joined: a subset of none is written");
+    }
+    if let Some(record) = cx.saved() {
+        let saved = (record.fallbacks.iter().rev()).find(|(id, subset)| {
+            record.map.get(&ObjKey::Res(*id)).is_some() && draws_all(subset, &glyphs)
+        });
+        if let Some(&(id, _)) = saved {
+            cx.syms.rekey(marker, ObjKey::Res(id));
+            return None;
+        }
+    }
+    let written = sans.subset(&glyphs);
+    let id = written.id();
+    cx.syms.rekey(marker, ObjKey::Res(id));
+    cx.resource(&written);
+    Some((id, glyphs))
 }
 
 /// An Append's objects, into `cx`: the pages whose dictionaries are in

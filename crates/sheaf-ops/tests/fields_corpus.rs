@@ -117,14 +117,15 @@ const ROWS: &str = "SHEAF_FIELDS_ROWS";
 const MAKING_WIDTH: u32 = 16;
 
 /// Each class of rows past [`TOLERANCE`] ([`class`]), and how many widgets
-/// it holds over the whole corpus: 13,021 of the 227,577 compared
+/// it holds over the whole corpus: 13,254 of the 227,812 compared
 /// ([`TOTALS`]).
 const CLASSES: &[(&str, usize)] = &[
     (FALLBACK, 4538),
-    (ALIKE, 2929),
+    (ALIKE, 2927),
     (ALIKE_EDGE, 2145),
     (CJK, 1865),
-    (ALIKE_BESIDE, 1098),
+    (ALIKE_BESIDE, 1100),
+    (TWO_FONTS, 233),
     (OWN_FONT, 131),
     (WIDGET_MAX_LEN, 91),
     (NAMELESS, 71),
@@ -148,10 +149,11 @@ const TOTALS: Totals = Totals {
     no_text: 1577,
     fields: 220_981,
     filled: 229_351,
-    made: 228_607,
-    overlaid: 228_607,
-    pages: 8428,
-    compared: 227_577,
+    made: 228_842,
+    two_fonts: 235,
+    overlaid: 228_842,
+    pages: 8434,
+    compared: 227_812,
     off_page: 1030,
 };
 
@@ -165,9 +167,12 @@ struct Totals {
     /// Text fields filled, and their widgets on pages.
     fields: usize,
     filled: usize,
-    /// The widgets whose appearance sheaf made, and how many of those
-    /// forms an overlay holds as the save does: every one.
+    /// The widgets whose appearance sheaf made, those of them drawn in two
+    /// fonts (the field's, and the fallback for what it can't draw), and
+    /// how many of those forms an overlay holds as the save does: every
+    /// one.
     made: usize,
+    two_fonts: usize,
     overlaid: usize,
     /// Pages drawn; the widgets compared with PDFium's on them, and those
     /// left out because their box shows nothing of the page.
@@ -181,11 +186,12 @@ struct Totals {
 const UNMADE: &[(&str, usize)] = &[
     // A box of no width or height (494 of them 0 by 0), in the file.
     ("no-box", 497),
-    // A character of the field's own value the font has no code for, which
-    // a fallback font would draw (M10 slice 7): one of them a letter the
-    // value has in PDFDocEncoding and a MacRoman font hasn't (`š`, in
-    // `forms/safedocs/0410532.pdf`).
-    ("unencodable", 247),
+    // A character of the field's own value neither its font nor the
+    // fallback font has (M10 slice 7, which draws 235 of the 247 that its
+    // font alone couldn't in two fonts): a control character, nine of them
+    // U+007F DELETE and two in U+0000..U+000F; and one of the Private Use
+    // Area, in U+F0D0..U+F0DF. The tier prints each's range of sixteen.
+    ("unencodable", 12),
 ];
 
 /// The forms whose text fields can't be filled, a line each: its path and
@@ -220,6 +226,18 @@ const NAMELESS: &str = "no name: PDFium makes none";
 /// more, and PDFium makes a terminal field only where it's the field's own
 /// or its parent's (pdf-forms' stated `forms-three-deep`).
 const TYPE_UP: &str = "type two levels up: PDFium makes none";
+/// Drawn in two fonts (M10 slice 7): what the field's font has no code
+/// for in the fallback font sheaf bundles, which PDFium draws in no font a
+/// caller gives, so its appearance of the same value is in the field's font
+/// alone, or in a font its font map takes for the charset; what's in two
+/// fonts has no appearance of PDFium's to be held to (pdf-forms holds it
+/// so too): it's held by PDFium's text extraction of what sheaf writes
+/// (`fields.rs`).
+/// Two of the 235 drawn in two fonts draw as PDFium's: black text on a
+/// black `/MK /BG` (`forms/safedocs/0577838.pdf`), and a zero width space
+/// past an overflowing box's clip (`0970197.pdf`). Two rows drawn alike
+/// beside one of them are [`ALIKE_BESIDE`]'s, as that one differs.
+const TWO_FONTS: &str = "two fonts: PDFium draws in no font sheaf gives";
 /// A `/DA` font `/DR` lacks falls back to the standard 14 family its name
 /// gives; PDFium draws every such font in a Helvetica it adds (pdf-forms'
 /// stated `ap-font-missing-*`).
@@ -318,6 +336,7 @@ fn class(f: &Facts) -> Option<&'static str> {
     Some(match () {
         _ if f.pdfium_tf == "none" && f.nameless => NAMELESS,
         _ if f.pdfium_tf == "none" && f.ft_up.is_some_and(|up| up >= 2) => TYPE_UP,
+        _ if f.fallback > 0 => TWO_FONTS,
         _ if f.font.starts_with("fallback:") && f.font != "fallback:Helvetica" => FALLBACK,
         _ if f.border.0.fract() != 0.0 => FRACTION,
         _ if f.border_array.is_some_and(|w| w as f32 != f.border.0) => BORDER_ARRAY,
@@ -366,6 +385,9 @@ struct Facts {
     /// sheaf's appearance's font size, and whether its text overflowed.
     size: f32,
     overflowed: bool,
+    /// How many glyphs sheaf's appearance draws in the fallback font (M10
+    /// slice 7), what the field's font can't: 0 for none.
+    fallback: usize,
     /// What sheaf's appearance and PDFium's show text with: each `Tf`'s
     /// name and size, and for PDFium's each font's `/BaseFont`; `none`
     /// where PDFium made no appearance.
@@ -418,7 +440,8 @@ impl std::fmt::Display for Facts {
         write!(
             f,
             "font={} kind={} da={} ff={:x} q={} maxlen={} w={} h={} r={} bw={} bs={} dash={} \
-             bg={} bc={} size={} ovf={} ours.tf={} pdfium.tf={} chars={} ascii={} euro={} drawn={} \
+             bg={} bc={} size={} ovf={} fallback={} ours.tf={} pdfium.tf={} chars={} ascii={} \
+             euro={} drawn={} \
              nameless={} f={} overlaps={} overlap_differs={} text={} wmaxlen={} border_array={} \
              ft_up={} auto={} edge_only={} levels={}",
             self.font,
@@ -441,6 +464,7 @@ impl std::fmt::Display for Facts {
             u8::from(self.bc),
             self.size,
             u8::from(self.overflowed),
+            self.fallback,
             self.ours_tf,
             self.pdfium_tf,
             self.chars,
@@ -486,6 +510,13 @@ struct Outcome {
     filled: usize,
     made: usize,
     unmade: BTreeMap<String, usize>,
+    /// Of those made, the widgets drawn in two fonts: the field's and the
+    /// fallback ([`Facts::fallback`]).
+    two_fonts: usize,
+    /// The first character no font draws of each widget unmade as
+    /// `unencodable`, by the range of sixteen code points it's in (its
+    /// number with the last hex digit 0): the block, never the value.
+    unencodable: BTreeMap<u32, usize>,
     /// Made widgets whose forms an overlay and the save hold alike.
     overlaid: usize,
     /// Made widgets compared by pixels, and those whose box shows no pixel
@@ -515,8 +546,9 @@ struct Filled {
     rect: [f32; 4],
     look: TextLook,
     /// sheaf's appearance for it, made as the emitter makes it, or why
-    /// none can be.
+    /// none can be; and how many glyphs it draws in the fallback font.
     made: Result<Appearance, Unmade>,
+    fallback: usize,
     /// Its font, as [`Facts::font`] and [`Facts::kind`] say it.
     font: (String, String),
     /// Its field's full name is empty; its `/F`.
@@ -566,19 +598,26 @@ fn line(e: &dyn std::fmt::Display) -> String {
 /// sheaf's appearance for `look`, a widget of `src`'s, made as the emitter
 /// makes one: in the font its `/DA` names in `src`'s `/DR`, named as the
 /// emitter names it (its content doesn't depend on the number the font is
-/// written at); and the font, as [`Facts`] says it.
-fn made_by_sheaf(src: &Src, look: &TextLook) -> (Result<Appearance, Unmade>, (String, String)) {
+/// written at), and the fallback font for what that can't draw; how many
+/// glyphs it draws in the fallback; and the font, as [`Facts`] says it.
+fn made_by_sheaf(
+    src: &Src,
+    look: &TextLook,
+) -> (Result<Appearance, Unmade>, usize, (String, String)) {
     let font = match appearance::font(src, look) {
         Ok(font) => font,
         Err(e) => {
             let kind = appearance::error_kind(&e);
-            return (Err(e.into()), (format!("error:{kind}"), "-".into()));
+            return (Err(e.into()), 0, (format!("error:{kind}"), "-".into()));
         }
     };
     let said = font_said(&font, look);
     let name = look.font_name().unwrap_or_default();
     let res = appearance::font_res(&font, src.id(), 0, &name, |_| ObjectId::new(1, 0));
-    (appearance::make(look, &font, res), said)
+    match appearance::make(look, &font, res) {
+        Ok(made) => (Ok(made.appearance), made.glyphs.len(), said),
+        Err(why) => (Err(why), 0, said),
+    }
 }
 
 /// `font`, the one `look`'s `/DA` names, as [`Facts::font`] and
@@ -959,7 +998,12 @@ fn fill_and_compare(
         let made_at = written(ObjKey::AnnotPart(w.aid, Part::Ap));
         match (&w.made, ap) {
             (Err(why), None) if made_at.is_none() => {
-                *out.unmade.entry(appearance::unmade_kind(why)).or_default() += 1
+                *out.unmade.entry(appearance::unmade_kind(why)).or_default() += 1;
+                if let Unmade::Unencodable(c) = why {
+                    *out.unencodable
+                        .entry(u32::from(c.character) & !0xf)
+                        .or_default() += 1;
+                }
             }
             (Err(why), _) => out.failed.push(format!(
                 "{at}: an appearance in the save, where none can be made ({})",
@@ -986,6 +1030,7 @@ fn fill_and_compare(
                         .push(format!("{at}: an appearance other than sheaf makes")),
                     _ => {
                         out.made += 1;
+                        out.two_fonts += usize::from(w.fallback > 0);
                         forms.insert(w.aid, form.expect("a form"));
                     }
                 }
@@ -1097,7 +1142,7 @@ fn filled(
                 continue;
             }
             let look = appearance::text_look(st, aid).context("a text widget's look")?;
-            let (made, font) = made_by_sheaf(&r.src, &look);
+            let (made, fallback, font) = made_by_sheaf(&r.src, &look);
             widgets.push(Filled {
                 aid,
                 page,
@@ -1113,6 +1158,7 @@ fn filled(
                 rect: w.rect,
                 look,
                 made,
+                fallback,
                 font,
             });
         }
@@ -1424,6 +1470,7 @@ fn facts_of(w: &Filled, saved: &Pdf, copy: &Pdf) -> Facts {
         bc: w.look.border_color.is_some(),
         size: made.font_size,
         overflowed: made.overflowed,
+        fallback: w.fallback,
         ours_tf: tfs(&made.content, None),
         pdfium_tf,
         chars: w.look.text.chars().count(),
@@ -1467,7 +1514,8 @@ fn every_text_field_is_drawn_as_pdfium_draws_it_or_its_difference_is_classed() {
     let mut unmade: BTreeMap<String, usize> = BTreeMap::new();
     let mut unfilled: BTreeMap<&str, &str> = BTreeMap::new();
     let mut rewritten_first: BTreeSet<&str> = BTreeSet::new();
-    let (mut no_text, mut fields, mut filled, mut made) = (0, 0, 0, 0);
+    let (mut no_text, mut fields, mut filled, mut made, mut two_fonts) = (0, 0, 0, 0, 0);
+    let mut unencodable: BTreeMap<u32, usize> = BTreeMap::new();
     let (mut overlaid, mut compared, mut off_page, mut pages, mut rows) = (0, 0, 0, 0, 0);
     for (path, o) in paths.iter().zip(&outcomes) {
         if let Some(why) = &o.unfilled {
@@ -1489,8 +1537,12 @@ fn every_text_field_is_drawn_as_pdfium_draws_it_or_its_difference_is_classed() {
         compared += o.compared;
         off_page += o.off_page;
         pages += o.pages;
+        two_fonts += o.two_fonts;
         for (kind, n) in &o.unmade {
             *unmade.entry(kind.clone()).or_default() += n;
+        }
+        for (range, n) in &o.unencodable {
+            *unencodable.entry(*range).or_default() += n;
         }
         let unmade_here: usize = o.unmade.values().sum();
         if o.made + unmade_here != o.filled {
@@ -1536,6 +1588,14 @@ fn every_text_field_is_drawn_as_pdfium_draws_it_or_its_difference_is_classed() {
          drawn, {compared} widgets compared ({off_page} more show nothing of the page), {rows} \
          past {TOLERANCE} px, by class {classes:?}"
     );
+    let ranges: Vec<String> = (unencodable.iter())
+        .map(|(range, n)| format!("U+{range:04X}..U+{:04X} {n}", range + 0xf))
+        .collect();
+    eprintln!(
+        "tier-fields: {two_fonts} made in two fonts; unmade as unencodable, by where the first \
+         character no font draws is: {}",
+        ranges.join(", ")
+    );
     eprintln!("tier-fields: {:.0} s", started.elapsed().as_secs_f64());
     if narrowed {
         eprintln!("tier-fields: narrowed by {ONLY}: its counts are printed, not held");
@@ -1546,6 +1606,7 @@ fn every_text_field_is_drawn_as_pdfium_draws_it_or_its_difference_is_classed() {
             fields,
             filled,
             made,
+            two_fonts,
             overlaid,
             pages,
             compared,

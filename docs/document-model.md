@@ -1703,14 +1703,18 @@ of this, and a user sees nothing new.
   flattened page. An ignored test in `interop.rs` runs `qpdf --check` on
   each case's output and draws it with `pdftoppm`. `just tier-fields`
   fills every corpus form's text fields: 220,981 fields and their
-  229,351 widgets, 228,607 made, each overlay's form the save's, and each
-  made one drawn beside PDFium's. The 13,021 widgets that differ by a
-  pixel are each in one of 16 classes held by count: 6,172 draw alike
-  within 0.001 pt and differ by PDFium's rasterizing alone, 4,538 are a
-  missing font's fallback by name, 1,865 PDFium's font map for CJK
-  fonts, and the rest pdf-forms' other stated differences and readings
-  PDFium makes otherwise (a kid widget's own `/MaxLen`, a field with no
-  name). The 318 forms that can't be filled (XFA alone, three that don't
+  229,351 widgets, 228,842 made (235 of them in two fonts, the field's
+  and sheaf's fallback font for what it can't draw), each overlay's form
+  the save's, and each made one drawn beside PDFium's. The 13,254
+  widgets that differ by a pixel are each in one of 17 classes held by
+  count: 6,172 draw alike within 0.001 pt and differ by PDFium's
+  rasterizing alone, 4,538 are a missing font's fallback by name, 1,865
+  PDFium's font map for CJK fonts, 233 are drawn in two fonts (PDFium
+  draws in no font sheaf gives), and the rest pdf-forms' other stated
+  differences and readings PDFium makes otherwise (a kid widget's own
+  `/MaxLen`, a field with no name). Twelve widgets are left unmade, a
+  character of their own values in no font sheaf has (a control
+  character, nine of them `DEL`, or one of the Private Use Area). The 318 forms that can't be filled (XFA alone, three that don't
   open, a tree past sheaf's depth) are held by name.
 
 ## Undo/redo: snapshots, not inverse commands

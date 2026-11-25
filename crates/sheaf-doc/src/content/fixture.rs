@@ -21,7 +21,7 @@
 //! Most draw in [`SQUARES`]: a Type3 font whose `a` is a square an em
 //! wide and `b` half one, from 0.2 em below the baseline to 0.8 above.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::ControlFlow;
 
 use crate::pdf::{
@@ -1781,6 +1781,40 @@ pub fn subsets_hold(bytes: &[u8]) -> usize {
         }
     }
     seen
+}
+
+/// Every subset of the fallback font the PDF `bytes` holds, as
+/// [`subsets_hold`] tells one (a Type 0 font whose `/BaseFont` is a
+/// subset's tag and `+NotoSans-Regular`), by its object, in their order,
+/// each with the codes its `/ToUnicode` gives a text: the glyphs written
+/// in it, by their numbers in the whole program. Every object the file's
+/// cross-reference lists is looked at, whether anything names it or not.
+pub fn fallback_subsets(bytes: &[u8]) -> Vec<(ObjectId, BTreeSet<u16>)> {
+    let pdf = Pdf::load_mem(bytes).expect("a PDF that reads");
+    let mut found = Vec::new();
+    for (&id, object) in &pdf.objects {
+        let Some(font) = object.as_dict() else {
+            continue;
+        };
+        let name = font.get(b"BaseFont").and_then(Object::as_name);
+        let subset = name.is_some_and(|name| {
+            name.len() == 7 + b"NotoSans-Regular".len()
+                && name[..6].iter().all(u8::is_ascii_uppercase)
+                && name[6] == b'+'
+                && &name[7..] == b"NotoSans-Regular"
+        });
+        if !subset || font.get(b"Subtype").and_then(Object::as_name) != Some(b"Type0") {
+            continue;
+        }
+        let cmap = font
+            .get(b"ToUnicode")
+            .and_then(|t| pdf.dereference(t).ok())
+            .and_then(|(_, t)| t.as_stream())
+            .and_then(|t| t.decompressed_content().ok())
+            .unwrap_or_else(|| panic!("font {id:?} has no /ToUnicode"));
+        found.push((id, to_unicode_codes(&cmap).into_iter().collect()));
+    }
+    found
 }
 
 /// A subset of the fallback font, read for [`subsets_hold`].

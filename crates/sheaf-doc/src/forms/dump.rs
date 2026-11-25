@@ -31,14 +31,18 @@
 //! gives).
 //!
 //! **The appearances,** each of the sample value ([`sample`]) of sheaf's
-//! text: the family's of its own reading (`made`, [`forms::text`]), and
-//! sheaf's of its model's (`ours`, [`appearance::make`]) in the font its
-//! source reads for the `/DA`'s name ([`appearance::font`]), named as the
-//! emitter names it ([`appearance::font_res`]). Each is its size, whether
-//! it overflowed, its content's length and checksum, and what it draws
-//! with, by their ids; or which [`Unmade`] it is. `ours.vs` sets sheaf's,
-//! its font named as the family names it, beside the family's: `=`, or the
-//! parts that differ.
+//! text, in the field's font and, for what that can't draw, the fallback
+//! font sheaf bundles ([`Fallback`], M10 slice 7), named by its marker as
+//! the emitter names it: the family's of its own reading (`made`,
+//! [`forms::text_with_fallback`]), and sheaf's of its model's (`ours`,
+//! [`appearance::make`]) in the font its source reads for the `/DA`'s name
+//! ([`appearance::font`]), named as the emitter names it
+//! ([`appearance::font_res`]). Each is its size, whether it overflowed,
+//! its content's length and checksum, and what it draws with, by their
+//! ids; or which [`Unmade`] it is. Where sheaf's draws in the fallback,
+//! `fallback` says how many of its glyphs; a line that draws nothing in it
+//! has no such field. `ours.vs` sets sheaf's, its font named as the family
+//! names it, beside the family's: `=`, or the parts that differ.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -49,7 +53,7 @@ use in_progress::NoProgress;
 
 use crate::annot::AnnotId;
 use crate::content::corpus::{each_path, written};
-use crate::content::{Objects, Unkept};
+use crate::content::{Fallback, Objects, Unkept};
 use crate::forms::FormClass;
 use crate::forms::appearance::{self, FontAt, TextLook, text_look};
 use crate::forms::corpus::Corpus;
@@ -59,7 +63,9 @@ use crate::history::FixedCount;
 use crate::model::Document;
 use crate::pdf::content::{Color, Res, ResBody};
 use crate::pdf::fonts::{Descendant, FontKind, FontProgram};
-use crate::pdf::forms::{self, Appearance, Error, FieldFont, Limits, Quadding, Unmade};
+use crate::pdf::forms::{
+    self, Appearance, Error, FieldFont, Limits, MadeWithFallback, Quadding, Unmade,
+};
 use crate::pdf::gfx::{BoxBorderStyle, DefaultAppearance};
 use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, Resolve, Value as PdfValue};
 use crate::source::Source;
@@ -350,23 +356,25 @@ where
 }
 
 /// The family's appearance of `read` with its text `text`, in `font`, the
-/// family's reading of its `/DA`'s font: what [`made_name`] says.
+/// family's reading of its `/DA`'s font, and the fallback: what
+/// [`made_name`] says.
 fn family_made(
     read: &forms::WidgetText<'_>,
     text: &str,
     font: &Result<FieldFont, Error>,
-) -> Result<Appearance, Unmade> {
+) -> Result<MadeWithFallback, Unmade> {
     let font = font.as_ref().map_err(|e| Unmade::from(e.clone()))?;
     let res = font.res().ok_or(Unmade::FontNotBindable)?;
     let mut field = read.field();
     field.text = text;
     let look = read.look();
-    forms::text(
+    forms::text_with_fallback(
         &field,
         &look,
         read.default_appearance(),
         res,
         &font.layout(),
+        &Fallback::SANS.field(),
         &LIMITS,
     )
 }
@@ -378,12 +386,7 @@ fn family_made(
 /// named as the family names it, to set beside the family's. A font named
 /// by an entry, which the emitter writes as an object of its own, is
 /// bound here to no object: the content's bytes are the same.
-fn ours_made(
-    src: &Source,
-    look: &TextLook,
-    text: &str,
-    copy: u32,
-) -> (Result<Appearance, Unmade>, Result<Appearance, Unmade>) {
+fn ours_made(src: &Source, look: &TextLook, text: &str, copy: u32) -> (Made, Made) {
     let look = TextLook {
         text: text.into(),
         ..look.clone()
@@ -406,11 +409,14 @@ fn ours_made(
     (ours, theirs)
 }
 
+/// An appearance made, and the fallback's glyphs it draws; or why none was.
+type Made = Result<MadeWithFallback, Unmade>;
+
 /// An appearance as the dump says it: its size, whether it overflowed, its
 /// content's length and checksum and the resources it draws with, by their
 /// ids; or `unmade:` and why.
-fn made_name(made: &Result<Appearance, Unmade>) -> String {
-    match made {
+fn made_name(made: &Made) -> String {
+    match made.as_ref().map(|m| &m.appearance) {
         Ok(a) => {
             let needs: Vec<String> = (a.needs.0.iter())
                 .map(|need| format!("{:032x}", need.res.id().0))
@@ -431,8 +437,11 @@ fn made_name(made: &Result<Appearance, Unmade>) -> String {
 /// sheaf's appearance, its font named as the family names it, beside the
 /// family's: `=` where they're the same (or unmade alike), else the parts
 /// that differ, `made` where one is made and the other isn't.
-fn versus(ours: &Result<Appearance, Unmade>, theirs: &Result<Appearance, Unmade>) -> String {
-    match (ours, theirs) {
+fn versus(ours: &Made, theirs: &Made) -> String {
+    fn appearance(m: &Made) -> Result<&Appearance, &Unmade> {
+        m.as_ref().map(|m| &m.appearance)
+    }
+    match (appearance(ours), appearance(theirs)) {
         (Ok(a), Ok(b)) => {
             let parts = [
                 ("bbox", a.bbox == b.bbox),
@@ -678,6 +687,12 @@ fn lines_of(path: &str, store: &Arc<Store>, src: &Src) -> Vec<String> {
                 false => counts.ours_unmade += 1,
             }
             line.field("ours", &made_name(&made));
+            if let Some(n) = (made.as_ref().ok())
+                .map(|m| m.glyphs.len())
+                .filter(|&n| n > 0)
+            {
+                line.field("fallback", &n.to_string());
+            }
             let vs = theirs.map_or("-".into(), |theirs| versus(&named, &theirs));
             counts.versus_differ += usize::from(vs != "=" && vs != "-");
             line.field("ours.vs", &vs);

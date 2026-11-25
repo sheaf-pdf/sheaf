@@ -476,6 +476,16 @@ pub fn append(
         },
         None => record.xref.clone(),
     };
+    // The file's subsets of the fallback font, and the one the section
+    // wrote, where it wrote one the file lacks.
+    let fallbacks = match &e.fallback {
+        Some((id, glyphs)) if !record.fallbacks.iter().any(|(had, _)| had == id) => {
+            let mut all = record.fallbacks.to_vec();
+            all.push((*id, glyphs.clone()));
+            all.into()
+        }
+        _ => record.fallbacks.clone(),
+    };
     let record = OutputRecord {
         version: input.version,
         path: record.path.clone(),
@@ -492,6 +502,7 @@ pub fn append(
         tree,
         drawn,
         transforms: transforms.into(),
+        fallbacks,
     };
     let mut out = tail.map_or_else(Vec::new, |tail| tail.to_vec());
     out.extend_from_slice(bytes);

@@ -92,7 +92,8 @@ pub use blocks::{
 };
 pub use font::{
     Descendant, DrawFont, DrawText, Fallback, Font, FontApprox, FontKind, FontMetrics, FontProgram,
-    Fonts, Glyphless, Glyphs, Std14, Unencoded, Uses, VerticalMetrics, std14_of, wrap_with,
+    Fonts, Glyphless, Glyphs, Std14, Unencoded, Uses, VerticalMetrics, draws_all, std14_of,
+    wrap_with,
 };
 pub use page::{
     Concat, ContentFault, Objects, PageContent, Pos, ReadObjects, SpanAcross, Unkept, contents,
