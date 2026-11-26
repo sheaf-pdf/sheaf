@@ -858,6 +858,130 @@ fn a_rewrite_says_why() {
         removed(RemovedKind::Recovered, 1).to_string(),
         "what the recovered changes removed"
     );
+    assert_eq!(
+        Why::EarlierValues.to_string(),
+        "the file's earlier revisions hold field values it no longer shows"
+    );
+}
+
+/// A value another tool filled in and then cleared, each in an update of
+/// its own (`fixture::append_revision`), that only the earlier revision
+/// still holds.
+const FIRST: &str = "FIRSTVALUE42";
+
+/// A one-page form of three empty text fields, `a`, `b` and `c`, and, with
+/// `signed`, the signature field `sig` signed; then `a` filled with
+/// [`FIRST`] in an update, and cleared in another: its earlier revisions
+/// hold a value its latest one doesn't.
+fn filled_and_cleared(signed: bool) -> Vec<u8> {
+    let mut f = Form::new(1);
+    let a = f.text("a", 0, row(0));
+    f.text("b", 0, row(1));
+    f.text("c", 0, row(2));
+    if signed {
+        let sig = f.signature("sig", 0, row(3));
+        f.sign(sig);
+    }
+    let original = f.bytes();
+    let filled = crate::forms::fixture::append_revision(&original, &[a], |pdf| {
+        (pdf.get_dictionary_mut(a).unwrap()).set("V", crate::pdf::literal(FIRST));
+    });
+    crate::forms::fixture::append_revision(&filled, &[a], |pdf| {
+        (pdf.get_dictionary_mut(a).unwrap()).remove(b"V");
+    })
+}
+
+/// A file whose earlier revisions hold a value its latest one doesn't
+/// ([`filled_and_cleared`]): a fill of another field is a Rewrite for them
+/// ([`Why::EarlierValues`]), asking nothing of an unsigned file and saying
+/// so in a note, and the value is nowhere in the file it writes, by a
+/// search that finds it in the file as built, and finds the fill in the
+/// one written. After that Rewrite, a fill of an empty field appends: the
+/// file holds none of its earlier revisions now. A comment alone on the
+/// file as built appends: the form didn't change. Signed, the fill's
+/// Rewrite asks before it breaks the signature, offering an Append anyway,
+/// which taken appends after the signed bytes.
+#[test]
+fn a_form_change_over_earlier_revisions_values_rewrites_the_file() {
+    let dir = scratch();
+    let bytes = filled_and_cleared(false);
+    assert!(
+        in_clear(&bytes, FIRST.as_bytes()),
+        "the control: it's in the file"
+    );
+    let report = crate::forms::check(&bytes, None).unwrap();
+    assert!(
+        (report.findings.iter()).any(|f| matches!(f, Finding::EarlierValues { .. })),
+        "{report}"
+    );
+
+    let (path, mut doc) = opened(&dir, "commented.pdf", &bytes);
+    comment(&mut doc, "a comment");
+    let planned_comment = planned(&doc, &path);
+    assert_eq!(
+        planned_comment.strategy,
+        Strategy::Append { onto: Onto::Saved }
+    );
+
+    let (path, mut doc) = opened(&dir, "filled.pdf", &bytes);
+    fx::fill(&mut doc, "b", "SecondValue");
+    let p = planned(&doc, &path);
+    let why = vec![Why::EarlierValues];
+    assert_eq!(p.strategy, Strategy::Rewrite { why: why.clone() });
+    assert_eq!(p.asks, []);
+    let told = Note(super::plan::EARLIER_VALUES.into());
+    assert!(p.notes.contains(&told), "{:?}", p.notes);
+    let report = saved(&mut doc, &path, AskAnswers::default()).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
+    assert_eq!(report.why, why);
+    assert!(report.notes.contains(&told), "{:?}", report.notes);
+    let now = std::fs::read(&path).unwrap();
+    assert!(in_clear(&now, b"SecondValue"), "the control: the fill");
+    assert!(!in_clear(&now, FIRST.as_bytes()), "the first value nowhere");
+    assert!(!doc.saved_record().unwrap().revisions_kept);
+
+    fx::fill(&mut doc, "c", "ThirdValue");
+    let p = planned(&doc, &path);
+    assert_eq!(p.strategy, Strategy::Append { onto: Onto::Saved });
+    let report = saved(&mut doc, &path, AskAnswers::default()).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Append));
+    let appended = std::fs::read(&path).unwrap();
+    assert!(appended.starts_with(&now) && !in_clear(&appended, FIRST.as_bytes()));
+    let back = crate::open::file(&path, None).unwrap().doc;
+    let value = |name: &str| {
+        let st = back.state();
+        let id = st.field_named(name).unwrap();
+        st.field(id).unwrap().term.as_ref().unwrap().value.clone()
+    };
+    let text = |t: &str| Some(Value::Text(t.into()));
+    assert_eq!(
+        [value("a"), value("b"), value("c")],
+        [None, text("SecondValue"), text("ThirdValue")]
+    );
+
+    let signed = filled_and_cleared(true);
+    assert!(signatures_fit(&signed));
+    let (path, mut doc) = opened(&dir, "signed.pdf", &signed);
+    fx::fill(&mut doc, "b", "SecondValue");
+    let p = planned(&doc, &path);
+    assert_eq!(p.strategy, Strategy::Rewrite { why: why.clone() });
+    let asks = Ask::Signatures {
+        impact: impact(Verdict::Invalid),
+        append_anyway: Some(AppendAnyway {
+            stays_readable: Vec::new(),
+        }),
+        reason: Some(Why::EarlierValues),
+    };
+    assert_eq!(p.asks, std::slice::from_ref(&asks));
+    assert_eq!(
+        saved(&mut doc, &path, AskAnswers::default()),
+        Err(SaveStop::Ask(asks))
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), signed);
+    let report = saved(&mut doc, &path, anyway()).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Append));
+    let now = std::fs::read(&path).unwrap();
+    assert!(now.starts_with(&signed) && signatures_fit(&now));
 }
 
 /// A file of one page whose XMP metadata holds `description`, its claims

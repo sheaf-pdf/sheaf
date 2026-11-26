@@ -379,7 +379,7 @@ fn missing_objects_on_a_signed_file_ask_and_write_nothing() {
     doc.commit_ops(vec![fx::add(page, &annot)], "note").unwrap();
     let mark = doc.state().marks_on(page).next().unwrap().id;
     save_appended(&mut doc, &path).unwrap();
-    assert!(doc.saved_record().unwrap().signatures_hold);
+    assert!(doc.saved_record().unwrap().revisions_kept);
     // The page turned: its dictionary, written again, lists the mark,
     // which the section doesn't write.
     let turn = fx::rotate(&[page], Turn::Quarter);

@@ -54,10 +54,17 @@ pub struct SaveRecord {
     /// base is sound), which an update after it needs: as opened, the
     /// source's say; a file a Rewrite wrote is.
     pub sound: bool,
-    /// Whether the file's signatures, when it has any, still hold as they
-    /// were signed: as opened, and after an update or a copy of the file,
-    /// but not once a Rewrite wrote it.
-    pub signatures_hold: bool,
+    /// Whether the file still holds every revision of the file the
+    /// document opened, byte for byte, whatever sheaf appended after them:
+    /// as opened (or restored), and after an update or a copy of the file,
+    /// but not once a Rewrite wrote it. While it does, the file's
+    /// signatures, when it has any, still hold as they were signed, and
+    /// what its earlier revisions hold of the form is still readable in it
+    /// ([`Source::earlier_values`]), which a save that changes the form
+    /// rewrites (M10 slice 9).
+    ///
+    /// [`Source::earlier_values`]: crate::source::Source::earlier_values
+    pub revisions_kept: bool,
     /// The PDF version it says it is: its header's, or its catalog's
     /// `/Version` when that's later. An Append that needs a later one says
     /// so in the catalog (§11.7).
@@ -155,7 +162,7 @@ impl SaveRecord {
             stamp,
             content_hash: None,
             sound: src.base_sound(),
-            signatures_hold: true,
+            revisions_kept: true,
             pdf_version: PdfVersion::of(src),
             xref: src.xref().clone(),
             crypt: src.crypt().cloned(),
@@ -271,7 +278,7 @@ pub struct OutputRecord {
     pub at: String,
     pub strategy: StrategyKind,
     pub sound: bool,
-    pub signatures_hold: bool,
+    pub revisions_kept: bool,
     pub pdf_version: PdfVersion,
     pub xref: XrefFacts,
     pub crypt: Option<Arc<Crypt>>,
@@ -296,7 +303,7 @@ impl OutputRecord {
             stamp,
             content_hash,
             sound: self.sound,
-            signatures_hold: self.signatures_hold,
+            revisions_kept: self.revisions_kept,
             pdf_version: self.pdf_version,
             xref: self.xref,
             crypt: self.crypt,

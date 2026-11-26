@@ -302,7 +302,7 @@ pub fn append(
     let signed =
         (objects.values()).any(|(key, _)| matches!(key, ObjKey::Catalog | ObjKey::AcroForm));
     let holding = || (primary.signatures().signed.iter()).any(|s| !s.integrity().is_broken());
-    if mode == Mode::Veto && signed && record.signatures_hold && holding() {
+    if mode == Mode::Veto && signed && record.revisions_kept && holding() {
         return Err(Refused::Unplanned.into());
     }
 
@@ -492,7 +492,7 @@ pub fn append(
         at: crate::pdf::semantics::date::now(),
         strategy: StrategyKind::Append,
         sound: record.sound,
-        signatures_hold: record.signatures_hold,
+        revisions_kept: record.revisions_kept,
         pdf_version: record.pdf_version.max(e.version),
         xref,
         crypt: record.crypt.clone(),

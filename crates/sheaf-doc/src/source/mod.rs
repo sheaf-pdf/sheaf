@@ -6,9 +6,10 @@
 //!
 //! What a source says about itself is a pure function of its bytes, read
 //! once: the page table when it opens; its conformance claims, what its
-//! pages hold beside their content, its form and signatures, the header
-//! and footer sheaf drew, and the watermarks and backgrounds and the
-//! streams of their blocks, when first asked; and whether PDFium
+//! pages hold beside their content, its form and signatures, whether its
+//! earlier revisions hold values its form doesn't, the header and footer
+//! sheaf drew, and the watermarks and backgrounds and the streams of their
+//! blocks, when first asked; and whether PDFium
 //! refuses the bytes, once an engine has tried them. Sources come from the
 //! [`Store`](crate::store::Store), one per distinct file.
 
@@ -78,6 +79,9 @@ pub struct Source {
     /// most [`FIELD_FONTS`] names.
     field_fonts: Mutex<HashMap<Vec<u8>, FieldFontRead>>,
     signatures: OnceLock<Arc<Signatures>>,
+    /// Whether its earlier revisions hold field values its latest one
+    /// doesn't, once asked ([`Source::earlier_values`]).
+    earlier_values: OnceLock<bool>,
     /// PDFium refused its bytes ([`Source::base_refused`]).
     refused: AtomicBool,
 }
@@ -210,6 +214,7 @@ impl Source {
             form: OnceLock::new(),
             field_fonts: Mutex::default(),
             signatures: OnceLock::new(),
+            earlier_values: OnceLock::new(),
             refused: AtomicBool::new(false),
         })
     }
@@ -471,6 +476,21 @@ impl Source {
     /// rights, read once (see [`crate::forms::sigs`]).
     pub fn signatures(&self) -> &Arc<Signatures> {
         (self.signatures).get_or_init(|| Arc::new(crate::forms::sigs::read(self)))
+    }
+
+    /// Whether an earlier revision of it holds field values its latest one
+    /// doesn't, as `sheaf form check` finds them
+    /// ([`Finding::EarlierValues`](crate::forms::Finding::EarlierValues)):
+    /// what an update of the file would leave readable beside the values it
+    /// writes, so a save that changes the form rewrites it (M10 slice 9).
+    /// Read once, at the first ask, never at open: a parse of its bytes,
+    /// with its password, and of each earlier revision, of the last 256,
+    /// until one holds any. A file of one revision is none, unparsed; one
+    /// that can't be read, or a revision of it that can't, holds none.
+    pub fn earlier_values(&self) -> bool {
+        *(self.earlier_values).get_or_init(|| {
+            crate::forms::check::holds_earlier_values(self.bytes(), self.password())
+        })
     }
 
     /// What its XMP metadata claims it conforms to: PDF/A and PDF/UA.

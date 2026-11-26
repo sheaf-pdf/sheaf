@@ -94,7 +94,15 @@
 //!   are the same everywhere).
 //! - **Save policy** ([`SaveTransform`]) applies here: `DropXfa` leaves
 //!   `/XFA` out, its tooltips in the fields' `/TU`; `FixSigFlags` drops
-//!   `/SigFlags` when nothing signed needs it (`DropUr3` is the catalog's).
+//!   `/SigFlags` when nothing signed needs it (`DropUr3` is the catalog's);
+//!   `FillAppearances` makes an appearance for each widget it writes that
+//!   its file left to the viewer ([`appearance::missing`]: a valued text
+//!   field's or choice's, a check box's or radio button's, a captioned push
+//!   button's, none with one), as for a stale one, `/NeedAppearances` kept.
+//!   An Append that carries it, from the Rewrite whose record it's in,
+//!   makes those it writes (a pressed group's other buttons, a filled
+//!   field's other widgets), which it would otherwise write bare, as the
+//!   opened file has them, over the ones the Rewrite made.
 //! - **An overlay's form** is of the fields with a widget on its pages
 //!   ([`Plan::scoped`]): `/Fields` its roots among them, each node's
 //!   `/Kids` those of its nodes and its widgets that are, so PDFium loads
@@ -547,8 +555,9 @@ pub(crate) fn widget(
     let key = ObjKey::Annot(aid);
     // Its text or choice field's value changed, its check box's or radio
     // button's state where its file has no appearance of it, or its push
-    // button's captions: its appearance is made anew.
-    let stale = appearance::stale(st, aid);
+    // button's captions, or save policy makes one its file left to the
+    // viewer: its appearance is made anew.
+    let stale = appearance::stale(st, aid) || fills(cx, key, aid);
     // Its button's state changed: its `/AS` is the model's.
     let changed = appearance::state_changed(st, aid);
     // Nothing of it changes: the file's object as it is, unbuilt.
@@ -606,6 +615,16 @@ pub(crate) fn widget(
     cx.hidden(aid, &mut out);
     put(cx, key, out, r, dict);
     Some(cx.placeholder(key))
+}
+
+/// Whether widget `aid`, written under `key`, gets the appearance its file
+/// left to the viewer ([`appearance::missing`]): the emission carries
+/// `SaveTransform::FillAppearances` and writes it. One an Append leaves out
+/// isn't made: the saved file has it as the Rewrite that made it wrote it.
+fn fills(cx: &Cx, key: ObjKey, aid: AnnotId) -> bool {
+    cx.transforms.contains(&SaveTransform::FillAppearances)
+        && cx.writes(&key)
+        && appearance::missing(cx.st, aid)
 }
 
 /// Widget `aid`'s appearance, made anew for its field as the model holds
@@ -1115,8 +1134,10 @@ impl Fields {
         let tags = one.is_some_and(|page| cx.keeps_tags(page));
         // That widget's text or choice field's value changed, its check
         // box's or radio button's state where its file has no appearance of
-        // it, or its push button's captions: its appearance is made anew.
-        let stale = merged.is_some_and(|w| appearance::stale(st, w));
+        // it, or its push button's captions, or save policy makes one its
+        // file left to the viewer: its appearance is made anew.
+        let stale =
+            merged.is_some_and(|w| appearance::stale(st, w) || fills(cx, ObjKey::Field(fid), w));
         // That widget's button's state changed: its `/AS` is the model's.
         let changed = merged.and_then(|w| appearance::state_changed(st, w));
         // Its value isn't its file's: `/V` is the model's, or for a

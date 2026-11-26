@@ -1748,8 +1748,11 @@ const FORMS: FormsBaseline = FormsBaseline {
         ("as planned, Rewrite", 1949),
         ("a page deleted, as planned, Rewrite", 2901),
         ("of one page, a Rewrite to a copy", 1488),
-        ("toggles pressed, as planned, Append", 42),
-        ("toggles pressed, as planned, Rewrite", 5),
+        // One form fewer since M10 slice 9: 1741061's earlier revisions
+        // hold values its latest one doesn't, so a press, a change to the
+        // form, rewrites it.
+        ("toggles pressed, as planned, Append", 41),
+        ("toggles pressed, as planned, Rewrite", 6),
     ],
     pressed: PressedBaseline {
         pressed: &[("check box", 254), ("radio button", 53)],

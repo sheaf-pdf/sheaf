@@ -1,6 +1,8 @@
 //! What a save takes out of a form because it described the file as it was
 //! (M10 proposals 6 and 7): the XFA copy, once the AcroForm changed, and
-//! Reader's usage rights, whose signature covers the original bytes.
+//! Reader's usage rights, whose signature covers the original bytes; and
+//! what it puts in where the file left it to the viewer: the appearances a
+//! `/NeedAppearances` file's widgets lack (M10 proposal 10, slice 9).
 //!
 //! [`plan`] decides it before anything is written (M10.5 §11.8), from the
 //! primary's form as read and the state being saved: policy, never an
@@ -13,7 +15,12 @@
 //! proposal 34): Reader checks later revisions against those. When the
 //! form changed, the XFA copy goes too, its tooltips copied into `/TU`
 //! first: Acrobat would show the XFA's fields and values, not the ones
-//! sheaf wrote. A recovery sidecar applies the same transforms.
+//! sheaf wrote. A Rewrite that changes the form of a file that says
+//! `/NeedAppearances` makes the appearances its widgets lack, which a
+//! viewer that ignores the flag (PDFium's screen) would show nothing of;
+//! an Append makes only those of what it changed, and those an earlier
+//! such Rewrite made, which its record carries. A recovery sidecar applies
+//! the same transforms.
 
 use std::collections::HashMap;
 
@@ -48,8 +55,20 @@ pub const RIGHTS_REMOVED: &str =
 /// - **`FixSigFlags`** beside it, when `/SigFlags` says there are
 ///   signatures and neither a signed field of the target nor a
 ///   certification needs it.
+/// - **`FillAppearances`** on a Rewrite alone, when the form `target`
+///   writes says `/NeedAppearances` (the primary's, or a form's that came
+///   in) and its fields differ from the primary's as read, as for
+///   `DropXfa`: the widgets its file left with no appearance are made
+///   ([`appearance::missing`]), and the flag stays: an appearance the file
+///   has may be the stale one the flag was there to cover. An Append
+///   writes the widgets of what it changed alone, and is given none: what
+///   a Rewrite made is its record's to carry. (M10 proposal 10 has them
+///   made on the first save that changes the form, an Append too, and the
+///   flag cleared once every one is.)
 ///
 /// An Append never repeats what `rec` says the file lost already.
+///
+/// [`appearance::missing`]: super::appearance::missing
 pub fn plan(
     src: &Source,
     target: &DocState,
@@ -81,6 +100,10 @@ pub fn plan(
                 out.push(SaveTransform::FixSigFlags);
             }
         }
+    }
+    let rewrite = matches!(strategy, Strategy::Rewrite { .. });
+    if rewrite && target.form().need_appearances && form_differs(src.form(), target, src.id()) {
+        out.push(SaveTransform::FillAppearances);
     }
     out.retain(|t| !done(t));
     out

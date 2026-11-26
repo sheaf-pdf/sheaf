@@ -125,6 +125,14 @@ pub enum Why {
     /// sections, which the save writes too, removed or replaced text the
     /// file has (§11.10): an Append would leave it readable.
     RecoveredRemovals,
+    /// The save changes the form of a file whose earlier revisions hold
+    /// field values its latest one doesn't ([`Source::earlier_values`]),
+    /// and the file still holds them ([`SaveRecord::revisions_kept`]): an
+    /// Append would leave them readable beside the values it writes (M10
+    /// slice 9). Once a Rewrite wrote the file, they're gone.
+    ///
+    /// [`Source::earlier_values`]: crate::source::Source::earlier_values
+    EarlierValues,
 }
 
 impl Why {
@@ -139,6 +147,7 @@ impl Why {
                 | Why::TransformNeedsRewrite(_)
                 | Why::RemovalCheck { .. }
                 | Why::RecoveredRemovals
+                | Why::EarlierValues
         )
     }
 }
@@ -169,6 +178,9 @@ impl fmt::Display for Why {
             Why::Chosen => f.write_str("you chose to rewrite it"),
             Why::RecoveredRemovals => {
                 f.write_str("the recovered changes removed text the file holds")
+            }
+            Why::EarlierValues => {
+                f.write_str("the file's earlier revisions hold field values it no longer shows")
             }
         }
     }
@@ -415,6 +427,18 @@ pub enum SaveTransform {
     DropUr3,
     /// `/SigFlags` follows the signatures the target holds.
     FixSigFlags,
+    /// In a form whose file says `/NeedAppearances`, each widget its file
+    /// gave no appearance that a viewer ignoring the flag would show
+    /// nothing for ([`appearance::missing`]: a text field's or a choice's
+    /// whose field holds a value, a check box's or radio button's, a push
+    /// button's with a caption) gets one, made as a changed widget's is;
+    /// the flag stays. Given to a Rewrite that changes the form alone
+    /// ([`rules::plan`]), and applied by every emission that carries it to
+    /// each such widget it writes: an Append after that Rewrite carries the
+    /// record's, so a widget in its scope isn't written bare again.
+    ///
+    /// [`appearance::missing`]: crate::forms::appearance::missing
+    FillAppearances,
 }
 
 impl SavePlan {
@@ -479,7 +503,10 @@ impl SavePlan {
 ///   file that can't take an update, pending sections that removed or
 ///   replaced text, what the path removes or replaces (strict removal: a
 ///   generator's live tokens laid out again remove nothing,
-///   `LIVE_REDRAW`), and a save transform an Append can't carry.
+///   `LIVE_REDRAW`), a change to the form of a file whose earlier
+///   revisions hold values its latest one doesn't, while it still holds
+///   them ([`Why::EarlierValues`]), and a save transform an Append can't
+///   carry.
 ///
 /// It asks before it breaks or flags the primary's signatures, while they
 /// hold, by what it does to each ([`sig_impact`]): an Append by the
@@ -565,7 +592,8 @@ fn planned(input: &SaveInput, target: &SaveTarget, copy: CopyWhen) -> SavePlan {
     if !record.takes_updates() {
         why.push(Why::BaseUnsound);
     }
-    if pending.is_some_and(|tail| tail.removes) {
+    let recovered_removals = pending.is_some_and(|tail| tail.removes);
+    if recovered_removals {
         why.push(Why::RecoveredRemovals);
     }
     // Recognized text or a header removed is replaced text, which says
@@ -578,6 +606,23 @@ fn planned(input: &SaveInput, target: &SaveTarget, copy: CopyWhen) -> SavePlan {
     }
     if replaces {
         why.push(Why::ReplacesText(text));
+    }
+    // A form change, the pending sections' among them (the fields they
+    // touch), over a file whose earlier revisions hold values it doesn't,
+    // read from the primary at the first plan that asks. A restored
+    // document's primary is the file with the sections after it, so where
+    // they removed text the file's own latest revision is among those it
+    // reads as earlier: that's the recovered removals', and judged only
+    // where they removed nothing, when the two read the same.
+    let form = Flags::FIELD_VALUES | Flags::FIELD_TREE | Flags::FORM;
+    let form_changed =
+        path.flags.intersects(form) || pending.is_some_and(|tail| !tail.fields.is_empty());
+    if form_changed
+        && !recovered_removals
+        && record.revisions_kept
+        && input.primary.earlier_values()
+    {
+        why.push(Why::EarlierValues);
     }
     let append = Appending::of(input, record, &path);
     why.extend(append.needs_rewrite.map(Why::TransformNeedsRewrite));
@@ -596,7 +641,7 @@ fn planned(input: &SaveInput, target: &SaveTarget, copy: CopyWhen) -> SavePlan {
 /// read or wrote it, which the copy checks again.
 fn copies(input: &SaveInput, record: &SaveRecord) -> bool {
     let signed = !input.primary.signatures().is_empty();
-    signed && record.signatures_hold && record.stamp.holds(&record.path).unwrap_or(false)
+    signed && record.revisions_kept && record.stamp.holds(&record.path).unwrap_or(false)
 }
 
 /// What an Append of a save's path does to the form, and to signatures.
@@ -729,7 +774,8 @@ fn appended(input: &SaveInput, target: &SaveTarget, class: SigClass) -> SavePlan
 /// breaks the primary's signatures, while they hold, for the first reason,
 /// offering an Append anyway that would leave `stays_readable` readable
 /// when one could be written (Some) and every reason allows it; and what
-/// save policy's transforms ask.
+/// save policy's transforms ask. One for the file's earlier revisions'
+/// values says so in a note ([`EARLIER_VALUES`]).
 fn rewritten(
     input: &SaveInput,
     why: Vec<Why>,
@@ -749,6 +795,7 @@ fn rewritten(
         anyway,
         reason,
     ));
+    let earlier = why.contains(&Why::EarlierValues);
     let strategy = Strategy::Rewrite { why };
     let saved = input.saved.as_ref().map(|s| &*s.record);
     let transforms = rules::plan(
@@ -759,7 +806,10 @@ fn rewritten(
         SigClass::all(),
         AnnotOps::all(),
     );
-    let notes = told(input, None, &transforms, &mut asks);
+    let mut notes = told(input, None, &transforms, &mut asks);
+    if earlier {
+        notes.push(Note(EARLIER_VALUES.into()));
+    }
     SavePlan {
         strategy,
         asks,
@@ -780,7 +830,7 @@ fn signatures_ask(
     append_anyway: Option<AppendAnyway>,
     reason: Option<Why>,
 ) -> Option<Ask> {
-    let holds = (input.saved.as_ref()).is_none_or(|s| s.record.signatures_hold);
+    let holds = (input.saved.as_ref()).is_none_or(|s| s.record.revisions_kept);
     if !holds {
         return None;
     }
@@ -919,7 +969,7 @@ fn told(
             SaveTransform::DropUr3 => {
                 notes.push(Note(rules::RIGHTS_REMOVED.into()));
             }
-            SaveTransform::FixSigFlags => {}
+            SaveTransform::FixSigFlags | SaveTransform::FillAppearances => {}
         }
     }
     notes.extend(claim_broken(input, path));
@@ -1027,6 +1077,11 @@ pub fn unanswered(plan: &SavePlan, answers: &AskAnswers) -> Option<Ask> {
         })
         .cloned()
 }
+
+/// What a Rewrite for the file's earlier revisions' values
+/// ([`Why::EarlierValues`]) tells the reader.
+pub const EARLIER_VALUES: &str =
+    "Saved the whole file, so the values its earlier revisions held don't stay in it";
 
 /// Something the reader should be told about a saved file.
 #[derive(Debug, Clone, PartialEq, Eq)]

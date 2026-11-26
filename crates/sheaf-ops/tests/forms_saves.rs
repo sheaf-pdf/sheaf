@@ -433,7 +433,7 @@ fn a_save_that_would_rewrite_a_signed_file_asks() {
     // Saved onto the file that Rewrite wrote, it isn't asked again: that
     // file has no signature left to break. Nor saved over the signed file
     // again: the document's signatures stopped holding with the Rewrite,
-    // whatever file it writes (`SaveRecord::signatures_hold`).
+    // whatever file it writes (`SaveRecord::revisions_kept`).
     let first = doc.state().order()[0];
     doc.commit_ops(vec![rotate(&[first], Turn::Quarter)], "Rotate")
         .unwrap();

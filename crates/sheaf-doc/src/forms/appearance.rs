@@ -2,7 +2,8 @@
 //! widget's appearance is made from, as plain data out of the model, by
 //! its kind ([`Look`], [`look`]), with what every kind shares read once
 //! ([`Frame`]: the box, `/MK`, the border and the `/DA`); which widgets need
-//! one made ([`stale`]), and which show a state their file's doesn't
+//! one made ([`stale`]), which a `/NeedAppearances` file left without one
+//! ([`missing`]), and which show a state their file's doesn't
 //! ([`state_changed`]); the font it's drawn in, read once a name from its
 //! source's `/DR` (`read_font`, through
 //! [`Source::field_font`](crate::Source::field_font), and [`font`]); the
@@ -438,6 +439,44 @@ pub fn stale(st: &DocState, aid: AnnotId) -> bool {
         FieldKind::Combo | FieldKind::List => choice::stale(node, term),
         FieldKind::PushButton => push::stale(w),
         _ => false,
+    }
+}
+
+/// Whether widget `aid` is one save policy makes an appearance for where
+/// its file's form says `/NeedAppearances` and left it to the viewer
+/// (`SaveTransform::FillAppearances`, M10 slice 9): its file gave it no
+/// normal appearance (none, or a `/N` of no states), and a viewer that
+/// ignores the flag, as PDFium's screen does, would show nothing of what
+/// it holds:
+///
+/// - a text field's widget whose field holds a text that isn't empty;
+/// - a combo box's or list box's whose field's value holds one;
+/// - a check box's or radio button's, whatever state it shows;
+/// - a push button's with a caption (`/MK /CA`).
+///
+/// False for anything else, and for a widget whose file has an appearance,
+/// which may be the stale one the flag was there to cover: it's made only
+/// where [`stale`] says. What's made is as for a stale widget, and a widget
+/// both is made once.
+pub fn missing(st: &DocState, aid: AnnotId) -> bool {
+    let Some(w) = st.annot(aid).and_then(|rec| rec.widget()) else {
+        return false;
+    };
+    let Some(term) = st.field(w.field).and_then(|node| node.term.as_deref()) else {
+        return false;
+    };
+    if w.props.has_appearance {
+        return false;
+    }
+    let value = term.value.as_ref();
+    match term.kind {
+        FieldKind::Text => !field::text_shown(value).is_empty(),
+        FieldKind::Combo | FieldKind::List => {
+            field::choice_texts(value).iter().any(|t| !t.is_empty())
+        }
+        FieldKind::CheckBox | FieldKind::Radio => true,
+        FieldKind::PushButton => w.mk.caption.as_deref().is_some_and(|c| !c.is_empty()),
+        FieldKind::Signature | FieldKind::Unknown => false,
     }
 }
 

@@ -1071,6 +1071,11 @@ const RETIRED_M10: &[(&str, u8)] = &[
     // the group's rules (`tx::fixture::press`, `set_buttons`): no put of a
     // group's change by hand beside it.
     ("tx::fixture::put_change", 9),
+    // That a file still holds every revision it was opened with is one
+    // fact, `revisions_kept`, which both its signatures holding and its
+    // earlier revisions' values still being readable in it ask.
+    ("materialize::record::SaveRecord::signatures_hold", 9),
+    ("materialize::record::OutputRecord::signatures_hold", 9),
 ];
 
 /// Every name M11 retired, with the slice of `plan/m11-security/README.md` that retired

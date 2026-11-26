@@ -197,8 +197,9 @@ fn a_toggle_s_look_is_its_kind_caption_and_on_state() {
     }
 }
 
-/// What's made for a widget nothing changed (as M10 slice 9's
-/// `NeedAppearances` transform and slice 23's new widgets will ask), its
+/// What's made for a widget nothing changed (as a `NeedAppearances` file's
+/// widgets with none get, `FillAppearances`, and slice 23's new widgets
+/// will ask), its
 /// `/DA` font never read: with no `/MK`, the on state's normal and down
 /// forms and `Off`'s down one (the pressed gray), no normal `Off`, which
 /// would paint nothing; with a border color, all four, `Off`'s the on

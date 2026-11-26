@@ -8,17 +8,24 @@
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
-use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, dictionary, literal};
+use crate::pdf::{
+    Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, StreamExt, Value as PdfValue,
+    dictionary, literal,
+};
 use in_progress::NoProgress;
 use sheaf_edit::{Rotation, Turn};
 
+use super::append_tests::{planned_in_place, written};
+use super::field_ap_tests::read_back;
 use super::graph::Graph;
+use super::removal_tests::{opened, scratch, warned};
 use super::tests::{
     add, bytes, file, insert, lazy, open, rewrite, save, source, source_of, span, target,
 };
 use super::*;
 use crate::annot::{Annot, AnnotId, AnnotKind, Box2, Pt};
-use crate::forms::fixture::{Form, every_mark_kind, row};
+use crate::forms::Finding;
+use crate::forms::fixture::{Button, Form, NO_TOGGLE_TO_OFF, RADIO, every_mark_kind, row};
 use crate::labels::{LabelSpec, Style};
 use crate::model::{Document, PageId};
 use crate::prim::{Key, Val};
@@ -1027,6 +1034,168 @@ fn the_plan_asks_before_it_rewrites() {
     );
     assert_eq!(p.asks, [Ask::XfaHoldsValues { fields: 1 }]);
     assert!(matches!(p.transforms[0], SaveTransform::DropXfa { .. }));
+}
+
+/// A one-page form whose file says `/NeedAppearances` and leaves each of
+/// its widgets to the viewer, none with an appearance: a text field
+/// `valued` holding `value`, a combo box `pick` holding `b`, a radio group
+/// `radio` of two buttons and a check box `check`, all off, a push button
+/// `push` that says "Go"; and an empty text field `other`, `other`'s
+/// object beside them. The widgets left to the viewer, each by its field's
+/// name and its object.
+fn left_to_the_viewer(value: &str) -> (Vec<u8>, Vec<(&'static str, ObjectId)>, ObjectId) {
+    let mut f = Form::new(1);
+    let valued = f.text("valued", 0, row(0));
+    f.dict(valued).set("V", crate::pdf::text::string(value));
+    let pick = f.choice("pick", 0, row(1), &["a", "b"], true);
+    f.dict(pick).set("V", literal("b"));
+    let off = |i| Button::at(i, None, Some("Off"));
+    let (_, radio) = f.buttons("radio", RADIO | NO_TOGGLE_TO_OFF, &[off(2), off(3)]);
+    let (_, check) = f.buttons("check", 0, &[off(4)]);
+    let push = f.push_button("push", 0, row(5), "Go");
+    f.dict(push).remove(b"AP");
+    let other = f.text("other", 0, row(6));
+    let acroform = f.acroform;
+    f.dict(acroform).set("NeedAppearances", true);
+    let widgets = vec![
+        ("valued", valued),
+        ("pick", pick),
+        ("radio", radio[0]),
+        ("radio", radio[1]),
+        ("check", check[0]),
+        ("push", push),
+    ];
+    (f.bytes(), widgets, other)
+}
+
+/// Whether widget `w` of `pdf` has a normal appearance: a stream, or a
+/// dictionary of states.
+fn appears(pdf: &LazyPdf, w: ObjectId) -> bool {
+    let d = pdf.get_dictionary(w).unwrap();
+    let normal = (d.get(b"AP"))
+        .and_then(|ap| pdf.dereference(ap).ok())
+        .and_then(|(_, ap)| ap.as_dict()?.get(b"N"))
+        .and_then(|n| pdf.dereference(n).ok());
+    match normal.map(|(_, n)| n.value()) {
+        Some(PdfValue::Stream(_)) => true,
+        Some(PdfValue::Dict(states)) => !states.is_empty(),
+        _ => false,
+    }
+}
+
+/// The names of `widgets`' fields, each a widget, whose widget in the file
+/// `bytes` has no normal appearance ([`appears`]).
+fn bare(bytes: &[u8], widgets: &[(&'static str, ObjectId)]) -> Vec<&'static str> {
+    let pdf = lazy(bytes, None);
+    (widgets.iter())
+        .filter(|&&(_, w)| !appears(&pdf, w))
+        .map(|&(name, _)| name)
+        .collect()
+}
+
+/// A form whose file says `/NeedAppearances` and leaves its widgets to the
+/// viewer ([`left_to_the_viewer`]). A save that changed no field makes
+/// none, rewritten. An Append of a fill, as planned, is given no transform
+/// and makes the filled field's alone. A Rewrite of the fill makes one for
+/// each widget its file left with none (`SaveTransform::FillAppearances`),
+/// the valued fields' drawing their values, `/NeedAppearances` kept, and
+/// the form check that found values with no appearance finds none. After
+/// it, a press of one radio button saved as planned, an Append, writes the
+/// group's other button too (its field's widgets are in its scope), and
+/// makes it again from the record's transform, not bare as the opened file
+/// has it: every widget the Rewrite gave an appearance still has one.
+#[test]
+fn a_need_appearances_form_rewritten_gets_what_its_file_left_to_the_viewer() {
+    let dir = scratch();
+    let (bytes, widgets, other) = left_to_the_viewer("Shown");
+    let fill = SaveTransform::FillAppearances;
+    let all: Vec<&str> = widgets.iter().map(|&(name, _)| name).collect();
+    assert_eq!(bare(&bytes, &widgets), all, "the file gives none one");
+    let check = |bytes: &[u8]| crate::forms::check(bytes, None).unwrap().findings;
+    let unshown = Finding::NoAppearance(vec!["pick".into(), "valued".into()]);
+    assert_eq!(check(&bytes), [unshown]);
+
+    let (path, mut d) = opened(&dir, "commented.pdf", &bytes);
+    let page = d.page(0).unwrap();
+    let pos = Pt { x: 9.0, y: 9.0 };
+    let add = fx::add(page, &mark(1, AnnotKind::Note { pos }));
+    d.commit_ops(vec![add], "note").unwrap();
+    let report = save_rewritten(&mut d, &path).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
+    assert!(!d.saved_record().unwrap().transforms.contains(&fill));
+    assert_eq!(bare(&std::fs::read(&path).unwrap(), &widgets), all);
+
+    let (path, mut d) = opened(&dir, "appended.pdf", &bytes);
+    fx::fill(&mut d, "other", "Filled");
+    let p = plan(&d.recovery_input(), &d.save_target(&path));
+    assert_eq!(p.strategy, Strategy::Append { onto: Onto::Saved });
+    assert_eq!(p.transforms, []);
+    let (base, section) = planned_in_place(&mut d);
+    let wrote = written(base.len(), &section, &path);
+    assert!(wrote.contains(&other), "{wrote:?}");
+    assert!(widgets.iter().all(|(_, w)| !wrote.contains(w)), "{wrote:?}");
+    let now = std::fs::read(&path).unwrap();
+    assert_eq!(bare(&now, &widgets), all);
+    assert!(appears(&lazy(&now, None), other));
+
+    let (path, mut d) = opened(&dir, "rewritten.pdf", &bytes);
+    fx::fill(&mut d, "other", "Filled");
+    let report = save_rewritten(&mut d, &path).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
+    assert!(d.saved_record().unwrap().transforms.contains(&fill));
+    let now = std::fs::read(&path).unwrap();
+    assert_eq!(bare(&now, &widgets), Vec::<&str>::new());
+    let pdf = lazy(&now, None);
+    assert!(appears(&pdf, other));
+    let src = source(&now, None);
+    assert!(src.form().facts.need_appearances, "the flag kept");
+    let normal = |w: ObjectId| {
+        let d = pdf.get_dictionary(w).unwrap();
+        let ap = pdf.dereference(d.get(b"AP").unwrap()).unwrap().1;
+        let n = ap.as_dict().unwrap().get(b"N").unwrap();
+        let n = pdf.dereference(n).unwrap().1;
+        n.as_stream().unwrap().decompressed_content().unwrap()
+    };
+    let draws = |w: ObjectId, text: &[u8]| normal(w).windows(text.len()).any(|t| t == text);
+    assert!(draws(widgets[0].1, b"(Shown)"), "valued draws its value");
+    assert!(draws(widgets[1].1, b"(b)"), "pick draws its value");
+    assert!(draws(widgets[5].1, b"(Go)"), "push draws its caption");
+    assert_eq!(check(&now), []);
+
+    let st = d.state();
+    let radio = st.field_named("radio").unwrap();
+    let pressed = st.field(radio).unwrap().term.as_ref().unwrap().widgets[0];
+    fx::press(&mut d, pressed);
+    let (base, section) = planned_in_place(&mut d);
+    let wrote = written(base.len(), &section, &path);
+    assert!(wrote.contains(&widgets[2].1) && wrote.contains(&widgets[3].1));
+    let now = std::fs::read(&path).unwrap();
+    assert_eq!(bare(&now, &widgets), Vec::<&str>::new());
+    assert_eq!(check(&now), []);
+}
+
+/// A `/NeedAppearances` form's value no font sheaf has draws (another
+/// tool's: the op refuses one) is left unmade by the Rewrite that makes the
+/// rest, and warned of by its kind, never its text: no `/AP`, and its value
+/// as the file has it.
+#[test]
+fn a_need_appearances_value_no_font_draws_is_unmade_and_warned_of() {
+    let dir = scratch();
+    let (bytes, widgets, _) = left_to_the_viewer("王");
+    let (path, mut d) = opened(&dir, "unencodable.pdf", &bytes);
+    fx::fill(&mut d, "other", "Filled");
+    let (report, said) = warned(|| save_rewritten(&mut d, &path));
+    assert_eq!(report.unwrap().strategy, Some(StrategyKind::Rewrite));
+    let unmade: Vec<&String> = (said.iter())
+        .filter(|w| w.contains("can't be made"))
+        .collect();
+    assert_eq!(unmade.len(), 1, "{said:?}");
+    assert!(unmade[0].contains("unencodable"), "{said:?}");
+    assert!(!said.iter().any(|w| w.contains('王')), "{said:?}");
+    let now = std::fs::read(&path).unwrap();
+    assert_eq!(bare(&now, &widgets), ["valued"]);
+    let (value, _) = read_back(&now, "valued");
+    assert_eq!(value, Some(crate::forms::Value::Text("王".into())));
 }
 
 /// A signed page whose signature's `/Reference` names its file's

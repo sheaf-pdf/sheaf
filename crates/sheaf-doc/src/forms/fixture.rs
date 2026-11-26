@@ -1845,13 +1845,39 @@ pub fn try_append_revision(
     ids: &[ObjectId],
     change: impl FnOnce(&mut Pdf),
 ) -> anyhow::Result<Vec<u8>> {
+    appended(bytes, None, ids, change)
+}
+
+/// [`append_revision`] of an encrypted file that opens with `password`
+/// (its user password, or its owner password), not the empty one.
+pub fn append_revision_with_password(
+    bytes: &[u8],
+    password: &str,
+    ids: &[ObjectId],
+    change: impl FnOnce(&mut Pdf),
+) -> Vec<u8> {
+    appended(bytes, Some(password), ids, change).expect("an update appended")
+}
+
+/// [`try_append_revision`] of a file that opens with `password`, or the
+/// empty user password.
+fn appended(
+    bytes: &[u8],
+    password: Option<&str>,
+    ids: &[ObjectId],
+    change: impl FnOnce(&mut Pdf),
+) -> anyhow::Result<Vec<u8>> {
     use anyhow::Context as _;
 
-    let kind = BlobKind::file(Path::new("form.pdf"), None);
+    let kind = BlobKind::file(Path::new("form.pdf"), password);
     let src = (Store::new().open(bytes.to_vec().into(), kind)).context("the previous revision")?;
     let mut base = (crate::serialize::append::Base::over(&src))
         .context("the previous revision's trailer names no catalog")?;
-    let prev = Pdf::load_mem(bytes).context("the previous revision")?;
+    let prev = match password {
+        Some(password) => Pdf::load_mem_with_password(bytes, password),
+        None => Pdf::load_mem(bytes),
+    };
+    let prev = prev.context("the previous revision")?;
     let mut next = Pdf::with_version(prev.version.clone());
     next.trailer = prev.trailer.clone();
     next.max_id = base.size.saturating_sub(1);

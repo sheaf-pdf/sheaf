@@ -1043,6 +1043,51 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A sidecar's fill of an empty field removes nothing, so where the
+    /// file's earlier revisions hold a value its latest one doesn't (another
+    /// tool's, filled and cleared in updates of its own), the restored
+    /// document's first save, whose sections change the form, rewrites the
+    /// file for them (`Why::EarlierValues`): the value is nowhere in it, by
+    /// a search that finds it in the file as it was, and the fill is.
+    #[test]
+    fn a_restored_fill_over_earlier_revisions_values_rewrites_the_file() {
+        use crate::forms::fixture::append_revision;
+        use crate::serialize::fixture::in_clear;
+        let dir = scratch();
+        let pdf = dir.join("form.pdf");
+        let mut f = Form::new(1);
+        let a = f.text("a", 0, row(0));
+        f.text("b", 0, row(1));
+        let filled = append_revision(&f.bytes(), &[a], |p| {
+            (p.get_dictionary_mut(a).unwrap()).set("V", crate::pdf::literal("FIRSTVALUE42"));
+        });
+        let cleared = append_revision(&filled, &[a], |p| {
+            (p.get_dictionary_mut(a).unwrap()).remove(b"V");
+        });
+        assert!(in_clear(&cleared, b"FIRSTVALUE42"), "the control");
+        std::fs::write(&pdf, &cleared).unwrap();
+        let mut model = crate::open::file(&pdf, None).unwrap().doc;
+        fx::fill(&mut model, "b", "SecondValue");
+        sidecar_of(&model);
+        let rec = find(&pdf).unwrap();
+        assert!(!rec.pending.flags.removes);
+        let mut recovered = restored(&pdf, &rec, None);
+        let report = save_with(
+            &mut recovered,
+            &pdf,
+            SaveHow::Planned,
+            &AskAnswers::default(),
+            &NoProgress,
+        )
+        .unwrap();
+        assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
+        assert_eq!(report.why, [Why::EarlierValues]);
+        let saved = std::fs::read(&pdf).unwrap();
+        assert!(in_clear(&saved, b"SecondValue"), "the fill");
+        assert!(!in_clear(&saved, b"FIRSTVALUE42"), "the earlier value");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The sidecar of an encrypted file opened without a password is
     /// encrypted as the file is: neither the page's string (the turned
     /// page's dictionary, which its section writes again) nor a mark's
