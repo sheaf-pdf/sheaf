@@ -225,16 +225,25 @@ pub mod pdfium {
 
     /// Held across every use of PDFium, from a load to the document's
     /// drop: a call into an engine, such as one page of a walk over the
-    /// whole document's page sizes. pdfium-render's `thread_safe` feature isn't
-    /// enough: 185 of the 467 functions it binds (0.9.4) take no lock,
-    /// among them `FPDFDOC_InitFormFillEnvironment` (every load makes it)
-    /// and the page size, text and bitmap calls. PDFium's parser keeps
-    /// its depth in a process global
-    /// (`CPDF_SyntaxParser::s_CurrentRecursionDepth`) that each object
-    /// parse saves, adds one to and puts back, so parses on two threads
-    /// at once leave it too high. Once it nears its limit (64), objects
-    /// stop parsing, and every load after fails with `FormatError`, from
-    /// any thread (M10 slice 1's note).
+    /// whole document's page sizes. PDFium's parser keeps its depth in a
+    /// process global (`CPDF_SyntaxParser::s_CurrentRecursionDepth`) that
+    /// each object parse saves, adds one to and puts back, so parses on
+    /// two threads at once leave it too high. Once it nears its limit
+    /// (64), objects stop parsing, and every load after fails with
+    /// `FormatError`, from any thread (M10 slice 1's note).
+    ///
+    /// pdfium-render's `thread_safe` feature takes a lock of its own
+    /// around each call. In 0.9.4 that left 185 of the 467 functions it
+    /// bound unlocked, among them `FPDFDOC_InitFormFillEnvironment` (every
+    /// load makes it) and the page size, text and bitmap calls, and with
+    /// this lock made to exclude nothing `tests/threads.rs` failed every
+    /// run, under the 7881 library and the 8125 one (about 270 of its 288
+    /// uses, most with `FormatError`). 0.9.6 locks all 478, and with this
+    /// lock excluding nothing the same test passed ten runs of ten (M18
+    /// slice 26): that shows no failure, not that none is left. This lock
+    /// stays: it is fair where pdfium-render's (std's mutex) isn't, and it
+    /// is held across the many calls of one engine call, where
+    /// pdfium-render's is held for one.
     ///
     /// Fair: a thread that unlocks and locks again at once, as a walk or
     /// a search does, goes behind the threads already waiting. (With
@@ -575,13 +584,17 @@ pub mod pdfium {
     }
 
     /// Page `page` of `doc` with the appearances a viewer shows drawn into
-    /// it (see [`render_appearances`]), in the box it showed before. The
-    /// flatten writes `/MediaBox` and `/CropBox` from the page's own keys
-    /// alone, so a page that inherits them comes out Letter (M10.5 slice
-    /// 2): the box PDFium showed, its inherited keys read, is put back. And
-    /// pdfium-render 0.9.4's flatten loads the page again under a new
-    /// handle but leaves its boxes on the one it closed, so the page is
-    /// loaded afresh before any box is touched.
+    /// it (see [`render_appearances`]), in the box it showed before.
+    /// PDFium's flatten (`FPDFPage_Flatten`) writes `/MediaBox` and
+    /// `/CropBox` from the page's own keys alone, Letter where it has none,
+    /// so a page that inherits them comes out Letter (M10.5 slice 2): the
+    /// box PDFium showed, its inherited keys read, is put back. chromium/8125
+    /// still does: its `fpdf_flatten.cpp` reads the boxes so, and
+    /// `an_inherited_box_survives_the_flatten` fails without the two
+    /// `set_*` lines below (M18 slice 26). And pdfium-render's flatten
+    /// (0.9.6, as 0.9.4: its `page.rs` is the same file) loads the page
+    /// again under a new handle but leaves its boxes on the one it closed,
+    /// so the page is loaded afresh before any box is touched.
     fn flattened<'a>(doc: &PdfDocument<'a>, page: PageIndex) -> Result<PdfPage<'a>> {
         let mut p = doc.pages().get(page.0 as i32)?;
         let visible = p.boundaries().bounding()?.bounds;
