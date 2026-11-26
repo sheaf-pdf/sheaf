@@ -14,7 +14,7 @@ use crate::labels::PageLabelRange;
 use crate::mark::{Anchor, Color, Imported, MarkPatch, NewMark, Style};
 use crate::page::{BoxSpec, DestView, Fit, PageSize, Rotation, TextStyle};
 use crate::patch::Patch;
-use crate::refs::{AnnotRef, BlobSel, BookmarkRef, PageRef, PageSel, RangeSet, ScopeSel};
+use crate::refs::{AnnotRef, BlobSel, BookmarkRef, FieldRef, PageRef, PageSel, RangeSet, ScopeSel};
 use crate::text_layer::TextLayer;
 use crate::watermark::{WatermarkSpec, Z};
 
@@ -221,6 +221,59 @@ pub enum Op {
     /// with its field when it was the field's last. Each page's drawing is
     /// a layer over what's there: flattening again adds another.
     FlattenAnnotations { pages: PageSel, which: FlattenSet },
+    /// Form fields' values: each field `values` names gets its value, by
+    /// the rules of its kind, and its widgets the states and appearances
+    /// that show it, in order; then each `calculated` names, the same way.
+    /// A full name sets every field that has it.
+    SetFieldValues {
+        values: Vec<FieldSet>,
+        /// The values the form's calculations gave after `values`, worked
+        /// out by whoever ran its scripts: never worked out again when the
+        /// op is. They may set a read-only field, and aren't held to a
+        /// field's maximum length or its single line.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        calculated: Vec<FieldSet>,
+    },
+}
+
+/// One field's value, as [`Op::SetFieldValues`] sets it, and what its
+/// widgets show of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FieldSet {
+    pub field: FieldRef,
+    pub value: FieldValue,
+    /// What a text field's or combo box's widgets show in place of the
+    /// value: the text a format script made of it. None shows the value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
+}
+
+/// A field's value, by its kind. In JSON, `"clear"`, `{"text": "Ann"}`,
+/// `{"items": ["W-2"]}`, `{"state": "Yes"}`, `{"export": "Single"}` or
+/// `{"press": {"widget": 12}}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[non_exhaustive]
+pub enum FieldValue {
+    /// No value: a text or choice field empty, a check box or radio group
+    /// off.
+    Clear,
+    /// A text field's text; a combo box's option, by its export value, or
+    /// any text where the combo box is editable; a list box's one option.
+    Text(String),
+    /// A list box's options, by their export values: more than one where
+    /// it takes several.
+    Items(Vec<String>),
+    /// A check box's or radio group's on state, by its name (`Off` for
+    /// none on).
+    State(String),
+    /// The same, by its export value: its `/Opt` entry, else its on
+    /// state's name.
+    Export(String),
+    /// A check box's or radio button's widget pressed, by the group's
+    /// rules: what a click does.
+    Press { widget: AnnotRef },
 }
 
 /// Which annotations a flatten draws into their pages.

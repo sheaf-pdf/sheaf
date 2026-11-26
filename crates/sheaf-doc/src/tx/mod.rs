@@ -65,6 +65,7 @@ pub mod cascade;
 pub(crate) mod content;
 pub mod error;
 pub mod export;
+mod fill;
 #[cfg(any(test, feature = "fixtures"))]
 pub mod fixture;
 mod flatten;
@@ -77,6 +78,8 @@ pub mod resolve;
 mod boxes_tests;
 #[cfg(test)]
 mod cascade_tests;
+#[cfg(test)]
+mod fill_tests;
 #[cfg(test)]
 mod header_tests;
 #[cfg(test)]
@@ -95,7 +98,7 @@ pub use error::{EditError, Notice, notice_text};
 pub use export::ExportTx;
 pub use marks::{mark_changes, mark_kind, mark_patch, mark_style};
 pub use resolve::{
-    At, BookmarkChange, OthersFound, ResolvedOp, incoming, op_name, ready_to_insert,
+    At, BookmarkChange, OthersFound, ResolvedOp, Set, SetValue, incoming, op_name, ready_to_insert,
 };
 
 /// Who the user is, as the host fills a mark in (§6.8): the name marks are
@@ -1281,6 +1284,7 @@ fn lower_op(lw: &mut Lower, op: &mut ResolvedOp) -> Result<(), EditError> {
             *flattened = flatten::flatten(lw, pages, *which)?;
             Ok(())
         }
+        R::SetFieldValues { values, calculated } => fill::set_values(lw, values, calculated),
         R::Revert { .. } => Err(EditError::internal(
             "a revert is made of its group's prims, never lowered",
         )),

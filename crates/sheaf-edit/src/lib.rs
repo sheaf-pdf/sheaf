@@ -45,12 +45,13 @@ pub use ids::{AnnotId, BlobId, FieldId, Local, NotALocal, OutlineId, PageId, Sou
 pub use labels::{LabelStyle, PageLabelRange};
 pub use mark::{Anchor, Color, FontChoice, Imported, MarkKind, MarkPatch, NewMark, Style};
 pub use op::{
-    BookmarkPatch, Bring, Delta, FlattenSet, FormBring, Op, OutlineBring, PageSource, Sibling, Turn,
+    BookmarkPatch, Bring, Delta, FieldSet, FieldValue, FlattenSet, FormBring, Op, OutlineBring,
+    PageSource, Sibling, Turn,
 };
 pub use page::{BoxSpec, DestView, Fit, Margins, PageSize, Rotation, TextStyle};
 pub use patch::Patch;
 pub use refs::{
-    AnnotRef, BlobSel, BookmarkRef, PageRef, PageSel, RangeSet, RangeSetError, ScopeSel,
+    AnnotRef, BlobSel, BookmarkRef, FieldRef, PageRef, PageSel, RangeSet, RangeSetError, ScopeSel,
 };
 pub use reply::{Applied, Cap, Failure, FailureKind, Made, Previewed};
 pub use text_layer::{OcrWord, TextLayer};

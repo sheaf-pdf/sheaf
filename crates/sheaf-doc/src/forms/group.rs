@@ -6,8 +6,8 @@
 //! family's: radio buttons, NoToggleToOff, RadiosInUnison, check boxes of
 //! one on state going together and check boxes of distinct on states
 //! acting as radio buttons. Which widgets there are, their states and
-//! their names are the model's. M10 slice 9's `SetFieldValues` lowering
-//! puts a [`Change`]; until then only a test's put does
+//! their names are the model's. `SetFieldValues`' lowering puts a
+//! [`Change`] (`crate::tx::fill`), as a test's put does
 //! (`crate::tx::fixture::press` and `set_buttons`).
 //!
 //! **By index.** A group's widgets go by their places among their field's
@@ -171,6 +171,18 @@ impl Buttons {
         let group = self.group();
         let after = group.states_for_export(export)?;
         Some(self.change(&group, &after))
+    }
+
+    /// Whether `name` is the name an on state goes under, of a widget at
+    /// some index ([`on_state`](Self::on_state), an index the model holds
+    /// no widget at among them): one [`set_state`](Self::set_state) turns
+    /// on. `Off` is none's.
+    pub fn has_on_state(&self, name: &str) -> bool {
+        let Some(name) = name_bytes(name).filter(|n| n != b"Off") else {
+            return false;
+        };
+        let group = self.group();
+        (0..self.members.len()).any(|index| group.on_state(index).is_some_and(|on| *on == *name))
     }
 
     /// The field's export value as its widgets show it now: the first on

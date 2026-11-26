@@ -40,10 +40,11 @@ pub struct ChoiceLook {
 /// What a combo box or a list box shows, by which it is.
 #[derive(Clone, PartialEq)]
 pub enum ChoiceShows {
-    /// A combo box's text, beside its drop button: the label of the first
-    /// option its value (the first of its texts) selects, else that text
-    /// as it is; empty with no value. Once an op carries one, the display
-    /// string a format script gives (M10 slice 9).
+    /// A combo box's text, beside its drop button: its display, the text
+    /// a format script made of its value, where it has one
+    /// ([`Terminal::display`]); else the label of the first option its
+    /// value (the first of its texts) selects, else that text as it is;
+    /// empty with no value.
     Combo { text: Arc<str> },
     /// A list box's options, each drawn by its label (`shown`), from the
     /// one at `top` (`/TI`) on; the indexes in `options` of those its value
@@ -87,14 +88,15 @@ impl fmt::Debug for ChoiceShows {
 }
 
 /// Widget `w`'s look, `node` its field and `term` that field's terminal, a
-/// combo box or list box: what its value shows among its options
-/// (`selected`, by the value alone), its `/TI` for a list box,
-/// and its frame.
+/// combo box or list box: a combo box's display where it has one, else
+/// what its value shows among its options (`selected`, by the value
+/// alone), its `/TI` for a list box, and its frame.
 pub(super) fn look(st: &DocState, w: &Widget, node: &FieldNode, term: &Terminal) -> ChoiceLook {
     let options = &term.props.options;
     let shows = match term.kind {
         FieldKind::Combo => ChoiceShows::Combo {
-            text: combo_text(options, term.value.as_ref()),
+            text: (term.display.clone())
+                .unwrap_or_else(|| combo_text(options, term.value.as_ref())),
         },
         _ => ChoiceShows::List {
             options: options.clone(),
@@ -155,14 +157,15 @@ fn values(value: Option<&Value>) -> Vec<&str> {
 }
 
 /// Whether a widget of `node`, a combo box or list box whose terminal is
-/// `term`, needs its appearance made ([`stale`](super::stale)): its value's
-/// texts ([`values`]) aren't its source's field's as read, or the field was
-/// read from no source, or isn't among its source's fields as read. No
+/// `term`, needs its appearance made ([`stale`](super::stale)): it has a
+/// display, which no file holds; or its value's texts ([`values`]) aren't
+/// its source's field's as read, or the field was read from no source, or
+/// isn't among its source's fields as read. No
 /// value and an empty array are alike, and a text and an array of that
 /// one text, as each shows the same; an empty text isn't no value, as it
 /// selects an option whose export value is empty.
 pub(super) fn stale(node: &FieldNode, term: &Terminal) -> bool {
-    let Some(src) = &node.src else {
+    let Some(src) = node.src.as_ref().filter(|_| term.display.is_none()) else {
         return true;
     };
     match src.src.form().field_by_object(src.id) {

@@ -116,9 +116,12 @@ pub fn cap_of(op: &ResolvedOp, targets: &[Target]) -> Cap {
         | R::SetHeaderFooter { .. }
         | R::RemoveHeaderFooter { .. }
         | R::FlattenAnnotations { .. } => Cap::Approval,
+        // Fields are filled by the user, the command line and an import,
+        // until a plugin can read them (M10 slice 29).
         R::InsertPages { .. }
         | R::ReplacePages { .. }
         | R::SetOcrText { .. }
+        | R::SetFieldValues { .. }
         | R::Revert { .. } => Cap::User,
     }
 }

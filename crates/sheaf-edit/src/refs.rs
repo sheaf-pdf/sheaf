@@ -3,11 +3,12 @@
 //! can see: a page's position, a bookmark's titles, a comment's name.
 //!
 //! A reference is a number (an id), a string (a local, `"$1"`) or an
-//! object (`{"pos": 3}`). Each kind is read by hand, so a misspelled local
-//! is an error rather than another form. Positions are 1-based, as the UI
-//! shows them, and resolve against the document as it is when the op
-//! runs: `[delete-pages 1, rotate-pages 2]` turns the page that's second
-//! after the delete.
+//! object (`{"pos": 3}`, `{"name": "form1[0].name[0]"}`). Each kind is
+//! read by hand, so a misspelled local is an error rather than another
+//! form. Positions are 1-based, as the UI shows them, and resolve against
+//! the document as it is when the op runs: `[delete-pages 1, rotate-pages
+//! 2]` turns the page that's second after the delete. A field is named by
+//! its id or its full name, never a local: no op makes one.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -20,7 +21,7 @@ use serde::de::value::MapAccessDeserializer;
 use serde::de::{self, DeserializeOwned, MapAccess, Unexpected, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::ids::{AnnotId, BlobId, Local, OutlineId, PageId};
+use crate::ids::{AnnotId, BlobId, FieldId, Local, OutlineId, PageId};
 
 /// A page: by id, as a page an earlier op made, or by its position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -47,6 +48,16 @@ pub enum AnnotRef {
     Id(AnnotId),
     New(Local),
     Nm { nm: String, page: Option<PageRef> },
+}
+
+/// A form field: by id, or by its full name (`form1[0].name[0]`), which
+/// names every field that has it: fields named alike are one field to
+/// every reader of the file. No op makes a field, so none is named by a
+/// local.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FieldRef {
+    Id(FieldId),
+    Name(String),
 }
 
 /// A blob an op uses (an inserted file, a stamp's page, an attached file):
@@ -105,6 +116,12 @@ impl From<AnnotId> for AnnotRef {
     }
 }
 
+impl From<FieldId> for FieldRef {
+    fn from(id: FieldId) -> FieldRef {
+        FieldRef::Id(id)
+    }
+}
+
 /// Pages something is on: every page, including those added later, or
 /// these.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -120,8 +137,17 @@ trait RefForms: Sized {
     /// The object form, as read.
     type Object: DeserializeOwned;
     fn id(n: u64) -> Self;
-    fn local(l: Local) -> Self;
     fn object(o: Self::Object) -> Result<Self, String>;
+    /// The string form: a local. One that names nothing an op makes
+    /// refuses every string.
+    fn string(s: &str) -> Result<Self, String>;
+}
+
+/// A local, as a reference's string form reads one.
+fn local<R>(s: &str, new: fn(Local) -> R) -> Result<R, String> {
+    s.parse()
+        .map(new)
+        .map_err(|e: crate::ids::NotALocal| e.to_string())
 }
 
 struct RefVisitor<R>(PhantomData<R>);
@@ -143,7 +169,7 @@ impl<'de, R: RefForms> Visitor<'de> for RefVisitor<R> {
     }
 
     fn visit_str<E: de::Error>(self, s: &str) -> Result<R, E> {
-        s.parse().map(R::local).map_err(E::custom)
+        R::string(s).map_err(E::custom)
     }
 
     fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<R, A::Error> {
@@ -171,8 +197,8 @@ impl RefForms for PageRef {
         PageRef::Id(PageId(n))
     }
 
-    fn local(l: Local) -> PageRef {
-        PageRef::New(l)
+    fn string(s: &str) -> Result<PageRef, String> {
+        local(s, PageRef::New)
     }
 
     fn object(o: Pos) -> Result<PageRef, String> {
@@ -239,8 +265,8 @@ impl RefForms for BookmarkRef {
         BookmarkRef::Id(OutlineId(n))
     }
 
-    fn local(l: Local) -> BookmarkRef {
-        BookmarkRef::New(l)
+    fn string(s: &str) -> Result<BookmarkRef, String> {
+        local(s, BookmarkRef::New)
     }
 
     fn object(o: TitlePath) -> Result<BookmarkRef, String> {
@@ -309,8 +335,8 @@ impl RefForms for AnnotRef {
         AnnotRef::Id(AnnotId(n))
     }
 
-    fn local(l: Local) -> AnnotRef {
-        AnnotRef::New(l)
+    fn string(s: &str) -> Result<AnnotRef, String> {
+        local(s, AnnotRef::New)
     }
 
     fn object(o: Named) -> Result<AnnotRef, String> {
@@ -359,6 +385,73 @@ impl JsonSchema for AnnotRef {
                         "page": g.subschema_for::<PageRef>(),
                     },
                     "required": ["nm"],
+                    "additionalProperties": false,
+                },
+            ],
+        })
+    }
+}
+
+/// A field's full name.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FullName {
+    name: String,
+}
+
+impl RefForms for FieldRef {
+    const EXPECTING: &'static str = "a field: its id or {\"name\": its full name}";
+    type Object = FullName;
+
+    fn id(n: u64) -> FieldRef {
+        FieldRef::Id(FieldId(n))
+    }
+
+    fn string(s: &str) -> Result<FieldRef, String> {
+        Err(format!(
+            "{s:?} isn't a field: name one by its id or {{\"name\": its full name}}"
+        ))
+    }
+
+    fn object(o: FullName) -> Result<FieldRef, String> {
+        match o.name.is_empty() {
+            true => Err("a full name is never empty: name a field that has none by its id".into()),
+            false => Ok(FieldRef::Name(o.name)),
+        }
+    }
+}
+
+impl Serialize for FieldRef {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            FieldRef::Id(id) => s.serialize_u64(id.0),
+            FieldRef::Name(name) => FullName { name: name.clone() }.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for FieldRef {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<FieldRef, D::Error> {
+        deserialize_ref(d)
+    }
+}
+
+impl JsonSchema for FieldRef {
+    fn schema_name() -> Cow<'static, str> {
+        "FieldRef".into()
+    }
+
+    fn json_schema(g: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "description": "A form field: its id, or its full name, which names every field that has it.",
+            "oneOf": [
+                g.subschema_for::<FieldId>(),
+                {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "minLength": 1 },
+                    },
+                    "required": ["name"],
                     "additionalProperties": false,
                 },
             ],

@@ -22,9 +22,9 @@ use crate::pdf::forms::{FieldFlags, MadeWithFallback, TextField, Unmade, text_wi
 /// [`Look::Text`]: super::Look::Text
 #[derive(Clone, PartialEq)]
 pub struct TextLook {
-    /// The text shown: the field's value now; once an op carries one, the
-    /// display string a format script gives for it (M10 slice 9), which
-    /// pdf-forms draws as it draws a value.
+    /// The text shown: the field's display, the text a format script
+    /// made of its value, where it has one ([`Terminal::display`]), which
+    /// pdf-forms draws as it draws a value; else its value.
     pub text: Arc<str>,
     /// The field's `/Ff` (see [`field::flags`](crate::forms::field::flags)).
     pub flags: u32,
@@ -57,13 +57,14 @@ impl fmt::Debug for TextLook {
 }
 
 /// Widget `w`'s look, `node` its field and `term` that field's terminal, a
-/// text field: its value and flags, `/MaxLen` and `/Q`, and its frame. The
+/// text field: its display, else its value, its flags, `/MaxLen` and
+/// `/Q`, and its frame. The
 /// `/Q` is the widget's own, else the terminal's (its own or a parent's,
 /// as read), else its instance's form's, as the frame's `/DA` is.
 pub(super) fn look(st: &DocState, w: &Widget, node: &FieldNode, term: &Terminal) -> TextLook {
     let (_, form_align) = form_defaults(st, w, node);
     TextLook {
-        text: text_of(term.value.as_ref()),
+        text: (term.display.clone()).unwrap_or_else(|| text_of(term.value.as_ref())),
         flags: term.flags,
         max_len: term.props.max_len,
         align: (w.props.align.or(term.props.align)).unwrap_or(form_align),
@@ -72,12 +73,12 @@ pub(super) fn look(st: &DocState, w: &Widget, node: &FieldNode, term: &Terminal)
 }
 
 /// Whether a widget of `node`, a text field whose terminal is `term`, needs
-/// its appearance made ([`stale`](super::stale)): its text isn't what its
-/// source's field held as read (no value and an empty one are the same),
-/// or the field was read from no source, or isn't among its source's
-/// fields as read.
+/// its appearance made ([`stale`](super::stale)): it has a display, which
+/// no file holds; or its text isn't what its source's field held as read
+/// (no value and an empty one are the same), or the field was read from no
+/// source, or isn't among its source's fields as read.
 pub(super) fn stale(node: &FieldNode, term: &Terminal) -> bool {
-    let Some(src) = &node.src else {
+    let Some(src) = node.src.as_ref().filter(|_| term.display.is_none()) else {
         return true;
     };
     match src.src.form().field_by_object(src.id) {

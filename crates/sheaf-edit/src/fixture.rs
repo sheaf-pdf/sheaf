@@ -9,11 +9,11 @@ use crate::measure::{Measured, Scale};
 use crate::tape::{self, Line, Row, Tape, TapeLook};
 use crate::{
     Anchor, AnnotId, AnnotRef, BatesSpec, BlobId, BlobSel, BookmarkPatch, BookmarkRef, Box2,
-    BoxSpec, Bring, Delta, DestView, Fit, FlattenSet, FontChoice, FormBring, GridPos,
-    HeaderFooterSpec, Imported, LabelStyle, Local, Margins, MarkKind, MarkPatch, NewMark, OcrWord,
-    Op, OutlineBring, OutlineId, PageId, PageLabelRange, PageRef, PageSel, PageSize, PageSource,
-    Patch, Pt, RangeSet, Rotation, ScopeSel, Sibling, Style, TextLayer, TextStyle, Turn, Vec2,
-    WatermarkContent, WatermarkSpec, Z,
+    BoxSpec, Bring, Delta, DestView, FieldId, FieldRef, FieldSet, FieldValue, Fit, FlattenSet,
+    FontChoice, FormBring, GridPos, HeaderFooterSpec, Imported, LabelStyle, Local, Margins,
+    MarkKind, MarkPatch, NewMark, OcrWord, Op, OutlineBring, OutlineId, PageId, PageLabelRange,
+    PageRef, PageSel, PageSize, PageSource, Patch, Pt, RangeSet, Rotation, ScopeSel, Sibling,
+    Style, TextLayer, TextStyle, Turn, Vec2, WatermarkContent, WatermarkSpec, Z,
 };
 
 fn r(x: f32, y: f32, w: f32, h: f32) -> Box2 {
@@ -201,6 +201,15 @@ pub fn blob() -> BlobId {
     BlobId {
         hash: 0x99aa06d3014798d86001c324468d497f,
         len: 2048,
+    }
+}
+
+/// The field named `name` given `value`, shown as `display`.
+fn set(name: &str, value: FieldValue, display: Option<&str>) -> FieldSet {
+    FieldSet {
+        field: FieldRef::Name(name.into()),
+        value,
+        display: display.map(Into::into),
     }
 }
 
@@ -584,6 +593,39 @@ pub fn every_op() -> Vec<Op> {
         Op::FlattenAnnotations {
             pages: PageSel::Positions(pos("2-3")),
             which: FlattenSet::Printable,
+        },
+        Op::SetFieldValues {
+            values: vec![
+                set("form1[0].name[0]", FieldValue::Text("Ann Lee".into()), None),
+                FieldSet {
+                    field: FieldRef::Id(FieldId(7)),
+                    value: FieldValue::Items(vec!["W-2".into(), "1099".into()]),
+                    display: None,
+                },
+                set("form1[0].empty[0]", FieldValue::Clear, None),
+                set("form1[0].on[0]", FieldValue::State("Off".into()), None),
+                set("form1[0].pick[0]", FieldValue::Export("1".into()), None),
+                set(
+                    "form1[0].pick[0]",
+                    FieldValue::Press {
+                        widget: AnnotRef::Id(AnnotId(42)),
+                    },
+                    None,
+                ),
+            ],
+            calculated: vec![set(
+                "form1[0].total[0]",
+                FieldValue::Text("1234.5".into()),
+                Some("$1,234.50"),
+            )],
+        },
+        Op::SetFieldValues {
+            values: vec![set(
+                "form1[0].state[0]",
+                FieldValue::Text("NY".into()),
+                None,
+            )],
+            calculated: Vec::new(),
         },
     ];
     ops.extend(kinds().into_iter().map(|kind| Op::AddMark {

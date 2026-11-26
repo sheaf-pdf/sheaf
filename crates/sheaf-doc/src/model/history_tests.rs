@@ -25,14 +25,15 @@ use in_progress::NoProgress;
 use proptest::prelude::*;
 use sheaf_edit::{
     Anchor, AnnotRef, BatesSpec, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Bring, Delta,
-    DestView, FlattenSet, GridPos, Imported, LabelStyle, Local, Margins, MarkKind, MarkPatch,
-    NewMark, Op, OutlineBring, PageRef, PageSel, PageSource, Patch, RangeSet, ScopeSel, Sibling,
-    Style, Turn, Vec2, WatermarkContent, WatermarkSpec, Z,
+    DestView, FieldRef, FieldSet, FieldValue, FlattenSet, GridPos, Imported, LabelStyle, Local,
+    Margins, MarkKind, MarkPatch, NewMark, Op, OutlineBring, PageRef, PageSel, PageSource, Patch,
+    RangeSet, ScopeSel, Sibling, Style, Turn, Vec2, WatermarkContent, WatermarkSpec, Z,
 };
 
 use super::tests::{flat, opened_doc, square, tl};
 use super::*;
 use crate::annot::{Box2, Pt, REVIEW};
+use crate::forms::FieldKind;
 use crate::forms::fixture::Form;
 use crate::history::{AllOf, FixedCount, MemoryBudget};
 use crate::materialize::StrategyKind;
@@ -47,7 +48,7 @@ const PLUGIN: &str = "test-plugin";
 
 /// The ops a run makes versions of, by name: below [`KINDS`], an action
 /// is an op of the kind at its place here.
-const OPS: [&str; 25] = [
+const OPS: [&str; 26] = [
     "move-pages",
     "rotate-pages",
     "delete-pages",
@@ -73,6 +74,7 @@ const OPS: [&str; 25] = [
     "set-header-footer",
     "remove-header-footer",
     "flatten-annotations",
+    "set-field-values",
 ];
 
 /// A run's actions: below this, an op of the kind [`OPS`] names; then
@@ -742,6 +744,16 @@ impl Run {
             .collect();
         let preorder = st.bookmarks_preorder();
         let bookmarks: Vec<OutlineId> = preorder.iter().map(|&(_, id, _)| id).collect();
+        let fillable: Vec<(FieldId, &Terminal)> = (st.terminals())
+            .filter(|(_, _, t)| {
+                use FieldKind as K;
+                matches!(
+                    t.kind,
+                    K::Text | K::CheckBox | K::Radio | K::Combo | K::List
+                )
+            })
+            .map(|(id, _, t)| (id, t))
+            .collect();
         let kind = match OPS[kind as usize] {
             "delete-pages" if pages.len() <= 2 => "insert-pages",
             "patch-bookmarks" | "delete-bookmarks" if bookmarks.is_empty() => "add-bookmark",
@@ -755,6 +767,7 @@ impl Run {
                 "set-watermark"
             }
             "remove-header-footer" if st.header_footer().is_none() => "set-header-footer",
+            "set-field-values" if fillable.is_empty() => "insert-pages",
             k => k,
         };
         let page = |rng: &mut fastrand::Rng| pages[rng.usize(..pages.len())];
@@ -1359,6 +1372,57 @@ impl Run {
                 },
                 which: [FlattenSet::All, FlattenSet::Printable][rng.usize(..2)],
             },
+            "set-field-values" => {
+                // A field by its id or its full name, given a value of its
+                // kind, and now and then a display; sometimes after them a
+                // value the form calculated.
+                let one = |rng: &mut fastrand::Rng| {
+                    let (id, term) = fillable[rng.usize(..fillable.len())];
+                    let field = match rng.bool() {
+                        true => FieldRef::Name(st.full_name(id).expect("a field's name")),
+                        false => FieldRef::Id(id),
+                    };
+                    let options = &term.props.options;
+                    let option = |rng: &mut fastrand::Rng| match options.is_empty() {
+                        true => "none".to_string(),
+                        false => options[rng.usize(..options.len())].export.to_string(),
+                    };
+                    let widgets: Vec<AnnotId> = term.widgets.iter().copied().collect();
+                    let on_states: Vec<String> = (widgets.iter())
+                        .filter_map(|&w| st.annot(w)?.widget()?.props.on_state.clone())
+                        .collect();
+                    let value = match (term.kind, rng.u8(..6)) {
+                        (_, 0) => FieldValue::Clear,
+                        (FieldKind::Text, _) => FieldValue::Text(format!("v{}", rng.u8(..))),
+                        (FieldKind::Combo, _) => FieldValue::Text(option(rng)),
+                        (FieldKind::List, _) => FieldValue::Items(vec![option(rng)]),
+                        (_, 1) => FieldValue::State("Off".into()),
+                        (_, 2) if !on_states.is_empty() => {
+                            FieldValue::State(on_states[rng.usize(..on_states.len())].clone())
+                        }
+                        (_, 3) if !on_states.is_empty() => {
+                            FieldValue::Export(on_states[rng.usize(..on_states.len())].clone())
+                        }
+                        _ if !widgets.is_empty() => FieldValue::Press {
+                            widget: AnnotRef::Id(widgets[rng.usize(..widgets.len())]),
+                        },
+                        _ => FieldValue::Clear,
+                    };
+                    let shows = matches!(term.kind, FieldKind::Text | FieldKind::Combo);
+                    FieldSet {
+                        field,
+                        value,
+                        display: (shows && rng.u8(..4) == 0).then(|| format!("d{}", rng.u8(..))),
+                    }
+                };
+                Op::SetFieldValues {
+                    values: (0..rng.usize(1..=2)).map(|_| one(rng)).collect(),
+                    calculated: match rng.u8(..4) {
+                        0 => vec![one(rng)],
+                        _ => Vec::new(),
+                    },
+                }
+            }
             k => unreachable!("kind {k}"),
         }
     }
@@ -1772,6 +1836,10 @@ fn each_kind_s_no_op_pushes_nothing() {
         },
         // The printed annotations of a page whose comments aren't printed.
         fx::flatten(&[p2], FlattenSet::Printable),
+        Op::SetFieldValues {
+            values: Vec::new(),
+            calculated: Vec::new(),
+        },
     ];
     let names: BTreeSet<&str> = no_ops.iter().map(crate::tx::op_name).collect();
     assert_eq!(names.len(), no_ops.len());

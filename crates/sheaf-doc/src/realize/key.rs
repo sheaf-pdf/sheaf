@@ -924,6 +924,7 @@ impl Feed for Terminal {
             kind,
             flags,
             value,
+            display,
             default,
             props,
             widgets: _,
@@ -932,6 +933,7 @@ impl Feed for Terminal {
         sum.feed(&(*kind as u8))
             .feed(flags)
             .feed(value)
+            .feed(display)
             .feed(default)
             .feed(props)
             .feed(outside);

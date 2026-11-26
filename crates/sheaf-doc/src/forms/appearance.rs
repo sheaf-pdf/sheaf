@@ -385,19 +385,20 @@ pub fn make(
 
 /// Whether widget `aid` needs its appearance made, by its kind:
 ///
-/// - a text field's widget whose terminal's text isn't what its source's
-///   field held as read (no value and an empty one are the same), or whose
-///   field was read from no source, or isn't among its source's fields as
-///   read: its value is all an op can change that makes the file's
-///   appearance wrong;
+/// - a text field's widget whose terminal has a display (in no file), or
+///   whose text isn't what its source's field held as read (no value and
+///   an empty one are the same), or whose field was read from no source,
+///   or isn't among its source's fields as read: its value and display are
+///   all an op can change that makes the file's appearance wrong;
 /// - a check box's or radio button's widget that shows a state its source
 ///   widget didn't as read ([`state_changed`]) and whose file's normal
 ///   appearance has no on state (none, a stream, or `Off` alone): one
 ///   that has keeps its appearances, and only its `/AS` moves;
-/// - a combo box's or list box's widget whose terminal's value holds other
-///   texts than its source's field's as read (no value and an empty array
-///   alike, a text and an array of it alike), or whose field was read from
-///   no source, or isn't among its source's fields as read;
+/// - a combo box's or list box's widget whose terminal has a display, or
+///   whose value holds other texts than its source's field's as read (no
+///   value and an empty array alike, a text and an array of it alike), or
+///   whose field was read from no source, or isn't among its source's
+///   fields as read;
 /// - a push button's widget whose captions (`/MK /CA`, `/RC`, `/AC`) aren't
 ///   its source widget's as read (one not read had none): one nothing
 ///   changed keeps its appearances, and one with none stays so.
