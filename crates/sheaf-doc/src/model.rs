@@ -1383,12 +1383,12 @@ impl Document {
     }
 
     /// Each value of `puts` put at its key, all of them as one version,
-    /// labelled `label`: what no op sets yet (a fill, a press of a check
-    /// box, the form's calculation order), for tests of what a save
-    /// writes of it, a press's field and widgets undone together as an
-    /// op's would be. Its step names an op it doesn't run. Open to the
-    /// `fixtures` feature for [`fill`](crate::tx::fixture::fill) and
-    /// [`press`](crate::tx::fixture::press).
+    /// labelled `label`: what no op sets (a push button's captions, a value
+    /// only a file gives, a choice's options, the form's calculation
+    /// order), for tests of what a save writes of it. Its step names an op
+    /// it doesn't run. Open to the `fixtures` feature for
+    /// [`caption`](crate::tx::fixture::caption) and
+    /// [`put_value`](crate::tx::fixture::put_value).
     #[cfg(any(test, feature = "fixtures"))]
     pub(crate) fn put_for_test(&mut self, puts: Vec<(Key, Option<Val>)>, label: &str) {
         let before = self.state().clone();

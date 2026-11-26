@@ -1,24 +1,27 @@
 //! Ops as tests write them (M10.5 slice 11): a version made of the user's
 //! ops, the pages, bookmarks and files they name, and a fixture's marks
-//! said as the ops that make and change them; and a field's fill, a
-//! check box's or radio button's press or value, a combo box's or list
-//! box's value, and a push button's captions, which no op makes yet.
-//! For tests here and in other crates (the `fixtures` feature).
+//! said as the ops that make and change them; a field's fill (the user's,
+//! or the form's calculation's), a check box's or radio button's press or
+//! value, and a combo box's or list box's value, by `SetFieldValues` (M10
+//! slice 9), each with a `try_` form that says why the op refused it. Two
+//! puts no op makes stay: a push button's captions ([`caption`]: no op
+//! changes one), and a value only a file gives ([`put_value`]). For tests
+//! here and in other crates (the `fixtures` feature).
 
 use std::sync::Arc;
 
 use in_progress::NoProgress;
 use sheaf_edit::{
-    Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, Box2, BoxSpec, Bring, FlattenSet,
-    FontChoice, GridPos, HeaderFooterSpec, LabelStyle, Margins, NewMark, Op, PageLabelRange,
-    PageRef, PageSel, PageSource, Patch, RangeSet, ScopeSel, Sibling, Turn, WatermarkContent,
-    WatermarkSpec, Z,
+    Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, Box2, BoxSpec, Bring, FieldRef,
+    FieldSet, FieldValue, FlattenSet, FontChoice, GridPos, HeaderFooterSpec, LabelStyle, Margins,
+    NewMark, Op, PageLabelRange, PageRef, PageSel, PageSource, Patch, RangeSet, ScopeSel, Sibling,
+    Turn, WatermarkContent, WatermarkSpec, Z,
 };
 
 use super::{Actor, Commit, CommitOpts, EditError, JobKind, Tx};
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::forms::field::Mk;
-use crate::forms::{Change, FieldId, FieldKind, Value, buttons};
+use crate::forms::{FieldKind, Value};
 use crate::labels::LabelSpec;
 use crate::model::{
     AnnotBody, AnnotRec, Document, FieldNode, GroupId, GroupKind, OutlineId, PageId, Terminal,
@@ -79,45 +82,135 @@ impl Document {
 }
 
 /// The field of `doc` whose full name is `name` filled with the text
-/// `value`, as a version of its own: what no op does until M10 slice 9's
-/// fills, for tests of what a save or a render makes of a changed value.
-/// Panics where no field has that name or it isn't a terminal.
+/// `value`, by [`Op::SetFieldValues`] as the user sets one, as a version
+/// of its own: none where it changes nothing. Every field of that name is
+/// filled, as the op fills them. Panics where the op refuses it
+/// ([`try_fill`] says why).
 pub fn fill(doc: &mut Document, name: &str, value: &str) {
-    let st = doc.state();
-    let (id, node) = (st.fields())
-        .find(|(id, _)| st.full_name(*id).as_deref() == Some(name))
-        .unwrap_or_else(|| panic!("no field is named {name:?}"));
-    let mut node = FieldNode::clone(node);
-    let mut term = Terminal::clone(node.term.as_deref().expect("a terminal field"));
-    term.value = Some(Value::Text(value.into()));
-    node.term = Some(Arc::new(term));
-    let val = Some(Val::Field(Arc::new(node)));
-    doc.put_for_test(vec![(Key::Field(id), val)], "fill");
+    try_fill(doc, name, value).unwrap_or_else(|e| panic!("filling {name:?}: {e}"));
+}
+
+/// [`fill`], or why the op refused it, with nothing changed.
+pub fn try_fill(doc: &mut Document, name: &str, value: &str) -> Result<(), EditError> {
+    let value = FieldValue::Text(value.into());
+    set_value(doc, FieldRef::Name(name.into()), value, By::User, "fill")
+}
+
+/// The field of `doc` whose full name is `name` cleared, given no value
+/// (`FieldValue::Clear`: a check box or radio group off), by
+/// `SetFieldValues` as the user sets one, as a version of its own: none
+/// where it holds none. Panics where the op refuses it.
+pub fn clear(doc: &mut Document, name: &str) {
+    set_value(
+        doc,
+        FieldRef::Name(name.into()),
+        FieldValue::Clear,
+        By::User,
+        "clear",
+    )
+    .unwrap_or_else(|e| panic!("clearing {name:?}: {e}"));
+}
+
+/// The field of `doc` whose full name is `name` given the text `value` as
+/// the form's calculations set one (`SetFieldValues`' `calculated`), as a
+/// version of its own: a read-only field too, and a value past its
+/// `/MaxLen` or over more lines than it has, which the user's is refused.
+/// Panics where the op refuses it ([`try_calculate`] says why).
+pub fn calculate(doc: &mut Document, name: &str, value: &str) {
+    try_calculate(doc, name, value).unwrap_or_else(|e| panic!("calculating {name:?}: {e}"));
+}
+
+/// [`calculate`], or why the op refused it, with nothing changed.
+pub fn try_calculate(doc: &mut Document, name: &str, value: &str) -> Result<(), EditError> {
+    let value = FieldValue::Text(value.into());
+    let field = FieldRef::Name(name.into());
+    set_value(doc, field, value, By::Calculation, "calculate")
 }
 
 /// The combo box or list box field of `doc` whose full name is `name` given
-/// the value `values`, as a version of its own: none for no texts, a text
-/// for one, an array of them for several (a list box's of several
-/// selected), as M10 slice 9's `SetFieldValues` will put a choice's.
-/// Panics where no field has that name or it isn't a combo box or list
-/// box.
+/// the value `values`, by [`Op::SetFieldValues`] as the user sets one, as a
+/// version of its own: none for no texts, a text for one, several for a
+/// list box's of several selected. Panics where no combo box or list box
+/// has that name, or the op refuses it ([`try_choose`] says why).
 pub fn choose(doc: &mut Document, name: &str, values: &[&str]) {
+    try_choose(doc, name, values).unwrap_or_else(|e| panic!("choosing {name:?}: {e}"));
+}
+
+/// [`choose`], or why the op refused it, with nothing changed. Panics where
+/// no combo box or list box has that name.
+pub fn try_choose(doc: &mut Document, name: &str, values: &[&str]) -> Result<(), EditError> {
     let st = doc.state();
     let id = (st.field_named(name)).unwrap_or_else(|| panic!("no field is named {name:?}"));
-    let mut node = FieldNode::clone(st.field(id).expect("the field"));
-    let mut term = Terminal::clone(node.term.as_deref().expect("a terminal field"));
+    let kind = (st.field(id).and_then(|f| f.term.as_deref())).map(|t| t.kind);
     assert!(
-        matches!(term.kind, FieldKind::Combo | FieldKind::List),
+        matches!(kind, Some(FieldKind::Combo | FieldKind::List)),
         "{name:?} is no combo box or list box"
     );
-    term.value = match values {
-        [] => None,
-        [one] => Some(Value::Text((*one).into())),
-        many => Some(Value::Items(many.iter().map(|&v| v.into()).collect())),
+    let value = match values {
+        [] => FieldValue::Clear,
+        [one] => FieldValue::Text((*one).into()),
+        many => FieldValue::Items(many.iter().map(|&v| v.into()).collect()),
     };
-    node.term = Some(Arc::new(term));
+    set_value(doc, FieldRef::Name(name.into()), value, By::User, "choose")
+}
+
+/// Whose a fixture's value is: the user's (`SetFieldValues`' `values`), or
+/// the form's calculations' (its `calculated`).
+#[derive(Clone, Copy)]
+enum By {
+    User,
+    Calculation,
+}
+
+/// Field `field` of `doc` given `value` by [`Op::SetFieldValues`], as `by`
+/// sets one, committed as a version labelled `label`: none where it
+/// changes nothing.
+fn set_value(
+    doc: &mut Document,
+    field: FieldRef,
+    value: FieldValue,
+    by: By,
+    label: &str,
+) -> Result<(), EditError> {
+    let set = vec![FieldSet {
+        field,
+        value,
+        display: None,
+    }];
+    let op = match by {
+        By::User => Op::SetFieldValues {
+            values: set,
+            calculated: Vec::new(),
+        },
+        By::Calculation => Op::SetFieldValues {
+            values: Vec::new(),
+            calculated: set,
+        },
+    };
+    doc.commit_ops(vec![op], label).map(drop)
+}
+
+/// The field of `doc` whose full name is `name` holding `value`, put as it
+/// is, as a version of its own: a value only a file gives a field, which no
+/// op sets (one no font draws, which [`Op::SetFieldValues`] refuses; an
+/// array of one text, or none, which it writes as a text or no value), for
+/// tests of what a save or a render makes of such a field. Nothing else of
+/// it moves, nor any widget's state. Panics where no field has that name or
+/// it isn't a terminal.
+pub fn put_value(doc: &mut Document, name: &str, value: Option<Value>) {
+    let st = doc.state();
+    let id = (st.field_named(name)).unwrap_or_else(|| panic!("no field is named {name:?}"));
+    let node = FieldNode::clone(st.field(id).expect("the field"));
+    let term = Terminal {
+        value,
+        ..Terminal::clone(node.term.as_deref().expect("a terminal field"))
+    };
+    let node = FieldNode {
+        term: Some(Arc::new(term)),
+        ..node
+    };
     let val = Some(Val::Field(Arc::new(node)));
-    doc.put_for_test(vec![(Key::Field(id), val)], "choose");
+    doc.put_for_test(vec![(Key::Field(id), val)], "put");
 }
 
 /// Widget `widget` of `doc`, a push button's, given the captions `normal`,
@@ -158,64 +251,43 @@ pub fn caption(
     doc.put_for_test(vec![(Key::Annot(widget), Some(Val::Annot(rec)))], "caption");
 }
 
-/// Widget `widget` of `doc` pressed, by the group's rules
-/// ([`crate::forms::group`]): its field's value and every widget whose
-/// state that changes, put as one version, as M10 slice 9's
-/// `SetFieldValues` will lower a press. A press that changes nothing (a
-/// radio button that's on, in a field with NoToggleToOff) is no version.
-/// Panics where `widget` isn't a check box's or radio button's.
+/// Widget `widget` of `doc` pressed, by [`Op::SetFieldValues`] as the user
+/// presses one, by the group's rules ([`crate::forms::group`]): its
+/// field's value and every widget whose state that changes, one version.
+/// A press that changes nothing (a radio button that's on, in a field with
+/// NoToggleToOff) is no version. Panics where `widget` isn't a widget, or
+/// the op refuses it ([`try_press`] says why).
 pub fn press(doc: &mut Document, widget: AnnotId) {
+    try_press(doc, widget).unwrap_or_else(|e| panic!("pressing {widget:?}: {e}"));
+}
+
+/// [`press`], or why the op refused it, with nothing changed. Panics where
+/// `widget` isn't a widget.
+pub fn try_press(doc: &mut Document, widget: AnnotId) -> Result<(), EditError> {
     let st = doc.state();
     let rec = st.annot(widget).and_then(AnnotRec::widget);
     let field = rec
         .unwrap_or_else(|| panic!("{widget:?} is no widget"))
         .field;
-    let group = buttons(st, field).expect("a check box or radio field");
-    let change = group.press(widget).expect("one of its field's widgets");
-    put_change(doc, field, &change, "press");
+    let value = FieldValue::Press {
+        widget: AnnotRef::Id(widget),
+    };
+    set_value(doc, FieldRef::Id(field), value, By::User, "press")
 }
 
 /// The check box or radio field of `doc` whose full name is `name` given
-/// the value `state`, a state's name (`Off` for none), by the group's
-/// rules: put as [`press`] puts one. Panics where no such field has that
-/// name.
+/// the value `state`, a state's name (`Off` for none), by
+/// [`Op::SetFieldValues`] as the user sets one, by the group's rules: one
+/// version, as [`press`] makes one. Panics where the op refuses it
+/// ([`try_set_buttons`] says why).
 pub fn set_buttons(doc: &mut Document, name: &str, state: &str) {
-    let st = doc.state();
-    let field = (st.field_named(name)).unwrap_or_else(|| panic!("no field is named {name:?}"));
-    let group = buttons(st, field).expect("a check box or radio field");
-    let change = group.set_state(state);
-    put_change(doc, field, &change, "set");
+    try_set_buttons(doc, name, state).unwrap_or_else(|e| panic!("setting {name:?}: {e}"));
 }
 
-/// `change` of field `field`'s group put in `doc` as one version,
-/// labelled `label`: the field, where its value changes, and each widget
-/// whose state does. Nothing to put is no version.
-pub fn put_change(doc: &mut Document, field: FieldId, change: &Change, label: &str) {
-    let st = doc.state();
-    let node = st.field(field).expect("the field");
-    let term = node.term.as_deref().expect("a terminal field");
-    let mut puts = Vec::new();
-    if term.value.as_ref() != Some(&change.value) {
-        let mut term = Terminal::clone(term);
-        term.value = Some(change.value.clone());
-        let mut node = FieldNode::clone(node);
-        node.term = Some(Arc::new(term));
-        puts.push((Key::Field(field), Some(Val::Field(Arc::new(node)))));
-    }
-    for (aid, state) in &change.states {
-        let rec = st.annot(*aid).expect("its widget");
-        let mut w = Widget::clone(rec.widget().expect("a widget"));
-        w.state = Some(state.to_string());
-        let body = AnnotBody::Widget(Arc::new(w));
-        let rec = AnnotRec {
-            page: rec.page,
-            body,
-        };
-        puts.push((Key::Annot(*aid), Some(Val::Annot(rec))));
-    }
-    if !puts.is_empty() {
-        doc.put_for_test(puts, label);
-    }
+/// [`set_buttons`], or why the op refused it, with nothing changed.
+pub fn try_set_buttons(doc: &mut Document, name: &str, state: &str) -> Result<(), EditError> {
+    let value = FieldValue::State(state.into());
+    set_value(doc, FieldRef::Name(name.into()), value, By::User, "set")
 }
 
 /// What the pages `ops` insert or put in place from files the store holds

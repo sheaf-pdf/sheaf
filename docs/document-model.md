@@ -1617,10 +1617,10 @@ What stays sheaf's is said below, each with why.
 A text field's widget whose value the model holds changed gets its
 appearance made anew by pdf-forms (`pdf::forms`, the door's), from plain
 data out of sheaf's model, and written where a mark's appearance is
-written, so the realizer's overlay and a save hold the same form. No op
-changes a field's value yet: before M10 slice 9's `SetFieldValues`, only
-a test's fill (`tx::fixture::fill`, or a `Prim` on a state) reaches any
-of this, and a user sees nothing new.
+written, so the realizer's overlay and a save hold the same form. M10
+slice 9's `SetFieldValues` changes a field's value (Saving values,
+below): from `sheaf edit` today, and in the app from the filling slices
+(M10 slices 10 to 13).
 
 - **What's pdf-forms', what's sheaf's.** pdf-forms makes the appearance
   (`appearance::text_with_fallback`, over pdf-gfx and pdf-fonts): the `/DA` parser
@@ -1646,8 +1646,9 @@ of this, and a user sees nothing new.
   button's, `Look::Choice` for a combo box's or list box's and
   `Look::Push` for a push button's; for anything else `NoLook` says why,
   below): the terminal's value,
-  which is the text shown (a format script's display string, once slice
-  9's op carries one), its `/Ff`, `/MaxLen` and effective `/Q`; and the
+  which is the text shown, or its display where the op gave one
+  (`Terminal::display`, a format script's text), its `/Ff`, `/MaxLen` and
+  effective `/Q`; and the
   widget's frame (`Frame`, which every kind's look shares: its box, `/MK`
   background, border color and rotation, its border's width, style and
   dash array, width 1, solid, where it has none, and its effective
@@ -1669,8 +1670,10 @@ of this, and a user sees nothing new.
   prints lengths and numbers, never the text.
 - **`stale`** (`appearance::stale(st, aid)`): a text field's widget
   whose terminal's text isn't what its source's field held as read (no
-  value and an empty one alike; `FileForm::field_by_object`), or whose
-  field was read from no source. Until an op can change anything else
+  value and an empty one alike; `FileForm::field_by_object`;
+  `forms::value_changed` since M10 slice 9, which the emitter and the
+  realizer ask too), whose terminal shows a display, or whose field was
+  read from no source. Until an op can change anything else
   of a widget (M10 slices 23 to 26), its value is all that can make the
   file's appearance wrong. It's a map lookup and a compare of two
   strings, asked of every widget the emitter writes and `untouched`
@@ -1732,8 +1735,8 @@ of this, and a user sees nothing new.
   nothing, is its own dictionary, written once a file. A fallback isn't
   added to `/DR`: the form's own `/Resources` hold it, which every viewer
   draws, and adding it, for a viewer that makes appearances anew, would
-  write the form's dictionary on a fill (slice 9, with a fill's save
-  rules). Nor is the fallback font's subset: the form names it in its own
+  write the form's dictionary on every fill, which a fill leaves as its
+  file has it (Saving values). Nor is the fallback font's subset: the form names it in its own
   `/Resources`, and pdf-forms asks nothing of `/DR` for it. A stale widget's file `/AP` is never copied (`Closure::sym`
   would queue the old appearance's streams), and the "the file's object
   as it is" paths don't take it, so a Rewrite holds none of the old
@@ -1750,35 +1753,34 @@ of this, and a user sees nothing new.
   the field no longer holds, and a warning names the kind of reason
   (`unmade_kind`: each kind named by hand, never a type's `Debug` text,
   so the fields dump and the tier's counts don't move with a rename in
-  the PDF layer), never the text. The warning is logged at each emission,
-  an overlay's too: once a fill can reach it (slice 9), once a widget.
-  The refusal a user sees will be `SetFieldValues`' lowering
-  (slices 7 and 9), which calls the same `make` first. On the screen
+  the PDF layer), never the text. A save logs it (`warn`), once a widget
+  a save; an overlay, made at every realize, at debug level. A character
+  no font draws never gets this far from a user: `SetFieldValues`'
+  lowering makes each widget as the save will and refuses the value
+  (Saving values). What reaches it is what a file gives (a
+  `NeedAppearances` file's own value, made by `FillAppearances`) and the
+  other reasons (no box, a font that can't be read). On the screen
   PDFium's form filler makes an appearance from `/V` for a widget with
-  none, so such a widget would show its file's old value there and
-  nothing in a viewer that draws appearances alone; before slice 9 only
-  a test reaches it. Of the corpus's 229,351 text widgets on pages, 509
+  none, so such a widget shows its value there and nothing in a viewer
+  that draws appearances alone. Of the corpus's 229,351 text widgets on pages, 509
   are unmade for a sample value: 497 have no box and 12 have a character
   no font sheaf has draws (nine `DEL`, two other control characters and
   one of the Private Use Area). 235 more, whose own font can't draw a
   character of theirs, are drawn in two fonts since M10 slice 7.
-- **No save writes `/V` yet.** The emitter writes a stale widget's
-  appearance and nothing of its field's value: `/V`, `/RV` and the
-  password rule are slice 9's, with its op, after M18 slice 21's text
-  strings. A file saved from a test's fill holds the new appearance
-  beside the old `/V`.
+- **The value is written** with the appearance since M10 slice 9: `/V`
+  through M18 slice 21's text strings, no `/RV`, nothing of a password
+  field's (Saving values).
 - **The realizer.** `untouched` is false for a page with a stale widget
   where the inputs draw widgets, so the page is realized through its
   group's overlay, which makes the appearance by the same binding and
   draws the form the save writes; no picture is made for a field. Under
   `ViewInputs::content_only()`, which draws no widgets, the page stays
   untouched.
-- **A flatten of a stale widget still draws the file's appearance,**
-  the old value: `tx::flatten` reads a widget's appearances from its
-  source (`source::showing`, M18 slice 24), and print with markup, its
-  preview and Export Flattened flatten the same way. Making a widget's
-  appearance before it's flattened is M10 slice 15's; no op reaches one
-  stale today.
+- **A flatten of a stale widget is refused** (M10 slice 9): `tx::flatten`
+  reads a widget's appearances from its source (`source::showing`, M18
+  slice 24), which draw the old value, and print with markup, its preview
+  and Export Flattened flatten the same way. Making a widget's appearance
+  before it's flattened is M10 slice 15's (see Flattening).
 - **How it's held.** `forms::appearance`'s tests (the effective `/DA`
   and `/Q` at each level, the IRS navy `0 0 0.502 rg`, "é € — “ ”" one
   code each in an NJ-style `/Helv` and a PA-40-style `/Arial`, the
@@ -1829,10 +1831,11 @@ of this, and a user sees nothing new.
 A check box's, radio button's, combo box's, list box's or push button's
 widget whose model changed in a way its file's appearance doesn't show
 gets its appearances made anew by pdf-forms, from plain data out of the
-model, and bound as a text field's are (above). No op changes one yet:
-before M10 slice 9's `SetFieldValues`, only a test's put reaches any of
-this (`tx::fixture`'s `press`, `set_buttons`, `choose` and `caption`,
-each one version, as slice 9's op will be one transaction).
+model, and bound as a text field's are (above). M10 slice 9's
+`SetFieldValues` sets a check box's or radio group's value (a state, an
+export value, or a press of one widget) and a combo box's or list box's
+(Saving values); a push button's captions change by a test's put alone
+(`tx::fixture::caption`): no op changes one.
 
 - **A group's rules** (`forms::group`, over pdf-forms' `group`, the
   door's `pdf::forms::group`): `buttons(st, field)` reads a check box or
@@ -1847,8 +1850,8 @@ each one version, as slice 9's op will be one transaction).
   reads one, a string or an array of exactly two strings, anything else
   an empty one) and whether it's on. `Buttons::press`, `set_state` and `set_export`
   give a `Change` (the field's value, the state of each widget that
-  moves, and the export value data export writes), which is what slice
-  9's lowering puts; NoToggleToOff, RadiosInUnison and check boxes of
+  moves, and the export value data export writes), which is what
+  `SetFieldValues`' lowering puts (M10 slice 9); NoToggleToOff, RadiosInUnison and check boxes of
   distinct on states acting as radios are the family's. A widget the
   model doesn't hold (on a page template, or on a page since deleted)
   keeps the on state its file gives it, which the field's record holds
@@ -1890,9 +1893,9 @@ each one version, as slice 9's op will be one transaction).
   its `/AS` moves. A choice's widget whose value's texts moved (an empty
   text isn't no value: it selects an option whose export value is
   empty). A push button's whose captions moved. `/AS` is written from
-  the model where it changed (added where the file has none); `/V`, `/I`
-  and `/MK` stay the file's until slice 9, so a test's save can hold an
-  `/AS` the file's `/V` doesn't name.
+  the model where it changed (added where the file has none); `/V` and a
+  list box's `/I` are the model's since M10 slice 9 (Saving values), and
+  `/MK` stays the file's, as no op changes a caption.
 - **The making** (`appearance::make`): a toggle by `check_box` or
   `radio_button`, its on state's and `Off`'s normal and down forms
   (`Slot::Normal`, `NormalOff`, `Down`, `DownOff`), an `Off` none where
@@ -1938,10 +1941,221 @@ each one version, as slice 9's op will be one transaction).
   classes the group's comparison holds; pdf-lint over a form built in
   code of each kind changed, by a Rewrite and an Append, and in `just
   tier-arlington` over every corpus form whose check boxes or radio
-  buttons have no on state, each pressed and rewritten, what was pressed
+  buttons have no on state, each pressed and saved as planned (an Append
+  or a Rewrite, each counted; M10 slice 9), what was pressed
   and made held to its counts (47 forms; 254 check boxes and 14 radio
   buttons made, 36 radio buttons of no size not) and a widget whose
   appearance can be made and wasn't written a failure of its form.
+
+## Saving values (M10 slice 9)
+
+`Op::SetFieldValues` sets form fields' values, and a save writes them
+with the appearances that show them. It's `Cap::User` (the user, the
+command line, an import job): a plugin's transaction is refused it until
+a plugin can read fields (M10 slice 29). Filling on screen is the filling
+slices' (M10 slices 10 to 13); today it's `sheaf edit`'s and the tests'.
+
+```json
+{"op": "set-field-values", "values": [
+  {"field": {"name": "topmostSubform[0].Page1[0].f1_14[0]"}, "value": {"text": "Ann Lee"}},
+  {"field": {"name": "filing"}, "value": {"export": "Single"}},
+  {"field": {"name": "agree"}, "value": {"state": "Yes"}},
+  {"field": {"name": "forms"}, "value": {"items": ["W-2", "1099"]}},
+  {"field": {"name": "notes"}, "value": "clear"}
+]}
+```
+
+- **The op** (`sheaf_edit`): `values` and `calculated`, each a list of
+  `FieldSet { field, value, display }`. `field` is a `FieldRef`, an id (a
+  number: a session's, refused in a file) or `{"name": "…"}`, a full name,
+  which sets every terminal of that name (two fields named alike are one
+  field to every reader). `value` is a `FieldValue`: `"clear"`, `{"text":
+  …}` (a text field's text, a combo box's option by its export value or
+  any text where it's editable, a list box's one option), `{"items": […]}`
+  (a list box's options), `{"state": …}` (a check box's or radio group's
+  on state by name, or `Off`), `{"export": …}` (the same by export value)
+  and `{"press": {"widget": …}}` (one widget pressed, by the group's
+  rules: what a click does). `display` is what a text field's or combo
+  box's widgets show in place of the value (a format script's text):
+  `Terminal::display`, in no file, so a reopened field has none.
+  `calculated` holds what the form's calculations set after `values`,
+  worked out by whoever ran its scripts and never again on replay: it may
+  set a read-only field, and isn't held to `/MaxLen` or one line. History
+  says `Fill “f1_14[0]” on page 1` (the partial name, else the full one,
+  and its first widget's page), `Clear “notes”`, `Fill 5 fields`, `Fill
+  “x” on page 1 (and 3 calculated fields)`; never a value.
+- **Lowering** (`tx/fill.rs`): set by set, `values` then `calculated`,
+  each against what the sets before it left, a refused set refusing its
+  op, which changes nothing; no refusal's words hold a value.
+  - **Locked**, from either list: a signature field that holds a
+    signature, or a field of the primary file's own instance whose full
+    name one of its signatures locks (FieldMDP's `/TransformParams`, or
+    the signature field's `/Lock`), as the signatures say, unchecked
+    (lowering hashes nothing, and a broken signature's lock still says
+    what its signer locked): `EditError::Locked { op, field }`,
+    `FailureKind::Locked` for a plugin ("set-field-values: “a” is locked
+    by a signature").
+  - **Read-only**: a user's set of a field with `/Ff` ReadOnly is
+    `Invalid`; a calculated one isn't.
+  - **By kind**: a text field takes a text or none, composed (NFC); a
+    user's is held to `/MaxLen`, counted in grapheme clusters, where it's
+    above 0, and to one line where the field isn't multiline (no `\r` or
+    `\n`), and refused past either, never cut. A combo box takes one of
+    its options, matched as its file writes it, else as both compose, the
+    value its own export text; or, editable, any text. A list box takes
+    its options alone, several where it's multiple-select, put in its
+    options' order, each once. A check box or radio group takes a state
+    an on state goes under or `Off` (a name no widget has is refused,
+    where the group's rule alone would turn it off), an export value, or
+    a press of one of its widgets, by `forms::group`'s rules: the field's
+    value and each widget whose `/AS` moves. A push button, a signature
+    field and a field of no kind sheaf knows hold no value. A display is a
+    text field's or a combo box's alone. A set whose value means what the
+    field's does (`forms::field::set_alike`: the compare a save asks,
+    `values_alike`, none and empty text alike and a group's none and
+    `Off`, but a choice's texts as a set, so a choice of what the field
+    holds keeps its file's order) and whose display is the field's puts
+    nothing.
+  - **Drawn**: after the put, each widget whose appearance a save will
+    make anew (`appearance::stale`) is made as the emitter makes it, in
+    its `/DA` font and the fallback (`appearance::make_in`). A character
+    neither draws (`Unmade::Unencodable`: CJK, emoji, right-to-left
+    scripts) refuses the set, naming it and its code point ("“王”
+    (U+738B) can't be drawn in any font sheaf has, so “name” can't show
+    it"), the refusal M10 slice 7 left to it. Any other reason a widget
+    isn't made (no box, a font that can't be read, a list box's own
+    option) doesn't refuse: the widget is saved with no `/AP`. A check
+    box's or radio button's is never made here: its maker refuses no
+    character.
+- **What a save writes** (`emit/form.rs`), by both strategies, in an
+  overlay and in a recovery sidecar alike: where the terminal's value
+  isn't its source's field's as read (`forms::value_changed`: a text
+  field's shown text, none and empty alike; a choice's texts in order; a
+  group's none and `Off` alike), its `/V` from the model, a text through
+  `pdf::text::string` (PDFDocEncoding where it can, else UTF-16BE), a
+  list box's several an array, a state a name. With no value, none,
+  unless an ancestor's `/V` would be inherited in its place: then `()`
+  for a text field or a combo box, `[]` for a list box (`()` selects an
+  option of empty export value) and `/Off` for a check box or radio
+  group. An ancestor's `/V` goes, and its `/RV`, once every field that
+  took it holds another value and none still takes it (`value_orphaned`):
+  the replaced value isn't kept in the node it was inherited from, and a
+  cleared field under it then writes none; while another field still
+  takes it, it stays. An overlay keeps it, as its base has it. A list
+  box's `/I` is the options its value selects, as its made
+  appearance highlights them (a choice's `/Opt` keeps every place, an
+  item that is no text an option of empty text, so `/I` indexes the
+  file's `/Opt`); a combo box's is left out. `/RV` goes where the value
+  changed, `/DS` stays. A password field's value is never written: no
+  `/V`, its file's dropped too (pdf-forms masks its appearance), and a
+  sidecar holds none. `/V` and `/I` go where the file had them, else
+  after its keys, so a written field keeps its key order, and a field
+  whose value changed is never the file's object as it is. `/DV`, `/Opt`,
+  `/TI` and `/MK` are the file's (no op changes a caption).
+- **The objects a field is written as.** A field whose own dictionary is
+  a widget beside kid widgets is one object, as its file has it, its
+  kids in `/Kids` (`emit::form::joined`, which the emitter, an Append's
+  scope and the realizer's predicate share); an Append writes it at its
+  number and no page. One whose own widget the state shows more than
+  once (its file lists it on two pages, or twice on one:
+  `Joined::Split`) is written apart, the field at its number and each
+  widget at its own, and an Append writes the pages that list them. A
+  form the saved catalog holds in itself (`/AcroForm << … >>`), written
+  anew by an Append (an XFA copy dropped, `/Fields` or `/SigFlags`
+  changed), is written at a number of its own, and the catalog with it.
+  A made appearance needs PDF 1.3 (`PdfVersion::LEAN_FORMS`: its form has
+  no `/FormType` or `/Name`), so a Rewrite of an older file says 1.3 in
+  its header; an Append says a later version in the catalog's
+  `/Version`, which PDF 1.4 brought, so it says 1.4 at least
+  (`PdfVersion::CATALOG_VERSION`), whatever needed the later version.
+- **An Append of a fill** writes the field, its widgets and their forms
+  (and a fallback subset where one is new), and the field's ancestors as
+  their file has them, at their numbers; no page and no `/AcroForm`
+  unless the tree's shape moved or a transform writes the form.
+- **The save rules** are the planner's and the transforms', not a
+  writer's:
+  - a replaced value, or a replaced display, is `REPLACES_TEXT`, so a
+    Rewrite by strict removal; a fill of an empty field is `FILL`, an
+    Append, which keeps usage rights that allow filling in (`/Perms`
+    stays);
+  - **earlier revisions' values** (`Why::EarlierValues`, "the file's
+    earlier revisions hold field values it no longer shows"): a path that
+    changes field values, the field tree or the form, over a file whose
+    earlier revisions hold values its latest doesn't
+    (`Source::earlier_values`: the form check's walk,
+    `forms::check::holds_earlier_values`, read once, at the first plan
+    that asks, with the source's password; a revision that can't be read
+    holds none), while the record's `revisions_kept` holds (the file
+    still has every byte of the one the document opened), is a Rewrite,
+    noted "Saved the whole file, so the values its earlier revisions held
+    don't stay in it", and on a signed file offered Append anyway. A
+    restored document's pending sections count where they touch fields,
+    unless they removed text (`RecoveredRemovals` says it then);
+  - **`SaveTransform::FillAppearances`**: the first save, a Rewrite or
+    an Append, of a form that says
+    `NeedAppearances` (the written form's: an inserted form's too) and
+    changed (`rules::form_differs`) makes an appearance for every widget
+    whose file has none (`/AP /N` absent or of no states) and that has
+    something to show: a valued text field's or choice's, any check
+    box's or radio button's, a captioned push button's
+    (`appearance::missing`), as a changed widget's is; `/NeedAppearances`
+    stays, as an appearance the file has may be the stale one the flag
+    covered. An Append's section writes every such widget beside what
+    it changed (`deps`), a fill's kind of change for usage rights and
+    signatures, of the fields whose widgets they are
+    (`rules::filled_fields`: one a signature locks flags it), so its file
+    draws as a Rewrite's (M10 proposal 10). A save after it is given
+    none: it carries the record's transform and makes each such widget
+    it writes, which it would otherwise write bare over the ones that
+    save made. The realizer's overlay makes them too, whenever a save of
+    the state would (The realizer), so the screen is the file by either
+    strategy;
+  - XFA (`DropXfa`, the tooltips to `/TU`, after `Ask::XfaHoldsValues`),
+    usage rights (`DropUr3`) and `/SigFlags` (`FixSigFlags`) as Saving
+    has them; a signed or certified file through §9.3's asks, with Append
+    anyway (a fill of a signed hybrid form plans an Append the signature
+    flags, dropping the XFA copy being a change past a fill, its datasets
+    said to stay readable); every save keeps its encryption.
+- **How it's held.** `tx/fill_tests.rs` (each kind set and cleared, each
+  refusal with nothing changed, by id, by name and by a name two fields
+  share, presses beside `forms::group`'s own cases, History, undo and
+  redo, a stale transaction lowered again, a plugin refused, displays and
+  their effects; locks by FieldMDP include, exclude and `/All`, and a
+  signed field; CJK, emoji and Hebrew refused, Ł and ễ filled in two
+  fonts); the emitter's (`field_ap_tests`, `choice_ap_tests`,
+  `toggle_ap_tests`: each kind's `/V` both ways, read back by sheaf's
+  reader and the family's, UTF-16BE, NFC, `/I`, a field cleared under a
+  parent's `/V`, a password field's bytes, `/RV` and `/DS`, an overlay's
+  `/V`, a field beside its kids, a widget on two pages, a form its
+  catalog holds in itself, a file older than PDF 1.3); the planner's
+  (`plan_tests`, `annot_form_tests`, `recovery`: earlier values,
+  `NeedAppearances`); `tx::fixture`'s `fill`, `choose`, `press`,
+  `set_buttons`, `clear` and `calculate` go through the op (and a `try_`
+  form says why it refused), `put_value` puts a value only a file gives
+  (one no font draws, an array of one text) and `caption` a push
+  button's captions. sheaf-ops' `forms_fill.rs` holds the slice's checks:
+  the corpus 1040 and W-9 filled through the op, saved both ways and as
+  planned and reopened, their values read back, the form check clean,
+  `/XFA` and `/Perms` gone, PDFium's appearances-only drawing 0 px from
+  PDFium's own appearances of the same values, and a replaced value
+  nowhere in the bytes, by one search first run where the value is
+  (decoded streams, object streams' members, UTF-16BE, a font's codes);
+  fills across a Rewrite, an Append, a Save As and undo past a save; a
+  value earlier revisions held gone after the next save; a signed hybrid
+  form's Append anyway and a locked field; a permissions-password and an
+  open-password form encrypted through a fill, both strategies and a
+  recovery; usage rights kept by a fill's Append; what a fill's Append
+  writes, by object. `sheaf edit`'s tests fill a form by
+  `set-field-values` and read it back; `interop.rs` reads a filled form
+  of each kind with qpdf and pdf.js and draws it with pdftoppm. `just
+  tier-arlington` sets, on every corpus form, each text and choice field
+  that holds no value through the op as a user does, one op a field (a
+  text field its `forms::fixture::sample`, a choice its first option),
+  saves it as planned and holds what it wrote to the Arlington model:
+  2,715 forms, 183,022 text fields, 591 combo boxes and 5 list boxes
+  set, 6,168 refused as read-only and 14 as locked (none for a character
+  no font draws, nor past `/MaxLen` or a line break), 13 combo boxes with
+  no option to set; 2,044 Appends and 640 Rewrites, every count held.
 
 ## Undo/redo: snapshots, not inverse commands
 
@@ -3061,11 +3275,19 @@ below).
   dictionaries are their source's, copied as their instance
   (`FormInst.copy`): an instance past copy 0 of its file's bytes gets
   objects of its own. `/Parent` and `/Kids` are the tree's; a parent
-  sheaf made is written from its record. A field merged with its one
-  widget is one object under `ObjKey::Field`, which the page's `/Annots`
-  names, its widget key an alias in the record's map (`Emission::aliases`);
-  a copy stays merged. One whose widget the state shows twice is written
-  apart. A primary field's kids the records don't account for and no page
+  sheaf made is written from its record. A field whose own dictionary is
+  a widget is one object with it under `ObjKey::Field`, as its file has
+  it, whatever other widgets it has, which are its kids beside it: the
+  page's `/Annots` names it, its widget key an alias in the record's map
+  (`Emission::aliases`), and an Append of it writes the field at its
+  number and no page; a copy stays merged. `emit::form::joined` says it,
+  for the emitter, an Append's scope and the realizer's predicate alike.
+  One whose widget the state shows twice is written apart. An overlay
+  writes such a field apart where it doesn't show that widget's page (the
+  field's keys alone: no page it writes lists the widget), and where it
+  shows that widget and none of the field's kids, lists them still where
+  its base has them, as PDFium takes a field's own dictionary for its
+  widget only where the field lists none. A primary field's kids the records don't account for and no page
   shows stay in its `/Kids` when they're widgets (widgets on page
   templates); any other such kid, a page or the catalog (0092321's
   `Page2[0]` lists its catalog), isn't the field's and isn't written as
@@ -3094,9 +3316,11 @@ below).
   when the fields differ from the primary's as read (its tooltips onto
   `/TU`), `DropUr3` on every Rewrite of a file with usage rights (on an
   Append, from slice 10, only when they don't allow what it changes),
-  and `FixSigFlags` beside it when nothing signed needs `/SigFlags`. The
-  emitter applies them to the form's dictionary and the catalog's
-  `/Perms`; the record keeps them.
+  and `FixSigFlags` beside it when nothing signed needs `/SigFlags`; from
+  M10 slice 9, `FillAppearances` on the first save, by either strategy,
+  of a form that changed and says `NeedAppearances` (Saving values). The emitter applies them to the
+  form's dictionary, the catalog's `/Perms` and the widgets; the record
+  keeps them.
 - **Numbering** (`materialize::number`). Stable, for saves: the primary's
   objects keep their numbers, and so does each key the emitter owns at a
   primary object's (copy 0 of a primary page's dictionary keeps the page's
@@ -3399,8 +3623,9 @@ about 21 ms, its fsyncs included.
   changes nothing.
 - **The plan** (`plan`), in order: an Append onto a copy (`Onto::CopyOf`)
   for a save to another path when the primary has signatures or usage
-  rights, they hold (`SaveRecord.signatures_hold`: true when opened,
-  false after a Rewrite, inherited by everything else) and the saved file
+  rights, they hold (`SaveRecord.revisions_kept`, which M10 slice 9
+  renamed from `signatures_hold`: true when opened, false after a
+  Rewrite, inherited by everything else) and the saved file
   still has its stamp, else `OtherTarget`; no record that knows its file,
   `NoSaveRecord`; a file another program changed, `FileChanged` with its
   ask; **Unchanged** when nothing else was found, the target is the saved
@@ -3410,7 +3635,8 @@ about 21 ms, its fsyncs included.
   unsound base or a Full restore), `RecoveredRemovals` (until slice 17
   a header and footer forced a Rewrite here, `LegacyHeaderFooter`),
   strict removal's `Removes` and `ReplacesText` (by
-  `RemovedKind::is_text`: OCR layers and the header are text), and
+  `RemovedKind::is_text`: OCR layers and the header are text),
+  `EarlierValues` (M10 slice 9: see Saving values), and
   `TransformNeedsRewrite` (dropping an XFA part whose datasets hold values
   the path replaced); otherwise `Append { onto }`. `Why` has a reader's
   `Display` (§7.3), which `SaveReport.why` carries to the app's notice.
@@ -3465,8 +3691,9 @@ about 21 ms, its fsyncs included.
   its revision but no longer matches as `BrokenSignature`. Append anyway (`AppendAnyway { stays_readable }`, what the
   save leaves readable, by kind) is offered on an Append the signatures
   don't allow, and on a Rewrite whose every reason is what an Append would
-  leave readable (`Removes`, `ReplacesText`, `TransformNeedsRewrite`,
-  `RemovalCheck`, `RecoveredRemovals`), never on one for a file it can't
+  leave readable (`Removes`, `ReplacesText`, `EarlierValues`,
+  `TransformNeedsRewrite`, `RemovalCheck`, `RecoveredRemovals`), never on
+  one for a file it can't
   follow. The mapping stays conservative until Greg's Acrobat cross-check
   (`/P` 2 allows only filling in, so a comment on a P2 file asks even with
   usage rights that allow comments).
@@ -3674,7 +3901,8 @@ about 21 ms, its fsyncs included.
   "Nothing to save".
 - **Records** gain `content_hash` (a `sheaf_util::Checksum`, streamed
   xxh3-128 that a record extends over each Append's section), `sound`,
-  `signatures_hold`, the file's `pdf_version`, and `pending_tail`; the
+  `signatures_hold` (`revisions_kept` since M10 slice 9), the file's
+  `pdf_version`, and `pending_tail`; the
   roots keep the trailer's `/Info` (`RootValues.info`), and each tree node
   which primary node's keys it holds (`TreeNode.from`).
 - **Recovery sections** (§11.10). A sidecar is `append`: the sections an
@@ -4204,16 +4432,27 @@ render's flags draw
 them, its base page's annotations as they are: each drawn record as read
 from its own entry, none hidden or dragged, no entry left out (a record
 deleted, sheaf's marks and their companions under `ByHost`, another
-tool's without `foreign`, a link that leads nowhere), no merged field
-split, each drawn widget's `/Parent`s (merged,
+tool's without `foreign`, a link that leads nowhere), no field written
+apart from the widget that's its own dictionary (one the state shows
+twice, or one on another page, which an overlay of the page doesn't
+write), each drawn widget's `/Parent`s (merged,
 its field's) as the model's field tree has them, which a file's `/Kids`
 made where its `/Parent`s say otherwise, and the form's `DA`, `Q` and
 `NeedAppearances` as the source's form has them, and no text field's
 widget drawn whose value the model holds changed (`stale`, M10 slice 6:
 the overlay draws the appearance a save makes for it; see Text field
-appearances through pdf-forms). The value itself isn't counted: no save
-writes `/V` before M10 slice 9's fills. The predicate is
-O(the annotations on the page); `emission_is_base` (test and fixture
+appearances through pdf-forms), nor any widget whose field's value the
+model holds changed (`forms::value_changed`, M10 slice 9: the overlay
+writes the field with the model's `/V`, a radio group's on its other
+pages too), nor any widget a `NeedAppearances` form left with no
+appearance once a save of the state would make one
+(`FillAppearances`: the form changed; `rules::overlay_fills_appearances`):
+the overlay carries that transform and makes it as the save does, so a
+fill on one page realizes every page with such a widget, and the render
+key feeds whether it's made. The predicate is
+O(the annotations on the page); whether the form changed is found once
+for a version (O(the fields)) and kept by its state
+(`DocState::fields_differ`), for the key too; `emission_is_base` (test and fixture
 builds) checks it against the page's overlay compared with the base
 modulo placement (`/Parent`, `/Type`, `/Thumb`; boxes and `/Rotate` as
 effective values; resources against the page facts; annotations' `/P`,
@@ -6046,10 +6285,15 @@ with markup.
 
 A widget's own pinned appearance (its value and the form's `/DA`) comes
 with M10 slice 15's `FlattenFields`; until then a widget flattens by
-reference to its form, its file's: a text field's widget whose value
-the model holds changed (M10 slice 6's `stale`) flattens with the
-appearance its file holds, the old value, though a save makes it a new
-one. Slice 15 makes it first; no op changes a value before slice 9.
+reference to its form, its file's, so a flatten of a widget a save would
+make anew (`appearance::stale`: a value or display changed, a toggle
+whose file has no appearance of its state) is refused (M10 slice 9),
+`Invalid`: "a field on page N changed since the file was opened, and a
+flatten can't draw it yet: save, and flatten the saved file". A save
+doesn't lift it: a save changes no source, so the widget stays changed
+against the file as opened until the saved file is opened again. A
+check box or radio button pressed to a state its file draws flattens
+drawing that state's form, which is what the save shows.
 
 ### Private data
 

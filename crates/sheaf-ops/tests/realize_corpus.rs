@@ -25,8 +25,8 @@
 //!
 //! The field's value is a text field's (M10 slice 6): its widget's
 //! appearance is made anew, so its pages are realized, and drawn from the
-//! form the Rewrite writes too. No save writes its `/V` from the model
-//! until fills do (M10 slice 9).
+//! form the Rewrite writes too, its `/V` the model's as the Rewrite's is
+//! (M10 slice 9).
 //!
 //! The pool's sample is slice 2's spikes': the pool sample
 //! (`bench/pool-sample.txt`); spike A's encrypted files, the first 75

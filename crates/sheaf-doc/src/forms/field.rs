@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use crate::model::{FieldNode, Terminal};
 use crate::pdf::ObjectId;
 
 pub use sheaf_edit::FieldId;
@@ -91,6 +92,98 @@ pub enum Value {
     Items(Arc<[Arc<str>]>),
     /// A signature field holding a signature.
     Signed,
+}
+
+/// Whether terminal `term`, field `node`'s, holds another value than its
+/// source's field as read (M10 slice 9), as a field of its kind shows one
+/// ([`values_alike`]); or the field was read from no source, or isn't
+/// among its source's fields as read. Where it does, a save writes the
+/// model's `/V` (the emitter's `read_from`), a text field's or choice
+/// field's widgets have their appearances made anew
+/// ([`appearance::stale`](super::appearance::stale)), and an overlay of a
+/// page with one of its widgets isn't the base page
+/// ([`untouched`](crate::realize::untouched)). A map lookup and a compare
+/// of two values.
+pub fn value_changed(node: &FieldNode, term: &Terminal) -> bool {
+    let Some(src) = &node.src else {
+        return true;
+    };
+    match src.src.form().field_by_object(src.id) {
+        Some(read) => !values_alike(term.kind, read.value.as_ref(), term.value.as_ref()),
+        None => true,
+    }
+}
+
+/// Whether `a` and `b`, values of a field of `kind`, show the same: a text
+/// field's text (`text_shown`: none and an empty one alike); a combo box's
+/// or list box's texts, in order (`choice_texts`: none and an empty array
+/// alike, a text and an array of it alike); a check box's or
+/// radio group's state, none and `Off` alike; any other kind's value as it
+/// is.
+///
+/// The one compare of the value a field holds with another: a save writes
+/// the model's, and makes its appearances, where it isn't alike its
+/// file's ([`value_changed`]), and lowering puts one where it isn't alike
+/// the one the field holds ([`set_alike`], which is this but for a
+/// choice's order).
+pub fn values_alike(kind: FieldKind, a: Option<&Value>, b: Option<&Value>) -> bool {
+    fn state(v: Option<&Value>) -> Option<&Value> {
+        match v {
+            Some(Value::State(s)) if &**s == "Off" => None,
+            v => v,
+        }
+    }
+    match kind {
+        FieldKind::Text => text_shown(a) == text_shown(b),
+        FieldKind::Combo | FieldKind::List => choice_texts(a) == choice_texts(b),
+        FieldKind::CheckBox | FieldKind::Radio => state(a) == state(b),
+        FieldKind::PushButton | FieldKind::Signature | FieldKind::Unknown => a == b,
+    }
+}
+
+/// Whether setting a field of `kind` that holds `held` to `set` would
+/// leave what it holds, so that lowering puts nothing (`tx::fill`):
+/// [`values_alike`], and for a choice its texts as a set, whatever their
+/// order and each once. A choice selects the options its texts name,
+/// which no order changes, and an op's are in the options' order where
+/// the file's may be in any: an op that chose what the field holds would
+/// else put the same selection in another order, a value a save writes
+/// and calls replaced. So the field keeps its file's order, and
+/// [`values_alike`], which a save asks of the value kept, stays the
+/// stricter of the two: what this calls alike and that doesn't is never
+/// put.
+pub(crate) fn set_alike(kind: FieldKind, held: Option<&Value>, set: Option<&Value>) -> bool {
+    let texts = |v| {
+        let mut texts = choice_texts(v);
+        texts.sort_unstable();
+        texts.dedup();
+        texts
+    };
+    match kind {
+        FieldKind::Combo | FieldKind::List => texts(held) == texts(set),
+        _ => values_alike(kind, held, set),
+    }
+}
+
+/// The text a text field's value shows: none, and any value that's no
+/// text, the empty one.
+pub(crate) fn text_shown(value: Option<&Value>) -> &str {
+    match value {
+        Some(Value::Text(text)) => text,
+        _ => "",
+    }
+}
+
+/// The texts a choice field's value holds, as the family takes them
+/// (`field_choice`): a text is one, even an empty one, which selects an
+/// option whose export value is empty; an array its texts; none, no value
+/// and anything else.
+pub(crate) fn choice_texts(value: Option<&Value>) -> Vec<&str> {
+    match value {
+        Some(Value::Text(text)) => vec![&**text],
+        Some(Value::Items(items)) => items.iter().map(|t| &**t).collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// One of a choice field's items, or a check box's or radio button's
@@ -193,13 +286,14 @@ pub struct Field {
     pub top: u32,
     /// `/Opt`: a choice field's items, or a check box's or radio group's
     /// export values (one per widget, by its [`index`](Widget::index)).
-    /// Shared with the fields that inherit it. A choice field's leaves
-    /// out an item that is no text (a string or a stream, or an array
-    /// that starts with two of them); a check box's or radio group's is
-    /// read as the family reads an option, a string or an array of
-    /// exactly two strings, and keeps the place of anything else, as an
-    /// option of empty text, so each widget's entry is still at its
-    /// index.
+    /// Shared with the fields that inherit it. Each keeps every item's
+    /// place, as the family and PDFium read one, so an index into the
+    /// file's `/Opt` (`/TI`, `/I`) is one into it: an item that is no
+    /// text an option of empty text. A choice field's text is a string's
+    /// or a stream's, an item an array that starts with two of them; a
+    /// check box's or radio group's is read as the family reads an option,
+    /// a string or an array of exactly two strings, anything else an
+    /// option of empty text.
     pub options: Arc<[Choice]>,
     /// `/Opt` is an array, its own or a parent field's, an empty one too:
     /// a check box's or radio group's widgets with no on state of their

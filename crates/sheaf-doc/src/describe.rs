@@ -10,7 +10,7 @@ use sheaf_edit::{FlattenSet, MarkKind, Z};
 
 use crate::effects::Flags;
 use crate::model::{AnnotBody, DocState, PageId, Step};
-use crate::tx::{OthersFound, ResolvedOp};
+use crate::tx::{OthersFound, ResolvedOp, Set};
 
 /// A line of the History panel: what some steps did, and whether they
 /// removed content that was there (its badge).
@@ -158,7 +158,76 @@ pub fn describe(op: &ResolvedOp, before: &DocState) -> String {
             };
             format!("Flatten {what} on {}", pages(ids))
         }
+        R::SetFieldValues { values, calculated } => {
+            let fields = once_each(values);
+            let verb = fill_verb(!values.is_empty() && clears(values));
+            let line = match fields.as_slice() {
+                [] if !calculated.is_empty() => String::new(),
+                [] => "Fill no fields".into(),
+                [one] => format!("{verb} {}", field_text(one, before)),
+                many => format!("{verb} {}", count(many.len(), "field")),
+            };
+            calculated_line(line, once_each(calculated).len())
+        }
         R::Revert { label } => format!("Undo all of {label}"),
+    }
+}
+
+/// The sets of `sets` that name other fields than those before them do:
+/// the fields an op sets, each once, as History counts them.
+fn once_each(sets: &[Set]) -> Vec<&Set> {
+    let mut seen = std::collections::HashSet::with_capacity(sets.len());
+    (sets.iter())
+        .filter(|s| seen.insert(&s.fields[..]))
+        .collect()
+}
+
+/// Whether each of `values` empties its field.
+fn clears(values: &[Set]) -> bool {
+    values.iter().all(|s| s.value.clears())
+}
+
+/// What filling fields is called: "Clear" where each set `clears` its
+/// field, else "Fill".
+fn fill_verb(clears: bool) -> &'static str {
+    match clears {
+        true => "Clear",
+        false => "Fill",
+    }
+}
+
+/// `line`, what an op filled, with the `calculated` fields the form's
+/// calculations set after: " (and 3 calculated fields)", or "Fill 3
+/// calculated fields" where it filled none itself.
+fn calculated_line(line: String, calculated: usize) -> String {
+    match (line.is_empty(), calculated) {
+        (_, 0) => line,
+        (true, n) => format!("Fill {}", count(n, "calculated field")),
+        (false, n) => format!("{line} (and {})", count(n, "calculated field")),
+    }
+}
+
+/// The field `set` sets, in `st`, as History names it: “its partial name”
+/// (its full name where it has none) and the first page of `st` its
+/// widgets are on; never its value.
+fn field_text(set: &Set, st: &DocState) -> String {
+    let Some(&id) = set.fields.first() else {
+        return "a field".into();
+    };
+    let name = match st.field(id).map(|n| &*n.partial).filter(|p| !p.is_empty()) {
+        Some(partial) => Some(partial.to_string()),
+        None => st.full_name(id).filter(|n| !n.is_empty()),
+    };
+    let first = (set.fields.iter())
+        .filter_map(|&f| st.field(f)?.term.as_deref())
+        .flat_map(|t| t.widgets.iter())
+        .filter_map(|&w| st.annot(w))
+        .filter_map(|a| Some((st.pos_of(a.page)?, a.page)))
+        .min();
+    let on = first.map_or(String::new(), |(_, page)| on_page(page, st));
+    match name {
+        Some(name) => format!("“{name}”{on}"),
+        None => format!("a field{on}"),
     }
 }
 
@@ -363,6 +432,26 @@ fn run_line(run: &[Step]) -> String {
             };
             let what = count(sum(flattened), "annotation");
             format!("Flatten {what} on {}", pages())
+        }
+        R::SetFieldValues { .. } => {
+            let (mut fields, mut calculated, mut cleared) = (0, 0, true);
+            for s in run {
+                if let R::SetFieldValues {
+                    values,
+                    calculated: c,
+                } = &*s.op
+                {
+                    fields += once_each(values).len();
+                    calculated += once_each(c).len();
+                    cleared &= clears(values);
+                }
+            }
+            let line = match fields {
+                0 if calculated > 0 => String::new(),
+                0 => "Fill no fields".into(),
+                n => format!("{} {}", fill_verb(n > 0 && cleared), count(n, "field")),
+            };
+            calculated_line(line, calculated)
         }
         // A version's only step.
         R::Revert { .. } => run[0].line.clone(),

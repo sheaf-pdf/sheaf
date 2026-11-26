@@ -366,23 +366,7 @@ fn check_pdf(pdf: &Pdf, bytes: &[u8], password: Option<&str>) -> Report {
     let ends = revision_ends(bytes);
     let now = values(&tree.fields);
     report.revisions = 1;
-    let earlier = &ends[..ends.len().saturating_sub(1)];
-    for &(_, end) in &earlier[earlier.len().saturating_sub(MAX_REVISIONS)..] {
-        let Ok(earlier) = crate::file::load_pdf_mem(&bytes[..end], password) else {
-            continue;
-        };
-        if earlier.xref_start == 0 || earlier.get_pages().is_empty() {
-            // Not a revision: lopdf rebuilt its cross-references (the cut
-            // is inside a stream), or it's a linearized file's first-page
-            // section.
-            continue;
-        }
-        let then = read_tree(&earlier, acroform(&earlier));
-        let names: Vec<String> = values(&then.fields)
-            .into_iter()
-            .filter(|(name, v)| now.get(name) != Some(v))
-            .map(|(name, _)| name.to_string())
-            .collect();
+    for names in earlier_values(bytes, password, &ends, &now) {
         if !names.is_empty() {
             findings.push(Finding::EarlierValues {
                 revision: report.revisions,
@@ -490,6 +474,60 @@ fn check_pdf(pdf: &Pdf, bytes: &[u8], password: Option<&str>) -> Report {
     }
     report.findings = findings;
     report
+}
+
+/// The earlier revisions of the file in `bytes`, decrypted with
+/// `password`, from the original, each that reads as a file of the last
+/// [`MAX_REVISIONS`] before its latest (which `ends`, the file's
+/// [`revision_ends`], ends): the full names of the fields whose values it
+/// holds that `now`, the latest revision's [`values`], doesn't, sorted, as
+/// [`Finding::EarlierValues`] lists them, none where it holds none. Each is
+/// a parse of the file up to it, made as the iterator gets to it: one that
+/// doesn't read, or isn't a revision, is passed over. The check's walk,
+/// and what [`holds_earlier_values`] asks of it.
+fn earlier_values<'a>(
+    bytes: &'a [u8],
+    password: Option<&'a str>,
+    ends: &'a [(usize, usize)],
+    now: &'a BTreeMap<&str, u64>,
+) -> impl Iterator<Item = Vec<String>> + 'a {
+    let earlier = &ends[..ends.len().saturating_sub(1)];
+    let latest = &earlier[earlier.len().saturating_sub(MAX_REVISIONS)..];
+    latest.iter().filter_map(move |&(_, end)| {
+        let earlier = crate::file::load_pdf_mem(&bytes[..end], password).ok()?;
+        if earlier.xref_start == 0 || earlier.get_pages().is_empty() {
+            // Not a revision: lopdf rebuilt its cross-references (the cut
+            // is inside a stream), or it's a linearized file's first-page
+            // section.
+            return None;
+        }
+        let then = read_tree(&earlier, acroform(&earlier));
+        let names = (values(&then.fields).into_iter())
+            .filter(|(name, v)| now.get(name) != Some(v))
+            .map(|(name, _)| name.to_string())
+            .collect();
+        Some(names)
+    })
+}
+
+/// Whether an earlier revision of the file in `bytes`, decrypted with
+/// `password`, holds field values its latest one doesn't, as [`check`]
+/// finds them ([`Finding::EarlierValues`], by the same walk): what an
+/// update after it would leave readable, beside the values it writes
+/// (M10 slice 9's save rule). False for a file of one revision, without
+/// parsing it, and for one that doesn't read; the walk stops at the first
+/// revision that holds any.
+pub(crate) fn holds_earlier_values(bytes: &[u8], password: Option<&str>) -> bool {
+    let ends = revision_ends(bytes);
+    if ends.len() < 2 {
+        return false;
+    }
+    let Ok(pdf) = crate::file::load_pdf_mem(bytes, password) else {
+        return false;
+    };
+    let tree = read_tree(&pdf, acroform(&pdf));
+    let now = values(&tree.fields);
+    earlier_values(bytes, password, &ends, &now).any(|names| !names.is_empty())
 }
 
 /// A finding that names fields or widgets.

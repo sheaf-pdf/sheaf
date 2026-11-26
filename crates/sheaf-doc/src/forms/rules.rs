@@ -1,6 +1,8 @@
 //! What a save takes out of a form because it described the file as it was
 //! (M10 proposals 6 and 7): the XFA copy, once the AcroForm changed, and
-//! Reader's usage rights, whose signature covers the original bytes.
+//! Reader's usage rights, whose signature covers the original bytes; and
+//! what it puts in where the file left it to the viewer: the appearances a
+//! `/NeedAppearances` file's widgets lack (M10 proposal 10, slice 9).
 //!
 //! [`plan`] decides it before anything is written (M10.5 §11.8), from the
 //! primary's form as read and the state being saved: policy, never an
@@ -13,7 +15,16 @@
 //! proposal 34): Reader checks later revisions against those. When the
 //! form changed, the XFA copy goes too, its tooltips copied into `/TU`
 //! first: Acrobat would show the XFA's fields and values, not the ones
-//! sheaf wrote. A recovery sidecar applies the same transforms.
+//! sheaf wrote. The first save that changes the form of a file that says
+//! `/NeedAppearances` makes the appearances its widgets lack, which a
+//! viewer that ignores the flag (PDFium's screen) would show nothing of,
+//! by either strategy (M10 proposal 10): an Append writes those widgets
+//! beside what it changed, a fill's kind of change, and a save after it
+//! carries its record's, making only those of what it changes. A recovery
+//! sidecar applies the same transforms, and an overlay the realizer draws
+//! makes the appearances a save of its state would
+//! ([`overlay_fills_appearances`]): the screen is the file whichever way
+//! it's saved.
 
 use std::collections::HashMap;
 
@@ -48,8 +59,22 @@ pub const RIGHTS_REMOVED: &str =
 /// - **`FixSigFlags`** beside it, when `/SigFlags` says there are
 ///   signatures and neither a signed field of the target nor a
 ///   certification needs it.
+/// - **`FillAppearances`** when the form `target` writes says
+///   `/NeedAppearances` (the primary's, or a form's that came in) and its
+///   fields differ from the primary's as read, as for `DropXfa`: the
+///   widgets its file left with no appearance are made
+///   ([`appearance::missing`]), and the flag stays: an appearance the file
+///   has may be the stale one the flag was there to cover. By a Rewrite
+///   and an Append alike, so the two write files that draw alike and the
+///   screen draws either (M10 proposal 10's "the first save that changes
+///   the form"; the flag isn't cleared, as it has it, since those the
+///   file has aren't made anew). An Append's is a fill's kind of change,
+///   for usage rights and for signatures, of the fields whose widgets it
+///   makes ([`filled_fields`]).
 ///
 /// An Append never repeats what `rec` says the file lost already.
+///
+/// [`appearance::missing`]: super::appearance::missing
 pub fn plan(
     src: &Source,
     target: &DocState,
@@ -67,9 +92,14 @@ pub fn plan(
             tooltips_to_tu: true,
         });
     }
+    let fills = fills_appearances(src, target) && !done(&SaveTransform::FillAppearances);
     if facts.usage_rights {
         let class = match out.iter().any(|t| !done(t)) {
             true => class | SigClass::OTHER,
+            false => class,
+        };
+        let class = match fills {
+            true => class | SigClass::FILL,
             false => class,
         };
         let rights = src.signatures().usage_rights;
@@ -82,8 +112,43 @@ pub fn plan(
             }
         }
     }
+    if fills {
+        out.push(SaveTransform::FillAppearances);
+    }
     out.retain(|t| !done(t));
     out
+}
+
+/// Whether a save of `target` over `primary`, the primary file as read,
+/// makes the appearances the form's widgets were left without ([`plan`]'s
+/// `FillAppearances`): the form it writes says `/NeedAppearances` and its
+/// fields differ from the primary's.
+pub fn fills_appearances(primary: &Source, target: &DocState) -> bool {
+    target.form().need_appearances && form_differs(primary.form(), target, primary.id())
+}
+
+/// The full names of the fields of `target` with a widget
+/// `FillAppearances` makes ([`appearance::missing`]): what an Append that
+/// carries it touches beside its own changes, for a signature's locks.
+///
+/// [`appearance::missing`]: super::appearance::missing
+pub(crate) fn filled_fields(target: &DocState) -> impl Iterator<Item = String> + '_ {
+    (target.annots())
+        .filter(|(a, _)| super::appearance::missing(target, *a))
+        .filter_map(|(_, rec)| target.full_name(rec.widget()?.field))
+}
+
+/// [`fills_appearances`] as an overlay of pages of `src`, a source of
+/// `target`, asks it, since the realizer draws what a save writes: over
+/// the primary (the file `target` opened; a state made in memory opened
+/// none, and `src` stands for it), as a save asks it; over any other
+/// source, whose widgets are of fields that came in, so that the fields
+/// differ from the primary's, whenever the form says `/NeedAppearances`.
+pub(crate) fn overlay_fills_appearances(src: &Source, target: &DocState) -> bool {
+    match target.opened_file() {
+        Some(primary) if primary != src.id() => target.form().need_appearances,
+        _ => fills_appearances(src, target),
+    }
 }
 
 /// Whether save policy drops the XFA copy of `src`, the primary file as
@@ -96,8 +161,15 @@ pub(crate) fn drops_xfa(src: &Source, target: &DocState) -> bool {
 
 /// Whether `target`'s fields differ from `base`'s, the form of `primary`
 /// as read: a node of another instance, a node gone, or a node with
-/// another name, value or number of widgets.
+/// another name, value or number of widgets. A walk of every field, once
+/// for a state ([`DocState::fields_differ`] keeps the answer until a field
+/// is set): the realizer asks it for each page it keys.
 fn form_differs(base: &FileForm, target: &DocState, primary: SourceId) -> bool {
+    target.fields_differ(primary, || walk_differs(base, target, primary))
+}
+
+/// [`form_differs`], found.
+fn walk_differs(base: &FileForm, target: &DocState, primary: SourceId) -> bool {
     let own = FormInst {
         src: primary,
         copy: 0,

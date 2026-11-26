@@ -16,9 +16,10 @@
 //!
 //! **Made only where its captions changed**: they're all of a push button
 //! the model can change. One nothing changed keeps its appearances, and one
-//! with none stays so (a file with `/NeedAppearances` is M10 slice 9's
-//! transform), though [`make`](super::make) makes one for it as for any
-//! other.
+//! with none stays so, but where its file's form says `/NeedAppearances`
+//! and a save rewrites the form, which makes one for a captioned button
+//! ([`missing`](super::missing)); [`make`](super::make) makes one for it as
+//! for any other.
 
 use std::fmt;
 use std::sync::{Mutex, PoisonError};

@@ -14,15 +14,17 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use sheaf_edit::{
-    AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Bring, Color, Delta, DestView, Fit,
-    FlattenSet, GridPos, HeaderFooterSpec, Imported, Local, MarkKind, MarkPatch, NewMark, Op,
-    PageRef, PageSel, PageSource, Patch, ScopeSel, Sibling, Style, TextStyle, Turn, Z,
+    AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Bring, Color, Delta, DestView,
+    FieldRef, FieldSet, FieldValue, Fit, FlattenSet, GridPos, HeaderFooterSpec, Imported, Local,
+    MarkKind, MarkPatch, NewMark, Op, PageRef, PageSel, PageSource, Patch, ScopeSel, Sibling,
+    Style, TextStyle, Turn, Z,
 };
 
 use super::Made;
 use super::error::EditError;
 use super::{Grant, LowerCx};
 use crate::annot::{AnnotId, AnnotKind, Box2};
+use crate::forms::FieldId;
 use crate::labels::LabelSpec;
 use crate::memory;
 use crate::model::{DocState, Foreign, ImageRef, OutlineId, PageForm, PageId, WatermarkContent};
@@ -178,6 +180,11 @@ pub enum ResolvedOp {
         which: FlattenSet,
         flattened: usize,
     },
+    /// Each of `values`, then each of `calculated`, in order.
+    SetFieldValues {
+        values: Vec<Set>,
+        calculated: Vec<Set>,
+    },
     /// A group's versions taken back, the group called `label`: what
     /// History's "Undo all of …" makes, and a failed call's rollback. No
     /// `Op` says it, and it's never lowered: its step holds the group's
@@ -229,6 +236,37 @@ impl OthersFound {
     }
 }
 
+/// One field's value, as a [`ResolvedOp::SetFieldValues`] sets it:
+/// [`FieldSet`], its field and a pressed widget resolved. `fields` are the
+/// terminals its reference names, in id order: its id's, or each of its
+/// full name's, which every reader takes for one field; a press's, the
+/// one whose widget it is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Set {
+    pub fields: Vec<FieldId>,
+    pub value: SetValue,
+    pub display: Option<String>,
+}
+
+/// [`FieldValue`], a pressed widget resolved.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SetValue {
+    Clear,
+    Text(String),
+    Items(Vec<String>),
+    State(String),
+    Export(String),
+    /// A widget of the field's.
+    Press(AnnotId),
+}
+
+impl SetValue {
+    /// It empties a field, as History says it.
+    pub fn clears(&self) -> bool {
+        matches!(self, SetValue::Clear)
+    }
+}
+
 /// Where among its siblings a bookmark goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum At {
@@ -275,6 +313,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::SetHeaderFooter { .. } => "set-header-footer",
         Op::RemoveHeaderFooter { .. } => "remove-header-footer",
         Op::FlattenAnnotations { .. } => "flatten-annotations",
+        Op::SetFieldValues { .. } => "set-field-values",
         _ => "op",
     }
 }
@@ -309,6 +348,7 @@ impl ResolvedOp {
             R::SetHeaderFooter { .. } => "set-header-footer",
             R::RemoveHeaderFooter { .. } => "remove-header-footer",
             R::FlattenAnnotations { .. } => "flatten-annotations",
+            R::SetFieldValues { .. } => "set-field-values",
             R::Revert { .. } => "revert",
         }
     }
@@ -685,6 +725,10 @@ impl Resolver<'_> {
                 which: *which,
                 flattened: 0,
             },
+            Op::SetFieldValues { values, calculated } => R::SetFieldValues {
+                values: self.sets(values)?,
+                calculated: self.sets(calculated)?,
+            },
             _ => return Err(EditError::internal(format!("{op:?} has no lowering"))),
         })
     }
@@ -1008,6 +1052,100 @@ impl Resolver<'_> {
             }
         }
         Ok(())
+    }
+
+    /// The terminal fields `r` names: the one of its id, or every one of
+    /// its full name, in id order. A name no node has isn't there; an id
+    /// or a name of nodes that hold no value (parents of fields) is
+    /// Invalid. Each node a name reads through is read.
+    fn fields(&mut self, r: &FieldRef) -> Result<Vec<FieldId>, EditError> {
+        let terminal = |st: &DocState, id: FieldId| st.field(id).is_some_and(|f| f.term.is_some());
+        match r {
+            FieldRef::Id(id) => {
+                let instead = "name it {\"name\": its full name}";
+                self.id_allowed(format_args!("field {}", id.0), instead)?;
+                if self.st.field(*id).is_none() {
+                    return Err(self.not_found(format!("field {}", id.0)));
+                }
+                self.reads.insert(Key::Field(*id));
+                match terminal(self.st, *id) {
+                    true => Ok(vec![*id]),
+                    false => Err(self.invalid(format!(
+                        "field {} holds no value: it's a parent of fields",
+                        id.0
+                    ))),
+                }
+            }
+            FieldRef::Name(name) => {
+                let mut named: Vec<FieldId> = self.st.fields_named(name).collect();
+                named.sort_unstable();
+                if named.is_empty() {
+                    return Err(self.not_found(format!("a field named “{name}”")));
+                }
+                for &id in &named {
+                    let mut at = Some(id);
+                    while let Some(node) = at {
+                        self.reads.insert(Key::Field(node));
+                        at = self.st.field(node).and_then(|f| f.parent);
+                    }
+                }
+                named.retain(|&id| terminal(self.st, id));
+                match named.is_empty() {
+                    true => {
+                        Err(self
+                            .invalid(format!("“{name}” holds no value: it's a parent of fields")))
+                    }
+                    false => Ok(named),
+                }
+            }
+        }
+    }
+
+    /// `sets` resolved, in order.
+    fn sets(&mut self, sets: &[FieldSet]) -> Result<Vec<Set>, EditError> {
+        let mut out = Vec::with_capacity(sets.len());
+        for FieldSet {
+            field,
+            value,
+            display,
+        } in sets
+        {
+            let mut fields = self.fields(field)?;
+            let value = match value {
+                FieldValue::Clear => SetValue::Clear,
+                FieldValue::Text(text) => SetValue::Text(text.clone()),
+                FieldValue::Items(items) => SetValue::Items(items.clone()),
+                FieldValue::State(state) => SetValue::State(state.clone()),
+                FieldValue::Export(export) => SetValue::Export(export.clone()),
+                FieldValue::Press { widget } => {
+                    let widget = self.annot(widget)?;
+                    let of = (self.st.annot(widget).and_then(|a| a.widget())).map(|w| w.field);
+                    fields.retain(|&id| Some(id) == of);
+                    if fields.is_empty() {
+                        let field = match field {
+                            FieldRef::Id(id) => format!("field {}", id.0),
+                            FieldRef::Name(name) => format!("“{name}”"),
+                        };
+                        return Err(self.invalid(format!(
+                            "annotation {} isn't a widget of {field}",
+                            widget.0
+                        )));
+                    }
+                    SetValue::Press(widget)
+                }
+                _ => {
+                    return Err(EditError::internal(
+                        "a kind of field value that isn't resolved",
+                    ));
+                }
+            };
+            out.push(Set {
+                fields,
+                value,
+                display: display.clone(),
+            });
+        }
+        Ok(out)
     }
 
     /// The blob `sel` names: by id from the store, which a plugin may not

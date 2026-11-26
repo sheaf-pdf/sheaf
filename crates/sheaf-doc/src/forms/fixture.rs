@@ -266,6 +266,33 @@ impl Form {
         (field, kids)
     }
 
+    /// A kid widget of `field`, a field that's its own widget, at `rect` on
+    /// page `page` (from 0): the field's own dictionary stays a widget
+    /// beside its kids, as some files have it. For a check box or radio
+    /// field, `on` gives the kid appearances of that on state and `Off`,
+    /// showing `Off`. Returns the kid.
+    pub fn kid_beside(
+        &mut self,
+        field: ObjectId,
+        page: usize,
+        rect: Rect,
+        on: Option<&str>,
+    ) -> ObjectId {
+        let w = self.widget(page, rect);
+        let ap = on.map(|on| self.states(rect, on));
+        let d = self.dict(w);
+        d.set("Parent", field);
+        if let Some(ap) = ap {
+            d.set("AP", ap);
+            d.set("AS", Object::name("Off"));
+        }
+        let mut kids = refs(self.pdf.get_dictionary(field).ok(), b"Kids");
+        kids.push(w);
+        let kids: Vec<Object> = kids.into_iter().map(Object::from).collect();
+        self.dict(field).set("Kids", kids);
+        w
+    }
+
     /// A combo box (or, with `combo` false, a list box) of `options`.
     pub fn choice(
         &mut self,
@@ -1206,6 +1233,25 @@ pub fn every_kind_in(pages: usize) -> Form {
     f
 }
 
+/// Two pages, and two fields whose own dictionary is a widget beside kid
+/// widgets ([`Form::kid_beside`]), as some corpus forms' fields are: the
+/// empty text field `t`, its own widget in row 0 of the first page, a kid
+/// in row 1 there and one in row 0 of the second; and the check box `c`,
+/// off, its own widget in row 2 of the first page, on state `Yes`, a kid
+/// in row 3 there of `Yes` too, and one in row 1 of the second of `Two`.
+/// Each field's kids take the first places among its widgets, in order,
+/// and its own the last.
+pub fn kids_beside() -> Form {
+    let mut f = Form::new(2);
+    let t = f.text("t", 0, row(0));
+    f.kid_beside(t, 0, row(1), None);
+    f.kid_beside(t, 1, row(0), None);
+    let c = f.check_box("c", 0, row(2), false);
+    f.kid_beside(c, 0, row(3), Some("Yes"));
+    f.kid_beside(c, 1, row(1), Some("Two"));
+    f
+}
+
 /// A file that says one of each thing the opened version holds, on three
 /// pages: a field on the first, a mark on the second, roman page labels,
 /// a header/footer sheaf drew on the third alone
@@ -1799,13 +1845,39 @@ pub fn try_append_revision(
     ids: &[ObjectId],
     change: impl FnOnce(&mut Pdf),
 ) -> anyhow::Result<Vec<u8>> {
+    appended(bytes, None, ids, change)
+}
+
+/// [`append_revision`] of an encrypted file that opens with `password`
+/// (its user password, or its owner password), not the empty one.
+pub fn append_revision_with_password(
+    bytes: &[u8],
+    password: &str,
+    ids: &[ObjectId],
+    change: impl FnOnce(&mut Pdf),
+) -> Vec<u8> {
+    appended(bytes, Some(password), ids, change).expect("an update appended")
+}
+
+/// [`try_append_revision`] of a file that opens with `password`, or the
+/// empty user password.
+fn appended(
+    bytes: &[u8],
+    password: Option<&str>,
+    ids: &[ObjectId],
+    change: impl FnOnce(&mut Pdf),
+) -> anyhow::Result<Vec<u8>> {
     use anyhow::Context as _;
 
-    let kind = BlobKind::file(Path::new("form.pdf"), None);
+    let kind = BlobKind::file(Path::new("form.pdf"), password);
     let src = (Store::new().open(bytes.to_vec().into(), kind)).context("the previous revision")?;
     let mut base = (crate::serialize::append::Base::over(&src))
         .context("the previous revision's trailer names no catalog")?;
-    let prev = Pdf::load_mem(bytes).context("the previous revision")?;
+    let prev = match password {
+        Some(password) => Pdf::load_mem_with_password(bytes, password),
+        None => Pdf::load_mem(bytes),
+    };
+    let prev = prev.context("the previous revision")?;
     let mut next = Pdf::with_version(prev.version.clone());
     next.trailer = prev.trailer.clone();
     next.max_id = base.size.saturating_sub(1);

@@ -11,7 +11,10 @@
 //! normal appearance has an on state keeps its appearances whatever state
 //! it shows: only its `/AS` moves (M10 proposal 10: on states come from
 //! `/AP /N`). One whose file has none, or `Off` alone, gets the whole set
-//! where its state changed, as PDFium makes every state at once.
+//! where its state changed, as PDFium makes every state at once; and one
+//! whose file has none gets it whatever its state where its form says
+//! `/NeedAppearances` and a save rewrites the form
+//! ([`missing`](super::missing)).
 //!
 //! **The mark's font** is ZapfDingbats as the standard 14 font is written
 //! by name, never the `/DR` font the `/DA` names: one small dictionary a

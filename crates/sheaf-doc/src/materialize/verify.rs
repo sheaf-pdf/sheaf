@@ -47,11 +47,13 @@
 //!   make is written with none (from M10 slice 6 a text field's whose
 //!   value changed; from M10 slice 8 a combo box's or list box's whose
 //!   value changed, a push button's whose captions did, and a check box's
-//!   or radio button's whose state did), beside the file's `/V`, which no
-//!   save writes before M10 slice 9's fills. A check box's or radio
-//!   button's `/AS` is the model's from M10 slice 8, so until then a save
-//!   can hold an `/AS` its field's `/V` doesn't name, which isn't asked
-//!   here either. A made appearance (each form under `AnnotPart(aid,
+//!   or radio button's whose state did; from M10 slice 9 one a
+//!   `/NeedAppearances` file left to the viewer, which a changed
+//!   form's first save makes, `FillAppearances`), beside the model's `/V`, which a
+//!   save writes from M10 slice 9 where the value changed. A check box's
+//!   or radio button's `/AS` is the model's from M10 slice 8 and its
+//!   field's `/V` from slice 9, so the two agree as the model's do. A made
+//!   appearance (each form under `AnnotPart(aid,
 //!   part)`: `Ap`, and a button's `ApOff`, `ApDown`, `ApDownOff` and
 //!   `ApRollover`) is an object of the save's own, as a mark's is, and
 //!   checked as every other: its references, its font's among them (a

@@ -288,22 +288,12 @@ pub fn planned(doc: &mut Document, path: &Path) -> (StrategyKind, Vec<u8>) {
 /// [`planned`]'s save, or why it wrote nothing: for a corpus tier, which
 /// counts a file's failure rather than stop at it.
 pub fn planned_or_why(doc: &mut Document, path: &Path) -> Result<(StrategyKind, Vec<u8>), String> {
-    saved_or_why(doc, path, sheaf_doc::materialize::SaveHow::Planned)
-}
-
-/// [`planned_or_why`]'s save made `how` (`SaveHow::Rewrite`: a Rewrite,
-/// whatever the plan would decide), a signature or an XFA part's values
-/// given up when it asks; or why it wrote nothing.
-pub fn saved_or_why(
-    doc: &mut Document,
-    path: &Path,
-    how: sheaf_doc::materialize::SaveHow,
-) -> Result<(StrategyKind, Vec<u8>), String> {
     let answers = sheaf_doc::materialize::AskAnswers {
         break_signatures: true,
         drop_xfa_values: true,
         ..Default::default()
     };
+    let how = sheaf_doc::materialize::SaveHow::Planned;
     let report =
         sheaf_doc::materialize::save_with(doc, path, how, &answers, &sheaf_ops::NoProgress)
             .map_err(|stop| format!("the save stopped: {stop}"))?;
@@ -593,7 +583,7 @@ pub fn word_on(geom: &Geom, text: &str) -> sheaf_doc::OcrWord {
 }
 
 /// `bytes` with field `name`'s `/V` set to `value` (its appearance as it
-/// was), as a fill sheaf can't make yet (slice 9) would leave it.
+/// was), as another tool's fill that makes no appearance leaves it.
 pub fn filled(bytes: &[u8], name: &str, value: &str) -> Vec<u8> {
     let field = form_in(bytes)
         .fields

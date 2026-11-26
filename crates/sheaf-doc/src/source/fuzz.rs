@@ -1293,10 +1293,10 @@ mod tests {
     /// local and grant. Between them they reach each cascade.
     fn applying() -> Vec<sheaf_edit::Op> {
         use sheaf_edit::{
-            Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Delta, FontChoice,
-            GridPos, Local, Margins, MarkKind, MarkPatch, NewMark, Op, PageLabelRange, PageRef,
-            PageSel, PageSource, Patch, ScopeSel, Sibling, Turn, Vec2, WatermarkContent,
-            WatermarkSpec, Z,
+            Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Delta, FieldRef,
+            FieldSet, FieldValue, FontChoice, GridPos, Local, Margins, MarkKind, MarkPatch,
+            NewMark, Op, PageLabelRange, PageRef, PageSel, PageSource, Patch, ScopeSel, Sibling,
+            Turn, Vec2, WatermarkContent, WatermarkSpec, Z,
         };
         let pos = PageRef::Pos;
         let positions = |s: &str| PageSel::Positions(s.parse().unwrap());
@@ -1319,6 +1319,11 @@ mod tests {
             file,
             name: name.into(),
         };
+        let set = |name: &str, value, display: Option<&str>| FieldSet {
+            field: FieldRef::Name(format!("form1[0].{name}")),
+            value,
+            display: display.map(Into::into),
+        };
         let every = sheaf_edit::fixture::every_op();
         let spec = every.iter().find_map(|op| match op {
             Op::SetHeaderFooter { spec, .. } => Some(spec.clone()),
@@ -1329,6 +1334,20 @@ mod tests {
             _ => None,
         });
         let mut ops = vec![
+            // A value for a field of each kind that holds one, a display,
+            // and a value calculated after them.
+            Op::SetFieldValues {
+                values: vec![
+                    set("empty[0]", FieldValue::Text("Bo".into()), Some("BO")),
+                    set("name[0]", FieldValue::Clear, None),
+                    set("off[0]", FieldValue::State("Yes".into()), None),
+                    set("on[0]", FieldValue::Clear, None),
+                    set("pick[0]", FieldValue::Export("0".into()), None),
+                    set("state[0]", FieldValue::Text("CA".into()), None),
+                    set("kind[0]", FieldValue::Items(vec!["W-2".into()]), None),
+                ],
+                calculated: vec![set("name[0]", FieldValue::Text("Calc".into()), None)],
+            },
             Op::AddBookmark {
                 parent: None,
                 at: Sibling::Last,

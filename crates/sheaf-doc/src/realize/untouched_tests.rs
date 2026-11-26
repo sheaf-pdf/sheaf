@@ -15,7 +15,7 @@ use sheaf_edit::{Rotation, Turn};
 use super::fixture::{every_input, hiding, layer, their_comment};
 use super::*;
 use crate::forms::Value;
-use crate::forms::fixture::Form;
+use crate::forms::fixture::{Form, kids_beside};
 use crate::materialize::header_tests::ACROBAT_HEADER;
 use crate::materialize::others_tests::{ACROBAT, BODY, acrobat_file};
 use crate::materialize::tests::{add, bytes, file, insert, open};
@@ -295,6 +295,173 @@ fn the_predicate_agrees_with_the_emission_in_every_case() {
     // The link isn't drawn now: the page's key says so where it's drawn.
     assert_ne!(key(&d, &screen), was[0]);
     assert_eq!(key(&d, &content), was[1]);
+}
+
+/// Fields whose own dictionary is a widget beside kid widgets
+/// ([`kids_beside`]): as opened, the page of those widgets draws as its
+/// base does, an overlay of it writing each field and its widget as one
+/// object as the file has them, and the page with only kids of them
+/// doesn't, an overlay of it writing the fields apart, without those
+/// widgets' keys. A press of the check box's own widget, or of its kid on
+/// the second page, and a fill of the text field, each change the page of
+/// what they change and the page of the field's own widget, whose `/V`
+/// the overlay writes from the model (M10 slice 9), and the model agrees
+/// with the emission on every one.
+#[test]
+fn a_field_beside_its_kids_is_untouched_where_an_overlay_writes_it_as_read() {
+    let bytes = kids_beside().bytes();
+    let d = opened(bytes.clone(), "kids.pdf");
+    assert_eq!(agree(d.state(), "beside, opened"), [true, false]);
+    let content = verdicts(d.state(), &ViewInputs::content_only(), "beside");
+    assert_eq!(content, [true, true], "no widget drawn");
+    let widgets = |d: &crate::Document, name: &str| -> Vec<crate::annot::AnnotId> {
+        let st = d.state();
+        let field = st.field_named(name).unwrap();
+        let term = st.field(field).unwrap().term.clone().unwrap();
+        term.widgets.iter().copied().collect()
+    };
+    // Its own widget, then its kid on the second page: the field's value
+    // moves, and the first page's overlay writes it.
+    for (pressed, want) in [(0, [false, false]), (2, [false, false])] {
+        let mut d = opened(bytes.clone(), "kids.pdf");
+        let w = widgets(&d, "c")[pressed];
+        fx::press(&mut d, w);
+        assert_eq!(agree(d.state(), "beside, pressed"), want, "{pressed}");
+    }
+    let mut d = opened(bytes, "kids.pdf");
+    fx::fill(&mut d, "t", "Camden");
+    assert_eq!(agree(d.state(), "beside, filled"), [false, false]);
+}
+
+/// A radio group with a button on each of two pages, the first's pressed:
+/// the second page's button shows `Off` as it did, but an overlay of that
+/// page writes the group's `/V` from the model (M10 slice 9), so neither
+/// page is its base page, the model agreeing with the emission on both, and
+/// the second page's key moves with the value; the group set back to its
+/// file's value, both are their base pages again.
+#[test]
+fn a_radio_group_pressed_on_one_page_touches_its_other_pages() {
+    use crate::forms::fixture::{Button, RADIO, row};
+    let mut f = Form::new(2);
+    let on = |page, state| Button {
+        page,
+        rect: row(0),
+        on_state: Some(state),
+        shows: Some("Off"),
+    };
+    f.buttons("r", RADIO, &[on(0, "a"), on(1, "b")]);
+    let mut d = opened(f.bytes(), "radio.pdf");
+    assert_eq!(agree(d.state(), "radio, opened"), [true, true]);
+    let p1 = d.page(1).unwrap();
+    let screen = ViewInputs::screen();
+    let was = render_key(d.state(), p1, &screen).unwrap();
+    let st = d.state();
+    let field = st.field_named("r").unwrap();
+    let first = st.field(field).unwrap().term.as_ref().unwrap().widgets[0];
+    fx::press(&mut d, first);
+    assert_eq!(agree(d.state(), "radio, pressed"), [false, false]);
+    assert_ne!(render_key(d.state(), p1, &screen).unwrap(), was);
+    fx::set_buttons(&mut d, "r", "Off");
+    assert_eq!(agree(d.state(), "radio, put back"), [true, true]);
+    assert_eq!(render_key(d.state(), p1, &screen).unwrap(), was);
+}
+
+/// A valued text field on the second page whose `/NeedAppearances` form
+/// left its widget with no appearance: as opened, both pages are their
+/// base pages. Once a field on the first page is filled, a Rewrite of the
+/// state makes that widget's appearance (`SaveTransform::FillAppearances`),
+/// so the second page is realized too, its overlay making the widget's
+/// form (the model agreeing with the emission under every input), its key
+/// moving though nothing of its own did (its reads take in every field,
+/// opened or filled); the fill undone, it's its base page again, at its key as opened.
+/// The same form without the flag leaves the second page alone.
+#[test]
+fn a_widget_a_need_appearances_form_left_bare_is_realized_once_a_rewrite_makes_it() {
+    use crate::forms::fixture::row;
+    for flag in [true, false] {
+        let mut f = Form::new(2);
+        f.text("other", 0, row(0));
+        let valued = f.text("valued", 1, row(0));
+        f.dict(valued).set("V", crate::pdf::text::string("Shown"));
+        if flag {
+            let acroform = f.acroform;
+            f.dict(acroform).set("NeedAppearances", true);
+        }
+        let mut d = opened(f.bytes(), "left.pdf");
+        assert_eq!(
+            agree(d.state(), "left bare, opened"),
+            [true, true],
+            "{flag}"
+        );
+        let p1 = d.page(1).unwrap();
+        let screen = ViewInputs::screen();
+        let was = render_key(d.state(), p1, &screen).unwrap();
+        let st = d.state();
+        let other = st.field_named("other").unwrap();
+        let shown = st.field_named("valued").unwrap();
+        let aid = st.field(shown).unwrap().term.as_ref().unwrap().widgets[0];
+        let reads = render_reads(st, p1, &screen);
+        assert_eq!(reads.contains(&Key::Field(other)), flag, "{flag}");
+        fx::fill(&mut d, "other", "Filled");
+        let st = d.state();
+        assert_eq!(agree(st, "left bare, filled"), [false, !flag], "{flag}");
+        assert_eq!(render_key(st, p1, &screen).unwrap() != was, flag);
+        let made = overlay_appearances(st, p1, &screen).unwrap();
+        assert_eq!(made.iter().any(|(a, ..)| *a == aid), flag, "{flag}");
+        let reads = render_reads(st, p1, &screen);
+        assert_eq!(reads.contains(&Key::Field(other)), flag, "{flag}");
+        d.undo().unwrap();
+        assert_eq!(
+            agree(d.state(), "left bare, undone"),
+            [true, true],
+            "{flag}"
+        );
+        assert_eq!(render_key(d.state(), p1, &screen).unwrap(), was);
+    }
+}
+
+/// Whether a state's fields differ from its file's is found once for a
+/// version and kept by its state, so the key of each page of a
+/// `/NeedAppearances` form with a bare widget doesn't walk the fields
+/// again: a state asked answers what it found whatever it's told after,
+/// and a version with a field set finds its own.
+#[test]
+fn whether_the_fields_differ_is_found_once_for_a_version() {
+    use crate::forms::fixture::row;
+    let mut f = Form::new(1);
+    f.text("other", 0, row(0));
+    let valued = f.text("valued", 0, row(1));
+    f.dict(valued).set("V", crate::pdf::text::string("Shown"));
+    let acroform = f.acroform;
+    f.dict(acroform).set("NeedAppearances", true);
+    let mut d = opened(f.bytes(), "kept.pdf");
+    let file = d.primary().id();
+    let asked = std::cell::Cell::new(0);
+    let find = |differ| {
+        asked.set(asked.get() + 1);
+        differ
+    };
+    let st = d.state().clone();
+    assert!(
+        !st.fields_differ(file, || find(false)),
+        "nothing asked it yet"
+    );
+    render_key(&st, d.page(0).unwrap(), &ViewInputs::screen()).unwrap();
+    assert!(!st.fields_differ(file, || find(true)), "kept");
+    assert!(
+        !st.clone().fields_differ(file, || find(true)),
+        "a clone's too"
+    );
+    assert_eq!(asked.get(), 1);
+    fx::fill(&mut d, "other", "Filled");
+    let filled = d.state();
+    assert!(crate::forms::rules::fills_appearances(d.primary(), filled));
+    assert!(filled.fields_differ(file, || find(false)), "its own, kept");
+    assert!(
+        !st.fields_differ(file, || find(true)),
+        "the version before's"
+    );
+    assert_eq!(asked.get(), 1);
 }
 
 /// An untouched page is viewed in its source's base engine at its base

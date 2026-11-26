@@ -18,17 +18,19 @@ use crate::pdf::{
 };
 
 use super::append_tests::{appended_in_place, written};
+use super::field_ap_tests::{Theirs, read_back, saved_each_way, text_read};
 use super::key::{ObjKey, Part};
 use super::removal_tests::{opened, scratch, warned};
 use super::tests::{lazy, open, rewrite, span};
 use super::*;
 use crate::annot::AnnotId;
-use crate::content::Fallback;
 use crate::content::fixture::{fallback_subsets, subsets_hold};
+use crate::content::{Fallback, Objects, Unkept};
 use crate::forms::appearance::tests::shows;
-use crate::forms::field::{Choice, flags};
+use crate::forms::field::{Choice, Value, flags};
 use crate::forms::fixture::{COMBO, Form, Rect, row};
 use crate::model::{Document, FieldNode, FieldProps, Terminal};
+use crate::pdf::forms as family;
 use crate::prim::{Key, Val};
 use crate::realize::{ViewInputs, overlay_appearances, untouched};
 use crate::tx::fixture as fx;
@@ -184,8 +186,8 @@ const HIGHLIGHT: &str = "0 0.2 0.4431 rg\n";
 /// Ap)`, the widget's `/AP` naming it alone, its `/Resources` naming
 /// `/DR`'s Helvetica, the font's own object; its content `/Tx BMC`, the
 /// option's label read back, and the drop button after it. The field's `/V`
-/// is the file's (no save writes a value before M10 slice 9). Nothing else
-/// is written anew: the objects are the unchanged Rewrite's less the old
+/// is the value now (M10 slice 9), and it has no `/I`. Nothing else is
+/// written anew: the objects are the unchanged Rewrite's less the old
 /// appearance's stream and with the made form, each other one its bytes as
 /// they were; the unchanged combo box is the file's object. An Append writes
 /// the widget and its form alone, and another after it neither.
@@ -219,7 +221,8 @@ fn a_combo_box_shows_its_value_s_label_with_its_drop_button() {
     assert_eq!(shows(&form.content), bytes_of(&["Bravo"]), "its label");
     let (_, button) = content.split_once("EMC\n").expect("the text's end");
     assert!(button.contains(BUTTON), "the drop button after: {button}");
-    assert_eq!(value_of(&pdf, c).as_deref(), Some(b"a".as_slice()));
+    assert_eq!(value_of(&pdf, c).as_deref(), Some(b"b".as_slice()));
+    assert!(!pdf.get_dictionary(c).unwrap().has(b"I"), "a combo box's");
 
     let mut want = ids(&plain_pdf);
     assert!(want.remove(&old));
@@ -249,7 +252,7 @@ fn a_combo_box_shows_its_value_s_label_with_its_drop_button() {
     let (form, fonts) = saved_form(&pdf, c);
     assert_eq!(shows(&form.content), bytes_of(&["Bravo"]));
     assert_eq!(fonts, [helv]);
-    assert_eq!(value_of(&pdf, c).as_deref(), Some(b"a".as_slice()));
+    assert_eq!(value_of(&pdf, c).as_deref(), Some(b"b".as_slice()));
     let (base, section) = appended_in_place(&mut d).unwrap();
     if !section.is_empty() {
         let wrote = written(base.len(), &section, &path);
@@ -398,7 +401,9 @@ fn a_choice_in_two_fonts_writes_its_subset_and_a_refused_one_s_none() {
 /// A cluster neither font draws leaves its widget unmade, with no `/AP`
 /// and no subset: an editable combo box's own text, `unencodable`; a list
 /// box's option it would draw, `unencodable-option`. The warning says the
-/// kind, never the text.
+/// kind, never the text. The op refuses the combo box's text, so it's put
+/// as only a file gives one (`fx::put_value`); a list box's option no font
+/// draws doesn't refuse a choice of another.
 #[test]
 fn what_no_font_draws_leaves_a_choice_with_no_appearance() {
     let mut f = Form::new(1);
@@ -417,7 +422,10 @@ fn what_no_font_draws_leaves_a_choice_with_no_appearance() {
         ("l", l, "a", "unencodable-option"),
     ] {
         let mut d = open(&bytes, None);
-        fx::choose(&mut d, name, &[value]);
+        match kind {
+            "unencodable" => fx::put_value(&mut d, name, Some(Value::Text(value.into()))),
+            _ => fx::choose(&mut d, name, &[value]),
+        }
         let (out, said) = warned(|| rewrite(&d, Profile::default()));
         let pdf = lazy(&out.bytes, None);
         assert!(ap_dict(&pdf, widget).is_none(), "{name}: no /AP");
@@ -520,15 +528,16 @@ fn each_widget_of_a_choice_gets_its_form() {
 }
 
 /// An overlay of the page holds the save's form for a changed combo box,
-/// list box and one in two fonts, form for form (its box, matrix, content
-/// and font names), and no other; the page draws as its base does again
-/// once each value is put back.
+/// list box (multiple-select, two chosen) and one in two fonts, form for
+/// form (its box, matrix, content and font names), and no other; the page
+/// draws as its base does again once each value is put back.
 #[test]
 fn an_overlay_s_forms_are_the_save_s() {
     let mut f = Form::new(1);
     let c = choice(&mut f, "c", row(0), ABCD, true);
     f.fill(c, "a");
     let l = choice(&mut f, "l", tall(2), ABCD, false);
+    f.dict(l).set("Ff", flags::MULTI_SELECT as i64);
     let options = &[("a", "Alpha"), ("l", "\u{141}ukasz")];
     let two = choice(&mut f, "two", row(5), options, true);
     let bytes = table(&mut f);
@@ -558,4 +567,141 @@ fn an_overlay_s_forms_are_the_save_s() {
     fx::choose(&mut d, "l", &[]);
     fx::choose(&mut d, "two", &[]);
     assert!(untouched(d.state(), p0, &screen), "put back");
+}
+
+// ----- the value (M10 slice 9) ----------------------------------------------
+
+/// The indexes `field`'s `/I` holds in `pdf`; none where it has none.
+fn list_indexes(pdf: &LazyPdf, field: ObjectId) -> Option<Vec<i64>> {
+    let i = pdf.get_dictionary(field).ok()?.get(b"I")?;
+    let i = i.as_array().expect("an array");
+    Some(
+        i.iter()
+            .map(|n| n.as_integer().expect("an index"))
+            .collect(),
+    )
+}
+
+/// What the family's reading of the list box named `name` in the file
+/// `bytes` selects (by `/I` where it agrees with `/V`) and shows at its
+/// top (`/TI`).
+fn family_selects(bytes: &[u8], name: &str) -> (Vec<usize>, usize) {
+    let src = super::tests::source(bytes, None);
+    let pdf = src.pdf();
+    let unkept = Unkept::default();
+    let objects = Objects::new(pdf, &unkept);
+    let limits = family::Limits::DEFAULT;
+    let form = (family::read(objects, pdf.catalog().unwrap(), &limits).unwrap()).expect("a form");
+    let (_, field) = (form.terminals())
+        .find(|(i, _)| form.full_name(*i).as_deref() == Some(name))
+        .unwrap_or_else(|| panic!("the family reads no {name}"));
+    let choice = family::field_choice(field, objects, &limits).expect("a choice");
+    let list = choice.list().expect("a list box");
+    let mut selected = list.selected.to_vec();
+    selected.sort_unstable();
+    (selected, list.top)
+}
+
+/// A list box's value is a save's `/V` and what it selects its `/I` (M10
+/// slice 9), by a Rewrite and by an Append, read back alike by sheaf's
+/// reader and the family's, the family selecting by that `/I`: one option
+/// (the file's `/I` replaced), several of a multiple-select one, a value
+/// two options share as their export value (both selected), and an `/Opt`
+/// whose first item is no text (`[1 (a) (b)]`, `/TI 1`), its `/I` the
+/// file's place. A combo box's `/V` is the value and it has no `/I`, the
+/// file's left out.
+#[test]
+fn a_choice_s_value_and_its_list_box_s_indexes_are_written_both_ways() {
+    let mut f = Form::new(1);
+    let one = choice(&mut f, "one", tall(0), ABCD, false);
+    f.dict(one).set("V", literal("a"));
+    f.dict(one).set("I", vec![Object::from(0)]);
+    let several = choice(&mut f, "several", tall(2), ABCD, false);
+    f.dict(several).set("Ff", i64::from(flags::MULTI_SELECT));
+    let shared = &[("a", "First"), ("a", "Second"), ("b", "b")];
+    choice(&mut f, "twice", tall(4), shared, false);
+    let placed = choice(&mut f, "placed", tall(6), &[], false);
+    f.dict(placed)
+        .set("Opt", vec![1.into(), literal("a"), literal("b")]);
+    f.dict(placed).set("TI", 1);
+    let combo = choice(&mut f, "combo", row(8), ABCD, true);
+    f.dict(combo).set("V", literal("a"));
+    f.dict(combo).set("I", vec![Object::from(0)]);
+    let bytes = table(&mut f);
+    for how in ["a Rewrite", "an Append"] {
+        let dir = scratch();
+        let (path, mut d) = opened(&dir, "c.pdf", &bytes);
+        fx::choose(&mut d, "one", &["c"]);
+        fx::choose(&mut d, "several", &["d", "b"]);
+        fx::choose(&mut d, "twice", &["a"]);
+        fx::choose(&mut d, "placed", &["b"]);
+        fx::choose(&mut d, "combo", &["b"]);
+        saved_each_way(&mut d, &path, how);
+        let now = std::fs::read(&path).unwrap();
+        let pdf = lazy(&now, None);
+        let items = |texts: &[&str]| {
+            let ours = texts.iter().map(|&t| Arc::from(t)).collect();
+            let theirs = texts.iter().map(|&t| t.to_string()).collect();
+            (Some(Value::Items(ours)), Some(Theirs::Items(theirs)))
+        };
+        let values = [
+            ("one", text_read("c"), Some(vec![2]), (vec![2], 0)),
+            (
+                "several",
+                items(&["b", "d"]),
+                Some(vec![1, 3]),
+                (vec![1, 3], 0),
+            ),
+            ("twice", text_read("a"), Some(vec![0, 1]), (vec![0, 1], 0)),
+            ("placed", text_read("b"), Some(vec![2]), (vec![2], 1)),
+        ];
+        for (name, value, indexes, selects) in values {
+            let id = (d.state().field_named(name))
+                .and_then(|f| d.state().field(f)?.src.as_ref().map(|r| r.id))
+                .unwrap();
+            assert_eq!(read_back(&now, name), value, "{how}: {name}");
+            assert_eq!(list_indexes(&pdf, id), indexes, "{how}: {name}");
+            assert_eq!(family_selects(&now, name), selects, "{how}: {name}");
+        }
+        assert_eq!(read_back(&now, "combo"), text_read("b"), "{how}");
+        assert_eq!(list_indexes(&pdf, combo), None, "{how}: a combo box's");
+        let shown = shows(&saved_form(&pdf, placed).0.content);
+        assert_eq!(shown, bytes_of(&["a", "b"]), "{how}: from /TI on");
+    }
+}
+
+/// A combo box or list box cleared under a parent that holds a `/V` is
+/// written with no value of its own that selects nothing: a combo box's
+/// the empty text, a list box's an empty array (the empty text would select
+/// an option of empty text), and no `/I`. Both ways, read back alike by
+/// sheaf and the family.
+#[test]
+fn a_cleared_choice_under_a_parent_holding_a_value_selects_nothing() {
+    let mut f = Form::new(1);
+    let list = choice(&mut f, "l", tall(0), ABCD, false);
+    f.dict(list).set("V", literal("b"));
+    f.dict(list).set("I", vec![Object::from(1)]);
+    let combo = choice(&mut f, "c", row(4), ABCD, true);
+    f.dict(combo).set("V", literal("b"));
+    let parent = f.group("p", &[list, combo]);
+    f.dict(parent).set("V", literal("a"));
+    let bytes = table(&mut f);
+    for how in ["a Rewrite", "an Append"] {
+        let dir = scratch();
+        let (path, mut d) = opened(&dir, "c.pdf", &bytes);
+        fx::choose(&mut d, "p.l", &[]);
+        fx::choose(&mut d, "p.c", &[]);
+        saved_each_way(&mut d, &path, how);
+        let now = std::fs::read(&path).unwrap();
+        let pdf = lazy(&now, None);
+        let none = (
+            Some(Value::Items(Arc::from([]))),
+            Some(Theirs::Items(Vec::new())),
+        );
+        assert_eq!(read_back(&now, "p.l"), none, "{how}");
+        assert_eq!(list_indexes(&pdf, list), None, "{how}");
+        assert_eq!(family_selects(&now, "p.l"), (Vec::new(), 0), "{how}");
+        assert_eq!(read_back(&now, "p.c"), text_read(""), "{how}");
+        assert_eq!(value_of(&pdf, parent).as_deref(), Some(b"a".as_slice()));
+    }
 }

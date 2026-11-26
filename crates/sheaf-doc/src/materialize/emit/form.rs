@@ -8,13 +8,41 @@
 //!   instance whose names clashed is written from its record. Copy 0 of
 //!   the primary's own keeps its numbers, and a field the save changed
 //!   nothing of is the file's object as it is.
-//! - **A field merged with its one widget** (ISO 32000-1 12.7.3.1) is one
-//!   object under [`ObjKey::Field`]: the page's `/Annots` names it, and the
-//!   widget's key is an alias of it ([`Plan::aliases`]), so no number is
-//!   written twice. A copy stays merged, with no `/Parent` but the tree's,
-//!   so it's never an orphan. One whose widget the state shows more than
-//!   once (a page the tree lists twice) is written apart: the field's keys
-//!   in the field, each widget with the widget's.
+//! - **A field whose value changed** ([`value_changed`]: its value isn't
+//!   its source's field's as read, a text's none and empty alike, a
+//!   group's none and `Off`; M10 slice 9) is written from the model, never
+//!   as the file's object: `/V` the value (a text as a text string,
+//!   `pdf::text::string`; a list box's several an array of them; a check
+//!   box's or radio group's state a name), where the file's was or after
+//!   its keys; with no value, none, unless an ancestor's `/V` would be
+//!   inherited in its place, then the empty text, a list box's empty
+//!   array, or `/Off`. An ancestor's `/V` that every field that took it
+//!   holds another than now ([`value_orphaned`]) is left out, its `/RV`
+//!   too, by a whole file and a section: a replaced value isn't kept in
+//!   the node it was inherited from. A list box's `/I` is the indexes into its `/Opt` of
+//!   the options its value selects, as its appearance highlights them,
+//!   none where nothing is; a combo box's goes, its `/V` all it holds. Its
+//!   rich value (`/RV`) goes, which would show the old value; its default
+//!   style (`/DS`), `/DV`, `/Opt`, `/TI` and the rest are the file's. A
+//!   password field's value is never written: no `/V` at all, the file's
+//!   gone too, and its appearance draws a star a character. An overlay
+//!   writes the value as a save does.
+//! - **A field whose own dictionary is a widget** (ISO 32000-1 12.7.3.1)
+//!   is one object with it under [`ObjKey::Field`], as its file has it,
+//!   whatever other widgets it has, which are its kids beside it
+//!   ([`joined`], which the Append's scope and the realizer's predicate ask
+//!   too): the page's `/Annots` names it, and the widget's key is an alias
+//!   of it ([`Plan::aliases`]), so no number is written twice, and an
+//!   Append of it writes the field at its number and no page. A copy
+//!   stays merged, with no `/Parent` but the tree's, so it's never an
+//!   orphan. One whose widget the state shows more than once (a page the
+//!   tree lists twice) is written apart: the field's keys in the field,
+//!   each widget with the widget's. So is one an overlay writes without
+//!   that widget's page: the field's keys alone, as no page it writes
+//!   lists the widget. One an overlay writes with that widget and none of
+//!   its kids lists them still, where its base has them: PDFium takes a
+//!   field's own dictionary for its widget only where the field lists no
+//!   kids, and draws it then, which it doesn't from the file.
 //! - **Widgets** not merged are their source's, `/Parent` their field and
 //!   `/P` their page, `/StructParent` kept only where the page keeps its
 //!   tags.
@@ -24,9 +52,9 @@
 //!   [`ObjKey::AnnotPart`] (`Part::Ap`), the widget's `/AP` `<< /N … >>`
 //!   alone, so an overlay and a save write the same form. The file's
 //!   `/AP` isn't copied, so a Rewrite holds none of the old appearance's
-//!   streams. One that can't be made leaves the widget with no `/AP`. Its
-//!   `/V` is written as the file has it: no save writes a value before M10
-//!   slice 9.
+//!   streams. One that can't be made leaves the widget with no `/AP`, and
+//!   a save warns of it, by kind (an overlay at debug level, as it's made
+//!   at every realize).
 //! - **A check box's or radio button's widget whose state changed**
 //!   ([`appearance::state_changed`]) gets its `/AS` written from the model.
 //!   Where its file's normal appearance has no on state
@@ -36,19 +64,17 @@
 //!   the maker made none, `on` the name a press puts in `/AS`; the mark
 //!   drawn in ZapfDingbats as the standard 14 font is written by name, one
 //!   dictionary a file however many forms name it. One whose file's has
-//!   keeps it, and only `/AS` moves. Its field's `/V` is the file's, as a
-//!   text field's is, until M10 slice 9.
+//!   keeps it, and only `/AS` moves.
 //! - **A combo box's or list box's widget whose value changed**
 //!   ([`appearance::stale`]) gets its appearance made anew as a text
 //!   field's is, in the field's font and the fallback: one form under
-//!   `Part::Ap`, `<< /N … >>`. Its field's `/V` and `/I` are the file's
-//!   until M10 slice 9.
+//!   `Part::Ap`, `<< /N … >>`.
 //! - **A push button's widget whose captions changed**
 //!   ([`appearance::stale`]) gets its appearances made anew from them, in
 //!   the field's font and the fallback: `/N` under `Part::Ap`, and where its
 //!   `/H` is `/P` or `/T` `/R` under `ApRollover` and `/D` under `ApDown`,
 //!   `<< /N … /R … /D … >>`. One nothing changed keeps its own, and one with
-//!   none stays so. Its `/MK` is the file's, as a field's `/V` is.
+//!   none stays so. Its `/MK` is the file's: no op changes a caption.
 //! - **Widgets on page templates** (`/Names /Templates`) aren't records: a
 //!   primary field's kids the records don't account for and no page shows
 //!   stay in its `/Kids`, as the file has them.
@@ -71,7 +97,18 @@
 //!   are the same everywhere).
 //! - **Save policy** ([`SaveTransform`]) applies here: `DropXfa` leaves
 //!   `/XFA` out, its tooltips in the fields' `/TU`; `FixSigFlags` drops
-//!   `/SigFlags` when nothing signed needs it (`DropUr3` is the catalog's).
+//!   `/SigFlags` when nothing signed needs it (`DropUr3` is the catalog's);
+//!   `FillAppearances` makes an appearance for each widget it writes that
+//!   its file left to the viewer ([`appearance::missing`]: a valued text
+//!   field's or choice's, a check box's or radio button's, a captioned push
+//!   button's, none with one), as for a stale one, `/NeedAppearances` kept.
+//!   The first save that changes the form carries it, and an Append's
+//!   scope then holds every such widget (`deps`); a save after it carries
+//!   its record's and makes those it writes (a pressed group's other
+//!   buttons, a filled field's other widgets), which it would otherwise
+//!   write bare, as the opened file has them, over the ones that save
+//!   made. An overlay carries it whenever a save of its state would, and
+//!   no other transform: the realizer draws what the save writes.
 //! - **An overlay's form** is of the fields with a widget on its pages
 //!   ([`Plan::scoped`]): `/Fields` its roots among them, each node's
 //!   `/Kids` those of its nodes and its widgets that are, so PDFium loads
@@ -87,17 +124,18 @@ use std::sync::Arc;
 use crate::pdf::forms::FieldFont;
 use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, StringFormat, Value as PdfValue, literal};
 
-use super::Cx;
+use super::{Cx, PdfVersion};
 use crate::annot::AnnotId;
 use crate::attachments::tree_names;
 use crate::content::{Fallback, Glyphs, Res, sink};
 use crate::forms::appearance::{self, DaFont, FontAt, Look, Made, Slot};
-use crate::forms::{FieldId, FieldKind, Value};
+use crate::forms::field::flags;
+use crate::forms::{FieldId, FieldKind, Value, value_changed};
 use crate::materialize::copy::Scope;
 use crate::materialize::key::{NameTree, ObjKey, Part};
 use crate::materialize::plan::SaveTransform;
 use crate::materialize::record::ACROFORM_OWNED;
-use crate::model::{AnnotRec, DocState, FieldNode, FormInst, PageId, Widget};
+use crate::model::{AnnotRec, DocState, FieldNode, FormInst, PageId, Terminal, Widget};
 use crate::source::{Limits, ObjRef};
 use crate::store::{BlobId, Src};
 
@@ -139,11 +177,16 @@ const MAX_SCRIPTS: usize = Limits::DEFAULT.forms.scripts;
 /// What the form's emission decides before the pages are written.
 #[derive(Default)]
 pub(crate) struct Plan {
-    /// Widgets that are their field's one object, by id: their field.
+    /// Widgets that are one object with their field ([`Joined::One`]), by
+    /// id: their field.
     merged: HashMap<AnnotId, FieldId>,
-    /// Fields read merged with a widget the state shows more than once:
-    /// written apart from their widgets.
+    /// Fields read merged with a widget the state shows more than once
+    /// ([`Joined::Split`]): written apart from their widgets.
     split: HashSet<FieldId>,
+    /// An overlay's fields one object with a widget on a page it doesn't
+    /// show: written without that widget's keys, which no page it writes
+    /// lists.
+    unshown: HashSet<FieldId>,
     /// `/DR` merged, when files other than the primary's bring forms.
     dr: Option<Dictionary>,
     /// Each other file's fonts renamed in `/DR`, by old name.
@@ -177,32 +220,84 @@ impl Plan {
     }
 }
 
+/// How a field is written with its widgets ([`joined`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Joined {
+    /// No widget of it was read as its own dictionary: each is an object of
+    /// its own, a kid of it.
+    Kids,
+    /// Its own dictionary is this widget's, as its file has it: the two are
+    /// one object, and its other widgets, if any, are its kids beside it.
+    One(AnnotId),
+    /// The state shows the widget that's its own dictionary more than once
+    /// (a page the tree lists twice): the field and each widget are
+    /// written apart.
+    Split,
+}
+
+impl Joined {
+    /// The widget it's one object with, if any.
+    pub(crate) fn widget(self) -> Option<AnnotId> {
+        match self {
+            Joined::One(w) => Some(w),
+            Joined::Kids | Joined::Split => None,
+        }
+    }
+}
+
+/// How field `f` of `st` is written with its widgets, by every emission:
+/// one object with the widget of it read as its own dictionary, however
+/// many other widgets it has; apart where the state shows that widget more
+/// than once, or none of its widgets is it. What [`prepare`] writes, what
+/// an Append's scope brings in for it (`deps.rs`), and what the realizer's
+/// predicate takes as written as its file has it (`untouched.rs`).
+pub(crate) fn joined(st: &DocState, f: FieldId) -> Joined {
+    let Some(node) = st.field(f) else {
+        return Joined::Kids;
+    };
+    let (Some(src), Some(term)) = (&node.src, node.term.as_deref()) else {
+        return Joined::Kids;
+    };
+    let own = |w: &AnnotId| {
+        (st.annot(*w).and_then(AnnotRec::widget))
+            .is_some_and(|w| w.merged && w.src.as_ref().is_some_and(|r| r.id == src.id))
+    };
+    let mut own = term.widgets.iter().copied().filter(own);
+    match (own.next(), own.next()) {
+        (None, _) => Joined::Kids,
+        (Some(w), None) => Joined::One(w),
+        (Some(_), Some(_)) => Joined::Split,
+    }
+}
+
 /// The form's plan, and its fields' claims to the primary's numbers: copy 0
 /// of the primary's own nodes keep theirs. An overlay's is of the fields
 /// with a widget on its pages alone.
 pub(crate) fn prepare(cx: &mut Cx) -> Plan {
     let st = cx.st;
     let scoped = (cx.overlay).map(|_| scoped(st, cx.shown.keys().copied()));
-    let terminals = (nodes(st, scoped.as_ref()))
-        .filter_map(|(fid, node)| Some((fid, &**node, &**node.term.as_ref()?)));
     let mut merged = HashMap::new();
     let mut split = HashSet::new();
-    for (fid, node, term) in terminals {
-        let Some(src) = &node.src else {
-            continue;
-        };
-        let shows: Vec<(AnnotId, &Arc<Widget>)> = (term.widgets.iter())
-            .filter_map(|&w| Some((w, st.annot(w)?.widget()?)))
-            .collect();
-        let one = |w: &Widget| w.merged && w.src.as_ref().is_some_and(|r| r.id == src.id);
-        match shows.as_slice() {
-            [(w, widget)] if one(widget) => {
-                merged.insert(*w, fid);
+    let mut unshown = HashSet::new();
+    let terminals = nodes(st, scoped.as_ref()).filter(|(_, node)| node.term.is_some());
+    for (fid, _) in terminals {
+        match joined(st, fid) {
+            // An overlay that doesn't show that widget's page writes the
+            // field apart: merged, it would hold a widget's keys no page it
+            // writes lists, `/P` naming a page it doesn't write.
+            Joined::One(w)
+                if cx.overlay.is_some()
+                    && !(st.annot(w)).is_some_and(|a| cx.shown.contains_key(&a.page)) =>
+            {
+                unshown.insert(fid);
             }
-            many if many.iter().any(|(_, w)| one(w)) => {
+            Joined::One(w) => {
+                merged.insert(w, fid);
+            }
+            Joined::Split => {
                 split.insert(fid);
             }
-            _ => {}
+            Joined::Kids => {}
         }
     }
     let primary = cx.primary.id();
@@ -227,6 +322,7 @@ pub(crate) fn prepare(cx: &mut Cx) -> Plan {
     let mut plan = Plan {
         merged,
         split,
+        unshown,
         dr: None,
         renamed: HashMap::new(),
         others,
@@ -465,8 +561,9 @@ pub(crate) fn widget(
     let key = ObjKey::Annot(aid);
     // Its text or choice field's value changed, its check box's or radio
     // button's state where its file has no appearance of it, or its push
-    // button's captions: its appearance is made anew.
-    let stale = appearance::stale(st, aid);
+    // button's captions, or save policy makes one its file left to the
+    // viewer: its appearance is made anew.
+    let stale = appearance::stale(st, aid) || fills(cx, key, aid);
     // Its button's state changed: its `/AS` is the model's.
     let changed = appearance::state_changed(st, aid);
     // Nothing of it changes: the file's object as it is, unbuilt.
@@ -526,6 +623,16 @@ pub(crate) fn widget(
     Some(cx.placeholder(key))
 }
 
+/// Whether widget `aid`, written under `key`, gets the appearance its file
+/// left to the viewer ([`appearance::missing`]): the emission carries
+/// `SaveTransform::FillAppearances` and writes it. One an Append leaves out
+/// isn't made: the saved file has it as the save that made it wrote it.
+fn fills(cx: &Cx, key: ObjKey, aid: AnnotId) -> bool {
+    cx.transforms.contains(&SaveTransform::FillAppearances)
+        && cx.writes(&key)
+        && appearance::missing(cx.st, aid)
+}
+
 /// Widget `aid`'s appearance, made anew for its field as the model holds
 /// it ([`appearance::stale`]: a text or choice field's value, a check box's
 /// or radio button's state, a push button's captions) and bound as a
@@ -547,7 +654,11 @@ pub(crate) fn widget(
 /// radio button's in state dictionaries (`<< /N << /on … /Off … >> /D <<
 /// … >> >>`, `on` its look's on state's name, no `/Off` where none was
 /// made), nothing else of the file's (its `/D` and `/R` would show the old
-/// value or caption). None where none can be made: the widget is written with no
+/// value or caption). A form written needs PDF 1.3
+/// ([`PdfVersion::LEAN_FORMS`]: it has no `/FormType` or `/Name`), so a
+/// Rewrite of an older file says 1.3 in its header, and an Append a later
+/// version in its catalog (1.4 at least, `PdfVersion::CATALOG_VERSION`).
+/// None where none can be made: the widget is written with no
 /// `/AP`, so no file shows a value the field no longer holds, and a
 /// warning says which kind, never the text.
 fn appearance(cx: &mut Cx, aid: AnnotId, src: &Src) -> Option<Object> {
@@ -565,6 +676,12 @@ fn appearance(cx: &mut Cx, aid: AnnotId, src: &Src) -> Option<Object> {
     });
     let (look, Made { forms, glyphs }) = match made {
         Ok(made) => made,
+        // A save's, once a widget a save; an overlay's at debug, as one is
+        // made at every realize of its page.
+        Err(why) if cx.overlay.is_some() => {
+            log::debug!("a widget's appearance can't be made ({why}): it has none");
+            return None;
+        }
         Err(why) => {
             log::warn!("a widget's appearance can't be made ({why}): it has none");
             return None;
@@ -593,6 +710,7 @@ fn appearance(cx: &mut Cx, aid: AnnotId, src: &Src) -> Option<Object> {
             let (bbox, matrix) = (form.bbox, form.matrix);
             let form = sink::form(cx, bbox, matrix, form.content, &form.needs, glyphs);
             cx.push(key, Object::from(form));
+            cx.needs(PdfVersion::LEAN_FORMS);
         }
         let form = cx.placeholder(key);
         match on {
@@ -609,6 +727,116 @@ fn appearance(cx: &mut Cx, aid: AnnotId, src: &Src) -> Option<Object> {
         }
     }
     Some(Object::from(ap))
+}
+
+/// Terminal `term`'s value, field `node`'s, which changed
+/// ([`value_changed`]), as its dictionary is written, in place of the
+/// file's `/V`, `/RV` and a choice's `/I`: its `/V` and its `/I`. `/V` is
+/// the model's (a text as a text string, [`text::string`], a list box's
+/// several an array of them, a check box's or radio group's state a name,
+/// [`state_name`]); with no value, none, unless an ancestor's `/V` would
+/// be inherited in its place ([`inherits_value`]): then the empty text, a
+/// list box's empty array (an empty text would select an option of empty
+/// text), or `/Off`. A password field's value is never written: no `/V`
+/// at all. A list box's `/I` is the indexes into its options (its file's
+/// `/Opt`, every place kept) of those its value selects, as its made
+/// appearance highlights them ([`appearance::selected_by_value`]), none
+/// where nothing is; a combo box's is left out, its `/V` all it holds.
+///
+/// [`text::string`]: crate::pdf::text::string
+fn written_value(
+    st: &DocState,
+    node: &FieldNode,
+    term: &Terminal,
+    drops: bool,
+) -> (Option<Object>, Option<Object>) {
+    if term.kind == FieldKind::Text && term.flags & flags::PASSWORD != 0 {
+        return (None, None);
+    }
+    let v = match &term.value {
+        Some(Value::Text(text)) => Some(crate::pdf::text::string(text)),
+        Some(Value::Items(items)) => Some(Object::from(
+            (items.iter().map(|t| crate::pdf::text::string(t))).collect::<Vec<_>>(),
+        )),
+        Some(Value::State(state)) => Some(state_name(state)),
+        Some(Value::Signed) => None,
+        None if inherits_value(st, node, drops) => Some(match term.kind {
+            FieldKind::CheckBox | FieldKind::Radio => Object::name("Off"),
+            FieldKind::List => Object::from(Vec::<Object>::new()),
+            _ => crate::pdf::text::string(""),
+        }),
+        None => None,
+    };
+    let selected = match term.kind {
+        FieldKind::List => appearance::selected_by_value(term),
+        _ => Vec::new(),
+    };
+    let i = (!selected.is_empty()).then(|| {
+        let indexes: Vec<Object> = (selected.into_iter())
+            .map(|i| Object::from(i64::try_from(i).unwrap_or(i64::MAX)))
+            .collect();
+        Object::from(indexes)
+    });
+    (v, i)
+}
+
+/// Whether an ancestor of field `node` holds a `/V` its file has that the
+/// save writes, so a terminal with none of its own would inherit it (ISO
+/// 32000-1 Table 220): one a whole file or a section leaves out
+/// ([`value_orphaned`], where `drops`) isn't there to inherit.
+fn inherits_value(st: &DocState, node: &FieldNode, drops: bool) -> bool {
+    let mut at = node.parent;
+    while let Some(up) = at.and_then(|p| st.field(p)) {
+        if file_holds_value(up) && !(drops && value_orphaned(st, up)) {
+            return true;
+        }
+        at = up.parent;
+    }
+    false
+}
+
+/// Whether `node`'s own dictionary, as its file has it, holds a `/V`.
+fn file_holds_value(node: &FieldNode) -> bool {
+    (node.src.as_ref())
+        .and_then(|r| r.src.pdf().get_dictionary(r.id).ok())
+        .is_some_and(|d| d.has(b"V"))
+}
+
+/// Whether `node`, no terminal, whose file gives it a `/V` for the fields
+/// under it to inherit, holds one nothing shows any more: a terminal that
+/// took it (none of its own in its file, and no nearer node's) holds
+/// another value now ([`value_changed`]), and none still holds it. A save
+/// leaves such a `/V` out, and the node's `/RV` with it: it is the value
+/// those fields had, which a replaced value's Rewrite is there to take out
+/// of the file, and each of them writes its own or, cleared, none. Where
+/// another terminal still takes it, it stays, that field's value, and a
+/// cleared one beside it writes an empty one of its own
+/// ([`inherits_value`]). A walk of the nodes under `node`, asked only of a
+/// node whose file holds a `/V`.
+fn value_orphaned(st: &DocState, node: &FieldNode) -> bool {
+    let mut moved = false;
+    let mut next: Vec<FieldId> = node.kids.iter().copied().collect();
+    // A node is asked once, should kids ever make a loop.
+    let mut left = st.field_count();
+    while let Some(kid) = next.pop() {
+        if left == 0 {
+            break;
+        }
+        left -= 1;
+        let Some(kid) = st.field(kid) else {
+            continue;
+        };
+        // Its own value, or the one the nodes under it take.
+        if file_holds_value(kid) {
+            continue;
+        }
+        match kid.term.as_deref() {
+            Some(term) if value_changed(kid, term) => moved = true,
+            Some(_) => return false,
+            None => next.extend(kid.kids.iter().copied()),
+        }
+    }
+    moved
 }
 
 /// A button's state as the name `/AS` writes: its bytes as the model holds
@@ -950,7 +1178,8 @@ impl Fields {
         let copy = node.inst.copy;
         let scope = Scope { src: &r.src, copy };
         let term = node.term.as_ref();
-        let split = cx.form.split.contains(&fid);
+        // Written apart from the widget that's its own dictionary.
+        let split = cx.form.split.contains(&fid) || cx.form.unshown.contains(&fid);
         // The widget it's one object with, and that widget's page.
         let merged = (term.into_iter().flat_map(|t| t.widgets.iter()))
             .find(|&&w| cx.form.merged_into(w) == Some(fid))
@@ -959,10 +1188,22 @@ impl Fields {
         let tags = one.is_some_and(|page| cx.keeps_tags(page));
         // That widget's text or choice field's value changed, its check
         // box's or radio button's state where its file has no appearance of
-        // it, or its push button's captions: its appearance is made anew.
-        let stale = merged.is_some_and(|w| appearance::stale(st, w));
+        // it, or its push button's captions, or save policy makes one its
+        // file left to the viewer: its appearance is made anew.
+        let stale =
+            merged.is_some_and(|w| appearance::stale(st, w) || fills(cx, ObjKey::Field(fid), w));
         // That widget's button's state changed: its `/AS` is the model's.
         let changed = merged.and_then(|w| appearance::state_changed(st, w));
+        // Its value isn't its file's: `/V` is the model's, or for a
+        // password, none, and a list box's `/I` what it selects.
+        let value = term.filter(|t| t.value != Some(Value::Signed) && value_changed(node, t));
+        // A whole file and a section leave out a `/V` this node, no
+        // terminal, held for fields that all hold another now; an overlay
+        // keeps it, as its base has it: nothing draws it.
+        let drops = cx.overlay.is_none();
+        let orphaned = drops && term.is_none() && read.has(b"V") && value_orphaned(st, node);
+        let (mut v_now, mut i_now) =
+            value.map_or((None, None), |t| written_value(st, node, t, drops));
         let mut kids = kids;
         for &w in term.into_iter().flat_map(|t| t.widgets.iter()) {
             // An overlay's are those on its pages.
@@ -972,13 +1213,29 @@ impl Fields {
                 kids.push(cx.placeholder(ObjKey::Annot(w)));
             }
         }
+        // An overlay that shows the widget it's one object with and none of
+        // its kids lists them still, where they are in its base (copy 0 of
+        // its own source's): with no `/Kids`, PDFium would take the field's
+        // own dictionary for its widget, which it doesn't from the file,
+        // and draw it.
+        let primary = cx.primary.id();
+        let own = copy == 0 && r.src.id() == primary;
+        if self.scoped.is_some() && merged.is_some() && kids.is_empty() && own {
+            let theirs: Vec<ObjectId> = (term.into_iter().flat_map(|t| t.widgets.iter()))
+                .filter(|&&w| cx.form.merged_into(w).is_none())
+                .filter_map(|&w| Some(st.annot(w)?.widget()?.src.as_ref()?.id))
+                .collect();
+            for id in theirs {
+                let kid = cx.sym(&Object::from(id), &scope);
+                kids.push(kid);
+            }
+        }
         // Widgets on page templates: a kid of the primary's own instance
         // nothing accounts for and that no page shows, when it's a widget.
         // Any other such kid isn't the field's to write: a page, or the
         // catalog, as 0092321's `Page2[0]` lists it, copied as a kid would
         // carry what the save wrote anew, a removed generator's text in
         // the catalog's `/SHEF_Generators` among it (Greg, 2026-10-22).
-        let primary = cx.primary.id();
         if copy == 0 && r.src.id() == primary && !split && self.scoped.is_none() {
             let pdf = r.src.pdf();
             let listed = (read.get(b"Kids"))
@@ -1017,6 +1274,8 @@ impl Fields {
             && !split
             && !stale
             && changed.is_none()
+            && value.is_none()
+            && !orphaned
             && tip.is_none()
             && defaults_kept
             && (one.is_none() || tags)
@@ -1045,11 +1304,35 @@ impl Fields {
                 // appearance's streams for nothing to name.
                 b"AP" if stale => {}
                 b"AS" if let Some(state) = changed => out.set("AS", state_name(state)),
+                // The old value's, which the model's replaces where the
+                // file has it: its rich text gone, and a choice's selected
+                // indexes.
+                b"V" if value.is_some() => {
+                    if let Some(v) = v_now.take() {
+                        out.set("V", v);
+                    }
+                }
+                b"I" if value
+                    .is_some_and(|t| matches!(t.kind, FieldKind::Combo | FieldKind::List)) =>
+                {
+                    if let Some(i) = i_now.take() {
+                        out.set("I", i);
+                    }
+                }
+                b"RV" if value.is_some() => {}
+                // A value its fields all replaced: theirs to write.
+                b"V" | b"RV" if orphaned => {}
                 _ => {
                     let v = cx.sym(v, &scope);
                     out.set(k, v);
                 }
             }
+        }
+        if let Some(v) = v_now {
+            out.set("V", v);
+        }
+        if let Some(i) = i_now {
+            out.set("I", i);
         }
         if let Some(w) = merged.filter(|_| stale)
             && let Some(ap) = appearance(cx, w, &r.src)

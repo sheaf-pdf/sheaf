@@ -16,7 +16,7 @@ use super::emit::{self, Emission, EmitBase, EmitScope, Overlay, RotatePolicy, Sy
 use super::key::{ObjKey, Part};
 use super::tests::{add, bytes, file, insert, open};
 use crate::annot::AnnotId;
-use crate::forms::fixture::{Form, every_kind_in, note};
+use crate::forms::fixture::{Form, every_kind_in, kids_beside, note};
 use crate::layers::LayerId;
 use crate::model::history_tests::{with_ours, with_theirs};
 use crate::model::visits;
@@ -716,6 +716,87 @@ fn the_group_form_lists_only_fields_with_a_widget_on_its_pages() {
                 .all(|(key, _)| !matches!(key, ObjKey::Field(_)))
         );
     }
+}
+
+/// A field whose own dictionary is a widget beside kid widgets, filled, in
+/// an overlay: of that widget's page, the two are one object as a save
+/// writes them, the field's dictionary holding the widget's keys (its `/P`
+/// the page, its made form) and its `/Kids` the page's kids, the page's
+/// `/Annots` naming the field; of a page with only a kid of it, the field
+/// is written apart, without that widget's keys, as no page the overlay
+/// writes lists the widget, and the widget's form isn't written; of both,
+/// one object, its `/Kids` both kids. Of that widget's page, where none of
+/// its kids is, the field lists them where its base has them.
+#[test]
+fn a_field_beside_its_kids_is_one_object_where_an_overlay_shows_its_own_widget() {
+    let mut d = opened(kids_beside().bytes(), "kids.pdf");
+    fx::fill(&mut d, "t", "Camden");
+    let st = d.state();
+    let field = st.field_named("t").unwrap();
+    let widgets: Vec<AnnotId> = (st.field(field).unwrap().term.as_ref().unwrap().widgets)
+        .iter()
+        .copied()
+        .collect();
+    let [own, k0, k1] = widgets[..] else {
+        panic!("the field's own and two kids: {widgets:?}")
+    };
+    let [p0, p1] = [0, 1].map(|i| d.page(i).unwrap());
+    let screen = ViewInputs::screen();
+    let kids = |e: &Emission, field| -> Vec<ObjKey> {
+        let kids = built(e, ObjKey::Field(field)).get(b"Kids").unwrap();
+        kids.as_array()
+            .unwrap()
+            .iter()
+            .map(|k| named(e, k))
+            .collect()
+    };
+    for (pages, listed_kids) in [(vec![p0], vec![k0]), (vec![p0, p1], vec![k0, k1])] {
+        let e = overlay(&d, &pages, &screen);
+        assert!(listed(&e, p0).contains(&ObjKey::Field(field)), "{pages:?}");
+        assert!(!writes(&e, ObjKey::Annot(own)), "{pages:?}");
+        let dict = built(&e, ObjKey::Field(field));
+        assert_eq!(dict.get(b"Subtype"), Some(&Object::name("Widget")));
+        assert_eq!(named(&e, dict.get(b"P").unwrap()), ObjKey::Page(p0));
+        let ap = dict.get(b"AP").and_then(Object::as_dict).unwrap();
+        let ap = named(&e, ap.get(b"N").unwrap());
+        assert_eq!(ap, ObjKey::AnnotPart(own, Part::Ap), "{pages:?}");
+        assert!(writes(&e, ap), "{pages:?}");
+        let want: Vec<ObjKey> = listed_kids.into_iter().map(ObjKey::Annot).collect();
+        assert_eq!(kids(&e, field), want, "{pages:?}");
+    }
+    let e = overlay(&d, &[p1], &screen);
+    let dict = built(&e, ObjKey::Field(field));
+    for key in [b"Subtype".as_slice(), b"Rect", b"P", b"F", b"AP"] {
+        assert!(!dict.has(key), "{:?}", String::from_utf8_lossy(key));
+    }
+    assert_eq!(dict.get(b"FT"), Some(&Object::name("Tx")));
+    assert_eq!(kids(&e, field), [ObjKey::Annot(k1)]);
+    let on_p1 = listed(&e, p1);
+    assert!(on_p1.contains(&ObjKey::Annot(k1)) && !on_p1.contains(&ObjKey::Field(field)));
+    assert!(!writes(&e, ObjKey::AnnotPart(own, Part::Ap)));
+    assert!(writes(&e, ObjKey::AnnotPart(k1, Part::Ap)));
+
+    // Of that widget's page alone, none of its kids on it: they're listed
+    // where the base has them, so the field's dictionary is no terminal
+    // widget of its own.
+    let mut f = Form::new(2);
+    let c = f.check_box("c", 0, crate::forms::fixture::row(0), false);
+    let row = crate::forms::fixture::row(1);
+    let kid = f.kid_beside(c, 1, row, Some("Two"));
+    let mut d = opened(f.bytes(), "far.pdf");
+    let st = d.state();
+    let field = st.field_named("c").unwrap();
+    let own = st.field(field).unwrap().term.as_ref().unwrap().widgets[0];
+    fx::press(&mut d, own);
+    let p0 = d.page(0).unwrap();
+    let e = overlay(&d, &[p0], &screen);
+    let base = ObjKey::Base {
+        blob: d.primary().id(),
+        obj: kid,
+        copy: 0,
+    };
+    assert_eq!(kids(&e, field), [base]);
+    assert!(!writes(&e, base));
 }
 
 /// A form inserted from a file whose form's defaults (`/DA`, `/Q`) aren't

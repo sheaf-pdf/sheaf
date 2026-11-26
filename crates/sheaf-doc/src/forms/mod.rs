@@ -34,7 +34,7 @@ pub mod xfa;
 mod tests;
 
 pub use check::{Finding, Report, check, check_file, check_latest};
-pub use field::{Field, FieldId, FieldKind, Value, Widget};
+pub use field::{Field, FieldId, FieldKind, Value, Widget, value_changed};
 pub use group::{Buttons, Change, buttons};
 pub use read::{FileForm, FormClass, FormFacts, read};
 

@@ -575,6 +575,7 @@ impl HeapSize for FieldProps {
 impl HeapSize for Terminal {
     fn heap_size(&self) -> usize {
         self.value.heap_size()
+            + self.display.heap_size()
             + self.default.heap_size()
             + self.widgets.heap_size()
             + size_of::<FieldProps>()
@@ -768,6 +769,24 @@ impl HeapSize for Imported {
     }
 }
 
+/// A field's value as an op sets it: its texts.
+impl HeapSize for crate::tx::SetValue {
+    fn heap_size(&self) -> usize {
+        use crate::tx::SetValue as V;
+        match self {
+            V::Text(s) | V::State(s) | V::Export(s) => s.heap_size(),
+            V::Items(items) => items.heap_size(),
+            V::Clear | V::Press(_) => 0,
+        }
+    }
+}
+
+impl HeapSize for crate::tx::Set {
+    fn heap_size(&self) -> usize {
+        self.fields.heap_size() + self.value.heap_size() + self.display.heap_size()
+    }
+}
+
 /// What an op holds beyond its own size. Ids are plain data; a source,
 /// a blob and an OCR layer are counted where the store and the prims hold
 /// them.
@@ -823,6 +842,7 @@ impl HeapSize for ResolvedOp {
             R::SetOcrText { .. } => 0,
             R::SetWatermark { content, scope, .. } => content.heap_size() + scope.heap_size(),
             R::SetHeaderFooter { spec, scope } => spec.heap_size() + scope.heap_size(),
+            R::SetFieldValues { values, calculated } => values.heap_size() + calculated.heap_size(),
             R::Revert { label } => label.heap_size(),
         }
     }

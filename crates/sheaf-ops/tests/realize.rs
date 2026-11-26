@@ -9,7 +9,10 @@
 //! turned off, by a patch of the catalog; a comment hidden on its page and
 //! not its duplicate; a crop's comments, link and widget, and its content
 //! alone for OCR; sheaf's marks, renamed at open or not, left to the
-//! screen; and watermarks and backgrounds not yet saved (slice 16).
+//! screen; watermarks and backgrounds not yet saved (slice 16); and fields
+//! whose own dictionary is a widget beside kid widgets, pressed or filled,
+//! and a widget a `/NeedAppearances` form left bare, which a Rewrite makes
+//! once a field is filled (M10 slice 9).
 //!
 //! Each realization is the engine's segments read one after another, the
 //! base's bytes and the section after them. Pages are drawn through the
@@ -31,7 +34,7 @@ use futures::StreamExt;
 use futures::executor::block_on;
 
 use sheaf_doc::export::{Export, print_preview};
-use sheaf_doc::forms::fixture::{Form, every_mark_kind, write_marks};
+use sheaf_doc::forms::fixture::{Form, every_mark_kind, kids_beside, row, write_marks};
 use sheaf_doc::layers::LayerId;
 use sheaf_doc::model::Mark;
 use sheaf_doc::pdf::{
@@ -1176,4 +1179,138 @@ fn background_ocr_doesn_t_evict_visible_engines() {
     assert!(after.is_superset(&screen_s), "{after:?}");
     let theirs = after.len() - screen_s.len();
     assert!(theirs <= BACKGROUND_ENGINES, "{after:?}");
+}
+
+/// The widgets of the field named `name` in `d`, in the model's order.
+fn widgets_of(d: &Document, name: &str) -> Vec<sheaf_doc::AnnotId> {
+    let st = d.state();
+    let field = st.field_named(name).unwrap();
+    let term = st.field(field).unwrap().term.clone().unwrap();
+    term.widgets.iter().copied().collect()
+}
+
+/// Fields whose own dictionary is a widget beside kid widgets render from
+/// their realizations as the Rewrite does, live and appearances only
+/// (PDFium takes such a dictionary for its field's widget only where the
+/// field lists no kids, and then draws it live). A check box's own widget
+/// pressed, its kid on the same page, realizes that page alone, the field
+/// and that widget one object as the file has them; in [`kids_beside`],
+/// the check box's kid on the second page pressed realizes that page, the
+/// field written apart there, as it doesn't show that widget, and the
+/// first, where the field's own widget is, its `/V` the model's now (M10
+/// slice 9); its text field filled realizes both, in one group; and a
+/// check box's own widget pressed whose one kid is in another group
+/// realizes its page in a group of its own, the field one object with it
+/// there and its kid listed where the base has it. Each page left alone
+/// renders from the base.
+#[test]
+fn fields_beside_their_kids_render_as_saved() {
+    let views = views();
+    let renders = |d: &Document, pages: &[(usize, bool)], case: &str| {
+        let saved = saved(d);
+        let st = d.state();
+        for &(i, group) in pages {
+            let page = d.page(i).unwrap();
+            let view = views.view(st, page, &ViewInputs::plugin()).unwrap();
+            let realized = matches!(view.engine, EngineKey::Group(..));
+            assert_eq!(realized, group, "{case}: {view:?}");
+            renders_as_saved(&views, d, page, &saved, i as u32);
+        }
+    };
+    // Its own widget pressed, its one kid on its page.
+    let mut f = Form::new(2);
+    let c = f.check_box("c", 0, row(0), false);
+    f.kid_beside(c, 0, row(1), Some("Yes"));
+    let mut d = opened(f.bytes(), "kid.pdf", None);
+    let own = widgets_of(&d, "c")[0];
+    fx::press(&mut d, own);
+    renders(&d, &[(0, true), (1, false)], "its own widget pressed");
+    // Its kid on another page pressed.
+    let bytes = kids_beside().bytes();
+    let mut d = opened(bytes.clone(), "kids.pdf", None);
+    let kid = widgets_of(&d, "c")[2];
+    fx::press(&mut d, kid);
+    renders(
+        &d,
+        &[(0, true), (1, true)],
+        "its kid on the second page pressed",
+    );
+    // A text field of widgets on both pages filled.
+    let mut d = opened(bytes, "kids.pdf", None);
+    fx::fill(&mut d, "t", "Camden");
+    renders(&d, &[(0, true), (1, true)], "filled");
+    // Its own widget pressed, its one kid, of another on state, in the
+    // next group, which shows it off as the file has it.
+    let n = GROUP as usize + 1;
+    let mut f = Form::new(n);
+    let c = f.check_box("c", 0, row(0), false);
+    f.kid_beside(c, n - 1, row(1), Some("Two"));
+    let mut d = opened(f.bytes(), "far.pdf", None);
+    let own = widgets_of(&d, "c")[0];
+    fx::press(&mut d, own);
+    renders(
+        &d,
+        &[(0, true), (1, false), (n - 1, true)],
+        "its kid in another group",
+    );
+    let views_of = |i: usize| views.view(d.state(), d.page(i).unwrap(), &ViewInputs::plugin());
+    assert_ne!(views_of(0).unwrap().engine, views_of(n - 1).unwrap().engine);
+}
+
+/// A valued text field on the second page whose `/NeedAppearances` form
+/// left its widget with no appearance: once a field on the first page is
+/// filled, a save makes that widget's appearance (M10 slice 9's
+/// `FillAppearances`), and both pages, realized, render as the Rewrite
+/// does, live and appearances only, and so does the file the planned save,
+/// an Append, writes; as opened, the second page renders from the base, as
+/// the file is.
+#[test]
+fn a_need_appearances_form_s_bare_widget_renders_as_saved_once_a_field_is_filled() {
+    let views = views();
+    let mut f = Form::new(2);
+    f.text("other", 0, row(0));
+    let valued = f.text("valued", 1, row(0));
+    f.dict(valued).set("V", literal("Shown"));
+    let acroform = f.acroform;
+    f.dict(acroform).set("NeedAppearances", true);
+    let bytes = f.bytes();
+    let mut d = opened(bytes.clone(), "left.pdf", None);
+    let p1 = d.page(1).unwrap();
+    let view = views.view(d.state(), p1, &ViewInputs::plugin()).unwrap();
+    assert!(matches!(view.engine, EngineKey::Base(..)), "{view:?}");
+    renders_as_saved(&views, &d, p1, &bytes, 1);
+    fx::fill(&mut d, "other", "Filled");
+    let saved = saved(&d);
+    assert_ne!(
+        differing(&appearances(&bytes, None, 1), &appearances(&saved, None, 1)),
+        0,
+        "the Rewrite draws the widget the file left bare"
+    );
+    for i in 0..2 {
+        let page = d.page(i).unwrap();
+        let view = views.view(d.state(), page, &ViewInputs::plugin()).unwrap();
+        assert!(matches!(view.engine, EngineKey::Group(..)), "{i}: {view:?}");
+        renders_as_saved(&views, &d, page, &saved, i as u32);
+    }
+    // The save as planned, an Append, makes the widget too: its file draws
+    // as the Rewrite does, so the screen is the file whichever way it's
+    // saved.
+    let dir = common::scratch("realize-left");
+    let path = dir.join("left.pdf");
+    std::fs::write(&path, &bytes).unwrap();
+    let mut on_disk = common::open(&path);
+    fx::fill(&mut on_disk, "other", "Filled");
+    let (strategy, appended) = common::planned(&mut on_disk, &path);
+    assert_eq!(strategy, sheaf_doc::materialize::StrategyKind::Append);
+    assert!(appended.starts_with(&bytes));
+    for i in 0..2 {
+        let (ours, theirs) = (
+            appearances(&appended, None, i),
+            appearances(&saved, None, i),
+        );
+        assert_eq!(differing(&ours, &theirs), 0, "{i}: appended, appearances");
+        let ours = live(&appended, None, i, Rotation::R0);
+        let theirs = live(&saved, None, i, Rotation::R0);
+        assert_eq!(differing(&ours, &theirs), 0, "{i}: appended, live");
+    }
 }

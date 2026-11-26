@@ -415,27 +415,33 @@ fn aes(written: &Output) -> bool {
 /// an offset is written on its own, where written anew it was packed into
 /// an object stream. Print copies 51,694 fewer than dense: it writes an
 /// encrypted file's objects in the clear, and their bytes as read are
-/// ciphertext.
+/// ciphertext. M10 slice 9 moved them to 2,293,342 survived and 2,201,676
+/// copied in 1,720,675,424 bytes (print 2,149,982 and 1,947,227,562): a
+/// field whose own dictionary is a widget beside kid widgets (36 fields in
+/// 34 forms) is copied with its kids as its file has them, where it was
+/// written apart from that widget, each anew, packed into an object
+/// stream: 107 objects more copied, 4,865 bytes more (137 in 32 of them,
+/// 488 and -7 in the other two).
 const RENUMBERED: Renumbering = Renumbering {
     manifest: 4392,
     profiles: [
         Held {
             files: 4389,
-            survived: 2_293_235,
-            copied: 2_201_569,
-            bytes: 1_720_670_559,
+            survived: 2_293_342,
+            copied: 2_201_676,
+            bytes: 1_720_675_424,
         },
         Held {
             files: 4389,
-            survived: 2_293_235,
-            copied: 2_201_569,
-            bytes: 1_720_670_559,
+            survived: 2_293_342,
+            copied: 2_201_676,
+            bytes: 1_720_675_424,
         },
         Held {
             files: 4389,
-            survived: 2_293_235,
-            copied: 2_149_875,
-            bytes: 1_947_222_697,
+            survived: 2_293_342,
+            copied: 2_149_982,
+            bytes: 1_947_227_562,
         },
     ],
 };

@@ -5,9 +5,9 @@
 //! turned by `/MK /R 90` or not ([`Place`]).
 //!
 //! Ours ([`ours`]) is the case's file with no `/V` and no appearance, the
-//! field filled through the model (`tx::fixture::fill`, which no op does
-//! until M10 slice 9) and saved as a Rewrite: the widget's appearance is
-//! the save's own, made by pdf-forms. PDFium's ([`theirs`]) is the same
+//! field filled by `SetFieldValues` (`tx::fixture::fill`, or `calculate`
+//! for a value the user's would be refused) and saved as a Rewrite: the
+//! widget's appearance is the save's own, made by pdf-forms. PDFium's ([`theirs`]) is the same
 //! file with the value as `/V` and no appearance, in an engine whose
 //! widgets are drawn once (`FPDF_FFLDraw`, under the form-fill environment
 //! every load sets up), which makes the appearance each widget lacks, and
@@ -153,6 +153,10 @@ pub struct Case {
     /// `/DR /Font` entries the form gains, by name (in place of the
     /// fixture's `/Helv`, where that's the name).
     pub fonts: Vec<(&'static str, Dictionary)>,
+    /// The value is the form's calculation's (`SetFieldValues`'
+    /// `calculated`, [`fx::calculate`]), as one past the field's `/MaxLen`
+    /// must be: the user's is refused there.
+    pub calculated: bool,
 }
 
 impl Case {
@@ -172,6 +176,7 @@ impl Case {
             bc: None,
             bs: None,
             fonts: Vec::new(),
+            calculated: false,
         }
     }
 
@@ -478,8 +483,11 @@ pub fn missing_fonts() -> Vec<Stated> {
 /// `/MaxLen` cuts only a comb's text, where PDFium cuts every field's:
 /// ours is PDFium's of the field with no `/MaxLen`.
 pub fn max_len() -> Stated {
+    // Past `/MaxLen`, the user's value is refused: the form's calculation
+    // sets it.
     let cut = Case {
         max_len: Some(5),
+        calculated: true,
         ..Case::new("max len", "Hello world")
     };
     let uncut = Case {
@@ -588,14 +596,17 @@ pub struct Ours {
 }
 
 /// `case`'s file with no value, opened, the field filled with the case's
-/// value through the model, and saved as a Rewrite: its widget's
-/// appearance the one the save made (the file has none), `/N` alone, in
-/// `/Tx BMC` .. `EMC`.
+/// value by `SetFieldValues` (the user's, or the calculation's where the
+/// case says so), and saved as a Rewrite: its widget's appearance the one
+/// the save made (the file has none), `/N` alone, in `/Tx BMC` .. `EMC`.
 pub fn ours(case: &Case) -> Ours {
     let file = case.file(false);
     assert!(appearance(&file).is_none(), "{}", case.label());
     let mut doc = opened(file, "field.pdf", None);
-    fx::fill(&mut doc, NAME, &case.value);
+    match case.calculated {
+        true => fx::calculate(&mut doc, NAME, &case.value),
+        false => fx::fill(&mut doc, NAME, &case.value),
+    }
     let saved = sheaf_doc::save::rewrite(&doc).unwrap();
     let made = (appearance(&saved))
         .unwrap_or_else(|| panic!("{}: the save made no appearance", case.label()));

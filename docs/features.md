@@ -92,7 +92,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 ## Forms
 | Feature | Status |
 |---|---|
-| Fill AcroForms | 📋 |
+| Fill AcroForms | 🔨 from the command line today: `set-field-values` in `sheaf edit` fills text fields, check boxes, radio buttons, combo boxes and list boxes, and the save writes each value with an appearance that shows it in every viewer (in the field's font, and sheaf's fallback font for what that lacks), appended where the file allows and keeping signatures, usage rights and encryption; a read-only field, one a signature locks, or a value no font can draw is refused. In the app with the filling work next |
 | Create / edit form fields | 📋 |
 | XFA | ❌ not planned |
 

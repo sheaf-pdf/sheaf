@@ -378,10 +378,10 @@ mod against_pdfium {
     /// every slot (a toggle's `/N` and `/D` state dictionaries, a push
     /// button's `/N`, `/R` and `/D`), which its load under the form-fill
     /// environment made. That copy, flattened and drawn appearances only, is
-    /// pixel for pixel the page view's live drawing of the file. And a live
-    /// drawing follows `/AS`, not `/V`: ours of a check box turned on,
-    /// whose `/V` is the file's `Off` until M10 slice 9 writes it, draws
-    /// live as it draws appearances only, its mark shown.
+    /// pixel for pixel the page view's live drawing of the file. And ours
+    /// of a check box turned on, its `/AS` and its field's `/V` the model's
+    /// (M10 slices 8 and 9), draws live as it draws appearances only, its
+    /// mark shown.
     #[test]
     fn pdfium_makes_every_appearance_a_widget_lacks_and_draws_by_its_state() {
         let (frame, _, _) = toggle_frames().remove(2);
@@ -424,7 +424,7 @@ mod against_pdfium {
         let form = form_in(&saved);
         let value = (form.fields.iter()).find_map(|f| f.value.clone());
         let shown: Vec<_> = form.widgets.values().flatten().map(|w| &w.state).collect();
-        assert_eq!(value, Some(Value::State("Off".into())), "/V the file's");
+        assert_eq!(value, Some(Value::State("Yes".into())), "/V the model's");
         assert_eq!(shown, [&Some("Yes".to_string())], "/AS the model's");
         let live = live_in(&PdfiumEngine::open_bytes(saved.clone().into(), None).unwrap());
         let count = differing_in(&live, &draw(&saved), whole);

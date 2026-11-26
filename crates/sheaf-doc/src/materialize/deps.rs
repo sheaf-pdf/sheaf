@@ -11,7 +11,7 @@
 //! | `Geom(p)` | `p`'s dictionary; every connector of each group with one on `p` (a group's order is how its connectors show on their pages) |
 //! | `PageAnnots(p)` | `p`'s dictionary |
 //! | `Annot(a)` | `a`'s objects; for a widget, its field's (a merged pair is one object); its replies (a mark's reply takes its `/Rect`, and each its `/IRT`); every connector of its group, for one; its page, when it's a replacement now and wasn't or the other way round (a replacement's StrikeOut is beside it in `/Annots`) |
-//! | `Field(f)` | `f`'s dictionary, its widgets, every node above it (a node left with no widgets isn't written, nor the parents it empties); the form's dictionary when `f` came, went, moved or shows other widgets (its `/Fields` and `/CO` list what's written); the pages its widgets are on when one was its object and isn't, or the other way round |
+//! | `Field(f)` | `f`'s dictionary, its widgets, every node above it (a node left with no widgets isn't written, nor the parents it empties); the form's dictionary when `f` came, went, moved or shows other widgets (its `/Fields` and `/CO` list what's written); the pages its widgets are on when one was its object and isn't, or the other way round, or the state shows the widget that's its own dictionary more than once (written apart from it) |
 //! | `Form` | the form's dictionary; when the files the forms come from changed, every field and widget of the other files (their fonts' renames in `/DR`), their document scripts and the catalog; when `/DA` or `/Q` changed, the other files' roots (theirs are pushed down) |
 //! | `Bookmark(b)`, `OutlineRoots` | each bookmark whose item or place in the tree (`/Parent`, `/Prev`, `/Next`, `/First`, `/Last`, `/Count`) changed, and the outline's root when its own did |
 //! | `Labels` | the page labels; the catalog when they came or went; each page a generator whose tokens read a page's label lays out otherwise than its block in the saved file |
@@ -19,7 +19,10 @@
 //!
 //! And beside the path: the form's dictionary for a save transform the file
 //! hasn't had (every field, for `DropXfa`'s tooltips), and the catalog for
-//! `DropUr3`'s `/Perms`; the same for an XFA copy the file dropped that
+//! `DropUr3`'s `/Perms`, and every widget `FillAppearances` makes (each
+//! one a `/NeedAppearances` file left bare, `appearance::missing`, with
+//! its field's object); the same as `DropXfa`
+//! for an XFA copy the file dropped that
 //! policy keeps now; a page put under another node, or new to the saved
 //! tree, when any page is written. A page the file has at the number of a
 //! primary page that another page is copy 0 of now leaves it to that page
@@ -41,7 +44,8 @@
 //! `/OpenAction`, a named destination, the structure tree), which a Rewrite
 //! prunes.
 //! The emitter adds the catalog when the section needs a later version
-//! than the file, or the form or the outline came or went.
+//! than the file, or the form or the outline came or went, or it writes a
+//! form the saved catalog holds in itself.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -217,6 +221,19 @@ pub fn closure(
             }
             SaveTransform::DropUr3 => {
                 cx.keys.insert(ObjKey::Catalog);
+            }
+            // The first save that changes the form of a file that says
+            // `/NeedAppearances` makes each widget its file left bare, so
+            // the section writes them all, as a Rewrite does. One after it
+            // carries its record's, and writes those of what changed alone.
+            SaveTransform::FillAppearances => {
+                let bare: Vec<AnnotId> = (now.annots())
+                    .filter(|(a, _)| crate::forms::appearance::missing(now, *a))
+                    .map(|(a, _)| a)
+                    .collect();
+                for a in bare {
+                    cx.annot(a);
+                }
             }
         }
     }
@@ -716,8 +733,14 @@ impl<'a> Deps<'a> {
         }
         // A widget that was its field's object and isn't now, or the other
         // way round, is written at another number: the pages listing the
-        // field's widgets list them anew.
-        if merged_widget(self.was, f) != merged_widget(self.now, f) {
+        // field's widgets list them anew. So does a field whose own
+        // dictionary's widget the state shows more than once (a widget its
+        // file lists on two pages, or twice on one: `Joined::Split`), which
+        // is written apart from its widgets, though its file may have the
+        // two as one object that its pages list.
+        let joined = |st| emit::form::joined(st, f);
+        let split = joined(self.now) == emit::form::Joined::Split;
+        if split || joined(self.was).widget() != joined(self.now).widget() {
             let pages: Vec<PageId> = (widgets.iter())
                 .filter_map(|&w| Some(self.now.annot(w)?.page))
                 .collect();
@@ -1012,7 +1035,7 @@ impl<'a> Deps<'a> {
                     };
                     let copy = w.inst.copy;
                     // One its field's object is, written with it.
-                    let merged = merged_widget(now, w.field) == Some(a);
+                    let merged = emit::form::joined(now, w.field).widget() == Some(a);
                     let again = written(key) || (merged && written(ObjKey::Field(w.field)));
                     if !anew(again, r.src.id(), copy)
                         && walk.reaches(&r.src, copy, &Object::from(r.id), ANNOT_OWN)
@@ -1068,18 +1091,6 @@ impl<'a> Deps<'a> {
         }
         None
     }
-}
-
-/// The widget field `f` of `st` is written as one object with, as the
-/// emitter merges them: its one widget, read merged with it.
-fn merged_widget(st: &DocState, f: crate::forms::FieldId) -> Option<AnnotId> {
-    let node = st.field(f)?;
-    let src = node.src.as_ref()?;
-    let widgets = &node.term.as_ref()?.widgets;
-    let w = *widgets.front().filter(|_| widgets.len() == 1)?;
-    let widget = st.annot(w)?.widget()?;
-    let own = widget.src.as_ref().is_some_and(|r| r.id == src.id);
-    (widget.merged && own).then_some(w)
 }
 
 /// The name a reply names annotation `rec` by.

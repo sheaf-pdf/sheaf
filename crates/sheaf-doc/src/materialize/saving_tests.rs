@@ -533,7 +533,7 @@ fn appends_one_after_another_reopen() {
     let mut d = opened(&path);
     let opened_record = d.saved_record().unwrap().clone();
     assert_eq!(opened_record.sound, d.primary().base_sound());
-    assert!(opened_record.signatures_hold && opened_record.content_hash.is_none());
+    assert!(opened_record.revisions_kept && opened_record.content_hash.is_none());
     for i in 0..3 {
         turn(&mut d, i);
         let was = std::fs::read(&path).unwrap();
@@ -544,7 +544,7 @@ fn appends_one_after_another_reopen() {
         let record = d.saved_record().unwrap();
         assert_eq!(record.stamp, FileStamp::read(&path).unwrap(), "{i}");
         assert!(
-            record.signatures_hold && record.content_hash.is_none(),
+            record.revisions_kept && record.content_hash.is_none(),
             "{i}"
         );
         assert!(!d.is_dirty());
@@ -571,7 +571,7 @@ fn appends_one_after_another_reopen() {
     save_rewritten(&mut d, &path).unwrap();
     let record = d.saved_record().unwrap().clone();
     assert_eq!(record.strategy, StrategyKind::Rewrite);
-    assert!(record.sound && !record.signatures_hold);
+    assert!(record.sound && !record.revisions_kept);
     let sum = |d: &Document| {
         d.saved_record()
             .unwrap()
@@ -592,7 +592,7 @@ fn appends_one_after_another_reopen() {
             sheaf_util::checksum(&std::fs::read(&path).unwrap()),
             "{i}"
         );
-        assert!(!d.saved_record().unwrap().signatures_hold);
+        assert!(!d.saved_record().unwrap().revisions_kept);
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

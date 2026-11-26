@@ -140,6 +140,7 @@ fn terminal(kind: FieldKind, value: Option<Value>) -> Terminal {
         kind,
         flags: 0,
         value,
+        display: None,
         default: None,
         props: Arc::new(FieldProps {
             da: None,
@@ -860,6 +861,45 @@ fn field_values() {
     assert_eq!(e.flags, Flags::FIELD_VALUES | Flags::REPLACES_TEXT);
 }
 
+/// A display set is filling a field in; changed or dropped, the one it
+/// replaced is replaced text, as the appearance an Append leaves in the
+/// file's revision draws it, and an empty one replaced is nothing's. A
+/// value and its display replaced together are one field's values.
+#[test]
+fn field_displays() {
+    let f = Key::Field(FieldId(0));
+    let shown = |v: Option<Value>, d: Option<&str>| {
+        let mut t = terminal(FieldKind::Text, v);
+        t.display = d.map(Into::into);
+        of_field(node("total", None, Some(t)))
+    };
+    let st = holding(blank(1), &[(f, shown(text("12"), None))]);
+    let p = path(&st, &[(f, Some(shown(text("12"), Some("$12.00"))))]);
+    assert_eq!((p.flags, p.sig), (Flags::FIELD_VALUES, SigClass::FILL));
+    assert!(removed(&p).is_empty());
+    let st = holding(blank(1), &[(f, shown(text("12"), Some("$12.00")))]);
+    for now in [Some("12.00 $"), None] {
+        let p = path(&st, &[(f, Some(shown(text("12"), now)))]);
+        assert_eq!(
+            p.flags,
+            Flags::FIELD_VALUES | Flags::REPLACES_TEXT,
+            "{now:?}"
+        );
+        assert_eq!(p.sig, SigClass::FILL);
+        assert_eq!(removed(&p), [(RemovedKind::FieldValues, 1)], "{now:?}");
+    }
+    let st = holding(blank(1), &[(f, shown(text("12"), Some("")))]);
+    let p = path(&st, &[(f, Some(shown(text("12"), Some("—"))))]);
+    assert_eq!(p.flags, Flags::FIELD_VALUES);
+    assert!(removed(&p).is_empty());
+    let st = holding(blank(1), &[(f, shown(text("12"), Some("$12.00")))]);
+    let p = path(&st, &[(f, Some(shown(text("13"), Some("$13.00"))))]);
+    assert_eq!(p.flags, Flags::FIELD_VALUES | Flags::REPLACES_TEXT);
+    assert_eq!(removed(&p), [(RemovedKind::FieldValues, 1)]);
+    // Nothing else of the field changed: not the form's tree.
+    assert!(!p.flags.contains(Flags::FIELD_TREE));
+}
+
 #[test]
 fn field_nodes() {
     let f = Key::Field(FieldId(1));
@@ -1279,6 +1319,11 @@ fn samples(st: &DocState) -> Vec<(Key, Vec<Option<Val>>)> {
                 None,
                 Some(terminal(FieldKind::Text, v)),
             ))));
+        }
+        for display in ["x", "z"] {
+            let mut t = terminal(FieldKind::Text, text("x"));
+            t.display = Some(display.into());
+            vals.push(Some(of_field(node("a", None, Some(t)))));
         }
         vals.push(Some(of_field(node("a", Some(3), None))));
         vals

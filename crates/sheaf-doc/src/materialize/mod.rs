@@ -637,7 +637,7 @@ fn rewrite(
         at: crate::pdf::semantics::date::now(),
         strategy: StrategyKind::Rewrite,
         sound: true,
-        signatures_hold: false,
+        revisions_kept: false,
         pdf_version: version,
         xref,
         crypt: match crypt {

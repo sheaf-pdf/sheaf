@@ -651,7 +651,9 @@ fn lazy_encrypt(bytes: &[u8]) -> Option<Object> {
 }
 
 /// A section that needs a later version than its file is says so in the
-/// catalog, written for it; one that doesn't writes no catalog.
+/// catalog, written for it, as 1.4 at least, the version `/Version` came
+/// in (recognized text's Type 0 font needs 1.2 of a 1.1 file); one that
+/// doesn't writes no catalog.
 #[test]
 fn a_version_bump_writes_the_catalog_with_its_version() {
     let dir = scratch();
@@ -673,10 +675,10 @@ fn a_version_bump_writes_the_catalog_with_its_version() {
     assert!(written(base.len(), &section, &path).contains(&catalog));
     let pdf = Pdf::load(&path).unwrap();
     let version = pdf.catalog().unwrap().get(b"Version").unwrap();
-    assert_eq!(version.as_name().unwrap(), b"1.2");
+    assert_eq!(version.as_name().unwrap(), b"1.4");
     assert_eq!(
         doc.saved_record().unwrap().pdf_version,
-        PdfVersion::CID_FONTS
+        PdfVersion::CATALOG_VERSION
     );
     let page = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
     let contents = page.get(b"Contents").unwrap().as_array().unwrap();

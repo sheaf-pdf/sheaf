@@ -2,7 +2,8 @@
 //! widget's appearance is made from, as plain data out of the model, by
 //! its kind ([`Look`], [`look`]), with what every kind shares read once
 //! ([`Frame`]: the box, `/MK`, the border and the `/DA`); which widgets need
-//! one made ([`stale`]), and which show a state their file's doesn't
+//! one made ([`stale`]), which a `/NeedAppearances` file left without one
+//! ([`missing`]), and which show a state their file's doesn't
 //! ([`state_changed`]); the font it's drawn in, read once a name from its
 //! source's `/DR` (`read_font`, through
 //! [`Source::field_font`](crate::Source::field_font), and [`font`]); the
@@ -49,7 +50,7 @@ mod push;
 mod text;
 mod toggle;
 
-pub use choice::{ChoiceLook, ChoiceShows};
+pub use choice::{ChoiceLook, ChoiceShows, selected_by_value};
 pub use push::PushLook;
 pub use text::TextLook;
 pub use toggle::{ToggleLook, state_changed};
@@ -383,21 +384,39 @@ pub fn make(
     }
 }
 
+/// `look`'s appearance as the emitter makes it for a widget read from `src`
+/// ([`make`]): in the font its `/DA` names there ([`font`]), named for copy
+/// 0 of `src` ([`font_res`]), a font named by an entry bound to no object,
+/// which changes nothing of what's drawn. What lowering makes to learn
+/// whether a field's widget can show what it now holds.
+pub fn make_in(look: &Look, src: &Source) -> Result<Made, Unmade> {
+    make(look, |name| {
+        let font = font(src, name)?;
+        let written = |at: FontAt<'_>| match at {
+            FontAt::Object(id) => id,
+            FontAt::Entry(_) => ObjectId::new(0, 0),
+        };
+        let res = font_res(&font, src.id(), 0, name.unwrap_or_default(), written);
+        Ok(DaFont { font, res })
+    })
+}
+
 /// Whether widget `aid` needs its appearance made, by its kind:
 ///
-/// - a text field's widget whose terminal's text isn't what its source's
-///   field held as read (no value and an empty one are the same), or whose
-///   field was read from no source, or isn't among its source's fields as
-///   read: its value is all an op can change that makes the file's
-///   appearance wrong;
+/// - a text field's widget whose terminal has a display (in no file), or
+///   whose text isn't what its source's field held as read (no value and
+///   an empty one are the same), or whose field was read from no source,
+///   or isn't among its source's fields as read: its value and display are
+///   all an op can change that makes the file's appearance wrong;
 /// - a check box's or radio button's widget that shows a state its source
 ///   widget didn't as read ([`state_changed`]) and whose file's normal
 ///   appearance has no on state (none, a stream, or `Off` alone): one
 ///   that has keeps its appearances, and only its `/AS` moves;
-/// - a combo box's or list box's widget whose terminal's value holds other
-///   texts than its source's field's as read (no value and an empty array
-///   alike, a text and an array of it alike), or whose field was read from
-///   no source, or isn't among its source's fields as read;
+/// - a combo box's or list box's widget whose terminal has a display, or
+///   whose value holds other texts than its source's field's as read (no
+///   value and an empty array alike, a text and an array of it alike), or
+///   whose field was read from no source, or isn't among its source's
+///   fields as read;
 /// - a push button's widget whose captions (`/MK /CA`, `/RC`, `/AC`) aren't
 ///   its source widget's as read (one not read had none): one nothing
 ///   changed keeps its appearances, and one with none stays so.
@@ -420,6 +439,44 @@ pub fn stale(st: &DocState, aid: AnnotId) -> bool {
         FieldKind::Combo | FieldKind::List => choice::stale(node, term),
         FieldKind::PushButton => push::stale(w),
         _ => false,
+    }
+}
+
+/// Whether widget `aid` is one save policy makes an appearance for where
+/// its file's form says `/NeedAppearances` and left it to the viewer
+/// (`SaveTransform::FillAppearances`, M10 slice 9): its file gave it no
+/// normal appearance (none, or a `/N` of no states), and a viewer that
+/// ignores the flag, as PDFium's screen does, would show nothing of what
+/// it holds:
+///
+/// - a text field's widget whose field holds a text that isn't empty;
+/// - a combo box's or list box's whose field's value holds one;
+/// - a check box's or radio button's, whatever state it shows;
+/// - a push button's with a caption (`/MK /CA`).
+///
+/// False for anything else, and for a widget whose file has an appearance,
+/// which may be the stale one the flag was there to cover: it's made only
+/// where [`stale`] says. What's made is as for a stale widget, and a widget
+/// both is made once.
+pub fn missing(st: &DocState, aid: AnnotId) -> bool {
+    let Some(w) = st.annot(aid).and_then(|rec| rec.widget()) else {
+        return false;
+    };
+    let Some(term) = st.field(w.field).and_then(|node| node.term.as_deref()) else {
+        return false;
+    };
+    if w.props.has_appearance {
+        return false;
+    }
+    let value = term.value.as_ref();
+    match term.kind {
+        FieldKind::Text => !field::text_shown(value).is_empty(),
+        FieldKind::Combo | FieldKind::List => {
+            field::choice_texts(value).iter().any(|t| !t.is_empty())
+        }
+        FieldKind::CheckBox | FieldKind::Radio => true,
+        FieldKind::PushButton => w.mk.caption.as_deref().is_some_and(|c| !c.is_empty()),
+        FieldKind::Signature | FieldKind::Unknown => false,
     }
 }
 

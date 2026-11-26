@@ -718,6 +718,11 @@ pub struct Terminal {
     /// `/Ff` (see [`crate::forms::field::flags`]).
     pub flags: u32,
     pub value: Option<Value>,
+    /// What a text field's or combo box's widgets show in place of its
+    /// value: the text a format script made of it, as an op set it (M10
+    /// slice 9). In no file: one read has none, and a field with one
+    /// has its appearances made anew.
+    pub display: Option<Arc<str>>,
     /// `/DV`: what Reset Form puts back.
     pub default: Option<Value>,
     /// What doesn't change when it's filled, shared by its copies.
@@ -767,6 +772,7 @@ impl Terminal {
             kind: field.kind,
             flags: field.flags,
             value: field.value.clone(),
+            display: None,
             default: field.default.clone(),
             props: Arc::new(FieldProps {
                 da: field.da.clone(),

@@ -12,7 +12,7 @@ use crate::pdf::{
     Dictionary, Document as Pdf, Object, ObjectId, Stream, Value, dictionary, literal,
 };
 use in_progress::NoProgress;
-use sheaf_edit::{FlattenSet, Rotation};
+use sheaf_edit::{FieldRef, FieldSet, FieldValue, FlattenSet, Op, Rotation};
 
 use super::How;
 use super::recognized_tests::{contents, depth, isolates, pages, stream};
@@ -849,4 +849,115 @@ fn a_pinned_appearance_is_a_page_of_its_own() {
     let form = xobject(&pdf, page, b"Stamp");
     let drawn = String::from_utf8_lossy(&stream(&pdf, form).1).into_owned();
     assert!(drawn.contains(" re\nS\n"), "{drawn}");
+}
+
+/// Until M10 slice 15 makes a changed widget's appearance first, a flatten
+/// of a page that shows one is refused, with nothing changed: a fill and a
+/// flatten in one batch, and a flatten after the fill's save in the same
+/// document, whichever way it saved, since a save changes no source and the
+/// source's appearance is the old value's. The saved file opened again
+/// flattens, and its page draws the new value. A flatten of the file as
+/// opened is as before, and a check box pressed to a state its file has an
+/// appearance of flattens drawing that one, as a save shows it.
+#[test]
+fn a_changed_field_s_page_is_flattened_once_the_saved_file_is_opened() {
+    let dir = scratch();
+    let mut f = Form::new(1);
+    let name = f.text("Name", 0, [150.0, 600.0, 300.0, 620.0]);
+    f.fill(name, "Ada");
+    let on = f.check_box("On", 0, [72.0, 600.0, 92.0, 620.0], true);
+    let bytes = f.bytes();
+    let read = Pdf::load_mem(&bytes).unwrap();
+    let flat = |p| fx::flatten(&[p], FlattenSet::All);
+    let fill = Op::SetFieldValues {
+        values: vec![FieldSet {
+            field: FieldRef::Name("Name".into()),
+            value: FieldValue::Text("Camden".into()),
+            display: None,
+        }],
+        calculated: Vec::new(),
+    };
+    let refused = |doc: &mut Document, ops: Vec<Op>| {
+        let (n, st) = (doc.version_count(), doc.state().clone());
+        let e = doc.commit_ops(ops, "refused").unwrap_err();
+        let why = "a field on page 1 changed since the file was opened, and a flatten can't \
+                   draw it yet: save, and flatten the saved file";
+        let op = "flatten-annotations";
+        assert_eq!(
+            e,
+            EditError::Invalid {
+                op,
+                why: why.into()
+            }
+        );
+        assert_eq!(
+            (doc.version_count(), doc.state()),
+            (n, &st),
+            "nothing changed"
+        );
+    };
+
+    // As opened, as before: both widgets drawn, by their file's forms.
+    let (_, mut doc) = opened(&dir, "a.pdf", &bytes);
+    let p0 = doc.page(0).unwrap();
+    doc.commit_ops(vec![flat(p0)], "flatten").unwrap();
+    let drawn: Vec<_> = placements(&doc, p0).iter().map(base).collect();
+    let theirs = [
+        appearance(&read, name, None),
+        appearance(&read, on, Some(b"Yes")),
+    ];
+    assert_eq!(drawn, theirs.map(Some));
+    assert_eq!(doc.state().annots_on(p0).count(), 0);
+
+    // A fill and a flatten in one batch; a press and a flatten.
+    let (_, mut doc) = opened(&dir, "b.pdf", &bytes);
+    let p0 = doc.page(0).unwrap();
+    refused(&mut doc, vec![fill.clone(), flat(p0)]);
+    let [_, on_widget] = objects_on(&doc, p0)[..] else {
+        panic!("two widgets")
+    };
+    assert_eq!(on_widget, Some(on));
+    let pressed = doc.state().annots_on(p0).nth(1).map(|(id, _)| id).unwrap();
+    let press = Op::SetFieldValues {
+        values: vec![FieldSet {
+            field: FieldRef::Name("On".into()),
+            value: FieldValue::Press {
+                widget: sheaf_edit::AnnotRef::Id(pressed),
+            },
+            display: None,
+        }],
+        calculated: Vec::new(),
+    };
+    doc.commit_ops(vec![press, flat(p0)], "press").unwrap();
+    let drawn: Vec<_> = placements(&doc, p0).iter().map(base).collect();
+    let off = [
+        appearance(&read, name, None),
+        appearance(&read, on, Some(b"Off")),
+    ];
+    assert_eq!(drawn, off.map(Some), "the file's Off");
+
+    for how in [How::Rewritten, How::Appended] {
+        let (_, mut doc) = opened(&dir, &format!("{how:?}.pdf"), &bytes);
+        let p0 = doc.page(0).unwrap();
+        doc.commit_ops(vec![fill.clone()], "fill").unwrap();
+        let path = dir.join(format!("{how:?}-saved.pdf"));
+        how.save(&mut doc, &path);
+        assert!(doc.saved_record().is_some(), "{how:?}");
+        refused(&mut doc, vec![flat(p0)]);
+        // The saved file, opened, flattens: its page draws the new value.
+        let saved = std::fs::read(&path).unwrap();
+        let (_, mut again) = opened(&dir, &format!("{how:?}-again.pdf"), &saved);
+        let p0 = again.page(0).unwrap();
+        again.commit_ops(vec![flat(p0)], "flatten").unwrap();
+        let out = Pdf::load_mem(&How::Rewritten.write(&again)).unwrap();
+        let page = pages(&out)[0];
+        let block = *contents(&out, page).last().unwrap();
+        assert!(flat_block(&out, block).is_some(), "{how:?}");
+        let shown: Vec<Vec<u8>> = (drawn_names(&stream(&out, block).1).iter())
+            .map(|n| stream(&out, xobject(&out, page, n)).1)
+            .filter(|ops| ops.windows(2).any(|w| w == b"Tj"))
+            .map(|ops| crate::forms::appearance::tests::shown(&ops))
+            .collect();
+        assert_eq!(shown, [b"Camden".to_vec()], "{how:?}");
+    }
 }

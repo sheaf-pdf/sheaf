@@ -703,7 +703,8 @@ fn corpus_cropped_forms_keep_their_fields_by(how: How) {
         std::fs::write(&path, filled(&form, field, "Filled In")).unwrap();
         let input = std::fs::read(&path).unwrap();
         let before = check(&input, None).unwrap();
-        // The fill has no appearance yet (slice 9 makes them).
+        // The fill is another tool's, which made no appearance for it
+        // (sheaf makes one for its own fills, M10 slice 9).
         let expected = vec![sheaf_doc::forms::Finding::NoAppearance(vec![
             field.to_string(),
         ])];

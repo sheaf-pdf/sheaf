@@ -21,14 +21,25 @@
 //! drawn record as read from its own entry there, none hidden or dragged,
 //! no entry left out (a record deleted, or a kind the inputs leave to the
 //! screen, as sheaf's marks under [`MarkDraw::ByHost`]), each widget's
-//! `/Parent`s as the model's field tree has them, no text field's widget
-//! whose value the model holds changed ([`stale`], M10 slice 6: the
-//! overlay draws the appearance pdf-forms makes for it, the form a save
-//! writes), and the form's own keys the overlay writes from the document's
-//! as its file has them. The value itself isn't one of them: no save
-//! writes a field's `/V` before M10 slice 9's fills.
+//! `/Parent`s as the model's field tree has them, no field written apart
+//! from the widget that's its own dictionary ([`joined`]: one the state
+//! shows twice, or one on another page, which an overlay of this page
+//! doesn't write, so it writes the field without that widget's keys), no
+//! widget whose field's value the model holds changed ([`value_changed`],
+//! M10 slice 9: the overlay writes the field's `/V` from the model, as a
+//! save does, on every page with a widget of it, a radio group's other
+//! pages too), no widget whose appearance a save makes anew ([`stale`],
+//! M10 slices 6 and 8: the overlay draws the appearance pdf-forms makes for
+//! it, the form a save writes) or whose button's state changed, none its
+//! file left to the viewer where a save of the state makes one
+//! (`SaveTransform::FillAppearances`, M10 slice 9: an overlay makes it as
+//! the save does, on every page with such a widget), and the
+//! form's own keys the overlay writes from the document's as its file has
+//! them. The render key feeds each drawn widget's terminal whole, its value
+//! among it, so a page whose field's value moves is drawn anew.
 //!
 //! [`stale`]: crate::forms::appearance::stale
+//! [`value_changed`]: crate::forms::value_changed
 
 use std::collections::HashSet;
 
@@ -42,6 +53,7 @@ use crate::geom::Geom;
 use crate::materialize::emit::Shown;
 use crate::materialize::emit::annots::{dead_link, mark_kept};
 use crate::materialize::emit::content;
+use crate::materialize::emit::form::{Joined, joined};
 use crate::model::{AnnotBody, DocState, FormInst, PageDef, PageId, Static, Widget};
 use crate::source::{ObjRef, PageFacts};
 use crate::store::Src;
@@ -130,6 +142,9 @@ fn annots_kept(
     let (mut recorded, mut recorded_slots) = (HashSet::new(), HashSet::new());
     let (mut kept, mut kept_slots) = (HashSet::new(), HashSet::new());
     let mut form = false;
+    // Whether an overlay makes the appearances widgets were left without:
+    // the form's fields read once, at the first such widget.
+    let fills = std::cell::OnceCell::new();
     for &aid in st.annot_ids_on(page).into_iter().flatten() {
         let Some(rec) = st.annot(aid) else {
             continue;
@@ -190,18 +205,36 @@ fn annots_kept(
                 let Some(r) = read.filter(|r| listed(r.id) && w.inst.copy == 0) else {
                     return false;
                 };
-                // Its text field's value changed, or its button's state:
-                // its appearance is made anew, or its `/AS` written.
-                if crate::forms::appearance::stale(st, aid)
+                // Its field's value changed, its appearance or its
+                // button's state: the overlay writes the field's `/V` from
+                // the model, its appearance made anew, or its `/AS`.
+                let value_moved = (st.field(w.field))
+                    .and_then(|node| Some((node, node.term.as_deref()?)))
+                    .is_some_and(|(node, term)| crate::forms::value_changed(node, term));
+                if value_moved
+                    || crate::forms::appearance::stale(st, aid)
                     || crate::forms::appearance::state_changed(st, aid).is_some()
                 {
                     return false;
                 }
-                // One object with its field, which shows elsewhere too: the
-                // two are written apart.
-                let term = st.field(w.field).and_then(|node| node.term.as_ref());
-                if w.merged && term.is_some_and(|t| t.widgets.len() > 1) {
+                // One its file left to the viewer, which a save of the
+                // state makes (`SaveTransform::FillAppearances`), and so
+                // the overlay.
+                if crate::forms::appearance::missing(st, aid)
+                    && *fills
+                        .get_or_init(|| crate::forms::rules::overlay_fills_appearances(src, st))
+                {
                     return false;
+                }
+                // Its field written apart from the widget that's its own
+                // dictionary: one the state shows twice, or one on another
+                // page, which an overlay of this one doesn't write.
+                match joined(st, w.field) {
+                    Joined::Split => return false,
+                    Joined::One(own) if st.annot(own).is_none_or(|a| a.page != page) => {
+                        return false;
+                    }
+                    Joined::One(_) | Joined::Kids => {}
                 }
                 if !tree_kept(st, src, w, r.id) {
                     return false;

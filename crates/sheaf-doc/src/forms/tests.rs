@@ -332,6 +332,66 @@ fn values_an_earlier_revision_holds() {
     });
     let report = checked(&filled);
     assert_findings(&report, &[Finding::NoAppearance(vec!["empty".into()])]);
+
+    // A source's fact is the check's, by the same walk: none in a file of
+    // one revision, and none where an update only filled empty fields.
+    let earlier = |bytes: &[u8]| super::fixture::source(bytes.to_vec()).earlier_values();
+    assert!(!earlier(&original), "one revision");
+    assert!(earlier(&saved), "a replaced value and a cleared one");
+    assert!(!earlier(&filled), "an empty field filled");
+}
+
+/// An encrypted file's earlier revisions are read as its latest one is,
+/// the check's finding and its source's fact alike: one that opens with
+/// the empty user password, read with none; one that needs a password,
+/// read with the one its source was opened with, and holding none read
+/// with none, which doesn't open it.
+#[test]
+fn an_encrypted_file_s_earlier_values_are_read_with_its_password() {
+    use crate::pdf::Permissions;
+    use crate::pdf::test_crypt::{CipherKind, TestEncryption};
+    use crate::store::{BlobKind, Store};
+    let mut f = Form::new(1);
+    let name = f.text("name", 0, row(0));
+    f.fill(name, "Last client");
+    let plain = f.bytes();
+    let finding = [Finding::EarlierValues {
+        revision: 1,
+        names: vec!["name".into()],
+    }];
+    let replace = |pdf: &mut Pdf| {
+        (pdf.get_dictionary_mut(name).unwrap()).set("V", literal("This client"));
+    };
+    for user in ["", "secret"] {
+        let mut pdf = Pdf::load_mem(&plain).unwrap();
+        let id = Object::hex(b"0123456789abcdef");
+        pdf.trailer.set("ID", vec![id.clone(), id]);
+        let state = TestEncryption::new(CipherKind::Aes128, user, "owner")
+            .with_permissions(Permissions::NONE);
+        pdf.encrypt(&state).unwrap();
+        let mut original = Vec::new();
+        pdf.save_to(&mut original).unwrap();
+        let (password, saved) = match user {
+            "" => (None, append_revision(&original, &[name], replace)),
+            user => {
+                let saved = super::fixture::append_revision_with_password(
+                    &original,
+                    user,
+                    &[name],
+                    replace,
+                );
+                (Some(user), saved)
+            }
+        };
+        assert_findings(&check(&saved, password).unwrap(), &finding);
+        let kind = BlobKind::file(std::path::Path::new("form.pdf"), password);
+        let src = Store::new().open(saved.clone().into(), kind).unwrap();
+        assert!(src.crypt().is_some(), "{user:?}: encrypted");
+        assert!(src.earlier_values(), "{user:?}");
+        if password.is_some() {
+            assert!(!super::check::holds_earlier_values(&saved, None));
+        }
+    }
 }
 
 #[test]

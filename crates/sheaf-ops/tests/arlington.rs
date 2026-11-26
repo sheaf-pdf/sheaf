@@ -67,16 +67,23 @@
 //! draws a name in two fonts, so each save writes a subset of the
 //! fallback font sheaf bundles, and its objects are checked too. A form
 //! with check boxes or radio buttons whose file has no on state has a
-//! save of its own, each of them pressed and the document rewritten, so
-//! what's made of them is checked too ([`pressed_save`]). It prints what it
+//! save of its own, each of them pressed and the document saved as
+//! planned, so what's made of them is checked too ([`pressed_save`]). A
+//! form with text or choice fields that hold no value has another (M10
+//! slice 9): each set through `SetFieldValues` as the user sets one, one
+//! op a field, and the document saved as planned, so the fields and
+//! widgets a fill writes are checked too ([`filled_save`]). It prints what it
 //! checked: objects by table, keys, the checks not made and why, the keys
 //! the model doesn't list, and those the version deprecates or readers
-//! ignore, and the widgets pressed and what was made of them; run on every
-//! form, its counts of forms and saves are asserted ([`FORMS`]), and what
-//! the pressed saves pressed and made, which is held beside the files'
-//! failures so one doesn't hide the other; a pressed widget whose
-//! appearance can be made and that the save wrote none for fails its
-//! form. Skips when there's no corpus (see `sheaf_doc::forms::corpus`).
+//! ignore, the widgets pressed and what was made of them, and the fields
+//! set and those the op refused, by why; run on every form, its counts of
+//! forms and saves are asserted ([`FORMS`]), and what the pressed saves
+//! pressed and made and what the filled saves set and refused, with the
+//! filled saves by strategy, which are held beside the files' failures so
+//! one doesn't hide the other; a pressed widget whose appearance can be
+//! made and that the save wrote none for fails its form, as does a filled
+//! save that stops (its verify among it). Skips when there's no corpus
+//! (see `sheaf_doc::forms::corpus`).
 
 mod common;
 mod lint;
@@ -714,11 +721,11 @@ sheaf_doc::both_ways!(buttons_and_choices_hold, buttons_and_choices_hold_appende
 /// The tables [`buttons_and_choices`] must check: each kind of field and
 /// its widget, the `/AP` dictionaries and their state dictionaries, the
 /// forms made, and the ZapfDingbats font the marks are drawn in. A radio
-/// field apart from its widgets is checked only in an Append, which writes
-/// it, its dictionary as its file has it, for its value (`/V` isn't written
-/// before M10 slice 9); a Rewrite copies it.
+/// field apart from its widgets is checked both ways: its value moved, so
+/// each writes its `/V` from the model (M10 slice 9).
 const BUTTONS: &[&str] = &[
     "FieldBtnCheckbox",
+    "FieldBtnRadio",
     "FieldChoice",
     "FieldBtnPush",
     "AnnotWidget",
@@ -728,9 +735,10 @@ const BUTTONS: &[&str] = &[
     "FontType1",
 ];
 
-/// Every kind of button and choice changed as no op changes one before M10
-/// slice 9 (`tx::fixture`), each widget's appearances made by the save
-/// (M10 slice 8): a check box, one object with its widget, and a radio
+/// Every kind of button and choice changed, by `SetFieldValues`
+/// (`tx::fixture`) and a push button's captions by a put no op makes, each
+/// widget's appearances made by the save (M10 slice 8), each field's value
+/// written (slice 9): a check box, one object with its widget, and a radio
 /// group of two kid widgets, under `/Opt`, each with no appearances,
 /// pressed (`/N` and `/D` state dictionaries, `/AS`, the marks in
 /// ZapfDingbats); a combo box and a list box given values (`/N`); and a
@@ -769,11 +777,7 @@ fn buttons_and_choices(how: How) {
     let push = widgets(&doc, "push")[0];
     fx::caption(&mut doc, push, Some("Stop"), Some("Over"), Some("Down"));
     let checked = held(&mut doc, Some(how), &path);
-    let mut tables = BUTTONS.to_vec();
-    if how == How::Appended {
-        tables.push("FieldBtnRadio");
-    }
-    clean(&checked, &tables);
+    clean(&checked, BUTTONS);
     // The forms the save made, each widget's: the check box's on state's
     // normal and down ones and `Off`'s down one (the pressed gray; its
     // normal `Off` paints nothing, with no `/MK`), the radio group's
@@ -1736,19 +1740,36 @@ const TOP: usize = 20;
 /// manifest's length), unnarrowed: the forms that open, those that don't
 /// and why (three whose cross-reference tables don't parse, which no tier
 /// opens), and what the saves were, a form's check boxes and radio buttons
-/// with no on state pressed among them ([`pressed_save`], M10 slice 8). A
-/// change that moves one says why, and moves it. A save of none isn't
-/// counted.
+/// with no on state pressed among them ([`pressed_save`], M10 slice 8),
+/// and its empty text and choice fields filled ([`filled_save`], M10 slice
+/// 9), by the strategy their plan chose. A change that moves one says why,
+/// and moves it. A save of none isn't counted.
 const FORMS: FormsBaseline = FormsBaseline {
     manifest: 4392,
     files: 4389,
     unopened: [(UNREAD, 3), (PASSWORD, 0)],
     saves: [
-        ("as planned, Append", 2406),
-        ("as planned, Rewrite", 1983),
+        // 34 forms more since M10 slice 9: a field whose own dictionary is
+        // a widget beside kid widgets, written as one object with it, no
+        // longer turns their Append into a Rewrite.
+        ("as planned, Append", 2440),
+        ("as planned, Rewrite", 1949),
         ("a page deleted, as planned, Rewrite", 2901),
         ("of one page, a Rewrite to a copy", 1488),
-        (PRESSED, 47),
+        // One form fewer since M10 slice 9: 1741061's earlier revisions
+        // hold values its latest one doesn't, so a press, a change to the
+        // form, rewrites it.
+        ("toggles pressed, as planned, Append", 41),
+        ("toggles pressed, as planned, Rewrite", 6),
+        // M10 slice 9: 2,715 forms with empty text or choice fields, 31
+        // of them with every one refused (no save). Of the Rewrites, 210
+        // the plan's (199 for values earlier revisions hold, 11 whose file
+        // reads as damaged) and 430 an Append's fallback for what the write
+        // finds would stay readable (186 in a file's object, 160 in a
+        // hybrid's form, 81 in a catalog), and 3 Appends a signature asked
+        // of, answered by breaking it.
+        ("fields filled, as planned, Append", 2044),
+        ("fields filled, as planned, Rewrite", 640),
     ],
     pressed: PressedBaseline {
         pressed: &[("check box", 254), ("radio button", 53)],
@@ -1756,14 +1777,23 @@ const FORMS: FormsBaseline = FormsBaseline {
         made: &[("check box", 254), ("radio button", 14)],
         unmade: &[("radio button, no-box", 36)],
     },
+    filled: FilledBaseline {
+        set: &[("combo box", 591), ("list box", 5), ("text field", 183_022)],
+        // None for a character no font draws (a sample is ASCII, and no
+        // first option has one), nor past `/MaxLen` or a line break (a
+        // sample never is), nor any other.
+        refused: &[(LOCKED, 14), (READ_ONLY, 6168)],
+        unset: &[("combo box", 13)],
+    },
 };
 
 struct FormsBaseline {
     manifest: usize,
     files: usize,
     unopened: [(&'static str, usize); 2],
-    saves: [(&'static str, usize); 5],
+    saves: [(&'static str, usize); 8],
     pressed: PressedBaseline,
+    filled: FilledBaseline,
 }
 
 /// What the pressed saves pressed and made over the whole corpus
@@ -1779,8 +1809,8 @@ struct PressedBaseline {
     unmade: &'static [(&'static str, usize)],
 }
 
-/// What [`pressed_save`]'s save is.
-const PRESSED: &str = "toggles pressed, a Rewrite";
+/// What [`pressed_save`]'s save is, before the strategy the plan chose.
+const PRESSED: &str = "toggles pressed, as planned";
 
 /// Why a form didn't open.
 const UNREAD: &str = "its file doesn't read";
@@ -1790,7 +1820,7 @@ const PASSWORD: &str = "it needs a password";
 enum Outcome {
     /// It didn't open, for this reason ([`UNREAD`], [`PASSWORD`]).
     Unopened(&'static str),
-    Checked(FormChecked),
+    Checked(Box<FormChecked>),
     /// It couldn't be copied, or a save failed.
     Failed(String),
 }
@@ -1803,9 +1833,12 @@ struct FormChecked {
     /// What its pressed save pressed and made, where it had one
     /// ([`pressed_save`]).
     pressed: Option<Pressed>,
-    /// Why its pressed save failed, where it did: the form's other saves
-    /// are counted all the same.
-    failed: Option<String>,
+    /// What its filled save set and refused, where it had one
+    /// ([`filled_save`]).
+    filled: Option<Filled>,
+    /// Why its pressed or filled save failed, where one did: the form's
+    /// other saves are counted all the same.
+    failed: Vec<String>,
 }
 
 /// What [`pressed_save`] pressed of a form's check boxes and radio
@@ -1830,21 +1863,94 @@ impl Pressed {
     /// Each of its counts that isn't `held`'s, as a line that says which
     /// and both: none where every count is the one held.
     fn moved(&self, held: &PressedBaseline) -> Vec<String> {
-        fn differ<K: AsRef<str>>(
-            what: &str,
-            counted: &BTreeMap<K, usize>,
-            held: &[(&'static str, usize)],
-        ) -> Option<String> {
-            let counted: BTreeMap<&str, usize> =
-                counted.iter().map(|(k, &n)| (k.as_ref(), n)).collect();
-            let held: BTreeMap<&str, usize> = held.iter().copied().collect();
-            (counted != held).then(|| format!("{what}: {counted:?}, held at {held:?}"))
-        }
         [
             differ("pressed", &self.pressed, held.pressed),
             differ("pressed, to be made", &self.stale, held.stale),
             differ("pressed, made", &self.made, held.made),
             differ("pressed, not made", &self.unmade, held.unmade),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+}
+
+/// `counted`, a count of `what` by kind, beside `held`: a line that says
+/// both where they differ, none where they're the same.
+fn differ<K: AsRef<str>>(
+    what: &str,
+    counted: &BTreeMap<K, usize>,
+    held: &[(&'static str, usize)],
+) -> Option<String> {
+    let counted: BTreeMap<&str, usize> = counted.iter().map(|(k, &n)| (k.as_ref(), n)).collect();
+    let held: BTreeMap<&str, usize> = held.iter().copied().collect();
+    (counted != held).then(|| format!("{what}: {counted:?}, held at {held:?}"))
+}
+
+/// What [`filled_save`]'s save is, before the strategy the plan chose.
+const FILLED: &str = "fields filled, as planned";
+
+/// Why `SetFieldValues` refused a field [`filled_save`] set, as the tier
+/// counts it: one of these kinds, else the refusal's own words with the
+/// field's name left out ([`refusal`]).
+const READ_ONLY: &str = "read-only";
+const LOCKED: &str = "locked";
+const UNDRAWN: &str = "no font draws it";
+const TOO_LONG: &str = "past /MaxLen or a line break";
+
+/// What the filled saves set and refused over the whole corpus
+/// ([`Filled`], summed), each by its kind: the fields set (`text field`,
+/// `combo box`, `list box`), those the op refused, by why ([`refusal`]),
+/// and the combo boxes and list boxes with no option to set. Held whatever
+/// else the tier finds ([`Filled::moved`]), with the filled saves' rows of
+/// [`FormsBaseline::saves`], so a fill that turns from an Append to a
+/// Rewrite, or a refusal that's new, fails it.
+struct FilledBaseline {
+    set: &'static [(&'static str, usize)],
+    refused: &'static [(&'static str, usize)],
+    unset: &'static [(&'static str, usize)],
+}
+
+/// What [`filled_save`] set of a form's text and choice fields that hold no
+/// value, and what the op refused, each by its kind.
+#[derive(Default)]
+struct Filled {
+    /// The fields set: the op took the value, and the field holds one.
+    set: BTreeMap<&'static str, usize>,
+    /// The fields the op refused, by why ([`refusal`]).
+    refused: BTreeMap<String, usize>,
+    /// The combo boxes and list boxes with no option to set, by kind.
+    unset: BTreeMap<&'static str, usize>,
+    /// The fields refused for a character no font draws ([`UNDRAWN`]): the
+    /// field's object in its file and the character's code point, to set
+    /// beside the unencodable widgets the fields tier finds.
+    undrawn: Vec<(String, String)>,
+}
+
+impl Filled {
+    /// Each of its counts that isn't `held`'s, and each filled save's row
+    /// of `saves` (the saves counted, by what they were) that isn't the
+    /// one `held_saves` holds, as a line that says which and both: none
+    /// where every count is the one held.
+    fn moved(
+        &self,
+        held: &FilledBaseline,
+        saves: &BTreeMap<String, usize>,
+        held_saves: &[(&'static str, usize)],
+    ) -> Vec<String> {
+        let filled = |what: &str| what.starts_with(FILLED);
+        let saves: BTreeMap<&str, usize> = (saves.iter())
+            .filter(|(what, _)| filled(what))
+            .map(|(what, &n)| (what.as_str(), n))
+            .collect();
+        let held_saves: Vec<(&'static str, usize)> = (held_saves.iter().copied())
+            .filter(|&(what, n)| filled(what) && n > 0)
+            .collect();
+        [
+            differ("filled saves", &saves, &held_saves),
+            differ("filled, set", &self.set, held.set),
+            differ("filled, refused", &self.refused, held.refused),
+            differ("filled, no option to set", &self.unset, held.unset),
         ]
         .into_iter()
         .flatten()
@@ -1900,6 +2006,130 @@ fn the_pressed_saves_counts_are_held() {
     assert!(moved[0].starts_with("pressed, not made:"), "{moved:?}");
 }
 
+/// The filled saves' held counts hold themselves, and each that moves is
+/// said: a refusal that's new, a field kind set fewer times, and a filled
+/// save that turns from an Append to a Rewrite; the other saves' rows are
+/// no part of it.
+#[test]
+fn the_filled_saves_counts_are_held() {
+    let counted = |held: &FilledBaseline| Filled {
+        set: held.set.iter().copied().collect(),
+        refused: (held.refused.iter())
+            .map(|&(why, n)| (why.to_string(), n))
+            .collect(),
+        unset: held.unset.iter().copied().collect(),
+        undrawn: Vec::new(),
+    };
+    let saves = |rows: &[(&str, usize)]| -> BTreeMap<String, usize> {
+        (rows.iter())
+            .filter(|&&(_, n)| n > 0)
+            .map(|&(what, n)| (what.to_string(), n))
+            .collect()
+    };
+    let (held, rows) = (&FORMS.filled, &FORMS.saves[..]);
+    assert_eq!(
+        counted(held).moved(held, &saves(rows), rows),
+        [] as [String; 0]
+    );
+
+    let mut new_why = counted(held);
+    new_why.refused.insert("“…” is new".into(), 1);
+    let moved = new_why.moved(held, &saves(rows), rows);
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert!(moved[0].starts_with("filled, refused:"), "{moved:?}");
+
+    let mut fewer = counted(held);
+    *fewer.set.entry("text field").or_default() += 1;
+    let moved = fewer.moved(held, &saves(rows), rows);
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert!(moved[0].starts_with("filled, set:"), "{moved:?}");
+
+    let mut turned = saves(rows);
+    *turned.entry(format!("{FILLED}, Append")).or_default() -= 1;
+    *turned.entry(format!("{FILLED}, Rewrite")).or_default() += 1;
+    *turned.entry(format!("{PRESSED}, Rewrite")).or_default() += 1;
+    let moved = counted(held).moved(held, &turned, rows);
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert!(moved[0].starts_with("filled saves:"), "{moved:?}");
+}
+
+/// A form's text and choice fields that hold no value are set one op a
+/// field, a refusal taking none of the others: an empty text field and a
+/// list box set, a read-only field, one a signature locks and a combo box
+/// whose first option no font draws refused, each by its kind, a list box
+/// with no options left unset, and a field holding a value left alone, in
+/// one version. A value past `/MaxLen`, a line break in a one-line field
+/// and another refusal are counted as the tier counts them.
+#[test]
+fn a_form_s_empty_fields_are_filled_and_each_refusal_counted_by_kind() {
+    use sheaf_doc::forms::Value as Held;
+    use sheaf_doc::forms::fixture::row;
+    let dir = scratch("arlington-filled");
+    let mut f = Form::new(1);
+    f.text("t", 0, row(0));
+    let ro = f.text("ro", 0, row(1));
+    f.dict(ro).set("Ff", 1);
+    f.text("locked", 0, row(2));
+    let kept = f.text("kept", 0, row(3));
+    f.fill(kept, "Kept");
+    let combo = f.choice("combo", 0, row(4), &["a", "b"], true);
+    let first = sheaf_doc::pdf::text::string("\u{738b}");
+    f.dict(combo).set("Opt", vec![first, literal("b")]);
+    f.choice("none", 0, row(5), &[], false);
+    f.choice("list", 0, row(6), &["x", "y"], false);
+    let max = f.text("max", 0, row(7));
+    f.dict(max).set("MaxLen", 3);
+    let sig = f.signature("sig", 0, row(8));
+    f.sign_locking(sig, "Include", &["locked"], None);
+    let path = common::write(&dir, "form.pdf", &mut f);
+    let mut doc = common::open(&path);
+
+    // As the tier counts what the op refuses of other values.
+    let refused = |doc: &mut Document, name: &str, value: &str| {
+        let e = fx::try_fill(doc, name, value).unwrap_err();
+        refusal(&e, &format!("“{name}”"))
+    };
+    assert_eq!(refused(&mut doc, "max", "1234"), TOO_LONG);
+    assert_eq!(refused(&mut doc, "t", "a\nb"), TOO_LONG);
+    assert_eq!(
+        refused(&mut doc, "combo", "c"),
+        "“…” takes one of its options, and the value isn't one: it can't be typed in"
+    );
+    let versions = doc.version_count();
+
+    let filled = fill_fields(&mut doc).unwrap().unwrap();
+    let set = BTreeMap::from([("list box", 1), ("text field", 2)]);
+    assert_eq!(filled.set, set);
+    let refused = BTreeMap::from([
+        (LOCKED.to_string(), 1),
+        (READ_ONLY.to_string(), 1),
+        (UNDRAWN.to_string(), 1),
+    ]);
+    assert_eq!(filled.refused, refused);
+    assert_eq!(filled.unset, BTreeMap::from([("list box", 1)]));
+    let combo = doc.state().field_named("combo").unwrap();
+    let object = doc.state().field(combo).unwrap().src.as_ref().unwrap().id;
+    let object = format!("{}.{}", object.number, object.generation);
+    assert_eq!(filled.undrawn, [(object, "U+738B".to_string())]);
+
+    let st = doc.state();
+    let value = |name: &str| {
+        let id = st.field_named(name).unwrap();
+        st.field(id).unwrap().term.as_ref().unwrap().value.clone()
+    };
+    let text = |t: &str| Some(Held::Text(t.into()));
+    assert_eq!(value("t"), text("Sample 123"));
+    assert_eq!(value("max"), text("123"));
+    assert_eq!(value("list"), text("x"));
+    assert_eq!(value("kept"), text("Kept"));
+    for name in ["ro", "locked", "combo", "none"] {
+        assert_eq!(value(name), None, "{name}");
+    }
+    assert_eq!(doc.version_count(), versions + 1, "one version");
+    assert_eq!(doc.undo_label(), Some("Fill"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// One save's check, its findings sorted out.
 struct SaveChecked {
     /// The save, and what it was saved as.
@@ -1942,13 +2172,18 @@ impl SaveChecked {
 /// Append where the form takes one); then its last page deleted, saved as
 /// planned, which strict removal makes a Rewrite, or a form of one page
 /// rewritten to a copy. And, on a copy of its own, its check boxes and
-/// radio buttons whose file has no on state pressed, and rewritten
-/// ([`pressed_save`]). A finding no allowance holds fails, unless it's in
+/// radio buttons whose file has no on state pressed, and saved as planned
+/// ([`pressed_save`]): an Append where the form takes one. And, on a copy
+/// of its own, its text and choice fields that hold no value each set
+/// through `SetFieldValues`, one op a field, and saved as planned
+/// ([`filled_save`]). A finding no allowance holds fails, unless it's in
 /// an object merged over the form's that the form has too. The counts are
 /// printed: saves by what they were, objects checked by table, keys, the
 /// checks not made and what stood in their way, the keys the model doesn't
 /// list, those the version deprecates and those readers ignore, the
-/// widgets pressed and those made and not by why, the findings carried and
+/// widgets pressed and those made and not by why, the fields filled by
+/// kind and those the op refused by why (each refused for a character no
+/// font draws by its file, field and code point), the findings carried and
 /// allowed, and the allowances that allowed nothing here. A save that held
 /// nothing but its trailer fails. Run on every
 /// form, the counts of forms opened and not, and of saves, are asserted
@@ -1977,7 +2212,7 @@ fn what_sheaf_writes_on_every_form_holds_to_arlington() {
             Outcome::Checked(form) => {
                 let left: Vec<&str> = (form.saves.iter())
                     .flat_map(|save| save.left.iter().map(String::as_str))
-                    .chain(form.failed.as_deref())
+                    .chain(form.failed.iter().map(String::as_str))
                     .collect();
                 if !left.is_empty() {
                     failed.insert(entry.path.clone(), left.join("\n  "));
@@ -1985,7 +2220,7 @@ fn what_sheaf_writes_on_every_form_holds_to_arlington() {
                 for save in &form.saves {
                     lines.push_str(&save.line(&entry.path));
                 }
-                totals.add(form);
+                totals.add(&entry.path, *form);
             }
             Outcome::Failed(e) => {
                 totals.files += 1;
@@ -2001,22 +2236,32 @@ fn what_sheaf_writes_on_every_form_holds_to_arlington() {
     for (path, why) in &failed {
         println!("{path}:\n  {why}");
     }
-    // What the pressed saves made is held beside the files' failures, not
-    // after them, so a file that fails for something else doesn't hide it.
-    let pressed_moved = match entries.len() == FORMS.manifest {
+    // What the pressed saves made, and what the filled saves set and
+    // refused, are held beside the files' failures, not after them, so a
+    // file that fails for something else doesn't hide them.
+    let whole = entries.len() == FORMS.manifest;
+    let pressed_moved = match whole {
         true => totals.pressed.moved(&FORMS.pressed),
         false => Vec::new(),
     };
     for moved in &pressed_moved {
         println!("the pressed saves' counts moved: {moved}");
     }
+    let filled_moved = match whole {
+        true => (totals.filled).moved(&FORMS.filled, &totals.saves, &FORMS.saves),
+        false => Vec::new(),
+    };
+    for moved in &filled_moved {
+        println!("the filled saves' counts moved: {moved}");
+    }
     assert!(
-        failed.is_empty() && pressed_moved.is_empty(),
-        "{} files failed, {} of the pressed saves' counts moved",
+        failed.is_empty() && pressed_moved.is_empty() && filled_moved.is_empty(),
+        "{} files failed, {} of the pressed saves' counts moved, {} of the filled saves'",
         failed.len(),
-        pressed_moved.len()
+        pressed_moved.len(),
+        filled_moved.len()
     );
-    if entries.len() == FORMS.manifest {
+    if whole {
         assert_eq!(totals.files, FORMS.files, "forms opened");
         let unopened: BTreeMap<&str, usize> = (FORMS.unopened.iter().copied())
             .filter(|&(_, n)| n > 0)
@@ -2062,9 +2307,18 @@ fn written_on(entry: &Entry, corpus: &Corpus, dir: &Path, allowances: &Allowance
                                 form.pressed = Some(pressed);
                             }
                             Ok(None) => {}
-                            Err(e) => form.failed = Some(e),
+                            Err(e) => form.failed.push(e),
                         }
-                        Outcome::Checked(form)
+                        let filled = dir.join("filled.pdf");
+                        match filled_save(&from, &filled, entry, allowances) {
+                            Ok(Some((save, filled))) => {
+                                form.saves.extend(save);
+                                form.filled = Some(filled);
+                            }
+                            Ok(None) => {}
+                            Err(e) => form.failed.push(e),
+                        }
+                        Outcome::Checked(Box::new(form))
                     }
                     Err(e) => Outcome::Failed(e),
                 }
@@ -2128,7 +2382,8 @@ fn saves_of(
         saves,
         untexted,
         pressed: None,
-        failed: None,
+        filled: None,
+        failed: Vec::new(),
     })
 }
 
@@ -2136,21 +2391,18 @@ fn saves_of(
 /// normal appearance has no on state, a save of its own (M10 slice 8): the
 /// file copied from `from` to `path`, opened as a document of its own, so
 /// the other saves don't move, each such widget pressed once
-/// (`tx::fixture::press`, as M10 slice 9's lowering will press one), in
-/// page order, then rewritten and checked. Their state changed, and their
+/// (`tx::fixture::press`, by `SetFieldValues` as the user presses one), in
+/// page order, then saved as planned and checked, the save's line saying
+/// the strategy the plan chose (`toggles pressed, as planned, Append`).
+/// Their state changed, and their
 /// file having no appearance to show it, the save makes their appearances
 /// ([`appearance::stale`]): which widgets it made them for, and which it
 /// couldn't and why, are counted ([`Pressed`]). A widget the group doesn't
 /// hold, or another record of one already pressed (a page the tree lists
-/// twice), isn't pressed. None where the file has no such widget.
-///
-/// A Rewrite, not a save as planned: the Rewrite holds every object sheaf
-/// writes anew for the widgets pressed, which is what this save is for,
-/// where a planned Append of a field whose own dictionary is a widget
-/// beside its kids (the corpus's toggles with no on state are most often
-/// such a dictionary, of no size) stops at the save's own check, as a text
-/// field of that shape filled does (an Append writes the widget apart from
-/// the field and not its page's `/Annots`).
+/// twice), isn't pressed. None where the file has no such widget. The
+/// corpus's toggles with no on state are most often a field's own
+/// dictionary, of no size, beside its kid widgets, which an Append writes
+/// as one object with the field, at its number, and no page.
 ///
 /// [`appearance::stale`]: sheaf_doc::forms::appearance::stale
 fn pressed_save(
@@ -2161,7 +2413,7 @@ fn pressed_save(
 ) -> Result<Option<(SaveChecked, Pressed)>, String> {
     use sheaf_doc::forms::FieldKind;
     use sheaf_doc::forms::{appearance, buttons};
-    use sheaf_doc::materialize::{SaveHow, key::Part};
+    use sheaf_doc::materialize::key::Part;
     std::fs::copy(from, path).map_err(|e| format!("not copied to press: {e}"))?;
     let mut doc = (sheaf_doc::open::file(path, None))
         .map_err(|e| format!("not opened to press: {e}"))?
@@ -2223,7 +2475,9 @@ fn pressed_save(
             Some((aid, kind, format!("{kind}, {why}")))
         })
         .collect();
-    let (strategy, bytes) = common::saved_or_why(&mut doc, path, SaveHow::Rewrite)?;
+    let from = section_start(&doc);
+    let (strategy, bytes) = common::planned_or_why(&mut doc, path)?;
+    let what = format!("{PRESSED}, {strategy:?}");
     let record = doc
         .saved_record()
         .ok_or("the pressed save left no record")?;
@@ -2240,19 +2494,189 @@ fn pressed_save(
     }
     if unwritten > 0 {
         return Err(format!(
-            "{PRESSED}: no appearance written for {unwritten} widgets whose state changed and \
+            "{what}: no appearance written for {unwritten} widgets whose state changed and \
              that one can be made for"
         ));
     }
-    let (report, version) = save_checked(&doc, 0, strategy, &bytes)?;
+    let (report, version) = save_checked(&doc, from, strategy, &bytes)?;
     let held = (&doc, entry.path.as_str(), allowances);
+    let appended = strategy == StrategyKind::Append;
     let save = sorted_out(
-        PRESSED.into(),
-        (report, version, false),
+        what,
+        (report, version, appended),
         held,
         &mut BTreeMap::new(),
     );
     Ok(Some((save, pressed)))
+}
+
+/// Where the corpus file `entry` has text or choice fields that hold no
+/// value, a save of its own (M10 slice 9): the file copied from `from` to
+/// `path`, opened as a document of its own, so the other saves don't move,
+/// each such field set as the user sets one ([`fill_fields`]), then saved
+/// as planned and checked, the save's line saying the strategy the plan
+/// chose (`fields filled, as planned, Append`): what a fill writes, each
+/// field and widget whose value or appearance moved, and the appearances'
+/// forms and fonts. A save that stops (its verify among what stops one) fails
+/// the form. What was set and refused is counted ([`Filled`]). None where
+/// the form has no such field; no save where the op refused every one.
+fn filled_save(
+    from: &Path,
+    path: &Path,
+    entry: &Entry,
+    allowances: &Allowances,
+) -> Result<Option<(Option<SaveChecked>, Filled)>, String> {
+    std::fs::copy(from, path).map_err(|e| format!("not copied to fill: {e}"))?;
+    let mut doc = (sheaf_doc::open::file(path, None))
+        .map_err(|e| format!("not opened to fill: {e}"))?
+        .doc;
+    let Some(filled) = fill_fields(&mut doc)? else {
+        return Ok(None);
+    };
+    if filled.set.is_empty() {
+        return Ok(Some((None, filled)));
+    }
+    let from = section_start(&doc);
+    let (strategy, bytes) =
+        common::planned_or_why(&mut doc, path).map_err(|e| format!("{FILLED}: {e}"))?;
+    let what = format!("{FILLED}, {strategy:?}");
+    let (report, version) = save_checked(&doc, from, strategy, &bytes)?;
+    let held = (&doc, entry.path.as_str(), allowances);
+    let appended = strategy == StrategyKind::Append;
+    let save = sorted_out(
+        what,
+        (report, version, appended),
+        held,
+        &mut BTreeMap::new(),
+    );
+    Ok(Some((Some(save), filled)))
+}
+
+/// Each of `doc`'s text and choice fields that holds no value (none, an
+/// empty list, or a text field's empty text: a choice's selects an option
+/// of empty export value) set through [`Op::SetFieldValues`] as the user
+/// sets one (`values`), by its id: a text field its sample
+/// (`forms::fixture::sample`: a value of its kind, never past its
+/// `/MaxLen`, two lines only where it's multiline), a combo box or list box
+/// its first option's export value. One op a field, each applied alone in
+/// one transaction, since a refused op changes nothing and one refusal
+/// mustn't take the form's other fills with it; the transaction committed
+/// as one version where an op was taken. What was set and refused, by kind
+/// ([`refusal`]); None where the form has no such field.
+fn fill_fields(doc: &mut Document) -> Result<Option<Filled>, String> {
+    use sheaf_doc::forms::fixture::sample;
+    use sheaf_doc::forms::{FieldKind, Value as Held};
+    use sheaf_edit::{FieldRef, FieldSet, FieldValue};
+    let empty = |value: Option<&Held>, text: bool| match value {
+        None => true,
+        Some(Held::Text(t)) => text && t.is_empty(),
+        Some(Held::Items(items)) => items.is_empty(),
+        Some(_) => false,
+    };
+    let st = doc.state();
+    let mut filled = Filled::default();
+    let mut sets = Vec::new();
+    for (id, node, term) in st.terminals() {
+        let (kind, value) = match term.kind {
+            FieldKind::Text if empty(term.value.as_ref(), true) => {
+                let value = sample("", term.flags, term.props.max_len);
+                ("text field", FieldValue::Text(value))
+            }
+            FieldKind::Combo | FieldKind::List if empty(term.value.as_ref(), false) => {
+                let kind = match term.kind {
+                    FieldKind::Combo => "combo box",
+                    _ => "list box",
+                };
+                let Some(first) = term.props.options.first() else {
+                    *filled.unset.entry(kind).or_default() += 1;
+                    continue;
+                };
+                (kind, FieldValue::Text(first.export.to_string()))
+            }
+            _ => continue,
+        };
+        let name = match st.full_name(id).filter(|n| !n.is_empty()) {
+            Some(name) => format!("“{name}”"),
+            None => format!("field {}", id.0),
+        };
+        let object = (node.src.as_ref()).map_or("-".into(), |r| {
+            format!("{}.{}", r.id.number, r.id.generation)
+        });
+        sets.push((id, kind, value, name, object));
+    }
+    if sets.is_empty() && filled.unset.is_empty() {
+        return Ok(None);
+    }
+    let mut tx = doc.tx(Actor::User);
+    for (id, kind, value, name, object) in sets {
+        let set = FieldSet {
+            field: FieldRef::Id(id),
+            value,
+            display: None,
+        };
+        let op = Op::SetFieldValues {
+            values: vec![set],
+            calculated: Vec::new(),
+        };
+        match tx.apply(op, &NoProgress) {
+            Ok(_) => {
+                let term = (tx.state().field(id)).and_then(|node| node.term.as_deref());
+                let text = kind == "text field";
+                if term.is_none_or(|term| empty(term.value.as_ref(), text)) {
+                    return Err(format!("{FILLED}: {name} was set and holds no value"));
+                }
+                *filled.set.entry(kind).or_default() += 1;
+            }
+            Err(e) => {
+                let why = refusal(&e, &name);
+                if why == UNDRAWN {
+                    filled.undrawn.push((object, code_point(&e)));
+                }
+                *filled.refused.entry(why).or_default() += 1;
+            }
+        }
+    }
+    if !tx.is_empty() {
+        (doc.commit(tx, CommitOpts::labelled("Fill")))
+            .map_err(|e| format!("{FILLED}: not committed: {e}"))?;
+    }
+    Ok(Some(filled))
+}
+
+/// Why `SetFieldValues` refused a field, `name` as its refusal names it
+/// (“its full name”, or `field <id>`), as [`fill_fields`] counts it: a
+/// field a signature locks ([`LOCKED`]), a read-only one ([`READ_ONLY`]), a
+/// value no font sheaf has draws ([`UNDRAWN`]), one past `/MaxLen` or a line
+/// break in a one-line field ([`TOO_LONG`]); else the refusal's own words,
+/// the name left out.
+fn refusal(e: &EditError, name: &str) -> String {
+    let why = match e {
+        EditError::Locked { .. } => return LOCKED.into(),
+        EditError::Invalid { why, .. } => why,
+        other => return other.to_string().replace(name, "“…”"),
+    };
+    let undrawn = format!("can't be drawn in any font sheaf has, so {name} can't show it");
+    if *why == format!("{name} is read-only") {
+        READ_ONLY.into()
+    } else if why.ends_with(&undrawn) {
+        UNDRAWN.into()
+    } else if *why == format!("{name} is one line: its value can't break lines")
+        || why.starts_with(&format!("{name} takes at most "))
+    {
+        TOO_LONG.into()
+    } else {
+        why.replace(name, "“…”")
+    }
+}
+
+/// The code point a refusal for a character no font draws names
+/// (`U+738B`), as its words give it.
+fn code_point(e: &EditError) -> String {
+    let words = e.to_string();
+    let at = words.find("(U+").map(|at| at + 1);
+    at.and_then(|at| Some(&words[at..at + words[at..].find(')')?]))
+        .unwrap_or("?")
+        .to_string()
 }
 
 /// `doc` given, in one version, a note and a recognized word on its first
@@ -2357,6 +2781,14 @@ struct Totals {
     /// ([`pressed_save`]).
     pressed_files: usize,
     pressed: Pressed,
+    /// Files with a filled save, or fields to fill, those of them the op
+    /// refused every field of, and what those set and refused, summed
+    /// ([`filled_save`]); the fields refused for a character no font draws,
+    /// by file.
+    filled_files: usize,
+    filled_none: usize,
+    filled: Filled,
+    undrawn: Vec<(String, String, String)>,
     checked: BTreeMap<String, usize>,
     keys: usize,
     /// Checks not made, by what stood in the way ([`in_the_way`]), and by
@@ -2379,7 +2811,7 @@ struct Totals {
 }
 
 impl Totals {
-    fn add(&mut self, form: FormChecked) {
+    fn add(&mut self, file: &str, form: FormChecked) {
         self.files += 1;
         if let Some(why) = form.untexted {
             *self.untexted.entry(why).or_default() += 1;
@@ -2398,6 +2830,23 @@ impl Totals {
             }
             for (why, n) in pressed.unmade {
                 *sums.unmade.entry(why).or_default() += n;
+            }
+        }
+        if let Some(filled) = form.filled {
+            self.filled_files += 1;
+            self.filled_none += usize::from(filled.set.is_empty());
+            let sums = &mut self.filled;
+            for (kind, n) in filled.set {
+                *sums.set.entry(kind).or_default() += n;
+            }
+            for (why, n) in filled.refused {
+                *sums.refused.entry(why).or_default() += n;
+            }
+            for (kind, n) in filled.unset {
+                *sums.unset.entry(kind).or_default() += n;
+            }
+            for (object, code) in filled.undrawn {
+                self.undrawn.push((file.to_string(), object, code));
             }
         }
         for save in form.saves {
@@ -2490,6 +2939,30 @@ impl Totals {
         }
         for (why, n) in &p.unmade {
             println!("  pressed, not made, {why}: {n}");
+        }
+        let f = &self.filled;
+        match self.filled_files {
+            0 => println!(
+                "  no form has a text or choice field that holds no value: no field was filled, \
+                 and the filled saves prove nothing of a fill"
+            ),
+            n => println!(
+                "  forms whose empty text and choice fields were filled: {n}, {} of them with \
+                 none set",
+                self.filled_none
+            ),
+        }
+        for (kind, n) in &f.set {
+            println!("  filled, set, {kind}: {n}");
+        }
+        for (why, n) in &f.refused {
+            println!("  filled, refused, {why}: {n}");
+        }
+        for (kind, n) in &f.unset {
+            println!("  filled, no option to set, {kind}: {n}");
+        }
+        for (file, object, code) in &self.undrawn {
+            println!("  filled, refused as {UNDRAWN}: {file} field {object}, {code}");
         }
         for (table, n) in largest(&self.checked, usize::MAX) {
             println!("  checked as {table}: {n}");

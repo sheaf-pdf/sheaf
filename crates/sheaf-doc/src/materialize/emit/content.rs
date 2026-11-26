@@ -163,13 +163,17 @@ fn layer_needs(body: &Static) -> Option<PdfVersion> {
 
 /// Whether what sheaf draws on `st`'s pages needs a later PDF version than
 /// `version`: a generator's marked content (a watermark's transparency
-/// too), or its layers' ([`needs`]). The planner reads it, as an Append
-/// that needs a later version than its file says so in the catalog
-/// (§11.7), which a signature counts as any other change (§9.3).
+/// too), its layers' ([`needs`]), or a widget's appearance a save makes
+/// anew (`forms::appearance::stale`; [`PdfVersion::LEAN_FORMS`]). The
+/// planner reads it, as an Append that needs a later version than its file
+/// says so in the catalog (§11.7), which a signature counts as any other
+/// change (§9.3).
 pub(crate) fn needs_after(st: &DocState, version: PdfVersion) -> bool {
     (version < PdfVersion::ARTIFACTS && !st.generators().is_empty())
         || (version < PdfVersion::ARTIFACTS
             && (st.pages()).any(|(_, def, _)| needs(def).is_some_and(|v| v > version)))
+        || (version < PdfVersion::LEAN_FORMS
+            && (st.annots()).any(|(aid, _)| crate::forms::appearance::stale(st, aid)))
 }
 
 /// The generators on page `id` of `st`, in the order they're drawn: a

@@ -7,10 +7,10 @@ use std::collections::BTreeSet;
 use serde_json::{Value, json};
 use sheaf_edit::fixture::{blob, every_op, layer};
 use sheaf_edit::{
-    AnnotId, AnnotRef, BlobId, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Envelope, FontChoice,
-    GridPos, HeaderFooterSpec, Local, Margins, MarkupKeep, Op, OutlineId, OutlinePolicy, PageId,
-    PageNumbering, PageRef, PageSel, Patch, RangeSet, Rotation, ScopeSel, Transform, Turn,
-    WatermarkContent, WatermarkSpec, Z,
+    AnnotId, AnnotRef, BlobId, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Envelope, FieldId,
+    FieldRef, FieldSet, FieldValue, FontChoice, GridPos, HeaderFooterSpec, Local, Margins,
+    MarkupKeep, Op, OutlineId, OutlinePolicy, PageId, PageNumbering, PageRef, PageSel, Patch,
+    RangeSet, Rotation, ScopeSel, Transform, Turn, WatermarkContent, WatermarkSpec, Z,
 };
 
 fn pos(s: &str) -> RangeSet {
@@ -91,6 +91,13 @@ fn the_fixture_has_every_op_and_every_kind_of_mark() {
         r#""trim":{"rect":{"x":18.0,"y":18.0,"w":576.0,"h":756.0}}"#,
         r#""bleed":null"#,
         r#""crop":null"#,
+        r#""field":{"name":"form1[0].name[0]"},"value":{"text":"Ann Lee"}"#,
+        r#""field":7,"value":{"items":["W-2","1099"]}"#,
+        r#""value":"clear""#,
+        r#""value":{"state":"Off"}"#,
+        r#""value":{"export":"1"}"#,
+        r#""value":{"press":{"widget":42}}"#,
+        r#""calculated":[{"field":{"name":"form1[0].total[0]"},"value":{"text":"1234.5"},"display":"$1,234.50"}]"#,
     ] {
         assert!(text.contains(form), "{form}");
     }
@@ -143,6 +150,70 @@ fn references_read_in_their_forms_and_say_what_is_wrong() {
     assert!(e.contains("90, 180, 270 or -90"), "{e}");
     assert_eq!(read(json!(-90)), Ok(Turn::Back));
     assert_eq!(Turn::Back.rotation(), Rotation::R270);
+}
+
+/// A field is named by its id or its full name, never by a local or a
+/// bare string; a value is one of its kinds; and an op setting values
+/// leaves out what it doesn't set.
+#[test]
+fn fields_are_named_and_set_as_json_says() {
+    assert_eq!(read(json!(7)), Ok(FieldRef::Id(FieldId(7))));
+    assert_eq!(
+        read(json!({"name": "a.b"})),
+        Ok(FieldRef::Name("a.b".into()))
+    );
+    for bad in [json!("$1"), json!("a.b")] {
+        let e = read::<FieldRef>(bad.clone()).unwrap_err();
+        assert!(e.contains("isn't a field"), "{bad}: {e}");
+    }
+    let e = read::<FieldRef>(json!({"name": ""})).unwrap_err();
+    assert!(e.contains("a full name is never empty"), "{e}");
+    let e = read::<FieldRef>(json!({"nm": "a"})).unwrap_err();
+    assert!(e.contains("unknown field `nm`"), "{e}");
+    let e = read::<FieldRef>(json!(-1)).unwrap_err();
+    assert!(e.contains("a field: its id"), "{e}");
+    let op = read::<Op>(json!({
+        "op": "set-field-values",
+        "values": [
+            {"field": {"name": "x"}, "value": "clear"},
+            {"field": 3, "value": {"press": {"widget": {"nm": "w"}}}, "display": "On"},
+        ],
+    }));
+    let want = Op::SetFieldValues {
+        values: vec![
+            FieldSet {
+                field: FieldRef::Name("x".into()),
+                value: FieldValue::Clear,
+                display: None,
+            },
+            FieldSet {
+                field: FieldRef::Id(FieldId(3)),
+                value: FieldValue::Press {
+                    widget: AnnotRef::Nm {
+                        nm: "w".into(),
+                        page: None,
+                    },
+                },
+                display: Some("On".into()),
+            },
+        ],
+        calculated: Vec::new(),
+    };
+    assert_eq!(op, Ok(want.clone()));
+    let json = serde_json::to_value(&want).unwrap();
+    assert!(json.get("calculated").is_none(), "{json}");
+    assert!(json["values"][0].get("display").is_none(), "{json}");
+    for bad in [
+        json!({"field": 1, "value": {"number": 3}}),
+        json!({"field": 1, "value": "off"}),
+        json!({"field": 1, "value": {"text": "a"}, "shown": "a"}),
+        json!({"field": 1}),
+    ] {
+        let op = json!({"op": "set-field-values", "values": [bad.clone()]});
+        assert!(read::<Op>(op).is_err(), "{bad}");
+    }
+    let e = read::<Op>(json!({"op": "set-field-values"})).unwrap_err();
+    assert!(e.contains("missing field `values`"), "{e}");
 }
 
 #[test]

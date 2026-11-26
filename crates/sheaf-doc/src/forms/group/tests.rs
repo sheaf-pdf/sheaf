@@ -362,7 +362,9 @@ fn opt_gives_each_widget_its_export_value_by_its_index() {
         props.options.iter().map(|o| o.export.to_string()).collect()
     };
     assert_eq!(options("c"), ["x", "", "z"]);
-    assert_eq!(options("l"), ["x", "z"]);
+    // A choice's keeps the place too (M10 slice 9), so `/TI` and `/I` index
+    // the file's `/Opt`.
+    assert_eq!(options("l"), ["x", "", "z"]);
 }
 
 /// An `/Opt` item gives an export value only where it's an option as the

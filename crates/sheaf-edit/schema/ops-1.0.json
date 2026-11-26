@@ -395,6 +395,144 @@
         }
       ]
     },
+    "FieldId": {
+      "description": "A field's id in a document. Never reused.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "FieldRef": {
+      "description": "A form field: its id, or its full name, which names every field that has it.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/FieldId"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FieldSet": {
+      "additionalProperties": false,
+      "description": "One field's value, as [`Op::SetFieldValues`] sets it, and what its\nwidgets show of it.",
+      "properties": {
+        "display": {
+          "description": "What a text field's or combo box's widgets show in place of the\nvalue: the text a format script made of it. None shows the value.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "$ref": "#/$defs/FieldRef"
+        },
+        "value": {
+          "$ref": "#/$defs/FieldValue"
+        }
+      },
+      "required": [
+        "field",
+        "value"
+      ],
+      "type": "object"
+    },
+    "FieldValue": {
+      "description": "A field's value, by its kind. In JSON, `\"clear\"`, `{\"text\": \"Ann\"}`,\n`{\"items\": [\"W-2\"]}`, `{\"state\": \"Yes\"}`, `{\"export\": \"Single\"}` or\n`{\"press\": {\"widget\": 12}}`.",
+      "oneOf": [
+        {
+          "const": "clear",
+          "description": "No value: a text or choice field empty, a check box or radio group\noff.",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A text field's text; a combo box's option, by its export value, or\nany text where the combo box is editable; a list box's one option.",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A list box's options, by their export values: more than one where\nit takes several.",
+          "properties": {
+            "items": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A check box's or radio group's on state, by its name (`Off` for\nnone on).",
+          "properties": {
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The same, by its export value: its `/Opt` entry, else its on\nstate's name.",
+          "properties": {
+            "export": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "export"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A check box's or radio button's widget pressed, by the group's\nrules: what a click does.",
+          "properties": {
+            "press": {
+              "additionalProperties": false,
+              "properties": {
+                "widget": {
+                  "$ref": "#/$defs/AnnotRef"
+                }
+              },
+              "required": [
+                "widget"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "press"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "Fit": {
       "description": "How big each page made from an image is.",
       "oneOf": [
@@ -2199,6 +2337,34 @@
             "op",
             "pages",
             "which"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Form fields' values: each field `values` names gets its value, by\nthe rules of its kind, and its widgets the states and appearances\nthat show it, in order; then each `calculated` names, the same way.\nA full name sets every field that has it.",
+          "properties": {
+            "calculated": {
+              "description": "The values the form's calculations gave after `values`, worked\nout by whoever ran its scripts: never worked out again when the\nop is. They may set a read-only field, and aren't held to a\nfield's maximum length or its single line.",
+              "items": {
+                "$ref": "#/$defs/FieldSet"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "set-field-values",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "$ref": "#/$defs/FieldSet"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "op",
+            "values"
           ],
           "type": "object"
         }

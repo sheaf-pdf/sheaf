@@ -894,16 +894,20 @@ fn field(a: Option<&Arc<FieldNode>>, b: Option<&Arc<FieldNode>>, found: &mut Fou
     e
 }
 
-/// A terminal field changed: its value is filling it in, replaced text
-/// when it held one; the rest is the form's tree. `text` is set when its
-/// tooltip, items or scripts were replaced.
+/// A terminal field changed: its value, or what its widgets show in its
+/// place (its display), is filling it in, replaced text when it held one,
+/// as the appearance an Append leaves in the file's revision draws it;
+/// the rest is the form's tree. `text` is set when its tooltip, items or
+/// scripts were replaced.
 fn terminal(a: &Terminal, b: &Terminal, text: &mut bool, found: &mut Found) -> Effects {
     let mut e = Effects::NONE;
-    if a.value != b.value {
+    if a.value != b.value || a.display != b.display {
         e |= Effects::of(Flags::FIELD_VALUES, SigClass::FILL);
     }
-    let replaced =
-        (a.value != b.value && !blank(&a.value)) || (a.default != b.default && !blank(&a.default));
+    let shown = |d: &Option<Arc<str>>| d.as_deref().is_some_and(|d| !d.is_empty());
+    let replaced = (a.value != b.value && !blank(&a.value))
+        || (a.display != b.display && shown(&a.display))
+        || (a.default != b.default && !blank(&a.default));
     if replaced {
         e.flags |= Flags::REPLACES_TEXT;
         found.removed(RemovedKind::FieldValues, 1);
