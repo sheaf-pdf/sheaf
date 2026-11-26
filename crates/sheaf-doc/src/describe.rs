@@ -163,6 +163,7 @@ pub fn describe(op: &ResolvedOp, before: &DocState) -> String {
             let verb = fill_verb(!values.is_empty() && clears(values));
             let line = match fields.as_slice() {
                 [] if !calculated.is_empty() => String::new(),
+                [] => "Fill no fields".into(),
                 [one] => format!("{verb} {}", field_text(one, before)),
                 many => format!("{verb} {}", count(many.len(), "field")),
             };
@@ -447,6 +448,7 @@ fn run_line(run: &[Step]) -> String {
             }
             let line = match fields {
                 0 if calculated > 0 => String::new(),
+                0 => "Fill no fields".into(),
                 n => format!("{} {}", fill_verb(n > 0 && cleared), count(n, "field")),
             };
             calculated_line(line, calculated)

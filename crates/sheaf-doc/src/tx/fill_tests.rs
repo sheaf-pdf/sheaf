@@ -674,6 +674,10 @@ fn history_says_which_fields_were_filled() {
         ],
     };
     assert_eq!(line(&mut d, vec![calculated]), "Fill 2 calculated fields");
+    // An op with no sets changes nothing, and says so with no count of 0.
+    let none = d.commit_ops(vec![fill(Vec::new())], "none").unwrap();
+    assert!(none.version.is_none());
+    assert_eq!(none.lines[0].text, "Fill no fields");
     let batch = vec![
         fill(vec![set(&full("name[0]"), t("Ed"))]),
         fill(vec![set(&full("empty[0]"), t("14"))]),
