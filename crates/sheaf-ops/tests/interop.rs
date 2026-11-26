@@ -74,6 +74,13 @@
 //! nothing, but that it doesn't support a push button with no action,
 //! which each push button here is.
 //!
+//! From M10 slice 9 a form of each kind of field a value is set in, each
+//! filled through `SetFieldValues` and written either way, passes `qpdf
+//! --check`; qpdf and pdf.js read each field's value, pdf.js the text
+//! field's text from its appearance too, warning of nothing; and pdftoppm
+//! draws each widget's ink where PDFium draws it, and
+//! nothing else of the page otherwise than the form as built.
+//!
 //! qpdf is `$SHEAF_QPDF`, else `qpdf` on the PATH; pdf.js is `node` on the
 //! PATH with `$SHEAF_PDFJS`, pdfjs-dist's `legacy/build/pdf.mjs`, which
 //! draws through the canvas pdfjs-dist installs beside it
@@ -2132,6 +2139,213 @@ fn two_fonts_drawn(how: How) {
                 "{how:?}, {reader}: the {subtype} inked at {ours:?}, PDFium {theirs:?}"
             );
         }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+sheaf_doc::both_ways!(
+    #[ignore = "needs qpdf, pdftoppm, or node and pdf.js"]
+    a_form_filled_of_each_kind_reads_in_other_readers,
+    a_form_filled_of_each_kind_reads_in_other_readers_appended: each_kind_filled
+);
+
+/// A field of each kind a value is set in, on one page of a form built in
+/// code: a text field `name`; a check box `agree`, off; a radio group
+/// `pick` of two buttons, neither on; a combo box `state` (CA, NY); and a
+/// list box `kind` (W-2, 1099). Each widget's box, by its field's name.
+fn of_each_kind() -> (Form, Vec<(&'static str, [f32; 4])>) {
+    use sheaf_doc::forms::fixture::row;
+    let mut form = Form::new(1);
+    let [x0, y0, _, y1] = row(2);
+    let buttons = [[x0, y0, x0 + 20.0, y1], [x0 + 40.0, y0, x0 + 60.0, y1]];
+    form.text("name", 0, row(0));
+    form.check_box("agree", 0, row(1), false);
+    form.radio("pick", 0, &buttons, None);
+    form.choice("state", 0, row(3), &["CA", "NY"], true);
+    let mut list = row(5);
+    list[1] -= 20.0;
+    form.choice("kind", 0, list, &["W-2", "1099"], false);
+    let boxes = vec![
+        ("name", row(0)),
+        ("agree", row(1)),
+        ("pick", buttons[0]),
+        ("pick", buttons[1]),
+        ("state", row(3)),
+        ("kind", list),
+    ];
+    (form, boxes)
+}
+
+/// What pdf.js reads of each widget on a file's first page, for each file
+/// given after pdf.js's `pdf.mjs`: `file` and its path, then each warning
+/// it gives (a line `Warning: …`, said on stdout as [`PDFJS_WARNED`] says
+/// them), and a line `field` with the widget's field name, field value,
+/// button value (a radio button's on state) and the text it reads of its
+/// appearance, as JSON. The page is drawn first, so the appearances are
+/// read as drawn.
+const PDFJS_FIELDS: &str = r#"
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+console.warn = (...said) => console.log(said.join(" "));
+const [lib, ...files] = process.argv.slice(2);
+const pdfjs = await import(pathToFileURL(lib).href);
+const standardFontDataUrl = new URL("../../standard_fonts/", pathToFileURL(lib)).pathname;
+for (const file of files) {
+  console.log(`file ${file}`);
+  const data = new Uint8Array(readFileSync(file));
+  const verbosity = pdfjs.VerbosityLevel.WARNINGS;
+  const task = pdfjs.getDocument({ data, standardFontDataUrl, verbosity });
+  const doc = await task.promise;
+  const page = await doc.getPage(1);
+  const viewport = page.getViewport({ scale: 2 });
+  const { canvas, context } = doc.canvasFactory.create(viewport.width, viewport.height);
+  await page.render({ canvas, canvasContext: context, viewport }).promise;
+  for (const a of await page.getAnnotations()) {
+    const text = (a.textContent ?? []).join("\n");
+    const said = [a.fieldName ?? null, a.fieldValue ?? null, a.buttonValue ?? null, text];
+    console.log(`field ${JSON.stringify(said)}`);
+  }
+  await task.destroy();
+}
+"#;
+
+/// From M10 slice 9 a form of each kind of field a value is set in
+/// ([`of_each_kind`]), each filled through `SetFieldValues` (a text, the
+/// check box on, the radio group's second button pressed, an option of
+/// each choice) and written `how`: qpdf passes `--check` on it and reads
+/// each field's value (`--json`'s form); pdf.js reads every widget's field
+/// value, and each radio button's on state, the text field's text from its
+/// appearance (it reads no other kind's), and warns of nothing; and
+/// pdftoppm draws the page with
+/// each widget's ink in the box PDFium's ink is in, within [`INK_APART`]
+/// (none for the radio button that's off, as PDFium draws none), and
+/// nothing else of the page otherwise than it draws the form as built.
+fn each_kind_filled(how: How) {
+    use sheaf_doc::tx::fixture as fx;
+    use sheaf_render::PageIndex;
+    use sheaf_render::pdfium::PdfiumEngine;
+
+    let (qpdf, pdftoppm, pdfjs) = (qpdf(), pdftoppm(), pdfjs());
+    if qpdf.is_none() && pdftoppm.is_none() && pdfjs.is_none() {
+        return;
+    }
+    let dir = scratch(&format!("interop-each-kind-{how:?}"));
+    let (mut form, boxes) = of_each_kind();
+    let base = common::write(&dir, "kinds.pdf", &mut form);
+    let mut doc = common::open(&base);
+    fx::fill(&mut doc, "name", "Camden Lee");
+    fx::set_buttons(&mut doc, "agree", "Yes");
+    let st = doc.state();
+    let pick = st.field_named("pick").unwrap();
+    let second = st.field(pick).unwrap().term.as_ref().unwrap().widgets[1];
+    fx::press(&mut doc, second);
+    fx::choose(&mut doc, "state", &["NY"]);
+    fx::choose(&mut doc, "kind", &["1099"]);
+    let saved = dir.join(format!("kinds-{how:?}.pdf"));
+    std::fs::write(&saved, how.write(&doc)).unwrap();
+    // What each reader should read: the field's value by its name.
+    let want = [
+        ("name", "Camden Lee"),
+        ("agree", "Yes"),
+        ("pick", "1"),
+        ("state", "NY"),
+        ("kind", "1099"),
+    ];
+
+    if let Some(qpdf) = &qpdf {
+        run(Command::new(qpdf).arg("--check").arg(&saved))
+            .unwrap_or_else(|e| panic!("qpdf --check, {how:?}: {e}"));
+        let said = run(Command::new(qpdf)
+            .args(["--json", "--json-key=acroform"])
+            .arg(&saved))
+        .unwrap_or_else(|e| panic!("qpdf --json, {how:?}: {e}"));
+        let json: serde_json::Value = serde_json::from_str(&said).unwrap();
+        // qpdf's JSON says a text string `u:…` and a name `/…`.
+        let read: Vec<(String, String)> = (json["acroform"]["fields"].as_array().unwrap().iter())
+            .map(|f| {
+                let value = f["value"].as_str().unwrap_or_default();
+                let value =
+                    (value.strip_prefix("u:").or_else(|| value.strip_prefix('/'))).unwrap_or(value);
+                (f["fullname"].as_str().unwrap().to_string(), value.into())
+            })
+            .collect();
+        println!("qpdf, {how:?}: passes --check, reads {read:?}");
+        let mut wanted: Vec<(String, String)> = (want.iter())
+            .map(|(n, v)| (n.to_string(), v.to_string()))
+            .collect();
+        // A widget a line: the radio group's two.
+        wanted.insert(3, ("pick".into(), "1".into()));
+        assert_eq!(read, wanted, "qpdf, {how:?}");
+    }
+
+    if let Some(pdfjs) = &pdfjs {
+        let script = dir.join("fields.mjs");
+        std::fs::write(&script, PDFJS_FIELDS).unwrap();
+        let said = run(Command::new("node").arg(&script).arg(pdfjs).arg(&saved))
+            .unwrap_or_else(|e| panic!("pdf.js, {how:?}: {e}"));
+        println!("pdf.js, {how:?}:\n{said}");
+        let lines: Vec<&str> = said.lines().collect();
+        let (_, warnings) = warned(&lines, false);
+        assert!(warnings.is_empty(), "pdf.js, {how:?}: {warnings:?}");
+        let fields: Vec<serde_json::Value> = (lines.iter())
+            .filter_map(|l| l.strip_prefix("field "))
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        // pdf.js gives a choice's value as the array of its texts.
+        let value = |f: &serde_json::Value| match &f[1] {
+            serde_json::Value::Array(items) => (items.iter())
+                .map(|i| i.as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            v => v.as_str().unwrap_or_default().to_string(),
+        };
+        let read: Vec<(String, String)> = (fields.iter())
+            .map(|f| (f[0].as_str().unwrap().to_string(), value(f)))
+            .collect();
+        let mut wanted: Vec<(String, String)> = (want.iter())
+            .map(|(n, v)| (n.to_string(), v.to_string()))
+            .collect();
+        wanted.insert(3, ("pick".into(), "1".into()));
+        assert_eq!(read, wanted, "pdf.js, {how:?}");
+        let buttons: Vec<&str> = (fields.iter())
+            .filter(|f| f[0] == "pick")
+            .map(|f| f[2].as_str().unwrap())
+            .collect();
+        assert_eq!(buttons, ["0", "1"], "pdf.js, {how:?}: the radio buttons");
+        // The text a widget's appearance shows, which pdf.js reads of a
+        // text field's alone.
+        let texts: Vec<(&str, &str)> = (fields.iter())
+            .map(|f| (f[0].as_str().unwrap(), f[3].as_str().unwrap()))
+            .filter(|(_, text)| !text.is_empty())
+            .collect();
+        let shown = [("name", "Camden Lee")];
+        assert_eq!(texts, shown, "pdf.js, {how:?}: what the appearances read");
+    }
+
+    if let Some(pdftoppm) = &pdftoppm {
+        let [drawn, was] = [&saved, &base].map(|p| poppler_drew(pdftoppm, p));
+        let engine = PdfiumEngine::open_bytes(std::fs::read(&saved).unwrap().into(), None).unwrap();
+        let pdfium = fields::flat_at(&engine, PageIndex(0), drawn.width).unwrap();
+        let mut inside = 0;
+        for (name, [x0, y0, x1, y1]) in &boxes {
+            let px = |v: f32| (2.0 * v) as usize;
+            let at = [px(*x0), px(792.0 - y1), px(*x1) + 1, px(792.0 - y0) + 1];
+            let [ours, theirs] = [&drawn, &pdfium].map(|r| fields::ink_box(r, at));
+            println!("pdftoppm, {how:?}: {name} inked at {ours:?}, PDFium at {theirs:?}");
+            let near = match (ours, theirs) {
+                (Some(a), Some(b)) => (a.iter().zip(b)).all(|(a, b)| a.abs_diff(b) <= INK_APART),
+                (a, b) => a == b,
+            };
+            assert!(
+                near,
+                "pdftoppm, {how:?}: {name} at {ours:?}, PDFium {theirs:?}"
+            );
+            inside += fields::differing_in(&drawn, &was, at);
+        }
+        let page = [0, 0, drawn.width as usize, drawn.height as usize];
+        let outside = fields::differing_in(&drawn, &was, page) - inside;
+        assert_eq!(outside, 0, "pdftoppm, {how:?}: drawn outside the widgets");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

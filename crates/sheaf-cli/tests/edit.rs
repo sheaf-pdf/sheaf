@@ -139,6 +139,90 @@ fn edits_come_from_standard_input() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `sheaf edit` with a `set-field-values` envelope (M10 slice 9) fills a
+/// form, by full name: a text field's text and a check box's state, one
+/// version, its line the History line, written whole; the file holds the
+/// values, as sheaf reads it, and the text field's appearance draws its
+/// text. A second run reads them: the same edits, a dry run on the filled
+/// file, change nothing (no version); another text replaces the one it
+/// reads, which the dry run says; and saved, that file holds the new text
+/// and the check box as the first run left it.
+#[test]
+fn set_field_values_fills_a_form_and_a_second_run_reads_it() {
+    use sheaf_doc::forms::Value as FieldValue;
+    use sheaf_doc::forms::fixture::{Form, row, source};
+    use sheaf_doc::pdf::StreamExt;
+
+    let dir = scratch("fill");
+    let input = dir.join("form.pdf");
+    let mut f = Form::new(1);
+    f.text("name", 0, row(0));
+    f.check_box("agree", 0, row(1), false);
+    std::fs::write(&input, f.bytes()).unwrap();
+    let fill = |name: &str, text: &str| {
+        let ops = json!({"v": "1.0", "ops": [{"op": "set-field-values", "values": [
+            {"field": {"name": "name"}, "value": {"text": text}},
+            {"field": {"name": "agree"}, "value": {"state": "Yes"}},
+        ]}]});
+        edits(&dir, name, &ops)
+    };
+    let values = |file: &Path| {
+        let form = sheaf_doc::forms::read(&source(std::fs::read(file).unwrap()));
+        (form.fields.into_iter())
+            .map(|f| (f.name, f.value))
+            .collect::<Vec<_>>()
+    };
+    let text = |t: &str| Some(FieldValue::Text(t.into()));
+    let yes = Some(FieldValue::State("Yes".into()));
+    let edit = |input: &Path, edits: &Path, more: &[&str]| -> Value {
+        let mut args = vec!["edit", path(input), "--edits", path(edits)];
+        args.extend(more);
+        serde_json::from_str(&ok(&run(&args))).unwrap()
+    };
+
+    let first = fill("fill.json", "Ann Lee");
+    let filled = dir.join("filled.pdf");
+    let done = edit(&input, &first, &["-o", path(&filled)]);
+    assert_eq!(done["version"], "Fill 2 fields", "{done}");
+    let line = json!([{"text": "Fill 2 fields", "removes": false}]);
+    assert_eq!(done["lines"], line, "{done}");
+    assert_eq!(done["strategy"], "rewrite", "{done}");
+    let want = [
+        ("name".to_string(), text("Ann Lee")),
+        ("agree".into(), yes.clone()),
+    ];
+    assert_eq!(values(&filled), want);
+    let pdf = Pdf::load(&filled).unwrap();
+    let shows = (pdf.objects.values())
+        .filter_map(Object::as_stream)
+        .filter(|s| s.dict.get(b"Subtype").and_then(Object::as_name) == Some(b"Form"))
+        .any(|s| {
+            let content = s.decompressed_content().unwrap_or_default();
+            content.windows(9).any(|w| w == b"(Ann Lee)")
+        });
+    assert!(shows, "the text field's appearance draws its text");
+
+    // A second run reads the values: the same edits change nothing.
+    let again = edit(&filled, &first, &["--dry-run"]);
+    assert_eq!(again["version"], Value::Null, "{again}");
+    assert_eq!(again["consequences"], json!([]), "{again}");
+    // Another text replaces the one it reads.
+    let second = fill("again.json", "Bo Ray");
+    let replaced = edit(&filled, &second, &["--dry-run"]);
+    assert_eq!(replaced["version"], "Fill 2 fields", "{replaced}");
+    assert_eq!(
+        replaced["consequences"],
+        json!(["replaces 1 form field's value"]),
+        "{replaced}"
+    );
+    let refilled = dir.join("refilled.pdf");
+    let done = edit(&filled, &second, &["-o", path(&refilled)]);
+    assert_eq!(done["strategy"], "rewrite", "{done}");
+    let want = [("name".to_string(), text("Bo Ray")), ("agree".into(), yes)];
+    assert_eq!(values(&refilled), want);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Signed files from the corpus's `signatures/`, each named: approval
 /// signatures of both subfilters, one file signed twice, and two
 /// certifications that allow comments (DocMDP P = 3). Each is held to its
