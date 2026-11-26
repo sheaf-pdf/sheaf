@@ -118,7 +118,7 @@ use std::sync::Arc;
 use crate::pdf::forms::FieldFont;
 use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, StringFormat, Value as PdfValue, literal};
 
-use super::Cx;
+use super::{Cx, PdfVersion};
 use crate::annot::AnnotId;
 use crate::attachments::tree_names;
 use crate::content::{Fallback, Glyphs, Res, sink};
@@ -648,7 +648,11 @@ fn fills(cx: &Cx, key: ObjKey, aid: AnnotId) -> bool {
 /// radio button's in state dictionaries (`<< /N << /on … /Off … >> /D <<
 /// … >> >>`, `on` its look's on state's name, no `/Off` where none was
 /// made), nothing else of the file's (its `/D` and `/R` would show the old
-/// value or caption). None where none can be made: the widget is written with no
+/// value or caption). A form written needs PDF 1.3
+/// ([`PdfVersion::LEAN_FORMS`]: it has no `/FormType` or `/Name`), so a
+/// Rewrite of an older file says 1.3 in its header, and an Append a later
+/// version in its catalog (1.4 at least, `PdfVersion::CATALOG_VERSION`).
+/// None where none can be made: the widget is written with no
 /// `/AP`, so no file shows a value the field no longer holds, and a
 /// warning says which kind, never the text.
 fn appearance(cx: &mut Cx, aid: AnnotId, src: &Src) -> Option<Object> {
@@ -700,6 +704,7 @@ fn appearance(cx: &mut Cx, aid: AnnotId, src: &Src) -> Option<Object> {
             let (bbox, matrix) = (form.bbox, form.matrix);
             let form = sink::form(cx, bbox, matrix, form.content, &form.needs, glyphs);
             cx.push(key, Object::from(form));
+            cx.needs(PdfVersion::LEAN_FORMS);
         }
         let form = cx.placeholder(key);
         match on {

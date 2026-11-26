@@ -18,6 +18,7 @@ and appends the changes, which keeps a signed file's signatures.
 ```sh
 sheaf edit binder.pdf --edits tidy.json -o tidy.pdf
 sheaf edit signed.pdf --edits note.json -o noted.pdf --append
+sheaf edit fw9.pdf --edits fill.json -o filled.pdf
 sheaf inspect binder.pdf --json
 sheaf export binder.pdf -o pngs/ --pages "1-3, 10-" --dpi 200
 sheaf export binder.pdf -f tiff --tiff bw -o binder.tif
@@ -30,7 +31,7 @@ sheaf comments csv binder.pdf -c number,page,author,text --author "Pat Smith" > 
 
 | Subcommand | Does |
 |---|---|
-| `edit` | Edits from a JSON file (`--edits FILE`, or `-` for stdin) applied as one undoable version and saved: `-o out.pdf` (written whole), `-o out.pdf --append`, or `--in-place`. The edits are sheaf's ops (`--schema` prints their JSON schema) and name things as you see them: pages by position (`{"pos": 3}`), bookmarks by their titles (`{"path": ["Part I", "Ch. 2"]}`), comments by `/NM` (`{"nm": "…"}`), and files by `--with NAME=PATH` (`{"with": "NAME"}`). Prints what it did as JSON; `--dry-run` says what it would do and writes nothing. Examples in [docs/document-model.md](document-model.md) |
+| `edit` | Edits from a JSON file (`--edits FILE`, or `-` for stdin) applied as one undoable version and saved: `-o out.pdf` (written whole), `-o out.pdf --append`, or `--in-place`. The edits are sheaf's ops (`--schema` prints their JSON schema) and name things as you see them: pages by position (`{"pos": 3}`), bookmarks by their titles (`{"path": ["Part I", "Ch. 2"]}`), comments by `/NM` (`{"nm": "…"}`), form fields by full name (`{"name": "…"}`), and files by `--with NAME=PATH` (`{"with": "NAME"}`). `set-field-values` fills form fields: a text (`{"text": "Ann Lee"}`), a check box's or radio button's state or export value (`{"state": "Yes"}`, `{"export": "Single"}`), a list box's options (`{"items": [...]}`), or `"clear"`; a read-only field, one a signature locks, a value past the field's length or that no font sheaf has can draw is refused, and nothing is written. Prints what it did as JSON; `--dry-run` says what it would do and writes nothing (a value replaced is "replaces 1 form field's value"). Examples in [docs/document-model.md](document-model.md) |
 | `inspect` | `--json`: a PDF's pages (labels, boxes, rotation), sheaf's marks and other tools' comments by `/NM`, bookmarks by title path, headers, footers and watermarks, and a form summary: what `edit` needs to name things |
 | `form` | `check`: a PDF's form as the file has it, for what other viewers would trip on or a save would carry where it shouldn't. Prints its kind (AcroForm, hybrid, XFA-only) and how many fields, widgets and pages it has, its XFA, NeedAppearances, Reader usage rights, certification and signatures, then each problem: widgets no field reaches, on no page, on more than one or with the wrong `/P`, kids whose `/Parent` is elsewhere, fonts a `/DA` names that `/DR` lacks, full names held twice, values with no appearance, values only an earlier revision holds, an XFA copy that differs from the fields, and signatures or `/SigFlags` that no longer fit the file; `--password` for an encrypted one |
 | `combine` | PDFs and images into one PDF in order; `file:range` takes some pages (`a.pdf:1-3,7`). A bookmark per file (`--no-file-bookmarks` to skip), `--image-page` |

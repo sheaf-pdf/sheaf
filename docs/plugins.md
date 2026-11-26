@@ -392,7 +392,8 @@ a link, making another tool's comment a mark (`adopt-annotations`),
 cropping (`set-page-boxes`), watermarks, backgrounds, headers and
 footers, clearing OCR text and flattening (`flatten-annotations`); and
 what only the user makes (`user`): inserting or replacing pages
-(`insert-pages`, `replace-pages`), setting OCR text, and an imported
+(`insert-pages`, `replace-pages`), setting OCR text, filling form fields
+(`set-field-values`, until a plugin can read them), and an imported
 comment's own name and dates (`imported`). A plugin never names a blob by
 id (`{"blob": …}` is refused); it uploads what its edits hold. No
 manifest permission grants more in 0.4; `identity` changes what a

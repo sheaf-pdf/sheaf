@@ -397,9 +397,17 @@ impl PdfVersion {
     /// CIDFonts (ISO 32000-1 9.7.4), which an OCR layer's text is in, and
     /// the fallback font's subset.
     pub const CID_FONTS: PdfVersion = PdfVersion::new(1, 2);
+    /// Form XObjects with no `/FormType` or `/Name`, and no `/Matrix` where
+    /// it's the identity, as sheaf makes a widget's appearance: PDF 1.3 made
+    /// all three optional (PDF Reference 1.2 required them; the Arlington
+    /// model's `XObjectFormType1`).
+    pub const LEAN_FORMS: PdfVersion = PdfVersion::new(1, 3);
     /// Marked-content artifacts with property lists (14.8.2.2), which a
     /// header and footer are drawn as.
     pub const ARTIFACTS: PdfVersion = PdfVersion::new(1, 4);
+    /// The catalog's `/Version` (7.7.2, Table 28), which an Append says a
+    /// later version than its file's with: one it says is this at least.
+    pub const CATALOG_VERSION: PdfVersion = PdfVersion::new(1, 4);
 
     pub const fn new(major: u8, minor: u8) -> PdfVersion {
         PdfVersion { major, minor }
@@ -1300,8 +1308,10 @@ fn rebind(cx: &mut Cx, subset: ResId) {
 /// of the other pages, their pages' `/Annots` the saved file's; the nodes
 /// that changed; the form, the outline, the document scripts and the page
 /// labels when any of theirs is in scope; and the catalog when it is, or
-/// when the section needs a later version than the file is, or the form
-/// or the outline came or went.
+/// when the section needs a later version than the file is (said as 1.4
+/// at least, the version that brought `/Version`), or the form or the
+/// outline came or went, or the form the saved catalog holds in itself is
+/// written.
 fn appended(cx: &mut Cx, p: &dyn Progress) -> Result<()> {
     let st = cx.st;
     let append = cx.append.as_ref().expect("an Append");
@@ -1344,9 +1354,21 @@ fn appended(cx: &mut Cx, p: &dyn Progress) -> Result<()> {
     let came_or_went = |now: &Option<Option<Object>>, was: bool| {
         now.as_ref().is_some_and(|now| now.is_some() != was)
     };
+    // A form the saved catalog holds in itself, written anew (an XFA copy
+    // dropped, `/Fields` or `/SigFlags` changed), is written at a number of
+    // its own, which only the catalog, written anew too, names.
+    let form_in_itself = record.roots.acroform.is_some()
+        && record.map.get(&ObjKey::AcroForm).is_none()
+        && cx.writes(&ObjKey::AcroForm);
+    // A later version than the file's is said by the catalog's `/Version`,
+    // which PDF 1.4 brought: said at all, it says 1.4 at least.
+    if cx.version > record.pdf_version {
+        cx.needs(PdfVersion::CATALOG_VERSION);
+    }
     if cx.version > record.pdf_version
         || came_or_went(&form, record.roots.acroform.is_some())
         || came_or_went(&outline, record.roots.outlines.is_some())
+        || form_in_itself
     {
         cx.write_too(ObjKey::Catalog);
     }

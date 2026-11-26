@@ -610,6 +610,138 @@ fn a_field_beside_its_kid_widgets_is_saved_as_its_file_has_it() {
     }
 }
 
+/// A field that's one object with a widget its file lists on two pages is
+/// two widget records, which every save writes apart from the field
+/// (`Joined::Split`): the field at its number with the two as its `/Kids`,
+/// each widget at a number of its own, on its page. An Append writes the
+/// two pages too, whose `/Annots` named the one object (it left them, so
+/// the two widgets were on no page, and the save's check stopped it). The
+/// empty field `t` filled, saved by a Rewrite, an Append and as planned (an
+/// Append), is checked as every save is; each page lists one widget of
+/// `t`'s, drawing the value; and the file reopens to `t` and its two.
+#[test]
+fn a_widget_its_file_lists_on_two_pages_is_saved_apart_from_its_field() {
+    let mut f = Form::new(2);
+    let t = f.text("t", 0, row(0));
+    let mut annots = f.annots(1);
+    annots.push(t);
+    f.set_annots(1, &annots);
+    let pages = f.pages.clone();
+    let bytes = table(&mut f);
+    for how in EACH_WAY {
+        let dir = scratch();
+        let (path, mut d) = opened(&dir, "a.pdf", &bytes);
+        let [w0, w1] = widgets_of(&d, "t")[..] else {
+            panic!("{how}: a widget on each page")
+        };
+        let field = d.state().field_named("t").unwrap();
+        let joined = emit::form::joined(d.state(), field);
+        assert_eq!(joined, emit::form::Joined::Split, "{how}");
+        let on = |aid| {
+            d.state()
+                .pos_of(d.state().annot(aid).unwrap().page)
+                .unwrap()
+        };
+        assert_eq!([on(w0), on(w1)], [0, 1], "{how}");
+        fx::fill(&mut d, "t", "Camden");
+        let strategy = saved_each_way(&mut d, &path, how);
+        let want = match how {
+            "a Rewrite" => StrategyKind::Rewrite,
+            _ => StrategyKind::Append,
+        };
+        assert_eq!(strategy, want, "{how}");
+        let record = d.saved_record().unwrap();
+        let at = |key| record.map.keys[&key];
+        let widgets = [at(ObjKey::Annot(w0)), at(ObjKey::Annot(w1))];
+        assert_eq!(at(ObjKey::Field(field)), t, "{how}");
+        assert!(!widgets.contains(&t), "{how}: written apart");
+        let now = std::fs::read(&path).unwrap();
+        let pdf = lazy(&now, None);
+        assert_eq!(kids_of(&pdf, t), widgets, "{how}");
+        for (page, (w, id)) in pages.iter().zip([(w0, widgets[0]), (w1, widgets[1])]) {
+            let listed = pdf.get_dictionary(*page).unwrap().get(b"Annots").cloned();
+            let listed: Vec<ObjectId> = (listed.as_ref().and_then(Object::as_array))
+                .map(|a| a.iter().filter_map(Object::as_reference).collect())
+                .unwrap_or_default();
+            assert_eq!(listed, [id], "{how}: its page lists it");
+            assert_eq!(ap_n(&pdf, id), Some(at(ObjKey::AnnotPart(w, Part::Ap))));
+            assert_eq!(shown(&saved_form(&pdf, id).0.content), b"Camden", "{how}");
+        }
+        if how != "a Rewrite" {
+            let wrote = written(bytes.len(), &now[bytes.len()..], &path);
+            assert!(pages.iter().all(|p| wrote.contains(p)), "{how}: both pages");
+        }
+        let reopened = open(&now, None);
+        let [r0, r1] = widgets_of(&reopened, "t")[..] else {
+            panic!("{how}: reopened, a widget on each page")
+        };
+        let page_of = |aid| {
+            reopened
+                .state()
+                .pos_of(reopened.state().annot(aid).unwrap().page)
+        };
+        assert_eq!([page_of(r0), page_of(r1)], [Some(0), Some(1)], "{how}");
+    }
+}
+
+/// A hybrid form whose catalog holds its `/AcroForm` in itself, rather than
+/// by number: a fill saved by an Append drops the XFA copy, which writes the
+/// form at a number of its own, and the catalog with it, which names it
+/// (it left the catalog, which held the form with its XFA as it was, so
+/// the section's form reached nothing). Reopened, the file has no XFA and
+/// holds the value. A fill after it, the form an object now and the XFA
+/// dropped, writes neither.
+#[test]
+fn an_append_writing_a_form_its_catalog_holds_in_itself_writes_the_catalog() {
+    let mut f = Form::new(1);
+    f.text("a", 0, row(0));
+    f.text("b", 0, row(1));
+    f.xfa();
+    let form = f.dict(f.acroform).clone();
+    let (catalog, acroform) = (f.catalog, f.acroform);
+    f.dict(catalog).set("AcroForm", form);
+    f.pdf.objects.remove(&acroform);
+    let bytes = table(&mut f);
+    let dir = scratch();
+    let (path, mut d) = opened(&dir, "a.pdf", &bytes);
+    assert!(
+        d.saved_record()
+            .unwrap()
+            .map
+            .get(&ObjKey::AcroForm)
+            .is_none()
+    );
+    fx::fill(&mut d, "a", "Camden");
+    let (base, section) = appended_in_place(&mut d).unwrap();
+    let wrote = written(base.len(), &section, &path);
+    assert!(wrote.contains(&catalog), "{wrote:?}");
+    let now = std::fs::read(&path).unwrap();
+    let pdf = lazy(&now, None);
+    let named = pdf
+        .catalog()
+        .unwrap()
+        .get(b"AcroForm")
+        .and_then(Object::as_reference);
+    let at = d.saved_record().unwrap().map.get(&ObjKey::AcroForm);
+    assert!(named.is_some() && named == at, "{named:?}, {at:?}");
+    assert!(wrote.contains(&named.unwrap()));
+    let reopened = open(&now, None);
+    assert!(!reopened.primary().form().facts.xfa, "the XFA copy dropped");
+    let st = reopened.state();
+    let value = st.field(st.field_named("a").unwrap()).unwrap().term.clone();
+    assert_eq!(value.unwrap().value, Some(Value::Text("Camden".into())));
+    let report = crate::forms::check(&now, None).unwrap();
+    assert!(report.is_clean(), "{:?}", report.findings);
+
+    fx::fill(&mut d, "b", "Trenton");
+    let (base, section) = appended_in_place(&mut d).unwrap();
+    let wrote = written(base.len(), &section, &path);
+    assert!(
+        !wrote.contains(&catalog) && !wrote.contains(&named.unwrap()),
+        "{wrote:?}"
+    );
+}
+
 /// Each kind of `/DR` font is bound: a direct dictionary that holds no
 /// reference as it is, an object of its own; a direct one that holds a
 /// reference, its dictionary written once as an object of its own, the
@@ -1446,10 +1578,10 @@ fn appends_bind_a_saved_subset_and_write_one_only_for_new_glyphs() {
     };
     assert_eq!(numbers(g4), glyphs_of("\u{141}\u{143}"));
     let s4_at = record.map.keys[&ObjKey::Res(*s4)];
-    // Beside it, the file's `empty` widget as it was, which reads no value
-    // since the reopen (no save writes `/V` before M10 slice 9), so isn't
-    // made anew: its form and that form's subset copied, which the record
-    // doesn't list.
+    // Beside it, the file's `empty` widget as the reopened file has it: its
+    // `/V` the `ễ` an Append above wrote, unchanged since the reopen, so
+    // not made anew: its form and that form's subset copied, which the
+    // record doesn't list.
     let subsets = fallback_subsets(&now());
     assert_eq!(subsets.len(), 2, "{subsets:?}");
     assert!(subsets.contains(&(s4_at, numbers(g4))), "{subsets:?}");
@@ -1463,39 +1595,65 @@ fn appends_bind_a_saved_subset_and_write_one_only_for_new_glyphs() {
     assert_eq!(subsets_hold(&now()), 4);
 }
 
-/// An Append onto a file older than PDF 1.2, which has no Type 0 fonts,
-/// says 1.2 in the catalog where it binds the fallback, and the record
-/// says it; a WinAnsi value onto the same file writes no catalog.
+/// An Append of a fill onto a file older than PDF 1.3 says a later version
+/// in the catalog, which a made form with no `/FormType` or `/Name` needs
+/// (`PdfVersion::LEAN_FORMS`; saying none, the file would hold forms its
+/// version doesn't allow): 1.4, as `/Version` came in it, and the record
+/// says it; a value that binds the fallback after it (a Type 0 font, which
+/// PDF 1.2 brought) writes no catalog: the file says a version that has
+/// both. A Rewrite of a fill of the file as opened says 1.3 in its header,
+/// and the planner knows an Append needs the later version.
 #[test]
-fn an_append_onto_an_older_file_says_the_version_its_subset_needs() {
+fn an_append_onto_an_older_file_says_the_version_its_forms_need() {
     let dir = scratch();
-    let (mut f, _, _) = two_fields();
+    let (mut f, a, _) = two_fields();
     f.pdf.version = "1.1".into();
     let empty = f.text("empty", 0, row(1));
     let bytes = table(&mut f);
     let (path, mut d) = opened(&dir, "a.pdf", &bytes);
     let catalog = d.saved_record().unwrap().map.keys[&ObjKey::Catalog];
     assert_eq!(d.saved_record().unwrap().pdf_version, PdfVersion::new(1, 1));
+    // The planner knows it, as a signature counts the catalog's change.
+    let old = PdfVersion::new(1, 1);
+    assert!(!emit::content::needs_after(d.state(), old));
     fx::fill(&mut d, "a", "Camden");
+    assert!(emit::content::needs_after(d.state(), old));
+    assert!(!emit::content::needs_after(
+        d.state(),
+        PdfVersion::LEAN_FORMS
+    ));
+    let rewritten = rewrite(&d, Profile::default()).bytes;
+    assert!(rewritten.starts_with(b"%PDF-1.3"));
     let (base, section) = appended_in_place(&mut d).unwrap();
-    assert!(!written(base.len(), &section, &path).contains(&catalog));
-    assert_eq!(d.saved_record().unwrap().pdf_version, PdfVersion::new(1, 1));
+    let wrote = written(base.len(), &section, &path);
+    assert!(wrote.contains(&catalog) && wrote.contains(&a), "{wrote:?}");
+    let version = |now: &[u8]| {
+        let pdf = lazy(now, None);
+        let version = pdf.catalog().unwrap().get(b"Version").cloned();
+        version
+            .as_ref()
+            .and_then(Object::as_name)
+            .map(<[u8]>::to_vec)
+    };
+    assert_eq!(version(&std::fs::read(&path).unwrap()), Some(b"1.4".into()));
+    assert_eq!(
+        d.saved_record().unwrap().pdf_version,
+        PdfVersion::CATALOG_VERSION
+    );
 
     fx::fill(&mut d, "empty", "\u{141}ukasz");
     let (base, section) = appended_in_place(&mut d).unwrap();
     let wrote = written(base.len(), &section, &path);
     assert!(
-        wrote.contains(&catalog) && wrote.contains(&empty),
+        !wrote.contains(&catalog) && wrote.contains(&empty),
         "{wrote:?}"
     );
     let now = std::fs::read(&path).unwrap();
-    let pdf = lazy(&now, None);
-    let version = pdf.catalog().unwrap().get(b"Version").cloned();
+    assert_eq!(version(&now), Some(b"1.4".into()));
     assert_eq!(
-        version.as_ref().and_then(Object::as_name),
-        Some(b"1.2".as_slice())
+        d.saved_record().unwrap().pdf_version,
+        PdfVersion::CATALOG_VERSION
     );
-    assert_eq!(d.saved_record().unwrap().pdf_version, PdfVersion::CID_FONTS);
     assert_eq!(subsets_hold(&now), 1);
 }
 

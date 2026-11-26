@@ -11,7 +11,7 @@ built first for tax and audit preparers working in large scanned binders.
 
 > **Status:** pre-alpha, with no releases yet. Daily binder work (viewing,
 > page tools, bookmarks, markup, comments, OCR, export, print) works today;
-> filling forms, redaction and signatures are still to come. See
+> filling forms in the app, redaction and signatures are still to come. See
 > [What works today](#what-works-today) and [Progress](#progress).
 > Settings files and the command line may still change.
 
@@ -125,8 +125,10 @@ status.
   in the background. Scanning straight from a scanner isn't there yet.
 - **Forms, so far.** Forms open and display, and survive the page tools (crop, watermark, insert, extract, combine and the rest).
   Saves respect hybrid XFA forms, Reader usage rights and signatures.
-  `sheaf form check` reports what other viewers would trip on. Filling
-  fields comes next.
+  `sheaf form check` reports what other viewers would trip on. Fields
+  can be filled from the command line (`set-field-values` in `sheaf
+  edit`), saved with appearances that show the values in every viewer;
+  filling them in the app comes next.
 - **Saving.** Incremental saves in milliseconds that keep the original
   bytes. What you delete or replace is gone from the saved file, not left
   in an earlier revision. Encrypted files stay encrypted. A signed file
@@ -145,14 +147,15 @@ status.
   and Bookmark from Pattern. To write one, see
   [docs/plugins.md](docs/plugins.md).
 - **Command line.** `sheaf <subcommand>`, or the GUI-less `sheaf-cli`,
-  runs work headless: edits from a JSON file, inspect, combine, split,
-  export, scan, images to PDF, remove blanks, comments and form check. See
-  [docs/cli.md](docs/cli.md).
+  runs work headless: edits from a JSON file (filling form fields among
+  them), inspect, combine, split, export, scan, images to PDF, remove
+  blanks, comments and form check. See [docs/cli.md](docs/cli.md).
 - **Keyboard and settings.** A command palette, your own key bindings, and
   a settings file. See [docs/configuration.md](docs/configuration.md).
 
-Not yet: filling or creating form fields, redaction, setting passwords,
-digital signatures, editing page text and images, compare and optimize.
+Not yet: filling form fields in the app, creating them, redaction,
+setting passwords, digital signatures, editing page text and images,
+compare and optimize.
 [Progress](#progress) says when.
 
 ## Progress

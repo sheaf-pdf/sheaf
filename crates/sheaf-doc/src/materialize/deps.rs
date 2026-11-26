@@ -11,7 +11,7 @@
 //! | `Geom(p)` | `p`'s dictionary; every connector of each group with one on `p` (a group's order is how its connectors show on their pages) |
 //! | `PageAnnots(p)` | `p`'s dictionary |
 //! | `Annot(a)` | `a`'s objects; for a widget, its field's (a merged pair is one object); its replies (a mark's reply takes its `/Rect`, and each its `/IRT`); every connector of its group, for one; its page, when it's a replacement now and wasn't or the other way round (a replacement's StrikeOut is beside it in `/Annots`) |
-//! | `Field(f)` | `f`'s dictionary, its widgets, every node above it (a node left with no widgets isn't written, nor the parents it empties); the form's dictionary when `f` came, went, moved or shows other widgets (its `/Fields` and `/CO` list what's written); the pages its widgets are on when one was its object and isn't, or the other way round |
+//! | `Field(f)` | `f`'s dictionary, its widgets, every node above it (a node left with no widgets isn't written, nor the parents it empties); the form's dictionary when `f` came, went, moved or shows other widgets (its `/Fields` and `/CO` list what's written); the pages its widgets are on when one was its object and isn't, or the other way round, or the state shows the widget that's its own dictionary more than once (written apart from it) |
 //! | `Form` | the form's dictionary; when the files the forms come from changed, every field and widget of the other files (their fonts' renames in `/DR`), their document scripts and the catalog; when `/DA` or `/Q` changed, the other files' roots (theirs are pushed down) |
 //! | `Bookmark(b)`, `OutlineRoots` | each bookmark whose item or place in the tree (`/Parent`, `/Prev`, `/Next`, `/First`, `/Last`, `/Count`) changed, and the outline's root when its own did |
 //! | `Labels` | the page labels; the catalog when they came or went; each page a generator whose tokens read a page's label lays out otherwise than its block in the saved file |
@@ -43,7 +43,8 @@
 //! `/OpenAction`, a named destination, the structure tree), which a Rewrite
 //! prunes.
 //! The emitter adds the catalog when the section needs a later version
-//! than the file, or the form or the outline came or went.
+//! than the file, or the form or the outline came or went, or it writes a
+//! form the saved catalog holds in itself.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -722,9 +723,14 @@ impl<'a> Deps<'a> {
         }
         // A widget that was its field's object and isn't now, or the other
         // way round, is written at another number: the pages listing the
-        // field's widgets list them anew.
-        let merged = |st| emit::form::joined(st, f).widget();
-        if merged(self.was) != merged(self.now) {
+        // field's widgets list them anew. So does a field whose own
+        // dictionary's widget the state shows more than once (a widget its
+        // file lists on two pages, or twice on one: `Joined::Split`), which
+        // is written apart from its widgets, though its file may have the
+        // two as one object that its pages list.
+        let joined = |st| emit::form::joined(st, f);
+        let split = joined(self.now) == emit::form::Joined::Split;
+        if split || joined(self.was).widget() != joined(self.now).widget() {
             let pages: Vec<PageId> = (widgets.iter())
                 .filter_map(|&w| Some(self.now.annot(w)?.page))
                 .collect();
