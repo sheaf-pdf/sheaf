@@ -625,6 +625,31 @@ fields-dump out:
 structures-dump out:
     SHEAF_STRUCTURES_DUMP="{{ absolute_path(out) }}" scripts/test-capped.sh cargo test -p sheaf-doc --release --lib -- --ignored --nocapture --exact source::dump::structures_dump
 
+# What PDFium gives of every page of the files tier-interp reads, through
+# sheaf-render's engine, written to `out`, numbers and checksums only: a
+# line a file (how PDFium opened it, its page count, its form's type) and
+# one a page (its size, a checksum of its characters with their boxes and
+# angles, one of its text, and one of its pixels 612 wide as the page
+# view draws them; on a file's first page also as the matrix path draws
+# it, and for a form as PDFium's flatten does). It asserts nothing: run it
+# before and after a move of PDFium's build or of pdfium-render, or a
+# change to how sheaf-render has PDFium draw, over the same corpus, and
+# `diff` the two files. One thread, the files in order, so two runs over
+# the same code and library write the same file; the log names the
+# library the process mapped and its SHA-256.
+# SHEAF_RENDER_DUMP_ONLY=<corpus paths, comma-separated> narrows it and
+# prints its lines. In a whole run SHEAF_RENDER_DUMP_RASTERS=<dir> keeps
+# as PNG the renders of each page that differs from
+# SHEAF_RENDER_DUMP_AGAINST=<an earlier run's file>, or of each page
+# SHEAF_RENDER_DUMP_PAGES=<lines of path, tab, page> lists, and the
+# test's other half sets two such directories side by side
+# (crates/sheaf-render/tests/render_dump.rs says how). In release, about
+# 25 minutes.
+[doc("What PDFium gives of every corpus page, a line a page, written to a file: diff two runs across a move of PDFium's build")]
+[group('corpus')]
+render-dump out:
+    SHEAF_RENDER_DUMP="{{ absolute_path(out) }}" scripts/test-capped.sh cargo test -p sheaf-render --release --test render_dump -- --ignored --nocapture --exact render_dump
+
 # ----- Gates ---------------------------------------------------------------
 
 # Wait until the machine is quiet: the 1-minute load under

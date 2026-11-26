@@ -65,6 +65,13 @@ lists them):
   run before and after a change to what reads page or name trees, text
   strings or XMP, or a move of the PDF layer's pin, and `diff` the two
   files.
+- `just render-dump <file>` writes what PDFium gives of every page the
+  content interpreter's tiers read, through sheaf-render's engine (its
+  size, a checksum of its characters with their boxes, one of its text,
+  and one of its pixels as the page view draws it, and on a file's first
+  page as the matrix path and PDFium's flatten draw it, a line a page):
+  run before and after a move of PDFium's build or of pdfium-render, and
+  `diff` the two files.
 - `just tier-pages` sets the page table beside PDFium over the scans,
   signatures and conformance suites and the pool sample: each file PDFium
   opens opens as a source, with PDFium's count of pages, each at
