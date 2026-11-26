@@ -2037,7 +2037,12 @@ slices' (M10 slices 10 to 13); today it's `sheaf edit`'s and the tests'.
   unless an ancestor's `/V` would be inherited in its place: then `()`
   for a text field or a combo box, `[]` for a list box (`()` selects an
   option of empty export value) and `/Off` for a check box or radio
-  group. A list box's `/I` is the options its value selects, as its made
+  group. An ancestor's `/V` goes, and its `/RV`, once every field that
+  took it holds another value and none still takes it (`value_orphaned`):
+  the replaced value isn't kept in the node it was inherited from, and a
+  cleared field under it then writes none; while another field still
+  takes it, it stays. An overlay keeps it, as its base has it. A list
+  box's `/I` is the options its value selects, as its made
   appearance highlights them (a choice's `/Opt` keeps every place, an
   item that is no text an option of empty text, so `/I` indexes the
   file's `/Opt`); a combo box's is left out. `/RV` goes where the value

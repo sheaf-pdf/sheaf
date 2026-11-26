@@ -1055,38 +1055,52 @@ fn a_check_box_s_and_a_radio_group_s_value_is_written_both_ways() {
 
 /// A check box that takes its parent's `/V` (it has none of its own),
 /// turned off, is written with `/V /Off` of its own, so it doesn't take
-/// its parent's again; the parent keeps its file's. Both ways, read back
-/// alike by sheaf and the family.
+/// its parent's again; the parent keeps its file's, which the box beside
+/// it still takes. Where it was the one box that took it, the parent's
+/// goes. Both ways, read back alike by sheaf and the family.
 #[test]
 fn a_check_box_turned_off_under_a_parent_holding_a_value_holds_off() {
-    let mut f = Form::new(1);
-    let (field, _) = f.buttons("c", 0, &[Button::at(0, Some("Yes"), Some("Yes"))]);
-    f.dict(field).remove(b"V");
-    let parent = f.group("p", &[field]);
-    f.dict(parent).set("V", Object::name("Yes"));
-    let bytes = table(&mut f);
-    let on = (
-        Some(Value::State("Yes".into())),
-        Some(Theirs::State(n("Yes"))),
-    );
-    assert_eq!(read_back(&bytes, "p.c"), on, "as opened: its parent's");
-    for how in ["a Rewrite", "an Append"] {
-        let dir = scratch();
-        let (path, mut d) = opened(&dir, "a.pdf", &bytes);
-        fx::clear(&mut d, "p.c");
-        saved_each_way(&mut d, &path, how);
-        let now = std::fs::read(&path).unwrap();
-        let pdf = lazy(&now, None);
-        let off = (
-            Some(Value::State("Off".into())),
-            Some(Theirs::State(n("Off"))),
+    for beside in [true, false] {
+        let mut f = Form::new(1);
+        let (field, _) = f.buttons("c", 0, &[Button::at(0, Some("Yes"), Some("Yes"))]);
+        f.dict(field).remove(b"V");
+        let mut kids = vec![field];
+        if beside {
+            let (still, _) = f.buttons("s", 0, &[Button::at(1, Some("Yes"), Some("Yes"))]);
+            f.dict(still).remove(b"V");
+            kids.push(still);
+        }
+        let parent = f.group("p", &kids);
+        f.dict(parent).set("V", Object::name("Yes"));
+        let bytes = table(&mut f);
+        let on = (
+            Some(Value::State("Yes".into())),
+            Some(Theirs::State(n("Yes"))),
         );
-        assert_eq!(read_back(&now, "p.c"), off, "{how}");
-        assert_eq!(value_of(&pdf, field), Some(n("Off")), "{how}: its own");
-        assert_eq!(
-            value_of(&pdf, parent),
-            Some(n("Yes")),
-            "{how}: the parent's"
-        );
+        assert_eq!(read_back(&bytes, "p.c"), on, "as opened: its parent's");
+        for how in ["a Rewrite", "an Append"] {
+            let dir = scratch();
+            let (path, mut d) = opened(&dir, "a.pdf", &bytes);
+            fx::clear(&mut d, "p.c");
+            saved_each_way(&mut d, &path, how);
+            let now = std::fs::read(&path).unwrap();
+            let pdf = lazy(&now, None);
+            let off = Some(Value::State("Off".into()));
+            assert_eq!(read_back(&now, "p.c").0, off, "{how}");
+            if beside {
+                let theirs = Some(Theirs::State(n("Off")));
+                assert_eq!(read_back(&now, "p.c").1, theirs, "{how}");
+                assert_eq!(value_of(&pdf, field), Some(n("Off")), "{how}: its own");
+                assert_eq!(read_back(&now, "p.s"), on, "{how}: the box beside it");
+                assert_eq!(
+                    value_of(&pdf, parent),
+                    Some(n("Yes")),
+                    "{how}: the parent's"
+                );
+            } else {
+                assert_eq!(value_of(&pdf, field), Some(n("Off")), "{how}: its own");
+                assert_eq!(value_of(&pdf, parent), None, "{how}: the parent's");
+            }
+        }
     }
 }

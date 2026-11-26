@@ -1153,18 +1153,20 @@ fn a_text_field_s_value_is_written_and_reads_back_both_ways() {
     check(&std::fs::read(&path).unwrap(), "Append");
 }
 
-/// A field cleared (no value) under a parent that holds a `/V` is written
-/// with the empty text, so it doesn't take the parent's again; one under
-/// no such parent has no `/V`; a field that took its parent's, filled,
-/// holds its own. Both ways, read back by sheaf and the family; the parent
-/// keeps its file's `/V`.
+/// A field cleared (no value) under a parent that holds a `/V` another
+/// field still takes is written with the empty text, so it doesn't take
+/// the parent's again; one under no such parent has no `/V`; a field that
+/// took its parent's, filled, holds its own. Both ways, read back by sheaf
+/// and the family; the parent keeps its file's `/V`, which the field left
+/// alone still shows.
 #[test]
 fn a_cleared_field_under_a_parent_holding_a_value_holds_the_empty_text() {
     let mut f = Form::new(1);
     let own = f.text("own", 0, row(0));
     f.fill(own, "Mine");
     let took = f.text("took", 0, row(1));
-    let parent = f.group("p", &[own, took]);
+    let still = f.text("still", 0, row(3));
+    let parent = f.group("p", &[own, took, still]);
     f.dict(parent).set("V", literal("Theirs"));
     let alone = f.text("alone", 0, row(2));
     f.fill(alone, "Solo");
@@ -1188,6 +1190,8 @@ fn a_cleared_field_under_a_parent_holding_a_value_holds_the_empty_text() {
             "{how}"
         );
         assert_eq!(read_back(now, "p.took"), text_read("Taken"), "{how}");
+        assert_eq!(read_back(now, "p.still"), text_read("Theirs"), "{how}");
+        assert!(!pdf.get_dictionary(still).unwrap().has(b"V"), "{how}");
         assert_eq!(read_back(now, "alone"), (None, None), "{how}");
         assert!(!pdf.get_dictionary(alone).unwrap().has(b"V"), "{how}");
         let theirs = value_of(&pdf, parent);
@@ -1201,6 +1205,89 @@ fn a_cleared_field_under_a_parent_holding_a_value_holds_the_empty_text() {
     set(&mut d);
     appended_in_place(&mut d).unwrap();
     check(&std::fs::read(&path).unwrap(), "Append");
+}
+
+/// A value a field took from its parent's `/V` (and the parent's `/RV`)
+/// goes from the parent once every field that took it holds another: the
+/// replaced value is nowhere in a Rewrite's bytes, a string or a stream,
+/// which is what a replaced value's Rewrite is for. Filled, the field
+/// holds its own; cleared, none, and a field beside it with a value of its
+/// own, cleared too, none either, there being nothing to take. Under two
+/// parents that each hold one, the nearer's goes and the farther's, which
+/// its other field still takes, stays. An Append's section writes the
+/// parent without it too (the revision before it holds the file's). Read
+/// back by sheaf and the family.
+#[test]
+fn a_value_every_field_that_took_it_replaced_leaves_its_parent() {
+    let found = |bytes: &[u8], text: &str| {
+        bytes_hold(bytes, text) || !any_stream_holds(&lazy(bytes, None), text.as_bytes()).is_empty()
+    };
+    for clear in [false, true] {
+        let mut f = Form::new(1);
+        let own = f.text("own", 0, row(0));
+        f.fill(own, "Mine");
+        let took = f.text("took", 0, row(1));
+        let parent = f.group("p", &[own, took]);
+        f.dict(parent).set("V", literal("Inherited9"));
+        f.dict(parent)
+            .set("RV", literal("<body><p>Inherited9</p></body>"));
+        let far = f.text("far", 0, row(2));
+        let top = f.group("top", &[parent, far]);
+        f.dict(top).set("V", literal("Farther8"));
+        let bytes = table(&mut f);
+        assert!(found(&bytes, "Inherited9"), "the control");
+        assert_eq!(read_back(&bytes, "top.p.took"), text_read("Inherited9"));
+        assert_eq!(read_back(&bytes, "top.far"), text_read("Farther8"));
+        let set = |d: &mut Document| {
+            match clear {
+                true => fx::clear(d, "top.p.took"),
+                false => fx::fill(d, "top.p.took", "Taken"),
+            }
+            fx::clear(d, "top.p.own");
+        };
+        let check = |now: &[u8], how: &str| {
+            let how = format!("{how}, clear {clear}");
+            let pdf = lazy(now, None);
+            let p = pdf.get_dictionary(parent).unwrap();
+            assert!(!p.has(b"V") && !p.has(b"RV"), "{how}: the parent's gone");
+            let (took_now, own_now) = match clear {
+                // The farther parent's would be taken: an empty one.
+                true => (text_read(""), text_read("")),
+                false => (text_read("Taken"), text_read("")),
+            };
+            assert_eq!(read_back(now, "top.p.took"), took_now, "{how}");
+            assert_eq!(read_back(now, "top.p.own"), own_now, "{how}");
+            assert_eq!(read_back(now, "top.far"), text_read("Farther8"), "{how}");
+            let theirs = value_of(&pdf, top);
+            assert_eq!(theirs.as_deref(), Some(b"Farther8".as_slice()), "{how}");
+        };
+        let mut d = open(&bytes, None);
+        set(&mut d);
+        let out = rewrite(&d, Profile::default());
+        check(&out.bytes, "Rewrite");
+        assert!(!found(&out.bytes, "Inherited9"), "nowhere, clear {clear}");
+        assert!(found(&out.bytes, "Farther8"), "the control");
+        let dir = scratch();
+        let (path, mut d) = opened(&dir, "a.pdf", &bytes);
+        set(&mut d);
+        let (base, section) = appended_in_place(&mut d).unwrap();
+        assert!(written(base.len(), &section, &path).contains(&parent));
+        check(&std::fs::read(&path).unwrap(), "Append");
+    }
+    // With no farther parent, a cleared field has nothing to take: no `/V`.
+    let mut f = Form::new(1);
+    let took = f.text("took", 0, row(0));
+    let parent = f.group("p", &[took]);
+    f.dict(parent).set("V", literal("Inherited9"));
+    let bytes = table(&mut f);
+    let mut d = open(&bytes, None);
+    fx::clear(&mut d, "p.took");
+    let out = rewrite(&d, Profile::default());
+    let pdf = lazy(&out.bytes, None);
+    assert!(!pdf.get_dictionary(parent).unwrap().has(b"V"));
+    assert!(!pdf.get_dictionary(took).unwrap().has(b"V"));
+    assert_eq!(read_back(&out.bytes, "p.took"), (None, None));
+    assert!(!found(&out.bytes, "Inherited9"));
 }
 
 /// A password field's value is never written (M10 slice 9): filled, its

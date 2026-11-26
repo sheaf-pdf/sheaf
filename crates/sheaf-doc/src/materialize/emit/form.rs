@@ -16,7 +16,10 @@
 //!   box's or radio group's state a name), where the file's was or after
 //!   its keys; with no value, none, unless an ancestor's `/V` would be
 //!   inherited in its place, then the empty text, a list box's empty
-//!   array, or `/Off`. A list box's `/I` is the indexes into its `/Opt` of
+//!   array, or `/Off`. An ancestor's `/V` that every field that took it
+//!   holds another than now ([`value_orphaned`]) is left out, its `/RV`
+//!   too, by a whole file and a section: a replaced value isn't kept in
+//!   the node it was inherited from. A list box's `/I` is the indexes into its `/Opt` of
 //!   the options its value selects, as its appearance highlights them,
 //!   none where nothing is; a combo box's goes, its `/V` all it holds. Its
 //!   rich value (`/RV`) goes, which would show the old value; its default
@@ -745,6 +748,7 @@ fn written_value(
     node: &FieldNode,
     term: &Terminal,
 ) -> (Option<Object>, Option<Object>) {
+    drops: bool,
     if term.kind == FieldKind::Text && term.flags & flags::PASSWORD != 0 {
         return (None, None);
     }
@@ -755,7 +759,7 @@ fn written_value(
         )),
         Some(Value::State(state)) => Some(state_name(state)),
         Some(Value::Signed) => None,
-        None if inherits_value(st, node) => Some(match term.kind {
+        None if inherits_value(st, node, drops) => Some(match term.kind {
             FieldKind::CheckBox | FieldKind::Radio => Object::name("Off"),
             FieldKind::List => Object::from(Vec::<Object>::new()),
             _ => crate::pdf::text::string(""),
@@ -775,16 +779,14 @@ fn written_value(
     (v, i)
 }
 
-/// Whether an ancestor of field `node` holds a `/V` its file has, which a
-/// save writes as it is, so a terminal with none of its own would inherit
-/// it (ISO 32000-1 Table 220).
-fn inherits_value(st: &DocState, node: &FieldNode) -> bool {
+/// Whether an ancestor of field `node` holds a `/V` its file has that the
+/// save writes, so a terminal with none of its own would inherit it (ISO
+/// 32000-1 Table 220): one a whole file or a section leaves out
+/// ([`value_orphaned`], where `drops`) isn't there to inherit.
+fn inherits_value(st: &DocState, node: &FieldNode, drops: bool) -> bool {
     let mut at = node.parent;
     while let Some(up) = at.and_then(|p| st.field(p)) {
-        let holds = (up.src.as_ref())
-            .and_then(|r| r.src.pdf().get_dictionary(r.id).ok())
-            .is_some_and(|d| d.has(b"V"));
-        if holds {
+        if file_holds_value(up) && !(drops && value_orphaned(st, up)) {
             return true;
         }
         at = up.parent;
@@ -793,6 +795,50 @@ fn inherits_value(st: &DocState, node: &FieldNode) -> bool {
 }
 
 /// A button's state as the name `/AS` writes: its bytes as the model holds
+/// Whether `node`'s own dictionary, as its file has it, holds a `/V`.
+fn file_holds_value(node: &FieldNode) -> bool {
+    (node.src.as_ref())
+        .and_then(|r| r.src.pdf().get_dictionary(r.id).ok())
+        .is_some_and(|d| d.has(b"V"))
+}
+
+/// Whether `node`, no terminal, whose file gives it a `/V` for the fields
+/// under it to inherit, holds one nothing shows any more: a terminal that
+/// took it (none of its own in its file, and no nearer node's) holds
+/// another value now ([`value_changed`]), and none still holds it. A save
+/// leaves such a `/V` out, and the node's `/RV` with it: it is the value
+/// those fields had, which a replaced value's Rewrite is there to take out
+/// of the file, and each of them writes its own or, cleared, none. Where
+/// another terminal still takes it, it stays, that field's value, and a
+/// cleared one beside it writes an empty one of its own
+/// ([`inherits_value`]). A walk of the nodes under `node`, asked only of a
+/// node whose file holds a `/V`.
+fn value_orphaned(st: &DocState, node: &FieldNode) -> bool {
+    let mut moved = false;
+    let mut next: Vec<FieldId> = node.kids.iter().copied().collect();
+    // A node is asked once, should kids ever make a loop.
+    let mut left = st.field_count();
+    while let Some(kid) = next.pop() {
+        if left == 0 {
+            break;
+        }
+        left -= 1;
+        let Some(kid) = st.field(kid) else {
+            continue;
+        };
+        // Its own value, or the one the nodes under it take.
+        if file_holds_value(kid) {
+            continue;
+        }
+        match kid.term.as_deref() {
+            Some(term) if value_changed(kid, term) => moved = true,
+            Some(_) => return false,
+            None => next.extend(kid.kids.iter().copied()),
+        }
+    }
+    moved
+}
+
 /// them, a character a byte ([`appearance::state_changed`] gives none
 /// other).
 fn state_name(state: &str) -> Object {
@@ -1150,7 +1196,13 @@ impl Fields {
         // Its value isn't its file's: `/V` is the model's, or for a
         // password, none, and a list box's `/I` what it selects.
         let value = term.filter(|t| t.value != Some(Value::Signed) && value_changed(node, t));
-        let (mut v_now, mut i_now) = value.map_or((None, None), |t| written_value(st, node, t));
+        // A whole file and a section leave out a `/V` this node, no
+        // terminal, held for fields that all hold another now; an overlay
+        // keeps it, as its base has it: nothing draws it.
+        let drops = cx.overlay.is_none();
+        let orphaned = drops && term.is_none() && read.has(b"V") && value_orphaned(st, node);
+        let (mut v_now, mut i_now) =
+            value.map_or((None, None), |t| written_value(st, node, t, drops));
         let mut kids = kids;
         for &w in term.into_iter().flat_map(|t| t.widgets.iter()) {
             // An overlay's are those on its pages.
@@ -1223,6 +1275,7 @@ impl Fields {
             && changed.is_none()
             && value.is_none()
             && tip.is_none()
+            && !orphaned
             && defaults_kept
             && (one.is_none() || tags)
             && merged.is_none_or(|w| !cx.hides(w))
@@ -1267,6 +1320,8 @@ impl Fields {
                 }
                 b"RV" if value.is_some() => {}
                 _ => {
+                // A value its fields all replaced: theirs to write.
+                b"V" | b"RV" if orphaned => {}
                     let v = cx.sym(v, &scope);
                     out.set(k, v);
                 }
