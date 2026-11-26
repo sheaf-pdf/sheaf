@@ -209,7 +209,9 @@ pub mod pdfium {
     use super::*;
     use parking_lot::{FairMutex, FairMutexGuard};
     use pdfium_render::prelude::*;
+    use std::ffi::OsString;
     use std::mem::ManuallyDrop;
+    use std::path::Path;
     use std::sync::OnceLock;
 
     #[cfg(test)]
@@ -218,6 +220,8 @@ pub mod pdfium {
     mod encrypted;
     #[cfg(test)]
     mod frames;
+    #[cfg(test)]
+    mod search_order;
 
     /// Held across every use of PDFium, from a load to the document's
     /// drop: a call into an engine, such as one page of a walk over the
@@ -242,34 +246,74 @@ pub mod pdfium {
         LOCK.lock()
     }
 
-    /// Locate and bind libpdfium. Search order: `$PDFIUM_LIB_DIR`, next to
-    /// the executable (and its `lib/`, how packaged builds ship it),
-    /// `vendor/pdfium/<os>-<arch>/` relative to the cwd (and to this
-    /// source tree, for `cargo test` run from a crate directory), then the
-    /// system library.
-    fn bind() -> Result<Pdfium> {
-        let mut dirs: Vec<PathBuf> = Vec::new();
-        if let Ok(d) = std::env::var("PDFIUM_LIB_DIR") {
-            dirs.push(d.into());
+    /// Where [`bind`] looks for libpdfium.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Search {
+        /// `$PDFIUM_LIB_DIR` is set: that directory's library or none, so
+        /// a run meant for one library (a comparison under another build)
+        /// never runs under a different one unsaid.
+        Only(PathBuf),
+        /// Each directory in turn, then the system's library.
+        Dirs(Vec<PathBuf>),
+    }
+
+    /// The search order, from what [`bind`] reads of the process:
+    /// `lib_dir` is `$PDFIUM_LIB_DIR` (set but empty is unset), `exe_dir`
+    /// the executable's directory, `vendored` `vendor/pdfium/<os>-<arch>`
+    /// and `source_root` this source tree's root. Unset, it is the
+    /// executable's `lib/` (how packaged builds ship it) and its own
+    /// directory, then `vendored` from the cwd and from the source tree
+    /// (for `cargo test` run from a crate directory), then the system.
+    fn search(
+        lib_dir: Option<OsString>,
+        exe_dir: Option<&Path>,
+        vendored: &Path,
+        source_root: &Path,
+    ) -> Search {
+        if let Some(dir) = lib_dir.filter(|d| !d.is_empty()) {
+            return Search::Only(dir.into());
         }
-        if let Some(exe_dir) = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        {
+        let mut dirs = Vec::new();
+        if let Some(exe_dir) = exe_dir {
             dirs.push(exe_dir.join("lib"));
-            dirs.push(exe_dir);
+            dirs.push(exe_dir.to_path_buf());
         }
-        let vendored = format!(
+        dirs.push(vendored.to_path_buf());
+        dirs.push(source_root.join(vendored));
+        Search::Dirs(dirs)
+    }
+
+    /// Locate and bind libpdfium, in [`search`]'s order.
+    fn bind() -> Result<Pdfium> {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_path_buf));
+        let vendored = PathBuf::from(format!(
             "vendor/pdfium/{}-{}",
             std::env::consts::OS,
             std::env::consts::ARCH
-        );
-        dirs.push(vendored.clone().into());
-        dirs.push(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../..")
-                .join(vendored),
-        );
+        ));
+        let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let dirs = match search(
+            std::env::var_os("PDFIUM_LIB_DIR"),
+            exe_dir.as_deref(),
+            &vendored,
+            &source_root,
+        ) {
+            Search::Only(dir) => {
+                let lib = Pdfium::pdfium_platform_library_name_at_path(&dir);
+                return Pdfium::bind_to_library(&lib)
+                    .map(Pdfium::new)
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "$PDFIUM_LIB_DIR is {}, and {} doesn't bind ({e:?}); unset it to search vendor/ and the system",
+                            dir.display(),
+                            lib.display()
+                        )
+                    });
+            }
+            Search::Dirs(dirs) => dirs,
+        };
 
         let mut last_err = None;
         for d in &dirs {

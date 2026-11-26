@@ -62,7 +62,7 @@ gpui = { package = "gpui-pre", version = "=0.3.11" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["wayland", "x11"] }
 
 # PDF engines. NOTE: the `pdfium` crate (newinnovations) is GPL-3 — do not use it.
-pdfium-render = "0.9.4"
+pdfium-render = { version = "=0.9.6", default-features = false, features = ["pdfium_7881", "thread_safe"] }
 # One Flate backend across the workspace (D4, B26): zlib-rs.
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 
