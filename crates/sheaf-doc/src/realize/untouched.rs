@@ -31,9 +31,9 @@
 //! pages too), no widget whose appearance a save makes anew ([`stale`],
 //! M10 slices 6 and 8: the overlay draws the appearance pdf-forms makes for
 //! it, the form a save writes) or whose button's state changed, none its
-//! file left to the viewer where a Rewrite of the state makes one
+//! file left to the viewer where a save of the state makes one
 //! (`SaveTransform::FillAppearances`, M10 slice 9: an overlay makes it as
-//! the Rewrite does, on every page with such a widget), and the
+//! the save does, on every page with such a widget), and the
 //! form's own keys the overlay writes from the document's as its file has
 //! them. The render key feeds each drawn widget's terminal whole, its value
 //! among it, so a page whose field's value moves is drawn anew.
@@ -217,7 +217,7 @@ fn annots_kept(
                 {
                     return false;
                 }
-                // One its file left to the viewer, which a Rewrite of the
+                // One its file left to the viewer, which a save of the
                 // state makes (`SaveTransform::FillAppearances`), and so
                 // the overlay.
                 if crate::forms::appearance::missing(st, aid)

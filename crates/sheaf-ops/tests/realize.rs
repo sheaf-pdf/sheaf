@@ -1259,10 +1259,11 @@ fn fields_beside_their_kids_render_as_saved() {
 
 /// A valued text field on the second page whose `/NeedAppearances` form
 /// left its widget with no appearance: once a field on the first page is
-/// filled, a Rewrite makes that widget's appearance (M10 slice 9's
+/// filled, a save makes that widget's appearance (M10 slice 9's
 /// `FillAppearances`), and both pages, realized, render as the Rewrite
-/// does, live and appearances only; as opened, the second page renders from
-/// the base, as the file is.
+/// does, live and appearances only, and so does the file the planned save,
+/// an Append, writes; as opened, the second page renders from the base, as
+/// the file is.
 #[test]
 fn a_need_appearances_form_s_bare_widget_renders_as_saved_once_a_field_is_filled() {
     let views = views();
@@ -1290,5 +1291,26 @@ fn a_need_appearances_form_s_bare_widget_renders_as_saved_once_a_field_is_filled
         let view = views.view(d.state(), page, &ViewInputs::plugin()).unwrap();
         assert!(matches!(view.engine, EngineKey::Group(..)), "{i}: {view:?}");
         renders_as_saved(&views, &d, page, &saved, i as u32);
+    }
+    // The save as planned, an Append, makes the widget too: its file draws
+    // as the Rewrite does, so the screen is the file whichever way it's
+    // saved.
+    let dir = common::scratch("realize-left");
+    let path = dir.join("left.pdf");
+    std::fs::write(&path, &bytes).unwrap();
+    let mut on_disk = common::open(&path);
+    fx::fill(&mut on_disk, "other", "Filled");
+    let (strategy, appended) = common::planned(&mut on_disk, &path);
+    assert_eq!(strategy, sheaf_doc::materialize::StrategyKind::Append);
+    assert!(appended.starts_with(&bytes));
+    for i in 0..2 {
+        let (ours, theirs) = (
+            appearances(&appended, None, i),
+            appearances(&saved, None, i),
+        );
+        assert_eq!(differing(&ours, &theirs), 0, "{i}: appended, appearances");
+        let ours = live(&appended, None, i, Rotation::R0);
+        let theirs = live(&saved, None, i, Rotation::R0);
+        assert_eq!(differing(&ours, &theirs), 0, "{i}: appended, live");
     }
 }

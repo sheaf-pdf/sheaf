@@ -1095,15 +1095,17 @@ fn bare(bytes: &[u8], widgets: &[(&'static str, ObjectId)]) -> Vec<&'static str>
 
 /// A form whose file says `/NeedAppearances` and leaves its widgets to the
 /// viewer ([`left_to_the_viewer`]). A save that changed no field makes
-/// none, rewritten. An Append of a fill, as planned, is given no transform
-/// and makes the filled field's alone. A Rewrite of the fill makes one for
-/// each widget its file left with none (`SaveTransform::FillAppearances`),
-/// the valued fields' drawing their values, `/NeedAppearances` kept, and
-/// the form check that found values with no appearance finds none. After
-/// it, a press of one radio button saved as planned, an Append, writes the
-/// group's other button too (its field's widgets are in its scope), and
-/// makes it again from the record's transform, not bare as the opened file
-/// has it: every widget the Rewrite gave an appearance still has one.
+/// none, rewritten. The first save of a fill makes one for each widget its
+/// file left with none (`SaveTransform::FillAppearances`), by an Append,
+/// as planned, whose section writes them all beside the filled field, and
+/// by a Rewrite alike: the valued fields' drawing their values,
+/// `/NeedAppearances` kept, and the form check that found values with no
+/// appearance finds none; the two files' widgets draw the same. After
+/// either, a press of one radio button saved as planned, an Append, is
+/// given no transform again, writes the group's other button too (its
+/// field's widgets are in its scope), and makes it again from the record's
+/// transform, not bare as the opened file has it: every widget the first
+/// save gave an appearance still has one.
 #[test]
 fn a_need_appearances_form_rewritten_gets_what_its_file_left_to_the_viewer() {
     let dir = scratch();
@@ -1125,53 +1127,103 @@ fn a_need_appearances_form_rewritten_gets_what_its_file_left_to_the_viewer() {
     assert!(!d.saved_record().unwrap().transforms.contains(&fill));
     assert_eq!(bare(&std::fs::read(&path).unwrap(), &widgets), all);
 
-    let (path, mut d) = opened(&dir, "appended.pdf", &bytes);
-    fx::fill(&mut d, "other", "Filled");
-    let p = plan(&d.recovery_input(), &d.save_target(&path));
-    assert_eq!(p.strategy, Strategy::Append { onto: Onto::Saved });
-    assert_eq!(p.transforms, []);
-    let (base, section) = planned_in_place(&mut d);
-    let wrote = written(base.len(), &section, &path);
-    assert!(wrote.contains(&other), "{wrote:?}");
-    assert!(widgets.iter().all(|(_, w)| !wrote.contains(w)), "{wrote:?}");
-    let now = std::fs::read(&path).unwrap();
-    assert_eq!(bare(&now, &widgets), all);
-    assert!(appears(&lazy(&now, None), other));
-
-    let (path, mut d) = opened(&dir, "rewritten.pdf", &bytes);
-    fx::fill(&mut d, "other", "Filled");
-    let report = save_rewritten(&mut d, &path).unwrap();
-    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
-    assert!(d.saved_record().unwrap().transforms.contains(&fill));
-    let now = std::fs::read(&path).unwrap();
-    assert_eq!(bare(&now, &widgets), Vec::<&str>::new());
-    let pdf = lazy(&now, None);
-    assert!(appears(&pdf, other));
-    let src = source(&now, None);
-    assert!(src.form().facts.need_appearances, "the flag kept");
-    let normal = |w: ObjectId| {
+    // A widget's normal appearance: its one form's content, or each
+    // state's by its name.
+    let normal = |pdf: &LazyPdf, w: ObjectId| -> Vec<(Vec<u8>, Vec<u8>)> {
         let d = pdf.get_dictionary(w).unwrap();
         let ap = pdf.dereference(d.get(b"AP").unwrap()).unwrap().1;
         let n = ap.as_dict().unwrap().get(b"N").unwrap();
         let n = pdf.dereference(n).unwrap().1;
-        n.as_stream().unwrap().decompressed_content().unwrap()
+        let content = |o: &Object| {
+            let form = pdf.dereference(o).unwrap().1;
+            form.as_stream().unwrap().decompressed_content().unwrap()
+        };
+        match n.value() {
+            PdfValue::Dict(states) => (states.iter())
+                .map(|(state, form)| (state.to_vec(), content(form)))
+                .collect(),
+            _ => vec![(Vec::new(), content(n))],
+        }
     };
-    let draws = |w: ObjectId, text: &[u8]| normal(w).windows(text.len()).any(|t| t == text);
-    assert!(draws(widgets[0].1, b"(Shown)"), "valued draws its value");
-    assert!(draws(widgets[1].1, b"(b)"), "pick draws its value");
-    assert!(draws(widgets[5].1, b"(Go)"), "push draws its caption");
-    assert_eq!(check(&now), []);
+    let mut drawn = Vec::new();
+    for how in ["appended.pdf", "rewritten.pdf"] {
+        let (path, mut d) = opened(&dir, how, &bytes);
+        fx::fill(&mut d, "other", "Filled");
+        if how == "appended.pdf" {
+            let p = plan(&d.recovery_input(), &d.save_target(&path));
+            assert_eq!(p.strategy, Strategy::Append { onto: Onto::Saved });
+            assert_eq!(p.transforms, [fill]);
+            assert!(p.asks.is_empty(), "{:?}", p.asks);
+            let (base, section) = planned_in_place(&mut d);
+            let wrote = written(base.len(), &section, &path);
+            assert!(wrote.contains(&other), "{wrote:?}");
+            assert!(widgets.iter().all(|(_, w)| wrote.contains(w)), "{wrote:?}");
+        } else {
+            let report = save_rewritten(&mut d, &path).unwrap();
+            assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
+        }
+        assert!(d.saved_record().unwrap().transforms.contains(&fill));
+        let now = std::fs::read(&path).unwrap();
+        assert_eq!(bare(&now, &widgets), Vec::<&str>::new(), "{how}");
+        let pdf = lazy(&now, None);
+        assert!(appears(&pdf, other));
+        let src = source(&now, None);
+        assert!(src.form().facts.need_appearances, "the flag kept");
+        let draws = |w: ObjectId, text: &[u8]| {
+            let n = &normal(&pdf, w)[0].1;
+            n.windows(text.len()).any(|t| t == text)
+        };
+        assert!(draws(widgets[0].1, b"(Shown)"), "valued draws its value");
+        assert!(draws(widgets[1].1, b"(b)"), "pick draws its value");
+        assert!(draws(widgets[5].1, b"(Go)"), "push draws its caption");
+        assert_eq!(check(&now), [], "{how}");
+        let each: Vec<_> = (widgets.iter().map(|&(_, w)| normal(&pdf, w))).collect();
+        drawn.push(each);
 
-    let st = d.state();
-    let radio = st.field_named("radio").unwrap();
-    let pressed = st.field(radio).unwrap().term.as_ref().unwrap().widgets[0];
-    fx::press(&mut d, pressed);
-    let (base, section) = planned_in_place(&mut d);
-    let wrote = written(base.len(), &section, &path);
-    assert!(wrote.contains(&widgets[2].1) && wrote.contains(&widgets[3].1));
-    let now = std::fs::read(&path).unwrap();
-    assert_eq!(bare(&now, &widgets), Vec::<&str>::new());
-    assert_eq!(check(&now), []);
+        let st = d.state();
+        let radio = st.field_named("radio").unwrap();
+        let pressed = st.field(radio).unwrap().term.as_ref().unwrap().widgets[0];
+        fx::press(&mut d, pressed);
+        let p = plan(&d.recovery_input(), &d.save_target(&path));
+        assert_eq!(p.strategy, Strategy::Append { onto: Onto::Saved });
+        assert_eq!(p.transforms, [], "{how}: the record's carries it");
+        let (base, section) = planned_in_place(&mut d);
+        let wrote = written(base.len(), &section, &path);
+        assert!(wrote.contains(&widgets[2].1) && wrote.contains(&widgets[3].1));
+        assert!(!wrote.contains(&widgets[0].1), "{how}: {wrote:?}");
+        let now = std::fs::read(&path).unwrap();
+        assert_eq!(bare(&now, &widgets), Vec::<&str>::new(), "{how}");
+        assert_eq!(check(&now), [], "{how}");
+    }
+    assert_eq!(drawn[0], drawn[1], "an Append's draw as a Rewrite's");
+}
+
+/// To a signature, the appearances an Append makes for a
+/// `/NeedAppearances` form's bare widgets are a fill of their fields: where
+/// it locks one of them (FieldMDP), the planned Append asks first, as a
+/// fill of that field's value would have been refused, and where it locks
+/// another field, the same fill appends unasked, the transform no "anything
+/// else" to it.
+#[test]
+fn the_appearances_an_append_makes_are_a_fill_of_their_fields_to_a_signature() {
+    let dir = scratch();
+    for (locked, asked) in [("valued", true), ("nobody", false)] {
+        let mut f = Form::new(1);
+        let valued = f.text("valued", 0, row(0));
+        f.dict(valued).set("V", literal("Shown"));
+        f.text("other", 0, row(1));
+        let sig = f.signature("sig", 0, row(2));
+        f.sign_locking(sig, "Include", &[locked], None);
+        let acroform = f.acroform;
+        f.dict(acroform).set("NeedAppearances", true);
+        let (path, mut d) = opened(&dir, &format!("{locked}.pdf"), &f.bytes());
+        fx::fill(&mut d, "other", "Filled");
+        let p = plan(&d.recovery_input(), &d.save_target(&path));
+        assert_eq!(p.strategy, Strategy::Append { onto: Onto::Saved });
+        assert_eq!(p.transforms, [SaveTransform::FillAppearances]);
+        let asks = (p.asks.iter()).any(|a| matches!(a, Ask::Signatures { .. }));
+        assert_eq!(asks, asked, "{locked}: {:?}", p.asks);
+    }
 }
 
 /// A `/NeedAppearances` form's value no font sheaf has draws (another

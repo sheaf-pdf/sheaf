@@ -15,13 +15,16 @@
 //! proposal 34): Reader checks later revisions against those. When the
 //! form changed, the XFA copy goes too, its tooltips copied into `/TU`
 //! first: Acrobat would show the XFA's fields and values, not the ones
-//! sheaf wrote. A Rewrite that changes the form of a file that says
+//! sheaf wrote. The first save that changes the form of a file that says
 //! `/NeedAppearances` makes the appearances its widgets lack, which a
-//! viewer that ignores the flag (PDFium's screen) would show nothing of;
-//! an Append makes only those of what it changed, and those an earlier
-//! such Rewrite made, which its record carries. A recovery sidecar applies
-//! the same transforms, and an overlay the realizer draws makes the
-//! appearances a Rewrite of its state would ([`overlay_fills_appearances`]).
+//! viewer that ignores the flag (PDFium's screen) would show nothing of,
+//! by either strategy (M10 proposal 10): an Append writes those widgets
+//! beside what it changed, a fill's kind of change, and a save after it
+//! carries its record's, making only those of what it changes. A recovery
+//! sidecar applies the same transforms, and an overlay the realizer draws
+//! makes the appearances a save of its state would
+//! ([`overlay_fills_appearances`]): the screen is the file whichever way
+//! it's saved.
 
 use std::collections::HashMap;
 
@@ -56,16 +59,18 @@ pub const RIGHTS_REMOVED: &str =
 /// - **`FixSigFlags`** beside it, when `/SigFlags` says there are
 ///   signatures and neither a signed field of the target nor a
 ///   certification needs it.
-/// - **`FillAppearances`** on a Rewrite alone, when the form `target`
-///   writes says `/NeedAppearances` (the primary's, or a form's that came
-///   in) and its fields differ from the primary's as read, as for
-///   `DropXfa`: the widgets its file left with no appearance are made
+/// - **`FillAppearances`** when the form `target` writes says
+///   `/NeedAppearances` (the primary's, or a form's that came in) and its
+///   fields differ from the primary's as read, as for `DropXfa`: the
+///   widgets its file left with no appearance are made
 ///   ([`appearance::missing`]), and the flag stays: an appearance the file
-///   has may be the stale one the flag was there to cover. An Append
-///   writes the widgets of what it changed alone, and is given none: what
-///   a Rewrite made is its record's to carry. (M10 proposal 10 has them
-///   made on the first save that changes the form, an Append too, and the
-///   flag cleared once every one is.)
+///   has may be the stale one the flag was there to cover. By a Rewrite
+///   and an Append alike, so the two write files that draw alike and the
+///   screen draws either (M10 proposal 10's "the first save that changes
+///   the form"; the flag isn't cleared, as it has it, since those the
+///   file has aren't made anew). An Append's is a fill's kind of change,
+///   for usage rights and for signatures, of the fields whose widgets it
+///   makes ([`filled_fields`]).
 ///
 /// An Append never repeats what `rec` says the file lost already.
 ///
@@ -87,9 +92,14 @@ pub fn plan(
             tooltips_to_tu: true,
         });
     }
+    let fills = fills_appearances(src, target) && !done(&SaveTransform::FillAppearances);
     if facts.usage_rights {
         let class = match out.iter().any(|t| !done(t)) {
             true => class | SigClass::OTHER,
+            false => class,
+        };
+        let class = match fills {
+            true => class | SigClass::FILL,
             false => class,
         };
         let rights = src.signatures().usage_rights;
@@ -102,15 +112,14 @@ pub fn plan(
             }
         }
     }
-    let rewrite = matches!(strategy, Strategy::Rewrite { .. });
-    if rewrite && fills_appearances(src, target) {
+    if fills {
         out.push(SaveTransform::FillAppearances);
     }
     out.retain(|t| !done(t));
     out
 }
 
-/// Whether a Rewrite of `target` over `primary`, the primary file as read,
+/// Whether a save of `target` over `primary`, the primary file as read,
 /// makes the appearances the form's widgets were left without ([`plan`]'s
 /// `FillAppearances`): the form it writes says `/NeedAppearances` and its
 /// fields differ from the primary's.
@@ -118,8 +127,19 @@ pub fn fills_appearances(primary: &Source, target: &DocState) -> bool {
     target.form().need_appearances && form_differs(primary.form(), target, primary.id())
 }
 
+/// The full names of the fields of `target` with a widget
+/// `FillAppearances` makes ([`appearance::missing`]): what an Append that
+/// carries it touches beside its own changes, for a signature's locks.
+///
+/// [`appearance::missing`]: super::appearance::missing
+pub(crate) fn filled_fields(target: &DocState) -> impl Iterator<Item = String> + '_ {
+    (target.annots())
+        .filter(|(a, _)| super::appearance::missing(target, *a))
+        .filter_map(|(_, rec)| target.full_name(rec.widget()?.field))
+}
+
 /// [`fills_appearances`] as an overlay of pages of `src`, a source of
-/// `target`, asks it, since the realizer draws what a Rewrite writes: over
+/// `target`, asks it, since the realizer draws what a save writes: over
 /// the primary (the file `target` opened; a state made in memory opened
 /// none, and `src` stands for it), as a save asks it; over any other
 /// source, whose widgets are of fields that came in, so that the fields
@@ -145,6 +165,11 @@ pub(crate) fn drops_xfa(src: &Source, target: &DocState) -> bool {
 /// for a state ([`DocState::fields_differ`] keeps the answer until a field
 /// is set): the realizer asks it for each page it keys.
 fn form_differs(base: &FileForm, target: &DocState, primary: SourceId) -> bool {
+    target.fields_differ(primary, || walk_differs(base, target, primary))
+}
+
+/// [`form_differs`], found.
+fn walk_differs(base: &FileForm, target: &DocState, primary: SourceId) -> bool {
     let own = FormInst {
         src: primary,
         copy: 0,
@@ -165,11 +190,6 @@ fn form_differs(base: &FileForm, target: &DocState, primary: SourceId) -> bool {
         *shown.entry(w.field).or_default() += 1;
     }
     target.fields().any(|(_, node)| {
-    target.fields_differ(primary, || walk_differs(base, target, primary))
-}
-
-/// [`form_differs`], found.
-fn walk_differs(base: &FileForm, target: &DocState, primary: SourceId) -> bool {
         let Some(r) = &node.src else {
             return true;
         };

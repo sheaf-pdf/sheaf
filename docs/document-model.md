@@ -2091,7 +2091,8 @@ slices' (M10 slices 10 to 13); today it's `sheaf edit`'s and the tests'.
     don't stay in it", and on a signed file offered Append anyway. A
     restored document's pending sections count where they touch fields,
     unless they removed text (`RecoveredRemovals` says it then);
-  - **`SaveTransform::FillAppearances`**: a Rewrite of a form that says
+  - **`SaveTransform::FillAppearances`**: the first save, a Rewrite or
+    an Append, of a form that says
     `NeedAppearances` (the written form's: an inserted form's too) and
     changed (`rules::form_differs`) makes an appearance for every widget
     whose file has none (`/AP /N` absent or of no states) and that has
@@ -2099,11 +2100,16 @@ slices' (M10 slices 10 to 13); today it's `sheaf edit`'s and the tests'.
     box's or radio button's, a captioned push button's
     (`appearance::missing`), as a changed widget's is; `/NeedAppearances`
     stays, as an appearance the file has may be the stale one the flag
-    covered. An Append is given none, but one after such a Rewrite
-    carries the record's transform and makes each such widget it writes,
-    which it would otherwise write bare over the ones the Rewrite made.
-    The realizer's overlay makes them too, whenever a Rewrite of the
-    state would (The realizer);
+    covered. An Append's section writes every such widget beside what
+    it changed (`deps`), a fill's kind of change for usage rights and
+    signatures, of the fields whose widgets they are
+    (`rules::filled_fields`: one a signature locks flags it), so its file
+    draws as a Rewrite's (M10 proposal 10). A save after it is given
+    none: it carries the record's transform and makes each such widget
+    it writes, which it would otherwise write bare over the ones that
+    save made. The realizer's overlay makes them too, whenever a save of
+    the state would (The realizer), so the screen is the file by either
+    strategy;
   - XFA (`DropXfa`, the tooltips to `/TU`, after `Ask::XfaHoldsValues`),
     usage rights (`DropUr3`) and `/SigFlags` (`FixSigFlags`) as Saving
     has them; a signed or certified file through §9.3's asks, with Append
@@ -3311,8 +3317,8 @@ below).
   `/TU`), `DropUr3` on every Rewrite of a file with usage rights (on an
   Append, from slice 10, only when they don't allow what it changes),
   and `FixSigFlags` beside it when nothing signed needs `/SigFlags`; from
-  M10 slice 9, `FillAppearances` on a Rewrite of a form that changed and
-  says `NeedAppearances` (Saving values). The emitter applies them to the
+  M10 slice 9, `FillAppearances` on the first save, by either strategy,
+  of a form that changed and says `NeedAppearances` (Saving values). The emitter applies them to the
   form's dictionary, the catalog's `/Perms` and the widgets; the record
   keeps them.
 - **Numbering** (`materialize::number`). Stable, for saves: the primary's
@@ -4439,9 +4445,9 @@ appearances through pdf-forms), nor any widget whose field's value the
 model holds changed (`forms::value_changed`, M10 slice 9: the overlay
 writes the field with the model's `/V`, a radio group's on its other
 pages too), nor any widget a `NeedAppearances` form left with no
-appearance once a Rewrite of the state would make one
+appearance once a save of the state would make one
 (`FillAppearances`: the form changed; `rules::overlay_fills_appearances`):
-the overlay carries that transform and makes it as the Rewrite does, so a
+the overlay carries that transform and makes it as the save does, so a
 fill on one page realizes every page with such a widget, and the render
 key feeds whether it's made. The predicate is
 O(the annotations on the page); whether the form changed is found once

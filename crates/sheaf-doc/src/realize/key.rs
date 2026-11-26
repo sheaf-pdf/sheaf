@@ -94,7 +94,7 @@ pub fn render_key(st: &DocState, page: PageId, inputs: &ViewInputs) -> Option<Re
             AnnotBody::Mark(m) => sum.feed(&0u8).feed(&**m),
             AnnotBody::Foreign(f) => sum.feed(&1u8).feed(&**f).feed(&(a.to == LinkTo::Nowhere)),
             AnnotBody::Widget(w) => {
-                // Whether its appearance is made as a Rewrite makes one its
+                // Whether its appearance is made as a save makes one its
                 // file left to the viewer, which turns on every field.
                 let made = crate::forms::appearance::missing(st, a.id)
                     && *fills.get_or_init(|| {

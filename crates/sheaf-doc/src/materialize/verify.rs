@@ -48,8 +48,8 @@
 //!   value changed; from M10 slice 8 a combo box's or list box's whose
 //!   value changed, a push button's whose captions did, and a check box's
 //!   or radio button's whose state did; from M10 slice 9 one a
-//!   `/NeedAppearances` file left to the viewer, which a Rewrite of its
-//!   form makes, `FillAppearances`), beside the model's `/V`, which a
+//!   `/NeedAppearances` file left to the viewer, which a changed
+//!   form's first save makes, `FillAppearances`), beside the model's `/V`, which a
 //!   save writes from M10 slice 9 where the value changed. A check box's
 //!   or radio button's `/AS` is the model's from M10 slice 8 and its
 //!   field's `/V` from slice 9, so the two agree as the model's do. A made

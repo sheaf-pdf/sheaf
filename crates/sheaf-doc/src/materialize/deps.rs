@@ -19,8 +19,9 @@
 //!
 //! And beside the path: the form's dictionary for a save transform the file
 //! hasn't had (every field, for `DropXfa`'s tooltips), and the catalog for
-//! `DropUr3`'s `/Perms`, but nothing for `FillAppearances`, which makes
-//! appearances only for the widgets the section writes anyway; the same
+//! `DropUr3`'s `/Perms`, and every widget `FillAppearances` makes (each
+//! one a `/NeedAppearances` file left bare, `appearance::missing`, with
+//! its field's object); the same as `DropXfa`
 //! for an XFA copy the file dropped that
 //! policy keeps now; a page put under another node, or new to the saved
 //! tree, when any page is written. A page the file has at the number of a
@@ -221,10 +222,19 @@ pub fn closure(
             SaveTransform::DropUr3 => {
                 cx.keys.insert(ObjKey::Catalog);
             }
-            // The widgets its file left with no appearance get one where the
-            // section writes them for what changed: it brings none in. (No
-            // Append is given it; one carries a Rewrite's record's.)
-            SaveTransform::FillAppearances => {}
+            // The first save that changes the form of a file that says
+            // `/NeedAppearances` makes each widget its file left bare, so
+            // the section writes them all, as a Rewrite does. One after it
+            // carries its record's, and writes those of what changed alone.
+            SaveTransform::FillAppearances => {
+                let bare: Vec<AnnotId> = (now.annots())
+                    .filter(|(a, _)| crate::forms::appearance::missing(now, *a))
+                    .map(|(a, _)| a)
+                    .collect();
+                for a in bare {
+                    cx.annot(a);
+                }
+            }
         }
     }
     // An XFA copy the file dropped that policy keeps now comes back to the

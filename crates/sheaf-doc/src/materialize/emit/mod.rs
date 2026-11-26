@@ -1094,8 +1094,8 @@ fn emit_overlay(
         .collect();
     let within = pages.iter().copied().collect();
     let closure = Closure::new(o.src.id(), Pages::Overlay { st, within });
-    // The appearances a Rewrite of the state makes for the widgets its file
-    // left to the viewer, made here too: the realizer draws what a Rewrite
+    // The appearances a save of the state makes for the widgets its file
+    // left to the viewer, made here too: the realizer draws what a save
     // writes (M10 slice 9). Save policy's other transforms change nothing a
     // page draws.
     let transforms: &[SaveTransform] =

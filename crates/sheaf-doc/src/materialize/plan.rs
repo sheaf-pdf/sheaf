@@ -432,11 +432,12 @@ pub enum SaveTransform {
     /// nothing for ([`appearance::missing`]: a text field's or a choice's
     /// whose field holds a value, a check box's or radio button's, a push
     /// button's with a caption) gets one, made as a changed widget's is;
-    /// the flag stays. Given to a Rewrite that changes the form alone
-    /// ([`rules::plan`]), and applied by every emission that carries it to
-    /// each such widget it writes: an Append after that Rewrite carries the
-    /// record's, so a widget in its scope isn't written bare again; the
-    /// realizer's overlay carries it whenever a Rewrite of its state would.
+    /// the flag stays. Given to the first save that changes the form, a
+    /// Rewrite or an Append ([`rules::plan`]), whose section then writes
+    /// every such widget, and applied by every emission that carries it to
+    /// each such widget it writes: a save after it carries the record's,
+    /// so a widget in its scope isn't written bare again; the realizer's
+    /// overlay carries it whenever a save of its state would.
     ///
     /// [`appearance::missing`]: crate::forms::appearance::missing
     FillAppearances,
@@ -684,8 +685,16 @@ impl Appending {
             class,
             path.annots,
         );
-        if !transforms.is_empty() {
+        // What a transform writes is anything else, but the appearances a
+        // `/NeedAppearances` file's widgets lacked: a fill's kind of
+        // change, of the fields whose widgets they are.
+        let fill = SaveTransform::FillAppearances;
+        if transforms.iter().any(|t| *t != fill) {
             class |= SigClass::OTHER;
+        }
+        if transforms.contains(&fill) {
+            class |= SigClass::FILL;
+            fields.extend(rules::filled_fields(&input.target));
         }
         let held = input.target.form().xfa.values > 0;
         let replaced = (path.removed.iter()).any(|r| r.kind == RemovedKind::FieldValues);

@@ -102,12 +102,13 @@
 //!   its file left to the viewer ([`appearance::missing`]: a valued text
 //!   field's or choice's, a check box's or radio button's, a captioned push
 //!   button's, none with one), as for a stale one, `/NeedAppearances` kept.
-//!   An Append that carries it, from the Rewrite whose record it's in,
-//!   makes those it writes (a pressed group's other buttons, a filled
-//!   field's other widgets), which it would otherwise write bare, as the
-//!   opened file has them, over the ones the Rewrite made. An overlay
-//!   carries it whenever a Rewrite of its state would, and no other
-//!   transform: the realizer draws what the Rewrite writes.
+//!   The first save that changes the form carries it, and an Append's
+//!   scope then holds every such widget (`deps`); a save after it carries
+//!   its record's and makes those it writes (a pressed group's other
+//!   buttons, a filled field's other widgets), which it would otherwise
+//!   write bare, as the opened file has them, over the ones that save
+//!   made. An overlay carries it whenever a save of its state would, and
+//!   no other transform: the realizer draws what the save writes.
 //! - **An overlay's form** is of the fields with a widget on its pages
 //!   ([`Plan::scoped`]): `/Fields` its roots among them, each node's
 //!   `/Kids` those of its nodes and its widgets that are, so PDFium loads
@@ -625,7 +626,7 @@ pub(crate) fn widget(
 /// Whether widget `aid`, written under `key`, gets the appearance its file
 /// left to the viewer ([`appearance::missing`]): the emission carries
 /// `SaveTransform::FillAppearances` and writes it. One an Append leaves out
-/// isn't made: the saved file has it as the Rewrite that made it wrote it.
+/// isn't made: the saved file has it as the save that made it wrote it.
 fn fills(cx: &Cx, key: ObjKey, aid: AnnotId) -> bool {
     cx.transforms.contains(&SaveTransform::FillAppearances)
         && cx.writes(&key)
@@ -747,8 +748,8 @@ fn written_value(
     st: &DocState,
     node: &FieldNode,
     term: &Terminal,
-) -> (Option<Object>, Option<Object>) {
     drops: bool,
+) -> (Option<Object>, Option<Object>) {
     if term.kind == FieldKind::Text && term.flags & flags::PASSWORD != 0 {
         return (None, None);
     }
@@ -794,7 +795,6 @@ fn inherits_value(st: &DocState, node: &FieldNode, drops: bool) -> bool {
     false
 }
 
-/// A button's state as the name `/AS` writes: its bytes as the model holds
 /// Whether `node`'s own dictionary, as its file has it, holds a `/V`.
 fn file_holds_value(node: &FieldNode) -> bool {
     (node.src.as_ref())
@@ -839,6 +839,7 @@ fn value_orphaned(st: &DocState, node: &FieldNode) -> bool {
     moved
 }
 
+/// A button's state as the name `/AS` writes: its bytes as the model holds
 /// them, a character a byte ([`appearance::state_changed`] gives none
 /// other).
 fn state_name(state: &str) -> Object {
@@ -1274,8 +1275,8 @@ impl Fields {
             && !stale
             && changed.is_none()
             && value.is_none()
-            && tip.is_none()
             && !orphaned
+            && tip.is_none()
             && defaults_kept
             && (one.is_none() || tags)
             && merged.is_none_or(|w| !cx.hides(w))
@@ -1319,9 +1320,9 @@ impl Fields {
                     }
                 }
                 b"RV" if value.is_some() => {}
-                _ => {
                 // A value its fields all replaced: theirs to write.
                 b"V" | b"RV" if orphaned => {}
+                _ => {
                     let v = cx.sym(v, &scope);
                     out.set(k, v);
                 }
