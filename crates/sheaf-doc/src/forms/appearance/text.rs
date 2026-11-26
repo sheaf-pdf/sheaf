@@ -9,7 +9,7 @@ use std::sync::{Arc, LazyLock};
 
 use super::{DaFont, Frame, Made, Slot, form_defaults, frame, limits, quadding};
 use crate::content::Fallback;
-use crate::forms::field::Value;
+use crate::forms::field::{Value, value_changed};
 use crate::model::{DocState, FieldNode, Terminal, Widget};
 use crate::pdf::forms::{FieldFlags, MadeWithFallback, TextField, Unmade, text_with_fallback};
 
@@ -74,26 +74,12 @@ pub(super) fn look(st: &DocState, w: &Widget, node: &FieldNode, term: &Terminal)
 
 /// Whether a widget of `node`, a text field whose terminal is `term`, needs
 /// its appearance made ([`stale`](super::stale)): it has a display, which
-/// no file holds; or its text isn't what its source's field held as read
-/// (no value and an empty one are the same), or the field was read from no
-/// source, or isn't among its source's fields as read.
+/// no file holds; or its value changed ([`value_changed`]: its text isn't
+/// what its source's field held as read, no value and an empty one the
+/// same), or the field was read from no source, or isn't among its
+/// source's fields as read.
 pub(super) fn stale(node: &FieldNode, term: &Terminal) -> bool {
-    let Some(src) = node.src.as_ref().filter(|_| term.display.is_none()) else {
-        return true;
-    };
-    match src.src.form().field_by_object(src.id) {
-        Some(read) => shows(read.value.as_ref()) != shows(term.value.as_ref()),
-        None => true,
-    }
-}
-
-/// The text a text field's value shows, borrowed: none and an empty one
-/// alike.
-fn shows(value: Option<&Value>) -> &str {
-    match value {
-        Some(Value::Text(text)) => text,
-        _ => "",
-    }
+    term.display.is_some() || value_changed(node, term)
 }
 
 /// The text a text field's value shows: none and an empty one alike.

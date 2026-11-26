@@ -304,7 +304,9 @@ fn the_predicate_agrees_with_the_emission_in_every_case() {
 /// doesn't, an overlay of it writing the fields apart, without those
 /// widgets' keys. A press of the check box's own widget, or of its kid on
 /// the second page, and a fill of the text field, each change the page of
-/// what they change, and the model agrees with the emission on every one.
+/// what they change and the page of the field's own widget, whose `/V`
+/// the overlay writes from the model (M10 slice 9), and the model agrees
+/// with the emission on every one.
 #[test]
 fn a_field_beside_its_kids_is_untouched_where_an_overlay_writes_it_as_read() {
     let bytes = kids_beside().bytes();
@@ -318,8 +320,9 @@ fn a_field_beside_its_kids_is_untouched_where_an_overlay_writes_it_as_read() {
         let term = st.field(field).unwrap().term.clone().unwrap();
         term.widgets.iter().copied().collect()
     };
-    // Its own widget, then its kids.
-    for (pressed, want) in [(0, [false, false]), (2, [true, false])] {
+    // Its own widget, then its kid on the second page: the field's value
+    // moves, and the first page's overlay writes it.
+    for (pressed, want) in [(0, [false, false]), (2, [false, false])] {
         let mut d = opened(bytes.clone(), "kids.pdf");
         let w = widgets(&d, "c")[pressed];
         fx::press(&mut d, w);
@@ -328,6 +331,39 @@ fn a_field_beside_its_kids_is_untouched_where_an_overlay_writes_it_as_read() {
     let mut d = opened(bytes, "kids.pdf");
     fx::fill(&mut d, "t", "Camden");
     assert_eq!(agree(d.state(), "beside, filled"), [false, false]);
+}
+
+/// A radio group with a button on each of two pages, the first's pressed:
+/// the second page's button shows `Off` as it did, but an overlay of that
+/// page writes the group's `/V` from the model (M10 slice 9), so neither
+/// page is its base page, the model agreeing with the emission on both, and
+/// the second page's key moves with the value; the group set back to its
+/// file's value, both are their base pages again.
+#[test]
+fn a_radio_group_pressed_on_one_page_touches_its_other_pages() {
+    use crate::forms::fixture::{Button, RADIO, row};
+    let mut f = Form::new(2);
+    let on = |page, state| Button {
+        page,
+        rect: row(0),
+        on_state: Some(state),
+        shows: Some("Off"),
+    };
+    f.buttons("r", RADIO, &[on(0, "a"), on(1, "b")]);
+    let mut d = opened(f.bytes(), "radio.pdf");
+    assert_eq!(agree(d.state(), "radio, opened"), [true, true]);
+    let p1 = d.page(1).unwrap();
+    let screen = ViewInputs::screen();
+    let was = render_key(d.state(), p1, &screen).unwrap();
+    let st = d.state();
+    let field = st.field_named("r").unwrap();
+    let first = st.field(field).unwrap().term.as_ref().unwrap().widgets[0];
+    fx::press(&mut d, first);
+    assert_eq!(agree(d.state(), "radio, pressed"), [false, false]);
+    assert_ne!(render_key(d.state(), p1, &screen).unwrap(), was);
+    fx::set_buttons(&mut d, "r", "Off");
+    assert_eq!(agree(d.state(), "radio, put back"), [true, true]);
+    assert_eq!(render_key(d.state(), p1, &screen).unwrap(), was);
 }
 
 /// An untouched page is viewed in its source's base engine at its base

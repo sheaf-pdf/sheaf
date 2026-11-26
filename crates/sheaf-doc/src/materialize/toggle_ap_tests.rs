@@ -17,12 +17,13 @@ use crate::pdf::{
 use in_progress::NoProgress;
 
 use super::append_tests::{appended_in_place, written};
-use super::field_ap_tests::{EACH_WAY, form_shape, kids_of, saved_each_way};
+use super::field_ap_tests::{EACH_WAY, Theirs, form_shape, kids_of, read_back, saved_each_way};
 use super::key::{ObjKey, Part};
 use super::removal_tests::{opened, scratch, warned};
 use super::tests::{add, insert, lazy, open, rewrite, span};
 use super::*;
 use crate::annot::AnnotId;
+use crate::forms::Value;
 use crate::forms::appearance::tests::shown;
 use crate::forms::fixture::{Button, Form, RADIO, kids_beside, row};
 use crate::model::Document;
@@ -198,6 +199,14 @@ fn framed_box(f: &mut Form, name: &str, i: usize, shows: &str) -> (ObjectId, Obj
     (field, kids[0])
 }
 
+/// `bytes` with `to` in place of the first `from`: an object as its file
+/// has it but for one key's value.
+fn but(bytes: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+    let at = (bytes.windows(from.len()).position(|w| w == from))
+        .unwrap_or_else(|| panic!("no {:?}", String::from_utf8_lossy(from)));
+    [&bytes[..at], to, &bytes[at + from.len()..]].concat()
+}
+
 /// Object `id` of `pdf`, read from `bytes`, from its `obj` on.
 fn raw(pdf: &LazyPdf, bytes: &[u8], id: ObjectId) -> Vec<u8> {
     let span = span(pdf, bytes, id).unwrap();
@@ -207,14 +216,14 @@ fn raw(pdf: &LazyPdf, bytes: &[u8], id: ObjectId) -> Vec<u8> {
 
 /// A Rewrite of a check box with no `/AP`, off in its file, pressed on:
 /// `/N` and `/D` each `<< /Yes … /Off … >>`, the on state's name a press
-/// puts, each form under its key; `/AS /Yes`, its field's `/V` the file's
-/// (no save writes a value before M10 slice 9); the on forms the mark in
-/// ZapfDingbats, the standard font's dictionary, which nothing else names.
-/// Nothing else anew: the objects are the unpressed Rewrite's and the four
-/// forms and the font, every other one its bytes as they were. An Append
-/// of the same press writes the widget, the four and the font, and the
-/// field, whose value the press changed, as its file has it; a second
-/// Append in a row writes none of them.
+/// puts, each form under its key; `/AS /Yes`, its field's `/V /Yes` (M10
+/// slice 9); the on forms the mark in ZapfDingbats, the standard font's
+/// dictionary, which nothing else names. Nothing else anew: the objects
+/// are the unpressed Rewrite's and the four forms and the font, every
+/// other one its bytes as they were but the field's `/V`. An Append of the
+/// same press writes the widget, the four and the font, and the field,
+/// whose value the press changed, as its file has it but its `/V`; a
+/// second Append in a row writes none of them.
 #[test]
 fn a_pressed_check_box_with_no_appearance_gets_four_forms_and_its_as() {
     let mut f = Form::new(1);
@@ -238,7 +247,7 @@ fn a_pressed_check_box_with_no_appearance_gets_four_forms_and_its_as() {
     );
     assert_eq!(ap_dict(&pdf, w).unwrap().len(), 2, "/N and /D alone");
     assert_eq!(shows(&pdf, w), Some(n("Yes")));
-    assert_eq!(value_of(&pdf, field), Some(n("Off")), "the file's /V");
+    assert_eq!(value_of(&pdf, field), Some(n("Yes")), "the model's /V");
 
     let (on_form, fonts) = made(&stream(&pdf, on));
     assert_eq!(shown(&on_form.content), b"4");
@@ -261,7 +270,7 @@ fn a_pressed_check_box_with_no_appearance_gets_four_forms_and_its_as() {
     assert_eq!(ids(&pdf), want);
     for &id in want
         .iter()
-        .filter(|&&id| ![w, on, off, down, down_off, zapf].contains(&id))
+        .filter(|&&id| ![w, field, on, off, down, down_off, zapf].contains(&id))
     {
         let (now, then) = (
             span(&pdf, &out.bytes, id),
@@ -269,6 +278,11 @@ fn a_pressed_check_box_with_no_appearance_gets_four_forms_and_its_as() {
         );
         assert_eq!(now, then, "{id:?}");
     }
+    assert_eq!(
+        raw(&pdf, &out.bytes, field),
+        but(&raw(&plain_pdf, &plain.bytes, field), b"/V/Off", b"/V/Yes"),
+        "its field as the unpressed Rewrite's but its /V"
+    );
 
     // An Append, then another with nothing changed.
     let dir = scratch();
@@ -289,8 +303,8 @@ fn a_pressed_check_box_with_no_appearance_gets_four_forms_and_its_as() {
     let was = lazy(&bytes, None);
     assert_eq!(
         raw(&pdf, &now, field),
-        raw(&was, &bytes, field),
-        "its field as its file has it"
+        but(&raw(&was, &bytes, field), b"/V/Off", b"/V/Yes"),
+        "its field as its file has it but its /V"
     );
     assert_eq!(shows(&pdf, w), Some(n("Yes")));
     assert_eq!(
@@ -515,16 +529,17 @@ fn the_on_state_is_named_as_a_press_names_it_and_the_mark_as_its_caption() {
 }
 
 /// A widget whose file draws an on state keeps its `/AP`, object for
-/// object, and only `/AS` moves: one merged with its field and a kid, by a
-/// Rewrite (every object the unpressed Rewrite's, but the two widgets) and
-/// by an Append (the two widgets written, nothing made); one whose file
-/// shows no `/AS` gains it.
+/// object, and only `/AS` moves, and its field's `/V`: one merged with its
+/// field and a kid, by a Rewrite (every object the unpressed Rewrite's,
+/// but the widgets and the kids' fields, whose `/V` alone moves) and by an
+/// Append (the widgets written, nothing made); one whose file shows no
+/// `/AS` gains it.
 #[test]
 fn a_widget_whose_file_draws_an_on_state_keeps_its_appearances() {
     let mut f = Form::new(1);
     let merged = f.check_box("merged", 0, row(0), false);
-    let (_, kid) = f.buttons("kid", 0, &[Button::at(1, Some("Yes"), Some("Off"))]);
-    let (_, bare) = f.buttons("bare", 0, &[Button::at(2, Some("On"), None)]);
+    let (kid_field, kid) = f.buttons("kid", 0, &[Button::at(1, Some("Yes"), Some("Off"))]);
+    let (bare_field, bare) = f.buttons("bare", 0, &[Button::at(2, Some("On"), None)]);
     let (kid, bare) = (kid[0], bare[0]);
     let bytes = table(&mut f);
     let was = lazy(&bytes, None);
@@ -557,7 +572,7 @@ fn a_widget_whose_file_draws_an_on_state_keeps_its_appearances() {
     assert_eq!(ids(&pdf), ids(&plain_pdf));
     for id in ids(&pdf)
         .into_iter()
-        .filter(|id| ![merged, kid, bare].contains(id))
+        .filter(|id| ![merged, kid, bare, kid_field, bare_field].contains(id))
     {
         let (now, then) = (
             span(&pdf, &out.bytes, id),
@@ -565,6 +580,18 @@ fn a_widget_whose_file_draws_an_on_state_keeps_its_appearances() {
         );
         assert_eq!(now, then, "{id:?}");
     }
+    for (field, on) in [(kid_field, "/V/Yes"), (bare_field, "/V/On")] {
+        assert_eq!(
+            raw(&pdf, &out.bytes, field),
+            but(
+                &raw(&plain_pdf, &plain.bytes, field),
+                b"/V/Off",
+                on.as_bytes()
+            ),
+            "{field:?}: the unpressed Rewrite's but its /V"
+        );
+    }
+    assert_eq!(value_of(&pdf, merged), Some(n("Yes")));
 
     let dir = scratch();
     let (path, mut d) = opened(&dir, "a.pdf", &bytes);
@@ -968,4 +995,98 @@ fn every_made_form_names_one_zapf_dingbats_a_file() {
     assert_eq!(fonts.len(), 1, "one font");
     let wrote = written(base.len(), &section, &path);
     assert!(fonts.is_subset(&wrote));
+}
+
+// ----- the value (M10 slice 9) ----------------------------------------------
+
+/// A check box's and a radio group's value is a save's `/V` (M10 slice 9),
+/// the state a press or a set puts, by a Rewrite and by an Append, at the
+/// field's own number, read back alike by sheaf's reader and the family's;
+/// each widget's `/AS` the model's beside it. A radio group set by its
+/// state, a check box turned off, and a group nothing set, its file's
+/// object.
+#[test]
+fn a_check_box_s_and_a_radio_group_s_value_is_written_both_ways() {
+    let mut f = Form::new(1);
+    let merged = f.check_box("merged", 0, row(0), false);
+    let (on_field, _) = f.buttons("on", 0, &[Button::at(1, Some("Yes"), Some("Yes"))]);
+    let radio = f.radio("radio", 0, &[row(2), row(3), row(4)], Some(0));
+    let kept = f.radio("kept", 0, &[row(5), row(6)], Some(1));
+    let bytes = table(&mut f);
+    let was = lazy(&bytes, None);
+    let state = |s: &str| (Some(Value::State(s.into())), Some(Theirs::State(n(s))));
+    for how in ["a Rewrite", "an Append"] {
+        let dir = scratch();
+        let (path, mut d) = opened(&dir, "a.pdf", &bytes);
+        let aid = widget_of(&d, "merged");
+        fx::press(&mut d, aid);
+        fx::clear(&mut d, "on");
+        fx::set_buttons(&mut d, "radio", "2");
+        let strategy = saved_each_way(&mut d, &path, how);
+        let now = std::fs::read(&path).unwrap();
+        let pdf = lazy(&now, None);
+        assert_eq!(read_back(&now, "merged"), state("Yes"), "{how}");
+        assert_eq!(value_of(&pdf, merged), Some(n("Yes")), "{how}");
+        assert_eq!(read_back(&now, "on"), state("Off"), "{how}");
+        assert_eq!(value_of(&pdf, on_field), Some(n("Off")), "{how}");
+        assert_eq!(read_back(&now, "radio"), state("2"), "{how}");
+        assert_eq!(value_of(&pdf, radio), Some(n("2")), "{how}");
+        let kids = kids_of(&pdf, radio);
+        let shown: Vec<Option<Vec<u8>>> = kids.iter().map(|&k| shows(&pdf, k)).collect();
+        assert_eq!(
+            shown,
+            [Some(n("Off")), Some(n("Off")), Some(n("2"))],
+            "{how}"
+        );
+        assert_eq!(read_back(&now, "kept"), state("1"), "{how}");
+        assert_eq!(span(&pdf, &now, kept), span(&was, &bytes, kept), "{how}");
+        if strategy == StrategyKind::Append {
+            let section = &now[bytes.len()..];
+            let wrote = written(bytes.len(), section, &path);
+            assert!(
+                [merged, on_field, radio]
+                    .iter()
+                    .all(|id| wrote.contains(id))
+            );
+            assert!(!wrote.contains(&kept), "{wrote:?}");
+        }
+    }
+}
+
+/// A check box that takes its parent's `/V` (it has none of its own),
+/// turned off, is written with `/V /Off` of its own, so it doesn't take
+/// its parent's again; the parent keeps its file's. Both ways, read back
+/// alike by sheaf and the family.
+#[test]
+fn a_check_box_turned_off_under_a_parent_holding_a_value_holds_off() {
+    let mut f = Form::new(1);
+    let (field, _) = f.buttons("c", 0, &[Button::at(0, Some("Yes"), Some("Yes"))]);
+    f.dict(field).remove(b"V");
+    let parent = f.group("p", &[field]);
+    f.dict(parent).set("V", Object::name("Yes"));
+    let bytes = table(&mut f);
+    let on = (
+        Some(Value::State("Yes".into())),
+        Some(Theirs::State(n("Yes"))),
+    );
+    assert_eq!(read_back(&bytes, "p.c"), on, "as opened: its parent's");
+    for how in ["a Rewrite", "an Append"] {
+        let dir = scratch();
+        let (path, mut d) = opened(&dir, "a.pdf", &bytes);
+        fx::clear(&mut d, "p.c");
+        saved_each_way(&mut d, &path, how);
+        let now = std::fs::read(&path).unwrap();
+        let pdf = lazy(&now, None);
+        let off = (
+            Some(Value::State("Off".into())),
+            Some(Theirs::State(n("Off"))),
+        );
+        assert_eq!(read_back(&now, "p.c"), off, "{how}");
+        assert_eq!(value_of(&pdf, field), Some(n("Off")), "{how}: its own");
+        assert_eq!(
+            value_of(&pdf, parent),
+            Some(n("Yes")),
+            "{how}: the parent's"
+        );
+    }
 }

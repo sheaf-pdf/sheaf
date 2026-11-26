@@ -583,7 +583,7 @@ pub fn word_on(geom: &Geom, text: &str) -> sheaf_doc::OcrWord {
 }
 
 /// `bytes` with field `name`'s `/V` set to `value` (its appearance as it
-/// was), as a fill sheaf can't make yet (slice 9) would leave it.
+/// was), as another tool's fill that makes no appearance leaves it.
 pub fn filled(bytes: &[u8], name: &str, value: &str) -> Vec<u8> {
     let field = form_in(bytes)
         .fields

@@ -25,13 +25,18 @@
 //! from the widget that's its own dictionary ([`joined`]: one the state
 //! shows twice, or one on another page, which an overlay of this page
 //! doesn't write, so it writes the field without that widget's keys), no
-//! text field's widget whose value the model holds changed ([`stale`], M10
-//! slice 6: the overlay draws the appearance pdf-forms makes for it, the
-//! form a save writes), and the form's own keys the overlay writes from
-//! the document's as its file has them. The value itself isn't one of
-//! them: no save writes a field's `/V` before M10 slice 9's fills.
+//! widget whose field's value the model holds changed ([`value_changed`],
+//! M10 slice 9: the overlay writes the field's `/V` from the model, as a
+//! save does, on every page with a widget of it, a radio group's other
+//! pages too), no widget whose appearance a save makes anew ([`stale`],
+//! M10 slices 6 and 8: the overlay draws the appearance pdf-forms makes for
+//! it, the form a save writes) or whose button's state changed, and the
+//! form's own keys the overlay writes from the document's as its file has
+//! them. The render key feeds each drawn widget's terminal whole, its value
+//! among it, so a page whose field's value moves is drawn anew.
 //!
 //! [`stale`]: crate::forms::appearance::stale
+//! [`value_changed`]: crate::forms::value_changed
 
 use std::collections::HashSet;
 
@@ -194,9 +199,14 @@ fn annots_kept(
                 let Some(r) = read.filter(|r| listed(r.id) && w.inst.copy == 0) else {
                     return false;
                 };
-                // Its text field's value changed, or its button's state:
-                // its appearance is made anew, or its `/AS` written.
-                if crate::forms::appearance::stale(st, aid)
+                // Its field's value changed, its appearance or its
+                // button's state: the overlay writes the field's `/V` from
+                // the model, its appearance made anew, or its `/AS`.
+                let value_moved = (st.field(w.field))
+                    .and_then(|node| Some((node, node.term.as_deref()?)))
+                    .is_some_and(|(node, term)| crate::forms::value_changed(node, term));
+                if value_moved
+                    || crate::forms::appearance::stale(st, aid)
                     || crate::forms::appearance::state_changed(st, aid).is_some()
                 {
                     return false;

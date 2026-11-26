@@ -1191,15 +1191,17 @@ fn widgets_of(d: &Document, name: &str) -> Vec<sheaf_doc::AnnotId> {
 /// Fields whose own dictionary is a widget beside kid widgets render from
 /// their realizations as the Rewrite does, live and appearances only
 /// (PDFium takes such a dictionary for its field's widget only where the
-/// field lists no kids, and then draws it live). A check box's own widget pressed, its kid on the
-/// same page, realizes that page alone, the field and that widget one
-/// object as the file has them; in [`kids_beside`], the check box's kid on
-/// the second page pressed realizes that page alone, the field written
-/// apart there, as it doesn't show that widget; its text field filled
-/// realizes both, in one group; and a check box's own widget pressed whose
-/// one kid is in another group realizes its page in a group of its own,
-/// the field one object with it there and its kid listed where the base
-/// has it. Each page left alone renders from the base.
+/// field lists no kids, and then draws it live). A check box's own widget
+/// pressed, its kid on the same page, realizes that page alone, the field
+/// and that widget one object as the file has them; in [`kids_beside`],
+/// the check box's kid on the second page pressed realizes that page, the
+/// field written apart there, as it doesn't show that widget, and the
+/// first, where the field's own widget is, its `/V` the model's now (M10
+/// slice 9); its text field filled realizes both, in one group; and a
+/// check box's own widget pressed whose one kid is in another group
+/// realizes its page in a group of its own, the field one object with it
+/// there and its kid listed where the base has it. Each page left alone
+/// renders from the base.
 #[test]
 fn fields_beside_their_kids_render_as_saved() {
     let views = views();
@@ -1229,7 +1231,7 @@ fn fields_beside_their_kids_render_as_saved() {
     fx::press(&mut d, kid);
     renders(
         &d,
-        &[(0, false), (1, true)],
+        &[(0, true), (1, true)],
         "its kid on the second page pressed",
     );
     // A text field of widgets on both pages filled.

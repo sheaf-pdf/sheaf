@@ -17,7 +17,7 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use super::{DaFont, Frame, Made, Slot, frame, limits};
 use crate::content::{Fallback, Glyphs};
-use crate::forms::field::{Choice, FieldKind, Value};
+use crate::forms::field::{Choice, FieldKind, Value, choice_texts, value_changed};
 use crate::model::{DocState, FieldNode, Terminal, Widget};
 use crate::pdf::forms::{ComboBox, ListBox, Unmade, combo_box, list_box};
 use crate::pdf::gfx::WithFallback;
@@ -100,7 +100,7 @@ pub(super) fn look(st: &DocState, w: &Widget, node: &FieldNode, term: &Terminal)
         },
         _ => ChoiceShows::List {
             options: options.clone(),
-            selected: selected(options, &values(term.value.as_ref())),
+            selected: selected_by_value(term),
             top: usize::try_from(term.props.top).unwrap_or(usize::MAX),
         },
     };
@@ -144,34 +144,25 @@ fn combo_text(options: &[Choice], value: Option<&Value>) -> Arc<str> {
     }
 }
 
-/// The texts a choice field's value holds, as the family takes them
-/// (`field_choice`): a text is one, even an empty one, which selects an
-/// option whose export value is empty; an array its texts; none, no value
-/// and anything else.
-fn values(value: Option<&Value>) -> Vec<&str> {
-    match value {
-        Some(Value::Text(text)) => vec![&**text],
-        Some(Value::Items(items)) => items.iter().map(|t| &**t).collect(),
-        _ => Vec::new(),
-    }
-}
-
 /// Whether a widget of `node`, a combo box or list box whose terminal is
 /// `term`, needs its appearance made ([`stale`](super::stale)): it has a
-/// display, which no file holds; or its value's texts ([`values`]) aren't
-/// its source's field's as read, or the field was read from no source, or
-/// isn't among its source's fields as read. No
-/// value and an empty array are alike, and a text and an array of that
-/// one text, as each shows the same; an empty text isn't no value, as it
-/// selects an option whose export value is empty.
+/// display, which no file holds; or its value changed ([`value_changed`]:
+/// its value's texts, [`choice_texts`], aren't its source's field's as
+/// read), or the field was read from no source, or isn't among its
+/// source's fields as read. No value and an empty array are alike, and a
+/// text and an array of that one text, as each shows the same; an empty
+/// text isn't no value, as it selects an option whose export value is
+/// empty.
 pub(super) fn stale(node: &FieldNode, term: &Terminal) -> bool {
-    let Some(src) = node.src.as_ref().filter(|_| term.display.is_none()) else {
-        return true;
-    };
-    match src.src.form().field_by_object(src.id) {
-        Some(read) => values(read.value.as_ref()) != values(term.value.as_ref()),
-        None => true,
-    }
+    term.display.is_some() || value_changed(node, term)
+}
+
+/// The indexes in `term`'s options of those its value selects, a combo
+/// box's or list box's ([`selected`], by the value alone): what its look
+/// highlights, and what a save writes as a list box's `/I` where its
+/// value changed.
+pub fn selected_by_value(term: &Terminal) -> Vec<usize> {
+    selected(&term.props.options, &choice_texts(term.value.as_ref()))
 }
 
 /// `look`'s appearance in `font`, and the fallback font

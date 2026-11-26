@@ -96,6 +96,21 @@ pub fn try_fill(doc: &mut Document, name: &str, value: &str) -> Result<(), EditE
     set_value(doc, FieldRef::Name(name.into()), value, By::User, "fill")
 }
 
+/// The field of `doc` whose full name is `name` cleared, given no value
+/// (`FieldValue::Clear`: a check box or radio group off), by
+/// `SetFieldValues` as the user sets one, as a version of its own: none
+/// where it holds none. Panics where the op refuses it.
+pub fn clear(doc: &mut Document, name: &str) {
+    set_value(
+        doc,
+        FieldRef::Name(name.into()),
+        FieldValue::Clear,
+        By::User,
+        "clear",
+    )
+    .unwrap_or_else(|e| panic!("clearing {name:?}: {e}"));
+}
+
 /// The field of `doc` whose full name is `name` given the text `value` as
 /// the form's calculations set one (`SetFieldValues`' `calculated`), as a
 /// version of its own: a read-only field too, and a value past its

@@ -31,9 +31,10 @@
 //! down, as PDFium's does, passing over a node with none or an empty one.
 //! Values, options and actions many fields share are read once, so a
 //! value a thousand fields inherit is one string. An `/Opt` is read once
-//! for both of the ways a field takes it: a choice field's items, which
-//! leave out an item that is no text, and a check box's or radio group's
-//! export values, which keep its place.
+//! for both of the ways a field takes it, a choice field's items and a
+//! check box's or radio group's export values, each keeping the place of
+//! an item that is no text, as an option of empty text, so `/TI`, `/I`
+//! and a widget's index go into the file's `/Opt`.
 //!
 //! Every node of the tree is numbered, in tree order (M10.5 §4): a
 //! terminal field's id is its node's.
@@ -441,7 +442,9 @@ struct Inherited<'a> {
 struct Opt {
     /// It is an array, an empty one too.
     array: bool,
-    /// A choice field's items: each item that is text, or a pair of text.
+    /// A choice field's items: every item in its place, each that is
+    /// text, or an array that starts with two texts; anything else an
+    /// option of empty text.
     items: Arc<[Choice]>,
     /// A check box's or radio group's export values: every item in its
     /// place, as the family reads an option: a string, or an array of
@@ -819,18 +822,20 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
                     None => is_string(item),
                 };
                 let button = choice.clone().filter(|_| strict);
+                let empty = || {
+                    let empty: Arc<str> = Arc::from("");
+                    Choice {
+                        export: empty.clone(),
+                        shown: empty,
+                    }
+                };
                 if button.is_none() || exports.is_some() {
-                    let empty = || {
-                        let empty: Arc<str> = Arc::from("");
-                        Choice {
-                            export: empty.clone(),
-                            shown: empty,
-                        }
-                    };
                     (exports.get_or_insert_with(|| choices.clone()))
                         .push(button.unwrap_or_else(empty));
                 }
-                choices.extend(choice);
+                // A choice's keeps its place too, so `/TI` and `/I` index
+                // the file's `/Opt`, as the family and PDFium read one.
+                choices.push(choice.unwrap_or_else(empty));
             }
         }
         let items: Arc<[Choice]> = choices.into();

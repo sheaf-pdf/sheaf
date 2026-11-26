@@ -10,17 +10,16 @@
 //! given (`tx::fixture::set_buttons`) and a choice's value (`choose`), by
 //! `SetFieldValues` as the user sets them, and a push button's captions
 //! (`caption`), a put no op makes. Its appearances are the save's own,
-//! made by pdf-forms; `/AS` is the model's, and `/V` stays the file's until
-//! M10 slice 9 writes it. PDFium's ([`theirs`]) is the file with the state, value or
-//! captions and no appearance, its widgets drawn once under PDFium's
-//! form-fill environment (`FPDF_FFLDraw`), whose load makes every
+//! made by pdf-forms; `/AS` and the field's `/V` are the model's (M10
+//! slices 8 and 9). PDFium's ([`theirs`]) is the file with the state,
+//! value or captions and no appearance, its widgets drawn once under
+//! PDFium's form-fill environment (`FPDF_FFLDraw`), whose load makes every
 //! appearance a widget lacks, every slot and state, as the family's oracle
 //! got them (`FORM_OnAfterLoadPage`); then saved by PDFium. Both are drawn
 //! appearances only ([`fields::draw`]) and compared inside the widget's
-//! box. A
-//! down or rollover appearance is drawn by a copy whose `/N` is that entry
-//! ([`rebound`]), a check box's or radio button's other state by a copy
-//! whose `/AS` names it ([`showing`]), on each side alike.
+//! box. A down or rollover appearance is drawn by a copy whose `/N` is
+//! that entry ([`rebound`]), a check box's or radio button's other state
+//! by a copy whose `/AS` names it ([`showing`]), on each side alike.
 
 use sheaf_doc::Document;
 use sheaf_doc::forms::fixture::{Button, COMBO, Form, RADIO};

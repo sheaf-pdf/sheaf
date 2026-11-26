@@ -56,12 +56,13 @@
 //!
 //! **Reading a form.** The family's own reading of a form's field tree
 //! and of a widget for its appearances (`read`, `Form`, `Field`,
-//! `FieldKind`, `Widget`; a text field's widget, `widget_text`,
-//! `WidgetText`; a check box's or radio button's, `widget_toggle`,
-//! `WidgetToggle`; a push button's, `widget_push`, `WidgetPush`; what a
-//! combo box or list box shows, `field_choice`, `FieldChoice`, and its
-//! widget, `widget_choice`, `WidgetChoice`; a check box or radio field's
-//! group, `field_group`; each under PDFium's rules) is set beside sheaf's
+//! `FieldKind`, `FieldValue`, `Widget`; a text field's widget,
+//! `widget_text`, `WidgetText`; a check box's or radio button's,
+//! `widget_toggle`, `WidgetToggle`; a push button's, `widget_push`,
+//! `WidgetPush`; what a combo box or list box shows, `field_choice`,
+//! `FieldChoice`, and its widget, `widget_choice`, `WidgetChoice`; a
+//! check box or radio field's group, `field_group`; each under PDFium's
+//! rules) is set beside sheaf's
 //! in tests alone: sheaf reads its form itself (`crate::forms::read`), as
 //! its model holds widgets the tree doesn't reach, copies of a form and
 //! ids of its own, and hands the makers plain data from that model.
@@ -99,7 +100,7 @@ pub mod group {
 #[cfg(test)]
 pub use pdf_forms::appearance::{FieldChoice, WidgetChoice, WidgetPush, WidgetText, WidgetToggle};
 #[cfg(test)]
-pub use pdf_forms::{Field, FieldKind, Form, Widget};
+pub use pdf_forms::{Field, FieldKind, FieldValue, Form, Widget};
 
 #[cfg(test)]
 use crate::pdf::{Dictionary, Resolve, Streams};

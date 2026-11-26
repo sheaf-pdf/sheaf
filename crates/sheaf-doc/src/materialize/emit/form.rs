@@ -8,6 +8,22 @@
 //!   instance whose names clashed is written from its record. Copy 0 of
 //!   the primary's own keeps its numbers, and a field the save changed
 //!   nothing of is the file's object as it is.
+//! - **A field whose value changed** ([`value_changed`]: its value isn't
+//!   its source's field's as read, a text's none and empty alike, a
+//!   group's none and `Off`; M10 slice 9) is written from the model, never
+//!   as the file's object: `/V` the value (a text as a text string,
+//!   `pdf::text::string`; a list box's several an array of them; a check
+//!   box's or radio group's state a name), where the file's was or after
+//!   its keys; with no value, none, unless an ancestor's `/V` would be
+//!   inherited in its place, then the empty text, a list box's empty
+//!   array, or `/Off`. A list box's `/I` is the indexes into its `/Opt` of
+//!   the options its value selects, as its appearance highlights them,
+//!   none where nothing is; a combo box's goes, its `/V` all it holds. Its
+//!   rich value (`/RV`) goes, which would show the old value; its default
+//!   style (`/DS`), `/DV`, `/Opt`, `/TI` and the rest are the file's. A
+//!   password field's value is never written: no `/V` at all, the file's
+//!   gone too, and its appearance draws a star a character. An overlay
+//!   writes the value as a save does.
 //! - **A field whose own dictionary is a widget** (ISO 32000-1 12.7.3.1)
 //!   is one object with it under [`ObjKey::Field`], as its file has it,
 //!   whatever other widgets it has, which are its kids beside it
@@ -33,9 +49,9 @@
 //!   [`ObjKey::AnnotPart`] (`Part::Ap`), the widget's `/AP` `<< /N … >>`
 //!   alone, so an overlay and a save write the same form. The file's
 //!   `/AP` isn't copied, so a Rewrite holds none of the old appearance's
-//!   streams. One that can't be made leaves the widget with no `/AP`. Its
-//!   `/V` is written as the file has it: no save writes a value before M10
-//!   slice 9.
+//!   streams. One that can't be made leaves the widget with no `/AP`, and
+//!   a save warns of it, by kind (an overlay at debug level, as it's made
+//!   at every realize).
 //! - **A check box's or radio button's widget whose state changed**
 //!   ([`appearance::state_changed`]) gets its `/AS` written from the model.
 //!   Where its file's normal appearance has no on state
@@ -45,19 +61,17 @@
 //!   the maker made none, `on` the name a press puts in `/AS`; the mark
 //!   drawn in ZapfDingbats as the standard 14 font is written by name, one
 //!   dictionary a file however many forms name it. One whose file's has
-//!   keeps it, and only `/AS` moves. Its field's `/V` is the file's, as a
-//!   text field's is, until M10 slice 9.
+//!   keeps it, and only `/AS` moves.
 //! - **A combo box's or list box's widget whose value changed**
 //!   ([`appearance::stale`]) gets its appearance made anew as a text
 //!   field's is, in the field's font and the fallback: one form under
-//!   `Part::Ap`, `<< /N … >>`. Its field's `/V` and `/I` are the file's
-//!   until M10 slice 9.
+//!   `Part::Ap`, `<< /N … >>`.
 //! - **A push button's widget whose captions changed**
 //!   ([`appearance::stale`]) gets its appearances made anew from them, in
 //!   the field's font and the fallback: `/N` under `Part::Ap`, and where its
 //!   `/H` is `/P` or `/T` `/R` under `ApRollover` and `/D` under `ApDown`,
 //!   `<< /N … /R … /D … >>`. One nothing changed keeps its own, and one with
-//!   none stays so. Its `/MK` is the file's, as a field's `/V` is.
+//!   none stays so. Its `/MK` is the file's: no op changes a caption.
 //! - **Widgets on page templates** (`/Names /Templates`) aren't records: a
 //!   primary field's kids the records don't account for and no page shows
 //!   stay in its `/Kids`, as the file has them.
@@ -101,12 +115,13 @@ use crate::annot::AnnotId;
 use crate::attachments::tree_names;
 use crate::content::{Fallback, Glyphs, Res, sink};
 use crate::forms::appearance::{self, DaFont, FontAt, Look, Made, Slot};
-use crate::forms::{FieldId, FieldKind, Value};
+use crate::forms::field::flags;
+use crate::forms::{FieldId, FieldKind, Value, value_changed};
 use crate::materialize::copy::Scope;
 use crate::materialize::key::{NameTree, ObjKey, Part};
 use crate::materialize::plan::SaveTransform;
 use crate::materialize::record::ACROFORM_OWNED;
-use crate::model::{AnnotRec, DocState, FieldNode, FormInst, PageId, Widget};
+use crate::model::{AnnotRec, DocState, FieldNode, FormInst, PageId, Terminal, Widget};
 use crate::source::{Limits, ObjRef};
 use crate::store::{BlobId, Src};
 
@@ -632,6 +647,12 @@ fn appearance(cx: &mut Cx, aid: AnnotId, src: &Src) -> Option<Object> {
     });
     let (look, Made { forms, glyphs }) = match made {
         Ok(made) => made,
+        // A save's, once a widget a save; an overlay's at debug, as one is
+        // made at every realize of its page.
+        Err(why) if cx.overlay.is_some() => {
+            log::debug!("a widget's appearance can't be made ({why}): it has none");
+            return None;
+        }
         Err(why) => {
             log::warn!("a widget's appearance can't be made ({why}): it has none");
             return None;
@@ -676,6 +697,73 @@ fn appearance(cx: &mut Cx, aid: AnnotId, src: &Src) -> Option<Object> {
         }
     }
     Some(Object::from(ap))
+}
+
+/// Terminal `term`'s value, field `node`'s, which changed
+/// ([`value_changed`]), as its dictionary is written, in place of the
+/// file's `/V`, `/RV` and a choice's `/I`: its `/V` and its `/I`. `/V` is
+/// the model's (a text as a text string, [`text::string`], a list box's
+/// several an array of them, a check box's or radio group's state a name,
+/// [`state_name`]); with no value, none, unless an ancestor's `/V` would
+/// be inherited in its place ([`inherits_value`]): then the empty text, a
+/// list box's empty array (an empty text would select an option of empty
+/// text), or `/Off`. A password field's value is never written: no `/V`
+/// at all. A list box's `/I` is the indexes into its options (its file's
+/// `/Opt`, every place kept) of those its value selects, as its made
+/// appearance highlights them ([`appearance::selected_by_value`]), none
+/// where nothing is; a combo box's is left out, its `/V` all it holds.
+///
+/// [`text::string`]: crate::pdf::text::string
+fn written_value(
+    st: &DocState,
+    node: &FieldNode,
+    term: &Terminal,
+) -> (Option<Object>, Option<Object>) {
+    if term.kind == FieldKind::Text && term.flags & flags::PASSWORD != 0 {
+        return (None, None);
+    }
+    let v = match &term.value {
+        Some(Value::Text(text)) => Some(crate::pdf::text::string(text)),
+        Some(Value::Items(items)) => Some(Object::from(
+            (items.iter().map(|t| crate::pdf::text::string(t))).collect::<Vec<_>>(),
+        )),
+        Some(Value::State(state)) => Some(state_name(state)),
+        Some(Value::Signed) => None,
+        None if inherits_value(st, node) => Some(match term.kind {
+            FieldKind::CheckBox | FieldKind::Radio => Object::name("Off"),
+            FieldKind::List => Object::from(Vec::<Object>::new()),
+            _ => crate::pdf::text::string(""),
+        }),
+        None => None,
+    };
+    let selected = match term.kind {
+        FieldKind::List => appearance::selected_by_value(term),
+        _ => Vec::new(),
+    };
+    let i = (!selected.is_empty()).then(|| {
+        let indexes: Vec<Object> = (selected.into_iter())
+            .map(|i| Object::from(i64::try_from(i).unwrap_or(i64::MAX)))
+            .collect();
+        Object::from(indexes)
+    });
+    (v, i)
+}
+
+/// Whether an ancestor of field `node` holds a `/V` its file has, which a
+/// save writes as it is, so a terminal with none of its own would inherit
+/// it (ISO 32000-1 Table 220).
+fn inherits_value(st: &DocState, node: &FieldNode) -> bool {
+    let mut at = node.parent;
+    while let Some(up) = at.and_then(|p| st.field(p)) {
+        let holds = (up.src.as_ref())
+            .and_then(|r| r.src.pdf().get_dictionary(r.id).ok())
+            .is_some_and(|d| d.has(b"V"));
+        if holds {
+            return true;
+        }
+        at = up.parent;
+    }
+    false
 }
 
 /// A button's state as the name `/AS` writes: its bytes as the model holds
@@ -1031,6 +1119,10 @@ impl Fields {
         let stale = merged.is_some_and(|w| appearance::stale(st, w));
         // That widget's button's state changed: its `/AS` is the model's.
         let changed = merged.and_then(|w| appearance::state_changed(st, w));
+        // Its value isn't its file's: `/V` is the model's, or for a
+        // password, none, and a list box's `/I` what it selects.
+        let value = term.filter(|t| t.value != Some(Value::Signed) && value_changed(node, t));
+        let (mut v_now, mut i_now) = value.map_or((None, None), |t| written_value(st, node, t));
         let mut kids = kids;
         for &w in term.into_iter().flat_map(|t| t.widgets.iter()) {
             // An overlay's are those on its pages.
@@ -1101,6 +1193,7 @@ impl Fields {
             && !split
             && !stale
             && changed.is_none()
+            && value.is_none()
             && tip.is_none()
             && defaults_kept
             && (one.is_none() || tags)
@@ -1129,11 +1222,33 @@ impl Fields {
                 // appearance's streams for nothing to name.
                 b"AP" if stale => {}
                 b"AS" if let Some(state) = changed => out.set("AS", state_name(state)),
+                // The old value's, which the model's replaces where the
+                // file has it: its rich text gone, and a choice's selected
+                // indexes.
+                b"V" if value.is_some() => {
+                    if let Some(v) = v_now.take() {
+                        out.set("V", v);
+                    }
+                }
+                b"I" if value
+                    .is_some_and(|t| matches!(t.kind, FieldKind::Combo | FieldKind::List)) =>
+                {
+                    if let Some(i) = i_now.take() {
+                        out.set("I", i);
+                    }
+                }
+                b"RV" if value.is_some() => {}
                 _ => {
                     let v = cx.sym(v, &scope);
                     out.set(k, v);
                 }
             }
+        }
+        if let Some(v) = v_now {
+            out.set("V", v);
+        }
+        if let Some(i) = i_now {
+            out.set("I", i);
         }
         if let Some(w) = merged.filter(|_| stale)
             && let Some(ap) = appearance(cx, w, &r.src)

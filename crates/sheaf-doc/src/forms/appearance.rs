@@ -49,7 +49,7 @@ mod push;
 mod text;
 mod toggle;
 
-pub use choice::{ChoiceLook, ChoiceShows};
+pub use choice::{ChoiceLook, ChoiceShows, selected_by_value};
 pub use push::PushLook;
 pub use text::TextLook;
 pub use toggle::{ToggleLook, state_changed};

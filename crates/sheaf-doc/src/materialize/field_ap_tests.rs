@@ -26,13 +26,16 @@ use super::key::{ObjKey, Part};
 use super::removal_tests::{opened, scratch, warned};
 use super::tests::{add, insert, lazy, open, rewrite, span};
 use super::*;
+use super::{AskAnswers, SaveHow, StrategyKind, save_with};
 use crate::annot::AnnotId;
 use crate::content::fixture::{FALLBACK_TEXT, fallback_subsets, subsets_hold};
-use crate::content::{Fallback, Glyphs};
+use crate::content::{Fallback, Glyphs, Objects, Unkept};
 use crate::forms::appearance::tests::shown;
+use crate::forms::field::flags;
 use crate::forms::fixture::{Form, Rect, kids_beside, row};
 use crate::forms::{FieldId, FieldKind, Value};
 use crate::model::{Document, PageId};
+use crate::pdf::forms::{self as family, FieldValue as FamilyValue};
 use crate::realize::{ViewInputs, emission_is_base, untouched};
 use crate::tx::fixture as fx;
 
@@ -196,13 +199,13 @@ fn value_of(pdf: &LazyPdf, field: ObjectId) -> Option<Vec<u8>> {
 /// under `AnnotPart(aid, Ap)`, the widget's `/AP` naming it alone (no
 /// `/D`, no `/R`), its `/Resources` naming `/DR`'s Helvetica, the font's
 /// own object, no copy of it; its content `/Tx BMC`, drawing the value now.
-/// The field's `/V` is the file's (no save writes a value before M10 slice
-/// 9). Nothing else is written anew: the objects are the unfilled
-/// Rewrite's less the old appearance's stream, which nothing names now and
-/// no stream of the file holds again, and with the made form, each other
-/// one its bytes as they were; the unchanged field `b` is the file's
-/// object as it is. Where a widget nothing made names the same stream, it
-/// stays, named by that widget alone.
+/// The field's `/V` is the value now (M10 slice 9). Nothing else is written
+/// anew: the objects are the unfilled Rewrite's less the old appearance's
+/// stream, which nothing names now and no stream of the file holds again,
+/// and with the made form, each other one its bytes as they were; the
+/// unchanged field `b` is the file's object as it is. Where a widget
+/// nothing made names the same stream, it stays, named by that widget
+/// alone.
 #[test]
 fn a_rewrite_writes_a_filled_field_s_appearance_where_a_mark_s_is() {
     let (mut f, a, b) = two_fields();
@@ -230,7 +233,7 @@ fn a_rewrite_writes_a_filled_field_s_appearance_where_a_mark_s_is() {
     assert!(form.content.starts_with(b"/Tx BMC"), "{form:?}");
     assert_eq!(shown(&form.content), b"Camden");
     assert_eq!(fonts, [helv], "the /DR font's own object");
-    assert_eq!(value_of(&pdf, a).as_deref(), Some(b"Trenton".as_slice()));
+    assert_eq!(value_of(&pdf, a).as_deref(), Some(b"Camden".as_slice()));
 
     let ids = |p: &LazyPdf| -> BTreeSet<ObjectId> { p.ids().collect() };
     let mut want = ids(&plain_pdf);
@@ -252,10 +255,13 @@ fn a_rewrite_writes_a_filled_field_s_appearance_where_a_mark_s_is() {
     // fill, as the code before M10 slice 8 made `appearance` a module of
     // kinds wrote it: the widget's dictionary, its form's and the form's
     // compressed content, which nothing above holds byte for byte, are as
-    // they were. Taken from that code; never edited.
+    // they were. Taken from that code, and moved once since, by M10 slice
+    // 9's `/V`: each file's `qpdf --qdf` dump then differed from the one
+    // before in the field's `/V (Camden)` alone and the offsets after it,
+    // nothing of a stream. Never edited otherwise.
     assert_eq!(
         sheaf_util::checksum_hex(&out.bytes),
-        "e36fbc8b00e757ec9268167e80683fdd"
+        "5b8cbabc969c540d1eae9379fa65684d"
     );
     let dir = scratch();
     let (path, mut appended) = opened(&dir, "a.pdf", &bytes);
@@ -263,7 +269,7 @@ fn a_rewrite_writes_a_filled_field_s_appearance_where_a_mark_s_is() {
     appended_in_place(&mut appended).unwrap();
     assert_eq!(
         sheaf_util::checksum_hex(&std::fs::read(&path).unwrap()),
-        "b3a5c22072529f5a52fb17c925aeafc8"
+        "4eca288e19c35b1284ad0deec05b4197"
     );
 
     // `b` naming `a`'s stream too: it stays, for `b`.
@@ -317,7 +323,7 @@ fn an_append_writes_a_filled_field_s_appearance_and_the_widget_alone() {
     let (form, fonts) = saved_form(&pdf, empty);
     assert_eq!(shown(&form.content), b"Camden");
     assert_eq!(fonts, [helv]);
-    assert_eq!(value_of(&pdf, empty), None, "no /V written");
+    assert_eq!(value_of(&pdf, empty).as_deref(), Some(b"Camden".as_slice()));
 
     let [aid] = widgets_of(&d, "a")[..] else {
         panic!("one widget")
@@ -334,7 +340,7 @@ fn an_append_writes_a_filled_field_s_appearance_and_the_widget_alone() {
     let (form, fonts) = saved_form(&pdf, a);
     assert_eq!(shown(&form.content), b"Newark");
     assert_eq!(fonts, [helv]);
-    assert_eq!(value_of(&pdf, a).as_deref(), Some(b"Trenton".as_slice()));
+    assert_eq!(value_of(&pdf, a).as_deref(), Some(b"Newark".as_slice()));
     assert_eq!(ap_n(&pdf, b), ap_n(&was, b));
 }
 
@@ -799,9 +805,11 @@ fn a_value_put_back_makes_nothing() {
 
 /// A value the field's font has no code for makes no appearance: the
 /// widget is written with no `/AP`, so the file shows no value the field
-/// no longer holds; its `/V` is the file's; the warning says which kind,
-/// never the text. An overlay writes the widget so too. The op refuses
-/// such a value, so it's put as only a file gives one (`fx::put_value`).
+/// no longer holds; its `/V` is the value it holds (M10 slice 9); the
+/// save's warning says which kind, never the text. An overlay writes the
+/// widget so too, and warns of nothing (it says so at debug level, as it's
+/// made at every realize). The op refuses such a value, so it's put as
+/// only a file gives one (`fx::put_value`).
 #[test]
 fn an_appearance_that_can_t_be_made_leaves_no_ap() {
     let (mut f, a, _) = two_fields();
@@ -820,7 +828,8 @@ fn an_appearance_that_can_t_be_made_leaves_no_ap() {
             .keys
             .contains_key(&ObjKey::AnnotPart(aid, Part::Ap))
     );
-    assert_eq!(value_of(&pdf, a).as_deref(), Some(b"Trenton".as_slice()));
+    let value = crate::pdf::text::decode(&value_of(&pdf, a).expect("a /V"));
+    assert_eq!(value, "Camden \u{4e2d}");
     assert_eq!(any_stream_holds(&pdf, b"Trenton"), []);
     let unmade: Vec<&String> = said.iter().filter(|w| w.contains("appearance")).collect();
     assert_eq!(unmade.len(), 1, "{said:?}");
@@ -831,7 +840,8 @@ fn an_appearance_that_can_t_be_made_leaves_no_ap() {
             .any(|w| w.contains("Camden") || w.contains('\u{4e2d}'))
     );
     let p0 = d.page(0).unwrap();
-    let ((), _) = warned(|| assert!(overlay_form(&d, p0, aid).is_none()));
+    let ((), said) = warned(|| assert!(overlay_form(&d, p0, aid).is_none()));
+    assert_eq!(said, Vec::<String>::new(), "an overlay's at debug");
     let page = d.state().order()[0];
     assert!(!untouched(d.state(), page, &ViewInputs::screen()));
 }
@@ -839,8 +849,12 @@ fn an_appearance_that_can_t_be_made_leaves_no_ap() {
 /// A WinAnsi value's form, as a Rewrite and an Append write it, the whole
 /// Rewrite and the Append's section: the bytes the code before the
 /// fallback font (M10 slice 7) wrote, held as literals taken from it, its
-/// length and checksum each. The form names `/DR`'s Helvetica alone, and
-/// nothing is written in the fallback.
+/// length and checksum each, the form's never edited, the file's and the
+/// section's moved once since, by M10 slice 9's `/V`: each then differed
+/// from the one before in the field's `/V`, the value in UTF-16BE, and the
+/// offsets after it alone (each file's `qpdf --qdf` dump, and the
+/// section's bytes), nothing of a stream. The form names `/DR`'s Helvetica
+/// alone, and nothing is written in the fallback.
 #[test]
 fn a_winansi_value_s_form_is_the_bytes_it_was() {
     let held = |bytes: &[u8]| (bytes.len(), sheaf_util::checksum_hex(bytes));
@@ -860,7 +874,7 @@ fn a_winansi_value_s_form_is_the_bytes_it_was() {
     assert_eq!(held(form), at(260, "a05b80a7d9917226804cc8d8d5fd512a"));
     assert_eq!(
         held(&out.bytes),
-        at(1924, "be547f601ed382a7eedcaa01e393409f")
+        at(1969, "bde58c8e3d7fe713912d264b35a07070")
     );
     assert_eq!(saved_form(&pdf, a).1, [helv]);
     assert_eq!(subsets_hold(&out.bytes), 0);
@@ -875,9 +889,353 @@ fn a_winansi_value_s_form_is_the_bytes_it_was() {
     let pdf = lazy(&now, None);
     let form = span(&pdf, &now, ap).unwrap();
     assert_eq!(held(form), at(260, "a05b80a7d9917226804cc8d8d5fd512a"));
-    assert_eq!(held(&section), at(525, "e783325316140b12fdd9a10dff9a44fb"));
+    assert_eq!(held(&section), at(570, "1a1255d8938f29aaab7c7bf0f999a9ba"));
     assert_eq!(subsets_hold(&now), 0);
     assert!(d.saved_record().unwrap().fallbacks.is_empty());
+}
+
+// ----- the value (M10 slice 9) ----------------------------------------------
+
+/// A field's value as the family reads it (`Field::value`, under PDFium's
+/// rules), owned.
+#[derive(Debug, PartialEq)]
+pub(super) enum Theirs {
+    Text(String),
+    State(Vec<u8>),
+    Items(Vec<String>),
+    Other,
+}
+
+/// The value of the field named `name` in the file `bytes`, as sheaf's
+/// reader reads it and as the family's does: what a save's `/V` reads back
+/// as, none for none. Panics where either reads no such field.
+pub(super) fn read_back(bytes: &[u8], name: &str) -> (Option<Value>, Option<Theirs>) {
+    let src = super::tests::source(bytes, None);
+    let form = src.form();
+    let ours = (form.fields.iter().find(|f| f.name == name))
+        .unwrap_or_else(|| panic!("sheaf reads no {name}"));
+    let pdf = src.pdf();
+    let unkept = Unkept::default();
+    let objects = Objects::new(pdf, &unkept);
+    let catalog = pdf.catalog().expect("a catalog");
+    let theirs = family::read(objects, catalog, &family::Limits::DEFAULT)
+        .expect("a form the family reads")
+        .expect("a form");
+    let (_, field) = (theirs.terminals())
+        .find(|(i, _)| theirs.full_name(*i).as_deref() == Some(name))
+        .unwrap_or_else(|| panic!("the family reads no {name}"));
+    let value = field.value().map(|v| match v {
+        FamilyValue::Text(t) => Theirs::Text(t.clone()),
+        FamilyValue::State(s) => Theirs::State(s.to_vec()),
+        FamilyValue::Items(items) => Theirs::Items(items.clone()),
+        _ => Theirs::Other,
+    });
+    (ours.value.clone(), value)
+}
+
+/// What [`read_back`] gives for the text `t`, read alike by both.
+pub(super) fn text_read(t: &str) -> (Option<Value>, Option<Theirs>) {
+    (Some(Value::Text(t.into())), Some(Theirs::Text(t.into())))
+}
+
+/// `text` in UTF-16BE after its mark, as `pdf::text::string` writes what
+/// isn't printable ASCII.
+pub(super) fn utf16be(text: &str) -> Vec<u8> {
+    let units = text.encode_utf16().flat_map(u16::to_be_bytes);
+    [0xFE, 0xFF].into_iter().chain(units).collect()
+}
+
+/// Whether `bytes` hold `text` as written: its own bytes, or in UTF-16BE.
+/// A stream's text is read decoded ([`any_stream_holds`]).
+fn bytes_hold(bytes: &[u8], text: &str) -> bool {
+    let utf16 = utf16be(text);
+    let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+    has(text.as_bytes()) || has(&utf16[2..])
+}
+
+/// A text field's value is a save's `/V` (M10 slice 9), by a Rewrite and
+/// by an Append, written in the field's own dictionary at its own number,
+/// and reads back as the model holds it by sheaf's reader and the
+/// family's: ASCII as a literal string, text past PDFDocEncoding (`ễ`) in
+/// UTF-16BE after its mark, text typed decomposed (NFD) composed (NFC), as
+/// the op holds it, and the empty text as `()`. A field nothing set is its
+/// file's object.
+#[test]
+fn a_text_field_s_value_is_written_and_reads_back_both_ways() {
+    let mut f = Form::new(1);
+    let ascii = f.text("ascii", 0, row(0));
+    f.fill(ascii, "Trenton");
+    let past = f.text("past", 0, row(1));
+    let nfd = f.text("nfd", 0, row(2));
+    let emptied = f.text("emptied", 0, row(3));
+    f.fill(emptied, "Gone");
+    let kept = f.text("kept", 0, row(4));
+    f.fill(kept, "Kept");
+    let bytes = table(&mut f);
+    let was = lazy(&bytes, None);
+    let fill = |d: &mut Document| {
+        fx::fill(d, "ascii", "Camden");
+        fx::fill(d, "past", "Nguy\u{1ec5}n");
+        fx::fill(d, "nfd", "Cafe\u{301}");
+        fx::fill(d, "emptied", "");
+    };
+    let check = |now: &[u8], how: &str| {
+        let pdf = lazy(now, None);
+        let values = [
+            ("ascii", "Camden"),
+            ("past", "Nguy\u{1ec5}n"),
+            ("nfd", "Caf\u{e9}"),
+            ("emptied", ""),
+            ("kept", "Kept"),
+        ];
+        for (name, want) in values {
+            assert_eq!(read_back(now, name), text_read(want), "{how}: {name}");
+        }
+        let holds = |id: ObjectId, s: &[u8]| {
+            let raw = span(&pdf, now, id).expect("the field");
+            raw.windows(s.len()).any(|w| w == s)
+        };
+        assert!(holds(ascii, b"/V(Camden)"), "{how}: a literal");
+        assert!(holds(emptied, b"/V()"), "{how}: the empty text");
+        assert!(holds(past, b"/V<FEFF"), "{how}: UTF-16BE, its mark first");
+        let utf16 = |t: &str| Some(utf16be(t));
+        assert_eq!(value_of(&pdf, past), utf16("Nguy\u{1ec5}n"), "{how}");
+        assert_eq!(value_of(&pdf, nfd), utf16("Caf\u{e9}"), "{how}: composed");
+    };
+    let mut d = open(&bytes, None);
+    fill(&mut d);
+    let out = rewrite(&d, Profile::default());
+    check(&out.bytes, "Rewrite");
+    let pdf = lazy(&out.bytes, None);
+    assert_eq!(span(&pdf, &out.bytes, kept), span(&was, &bytes, kept));
+
+    let dir = scratch();
+    let (path, mut d) = opened(&dir, "a.pdf", &bytes);
+    fill(&mut d);
+    let (base, section) = appended_in_place(&mut d).unwrap();
+    let wrote = written(base.len(), &section, &path);
+    for id in [ascii, past, nfd, emptied] {
+        assert!(wrote.contains(&id), "{id:?} at its own number");
+    }
+    assert!(!wrote.contains(&kept), "{wrote:?}");
+    check(&std::fs::read(&path).unwrap(), "Append");
+}
+
+/// A field cleared (no value) under a parent that holds a `/V` is written
+/// with the empty text, so it doesn't take the parent's again; one under
+/// no such parent has no `/V`; a field that took its parent's, filled,
+/// holds its own. Both ways, read back by sheaf and the family; the parent
+/// keeps its file's `/V`.
+#[test]
+fn a_cleared_field_under_a_parent_holding_a_value_holds_the_empty_text() {
+    let mut f = Form::new(1);
+    let own = f.text("own", 0, row(0));
+    f.fill(own, "Mine");
+    let took = f.text("took", 0, row(1));
+    let parent = f.group("p", &[own, took]);
+    f.dict(parent).set("V", literal("Theirs"));
+    let alone = f.text("alone", 0, row(2));
+    f.fill(alone, "Solo");
+    let bytes = table(&mut f);
+    assert_eq!(
+        read_back(&bytes, "p.took"),
+        text_read("Theirs"),
+        "as opened"
+    );
+    let set = |d: &mut Document| {
+        fx::clear(d, "p.own");
+        fx::fill(d, "p.took", "Taken");
+        fx::clear(d, "alone");
+    };
+    let check = |now: &[u8], how: &str| {
+        let pdf = lazy(now, None);
+        assert_eq!(read_back(now, "p.own"), text_read(""), "{how}");
+        assert_eq!(
+            value_of(&pdf, own).as_deref(),
+            Some(b"".as_slice()),
+            "{how}"
+        );
+        assert_eq!(read_back(now, "p.took"), text_read("Taken"), "{how}");
+        assert_eq!(read_back(now, "alone"), (None, None), "{how}");
+        assert!(!pdf.get_dictionary(alone).unwrap().has(b"V"), "{how}");
+        let theirs = value_of(&pdf, parent);
+        assert_eq!(theirs.as_deref(), Some(b"Theirs".as_slice()), "{how}");
+    };
+    let mut d = open(&bytes, None);
+    set(&mut d);
+    check(&rewrite(&d, Profile::default()).bytes, "Rewrite");
+    let dir = scratch();
+    let (path, mut d) = opened(&dir, "a.pdf", &bytes);
+    set(&mut d);
+    appended_in_place(&mut d).unwrap();
+    check(&std::fs::read(&path).unwrap(), "Append");
+}
+
+/// A password field's value is never written (M10 slice 9): filled, its
+/// file's `/V` goes and none is written, by a Rewrite and by an Append, and
+/// the value is nowhere in what either writes, a string or a stream, its
+/// appearance a star for each character; reopened, it holds no value. A
+/// plain field filled beside it is found by the same search, which finds
+/// the opened value in the file as opened too. The revision an Append
+/// leaves before it holds the file's own value, as the file had it.
+#[test]
+fn a_password_field_s_value_is_never_written() {
+    let mut f = Form::new(1);
+    let pw = f.text("pw", 0, row(0));
+    f.dict(pw).set("Ff", i64::from(flags::PASSWORD));
+    f.fill(pw, "Opened1");
+    f.text("plain", 0, row(1));
+    let bytes = table(&mut f);
+    let found = |bytes: &[u8], text: &str| {
+        bytes_hold(bytes, text) || !any_stream_holds(&lazy(bytes, None), text.as_bytes()).is_empty()
+    };
+    assert!(
+        found(&bytes, "Opened1"),
+        "the control: the search finds a value"
+    );
+    let fill = |d: &mut Document| {
+        fx::fill(d, "pw", "Hunter2");
+        fx::fill(d, "plain", "Shown3");
+    };
+    let mut d = open(&bytes, None);
+    fill(&mut d);
+    let out = rewrite(&d, Profile::default());
+    let pdf = lazy(&out.bytes, None);
+    assert!(!pdf.get_dictionary(pw).unwrap().has(b"V"), "no /V");
+    assert_eq!(read_back(&out.bytes, "pw"), (None, None));
+    assert!(
+        found(&out.bytes, "Shown3"),
+        "the control: the plain field's"
+    );
+    assert!(!found(&out.bytes, "Hunter2"), "the password nowhere");
+    assert!(!found(&out.bytes, "Opened1"), "nor the file's");
+    assert_eq!(shown(&saved_form(&pdf, pw).0.content), b"*******");
+
+    let dir = scratch();
+    let (path, mut d) = opened(&dir, "a.pdf", &bytes);
+    fill(&mut d);
+    let (base, section) = appended_in_place(&mut d).unwrap();
+    assert!(written(base.len(), &section, &path).contains(&pw));
+    let now = std::fs::read(&path).unwrap();
+    let pdf = lazy(&now, None);
+    assert!(!pdf.get_dictionary(pw).unwrap().has(b"V"), "no /V");
+    assert_eq!(read_back(&now, "pw"), (None, None));
+    assert!(found(&now, "Shown3"), "the control: the section's");
+    assert!(!found(&now, "Hunter2"), "the password nowhere");
+    assert_eq!(shown(&saved_form(&pdf, pw).0.content), b"*******");
+}
+
+/// A filled field's rich value (`/RV`) goes, as it would show the old value
+/// to a viewer that draws it, and its default style (`/DS`) stays as its
+/// file has it: it styles, it holds no value. A field nothing set keeps
+/// both. Both ways.
+#[test]
+fn a_filled_field_s_rich_value_goes_and_its_style_stays() {
+    let (mut f, a, b) = two_fields();
+    for (id, was) in [(a, "Trenton"), (b, "Other")] {
+        let rich = format!("<body><p>{was}</p></body>");
+        f.dict(id).set("RV", literal(rich));
+        f.dict(id).set("DS", literal("font: 12pt Helvetica"));
+    }
+    let bytes = table(&mut f);
+    let was = lazy(&bytes, None);
+    let check = |now: &[u8], how: &str| {
+        let pdf = lazy(now, None);
+        let field = |id| pdf.get_dictionary(id).unwrap().clone();
+        let (a_now, b_now) = (field(a), field(b));
+        assert!(!a_now.has(b"RV"), "{how}: the old value's rich text gone");
+        assert!(!bytes_hold(now, "<p>Trenton"), "{how}");
+        let ds = |d: &Dictionary| d.get(b"DS").and_then(Object::as_bytes).map(<[u8]>::to_vec);
+        let style = Some(b"font: 12pt Helvetica".to_vec());
+        assert_eq!(ds(&a_now), style, "{how}: its style kept");
+        assert_eq!(value_of(&pdf, a).as_deref(), Some(b"Camden".as_slice()));
+        assert!(
+            b_now.has(b"RV") && ds(&b_now) == style,
+            "{how}: b untouched"
+        );
+    };
+    let mut d = open(&bytes, None);
+    fx::fill(&mut d, "a", "Camden");
+    let out = rewrite(&d, Profile::default());
+    check(&out.bytes, "Rewrite");
+    let pdf = lazy(&out.bytes, None);
+    assert_eq!(span(&pdf, &out.bytes, b), span(&was, &bytes, b));
+    let dir = scratch();
+    let (path, mut d) = opened(&dir, "a.pdf", &bytes);
+    fx::fill(&mut d, "a", "Camden");
+    let (_, section) = appended_in_place(&mut d).unwrap();
+    assert!(!bytes_hold(&section, "<p>Trenton"));
+    let now = std::fs::read(&path).unwrap();
+    let pdf = lazy(&now, None);
+    let a_now = pdf.get_dictionary(a).unwrap();
+    assert!(!a_now.has(b"RV") && a_now.has(b"DS"), "Append");
+    assert_eq!(value_of(&pdf, a).as_deref(), Some(b"Camden".as_slice()));
+}
+
+/// An overlay writes a filled field's `/V` from the model, as a save does,
+/// so PDFium, which may draw a field from its value, is given the value the
+/// model holds; the page isn't its base page. A field nothing set on
+/// another page is its file's object in that page's overlay.
+#[test]
+fn an_overlay_s_field_holds_the_model_s_value() {
+    let (mut f, _, _) = two_fields();
+    let bytes = table(&mut f);
+    let mut d = open(&bytes, None);
+    fx::fill(&mut d, "a", "Camden");
+    let [p0, p1] = [0, 1].map(|i| d.page(i).unwrap());
+    let field = |e: &Emission, name: &str| {
+        let fid = d.state().field_named(name).unwrap();
+        let (_, obj) = (e.objects.iter().find(|(k, _)| *k == ObjKey::Field(fid)))
+            .unwrap_or_else(|| panic!("{name} written"));
+        match obj {
+            SymObject::Built(obj) => Some(obj.as_dict().expect("a dictionary").clone()),
+            _ => None,
+        }
+    };
+    let e = overlaid(&d, p0, EmitScope::Pages([p0].into()));
+    let a = field(&e, "a").expect("built: its value changed");
+    let v = a.get(b"V").and_then(Object::as_bytes);
+    assert_eq!(v, Some(b"Camden".as_slice()));
+    assert!(!untouched(d.state(), p0, &ViewInputs::screen()));
+    let e = overlaid(&d, p1, EmitScope::Pages([p1].into()));
+    assert!(field(&e, "b").is_none(), "the file's object, raw");
+    assert!(untouched(d.state(), p1, &ViewInputs::screen()));
+}
+
+/// A field filled and saved by an Append, then undone to the value it was
+/// opened with and saved again, is the opened file's object again: the
+/// value the Append wrote is gone from the file (strict removal plans a
+/// Rewrite), and the Rewrite, writing from the file as opened and the
+/// model, finds nothing of the field changed.
+#[test]
+fn a_fill_undone_after_its_append_saves_the_file_s_object_again() {
+    let dir = scratch();
+    let (mut f, _, _) = two_fields();
+    let empty = f.text("empty", 0, row(1));
+    let bytes = table(&mut f);
+    let was = lazy(&bytes, None);
+    let (path, mut d) = opened(&dir, "a.pdf", &bytes);
+    fx::fill(&mut d, "empty", "Camden");
+    planned_in_place(&mut d);
+    let appended = std::fs::read(&path).unwrap();
+    assert_eq!(read_back(&appended, "empty"), text_read("Camden"));
+    assert!(bytes_hold(&appended, "Camden"), "the control");
+    d.undo().unwrap();
+    let report = save_with(
+        &mut d,
+        &path,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    )
+    .unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
+    let now = std::fs::read(&path).unwrap();
+    let pdf = lazy(&now, None);
+    assert_eq!(span(&pdf, &now, empty), span(&was, &bytes, empty));
+    assert_eq!(read_back(&now, "empty"), (None, None));
+    assert!(!bytes_hold(&now, "Camden"));
+    assert_eq!(any_stream_holds(&pdf, b"Camden"), []);
 }
 
 // ----- in two fonts (M10 slice 7) -------------------------------------------

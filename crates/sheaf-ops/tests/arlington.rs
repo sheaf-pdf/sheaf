@@ -714,11 +714,11 @@ sheaf_doc::both_ways!(buttons_and_choices_hold, buttons_and_choices_hold_appende
 /// The tables [`buttons_and_choices`] must check: each kind of field and
 /// its widget, the `/AP` dictionaries and their state dictionaries, the
 /// forms made, and the ZapfDingbats font the marks are drawn in. A radio
-/// field apart from its widgets is checked only in an Append, which writes
-/// it, its dictionary as its file has it, for its value (`/V` isn't written
-/// before M10 slice 9); a Rewrite copies it.
+/// field apart from its widgets is checked both ways: its value moved, so
+/// each writes its `/V` from the model (M10 slice 9).
 const BUTTONS: &[&str] = &[
     "FieldBtnCheckbox",
+    "FieldBtnRadio",
     "FieldChoice",
     "FieldBtnPush",
     "AnnotWidget",
@@ -728,9 +728,10 @@ const BUTTONS: &[&str] = &[
     "FontType1",
 ];
 
-/// Every kind of button and choice changed as no op changes one before M10
-/// slice 9 (`tx::fixture`), each widget's appearances made by the save
-/// (M10 slice 8): a check box, one object with its widget, and a radio
+/// Every kind of button and choice changed, by `SetFieldValues`
+/// (`tx::fixture`) and a push button's captions by a put no op makes, each
+/// widget's appearances made by the save (M10 slice 8), each field's value
+/// written (slice 9): a check box, one object with its widget, and a radio
 /// group of two kid widgets, under `/Opt`, each with no appearances,
 /// pressed (`/N` and `/D` state dictionaries, `/AS`, the marks in
 /// ZapfDingbats); a combo box and a list box given values (`/N`); and a
@@ -769,11 +770,7 @@ fn buttons_and_choices(how: How) {
     let push = widgets(&doc, "push")[0];
     fx::caption(&mut doc, push, Some("Stop"), Some("Over"), Some("Down"));
     let checked = held(&mut doc, Some(how), &path);
-    let mut tables = BUTTONS.to_vec();
-    if how == How::Appended {
-        tables.push("FieldBtnRadio");
-    }
-    clean(&checked, &tables);
+    clean(&checked, BUTTONS);
     // The forms the save made, each widget's: the check box's on state's
     // normal and down ones and `Off`'s down one (the pressed gray; its
     // normal `Off` paints nothing, with no `/MK`), the radio group's

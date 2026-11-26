@@ -971,9 +971,9 @@ fn a_push_button_s_captions_icon_and_highlight_are_read() {
 }
 
 /// A field has `/Opt` where its own or a parent's is an array, an empty
-/// one too, and not where it's none or no array; a button field's keeps
-/// each item's place, one that is no text an empty option, and a choice
-/// field's leaves it out, each from one array they share.
+/// one too, and not where it's none or no array; a button field's and a
+/// choice field's each keep every item's place, one that is no text (as
+/// each reads an item) an empty option, from one array they share.
 #[test]
 fn a_fields_opt_is_read_for_its_kind() {
     let mut f = Form::new(1);
@@ -1018,12 +1018,33 @@ fn a_fields_opt_is_read_for_its_kind() {
     assert_eq!(read(name), (false, String::new()));
     assert_eq!(read(kid), (true, "p".into()));
     assert_eq!(read(button), (true, "x||y||z||||end".into()));
-    assert_eq!(read(choice), (true, "x|y|z|t|s|s|end".into()));
+    assert_eq!(read(choice), (true, "x||y||z|t|s|s|end".into()));
     assert_eq!(read(direct), (true, "a||b".into()));
     let shown: Vec<&str> = (form.field_by_object(choice).unwrap().options.iter())
         .map(|o| &*o.shown)
         .collect();
-    assert_eq!(shown, ["x", "Y", "z", "T", "s", "S", "end"]);
+    assert_eq!(shown, ["x", "", "Y", "", "z", "T", "s", "S", "end"]);
+}
+
+/// A list box whose `/Opt` has an item that is no text before its others,
+/// `[1 (a) (b)]`, reads three options, the first of empty text, so its
+/// `/TI 1` names the first option it shows (`a`) as the family and PDFium
+/// take it, and the index a save writes into `/I` is the file's.
+#[test]
+fn a_choice_s_opt_item_that_is_no_text_keeps_its_place() {
+    let mut f = Form::new(1);
+    let list = f.choice("list", 0, row(0), &[], false);
+    f.dict(list)
+        .set("Opt", vec![1.into(), literal("a"), literal("b")]);
+    f.dict(list).set("TI", 1);
+    let form = read_back(&mut f);
+    let field = form.field_by_object(list).unwrap();
+    let options: Vec<(&str, &str)> = (field.options.iter())
+        .map(|o| (&*o.export, &*o.shown))
+        .collect();
+    assert_eq!(options, [("", ""), ("a", "a"), ("b", "b")]);
+    assert_eq!(field.top, 1);
+    assert_eq!(&*field.options[field.top as usize].export, "a");
 }
 
 /// What damage reads as: no fields, and a reason.
