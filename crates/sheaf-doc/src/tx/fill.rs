@@ -22,6 +22,16 @@
 //! - a push button, a signature field, and a field of no kind sheaf knows
 //!   hold no value: refused.
 //!
+//! Before its kind's rules, a set of a field that's locked is refused,
+//! [`EditError::Locked`], from either list: a signature field holding a
+//! signature, or a field of the primary file's own instance whose full
+//! name a signature of that file locks (FieldMDP, or a field's `/Lock`),
+//! as its signatures say, unchecked. After the put, each of the field's
+//! widgets whose appearance a save makes anew is made as the emitter will
+//! make it: a character no font sheaf has draws refuses the set, named
+//! (right-to-left scripts, CJK and emoji among them); any other reason a
+//! widget's appearance isn't made doesn't.
+//!
 //! A user's set of a read-only field is refused. A calculated one isn't (a
 //! calculated field usually is read-only), nor held to `/MaxLen` or one
 //! line: the form's own script set it. `display`, what a text field's or
@@ -43,9 +53,11 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use super::resolve::{Set, SetValue};
 use super::{EditError, Lower};
+use crate::forms::appearance;
 use crate::forms::field::{Choice, FieldKind, Value, flags};
 use crate::forms::{FieldId, group};
-use crate::model::{AnnotBody, AnnotRec, FieldNode, Terminal, Widget};
+use crate::model::{AnnotBody, AnnotRec, FieldNode, FormInst, Terminal, Widget};
+use crate::pdf::forms::Unmade;
 use crate::prim::{Key, Val};
 
 /// Who a set's value is by: the user (`values`), or the form's
@@ -83,6 +95,12 @@ fn set_field(lw: &mut Lower, field: FieldId, set: &Set, by: By) -> Result<(), Ed
     let Some(term) = node.term.clone() else {
         return Err(lw.invalid(format!("{name} holds no value: it's a parent of fields")));
     };
+    if locked(lw, &node, &term, field) {
+        return Err(EditError::Locked {
+            op: lw.op,
+            field: lw.rec.full_name(field).unwrap_or_default(),
+        });
+    }
     if by == By::User && term.flags & flags::READ_ONLY != 0 {
         return Err(lw.invalid(format!("{name} is read-only")));
     }
@@ -114,7 +132,72 @@ fn set_field(lw: &mut Lower, field: FieldId, set: &Set, by: By) -> Result<(), Ed
             return Err(lw.invalid(format!("{name} is of no kind of field sheaf can fill")));
         }
     };
-    put(lw, field, &node, &term, value, display, alike);
+    if put(lw, field, &node, &term, value, display, alike) {
+        drawn(lw, field, &name)?;
+    }
+    Ok(())
+}
+
+/// Whether field `field`, `node` holding `term`, is locked: a signature
+/// field holding a signature, or a field of the primary file's own instance
+/// whose full name a signature of that file locks (its FieldMDP, or its
+/// field's `/Lock`), as the file's signatures say: not checked against
+/// their digests, since lowering hashes no file and a broken signature's
+/// lock still says what its signer locked. Another instance's fields (an
+/// inserted file's, a duplicate's copies) aren't the signed file's.
+fn locked(lw: &Lower, node: &FieldNode, term: &Terminal, field: FieldId) -> bool {
+    if term.kind == FieldKind::Signature && term.value == Some(Value::Signed) {
+        return true;
+    }
+    let primary = &lw.cx.primary;
+    let own = FormInst {
+        src: primary.id(),
+        copy: 0,
+    };
+    let signed = &primary.signatures().signed;
+    if node.inst != own || signed.iter().all(|s| s.locks.is_empty()) {
+        return false;
+    }
+    let full = lw.rec.full_name(field).unwrap_or_default();
+    (signed.iter().flat_map(|s| &s.locks)).any(|lock| lock.locks(&full))
+}
+
+/// Whether the widgets of field `field`, `name` as a refusal names it, can
+/// show what it now holds: each whose appearance a save makes anew
+/// ([`appearance::stale`]) made here as the emitter makes it, its look in
+/// the font its `/DA` names in its source and the fallback for what that
+/// can't draw. A character neither draws ([`Unmade::Unencodable`]) refuses
+/// the set, naming that character. Any other reason one isn't made (no
+/// box, a font that can't be read, a list box's own option no font draws)
+/// doesn't: the widget is saved with no appearance. A check box's or radio
+/// button's is never made here: its mark is ZapfDingbats', from its file's
+/// caption, and its maker refuses no character.
+fn drawn(lw: &mut Lower, field: FieldId, name: &str) -> Result<(), EditError> {
+    let Some(term) = lw.rec.field(field).and_then(|n| n.term.clone()) else {
+        return Ok(());
+    };
+    for &aid in &term.widgets {
+        lw.read(Key::Annot(aid));
+        if !appearance::stale(&lw.rec, aid) {
+            continue;
+        }
+        let Some(src) = (lw.rec.annot(aid).and_then(AnnotRec::widget))
+            .and_then(|w| w.src.as_ref())
+            .map(|r| r.src.clone())
+        else {
+            continue;
+        };
+        let Ok(look) = appearance::look(&lw.rec, aid) else {
+            continue;
+        };
+        if let Err(Unmade::Unencodable(c)) = appearance::make_in(&look, &src) {
+            let c = c.character;
+            return Err(lw.invalid(format!(
+                "“{c}” (U+{:04X}) can't be drawn in any font sheaf has, so {name} can't show it",
+                c as u32
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -352,7 +435,8 @@ fn choices_alike(a: Option<&Value>, b: Option<&Value>) -> bool {
 
 /// Field `field`'s terminal `term` given `value` and `display`, unless the
 /// value is `alike` the one it holds and the display the same: then
-/// nothing is put. A value alike stays as the field holds it.
+/// nothing is put. A value alike stays as the field holds it. Whether it
+/// put one.
 fn put(
     lw: &mut Lower,
     field: FieldId,
@@ -361,10 +445,10 @@ fn put(
     value: Option<Value>,
     display: Option<Arc<str>>,
     alike: Alike,
-) {
+) -> bool {
     let kept = alike(term.value.as_ref(), value.as_ref());
     if kept && term.display == display {
-        return;
+        return false;
     }
     let term = Terminal {
         value: if kept { term.value.clone() } else { value },
@@ -372,6 +456,7 @@ fn put(
         ..Terminal::clone(term)
     };
     put_term(lw, field, FieldNode::clone(node), term);
+    true
 }
 
 /// `node`, field `field`, holding `term`.

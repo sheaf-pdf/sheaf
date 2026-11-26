@@ -7,8 +7,8 @@
 //! one on state going together and check boxes of distinct on states
 //! acting as radio buttons. Which widgets there are, their states and
 //! their names are the model's. `SetFieldValues`' lowering puts a
-//! [`Change`] (`crate::tx::fill`), as a test's put does
-//! (`crate::tx::fixture::press` and `set_buttons`).
+//! [`Change`] (`crate::tx::fill`), which a test's press and state go
+//! through too (`crate::tx::fixture::press` and `set_buttons`).
 //!
 //! **By index.** A group's widgets go by their places among their field's
 //! widgets in its file ([`WidgetProps::index`](crate::model::WidgetProps::index)),

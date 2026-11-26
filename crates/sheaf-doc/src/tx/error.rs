@@ -33,6 +33,11 @@ pub enum EditError {
         page: u32,
         why: String,
     },
+    /// A field it would change is a signature field that's signed, or one
+    /// a signature in the file locks (its FieldMDP, or its field's
+    /// `/Lock`): `field`, its full name.
+    #[error("{op}: {} is locked by a signature", locked_name(.field))]
+    Locked { op: &'static str, field: String },
     /// The actor may not make this change.
     #[error("{0}")]
     Refused(Cap),
@@ -69,6 +74,15 @@ fn changed_by(by: &Option<Arc<str>>) -> String {
     match by {
         Some(label) => format!("“{label}”"),
         None => "another edit".into(),
+    }
+}
+
+/// A [`EditError::Locked`] field as its text names it: “its full name”, or
+/// "a field with no name".
+fn locked_name(field: &str) -> String {
+    match field.is_empty() {
+        true => "a field with no name".into(),
+        false => format!("“{field}”"),
     }
 }
 
@@ -116,6 +130,7 @@ impl From<&EditError> for sheaf_edit::Failure {
             EditError::Invalid { .. } => K::Invalid,
             EditError::Ambiguous { .. } => K::Ambiguous,
             EditError::Content { .. } => K::Content,
+            EditError::Locked { .. } => K::Locked,
             EditError::Refused(_) => K::Refused,
             EditError::NotReady => K::NotReady,
             EditError::Cancelled => K::Cancelled,

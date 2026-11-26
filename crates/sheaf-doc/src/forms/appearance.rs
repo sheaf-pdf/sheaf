@@ -383,6 +383,23 @@ pub fn make(
     }
 }
 
+/// `look`'s appearance as the emitter makes it for a widget read from `src`
+/// ([`make`]): in the font its `/DA` names there ([`font`]), named for copy
+/// 0 of `src` ([`font_res`]), a font named by an entry bound to no object,
+/// which changes nothing of what's drawn. What lowering makes to learn
+/// whether a field's widget can show what it now holds.
+pub fn make_in(look: &Look, src: &Source) -> Result<Made, Unmade> {
+    make(look, |name| {
+        let font = font(src, name)?;
+        let written = |at: FontAt<'_>| match at {
+            FontAt::Object(id) => id,
+            FontAt::Entry(_) => ObjectId::new(0, 0),
+        };
+        let res = font_res(&font, src.id(), 0, name.unwrap_or_default(), written);
+        Ok(DaFont { font, res })
+    })
+}
+
 /// Whether widget `aid` needs its appearance made, by its kind:
 ///
 /// - a text field's widget whose terminal has a display (in no file), or

@@ -10,13 +10,13 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::Arc;
 
 use crate::pdf::{
     Dictionary, LazyPdf, Object, ObjectId, Stream, StreamExt, Value as PdfValue, XrefKind,
     dictionary, literal,
 };
 use in_progress::NoProgress;
+use sheaf_edit::{FieldRef, FieldSet, FieldValue, Op};
 
 use super::append_tests::{appended_in_place, planned_in_place, written};
 use super::emit::{
@@ -32,8 +32,7 @@ use crate::content::{Fallback, Glyphs};
 use crate::forms::appearance::tests::shown;
 use crate::forms::fixture::{Form, Rect, kids_beside, row};
 use crate::forms::{FieldId, FieldKind, Value};
-use crate::model::{Document, FieldNode, PageId, Terminal};
-use crate::prim::{Key, Val};
+use crate::model::{Document, PageId};
 use crate::realize::{ViewInputs, emission_is_base, untouched};
 use crate::tx::fixture as fx;
 
@@ -65,17 +64,19 @@ fn widgets_of(d: &Document, name: &str) -> Vec<AnnotId> {
     term.expect("a terminal").widgets.iter().copied().collect()
 }
 
-/// Field `id` of `d` filled with the text `value`, as
-/// [`fx::fill`] fills one by name.
+/// Field `id` of `d` filled with the text `value` by `SetFieldValues`, as
+/// [`fx::fill`] fills one by name: the one field, where another has its
+/// name.
 fn fill_id(d: &mut Document, id: FieldId, value: &str) {
-    let mut node = FieldNode::clone(d.state().field(id).expect("a field"));
-    let mut term = Terminal::clone(node.term.as_deref().expect("a terminal"));
-    term.value = Some(Value::Text(value.into()));
-    node.term = Some(Arc::new(term));
-    d.put_for_test(
-        vec![(Key::Field(id), Some(Val::Field(Arc::new(node))))],
-        "fill",
-    );
+    let op = Op::SetFieldValues {
+        values: vec![FieldSet {
+            field: FieldRef::Id(id),
+            value: FieldValue::Text(value.into()),
+            display: None,
+        }],
+        calculated: Vec::new(),
+    };
+    d.commit_ops(vec![op], "fill").unwrap();
 }
 
 /// A widget's `/AP` in `pdf`, references followed.
@@ -799,7 +800,8 @@ fn a_value_put_back_makes_nothing() {
 /// A value the field's font has no code for makes no appearance: the
 /// widget is written with no `/AP`, so the file shows no value the field
 /// no longer holds; its `/V` is the file's; the warning says which kind,
-/// never the text. An overlay writes the widget so too.
+/// never the text. An overlay writes the widget so too. The op refuses
+/// such a value, so it's put as only a file gives one (`fx::put_value`).
 #[test]
 fn an_appearance_that_can_t_be_made_leaves_no_ap() {
     let (mut f, a, _) = two_fields();
@@ -808,7 +810,7 @@ fn an_appearance_that_can_t_be_made_leaves_no_ap() {
     let [aid] = widgets_of(&d, "a")[..] else {
         panic!("one widget")
     };
-    fx::fill(&mut d, "a", "Camden \u{4e2d}");
+    fx::put_value(&mut d, "a", Some(Value::Text("Camden \u{4e2d}".into())));
     let (out, said) = warned(|| rewrite(&d, Profile::default()));
     let pdf = lazy(&out.bytes, None);
     assert!(ap_dict(&pdf, a).is_none(), "no /AP");
@@ -1278,14 +1280,15 @@ fn an_overlay_s_form_is_the_save_s_and_each_emission_binds_its_own_subset() {
 /// A value with a cluster neither the field's font nor the fallback
 /// draws, a CJK ideograph (`王`) or an emoji (`😀`), leaves its widget
 /// unmade as `unencodable`: no `/AP`, no subset, nothing in the record;
-/// the warning says the kind, never the text.
+/// the warning says the kind, never the text. The op refuses such a value,
+/// so it's put as only a file gives one (`fx::put_value`).
 #[test]
 fn a_value_neither_font_draws_is_unencodable() {
     let (mut f, a, _) = two_fields();
     let bytes = table(&mut f);
     for value in ["\u{141}ukasz \u{738b}", "\u{1f600}"] {
         let mut d = open(&bytes, None);
-        fx::fill(&mut d, "a", value);
+        fx::put_value(&mut d, "a", Some(Value::Text(value.into())));
         let (out, said) = warned(|| rewrite(&d, Profile::default()));
         let pdf = lazy(&out.bytes, None);
         assert!(ap_dict(&pdf, a).is_none(), "{value}: no /AP");

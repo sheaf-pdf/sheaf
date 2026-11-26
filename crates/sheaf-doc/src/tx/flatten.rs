@@ -6,10 +6,14 @@
 //! ([`showing`]: a comment's flags and the forms its appearances name;
 //! [`appearing`]: a widget's appearances alone; nothing of either kept by
 //! the source), a sheaf mark's pinned by what it's drawn from,
-//! which a save draws again (`PinnedAp`). A text field's widget whose value
-//! the model holds changed draws its file's appearance too, the old value,
-//! where a save makes it anew (M10 slice 6); making it first is M10 slice
-//! 15's, and no op changes a value before slice 9. Each placed through the
+//! which a save draws again (`PinnedAp`). A widget whose appearance a save
+//! makes anew ([`appearance::stale`]: its field's value or display changed,
+//! a check box's or radio button's state its file has no appearance of, a
+//! push button's captions) refuses the flatten of its page: its source's
+//! appearance would put the old value in the page, and a save changes no
+//! source, so it does until the saved file is opened again; making it first
+//! is M10 slice 15's. One whose state alone moved, to one its file has an
+//! appearance of, draws that, as a save shows it. Each placed through the
 //! matrix that takes the box its form's matrix makes of its bounding box
 //! onto the annotation's `/Rect` (ISO 32000-2 12.5.5, the family's
 //! placement), marked as an artifact on a page of a tagged file.
@@ -43,6 +47,7 @@ use sheaf_edit::FlattenSet;
 use super::marks::drop_annots;
 use super::{EditError, Lower};
 use crate::annot::{Box2, Pt};
+use crate::forms::appearance;
 use crate::forms::field::annot_flags::{HIDDEN, NO_VIEW, PRINT};
 use crate::geom::Affine;
 use crate::model::{
@@ -91,6 +96,12 @@ fn flatten_page(lw: &mut Lower, page: PageId, which: FlattenSet) -> Result<usize
         let Some(drawn) = drawn(rec, &def, which) else {
             continue;
         };
+        if let Some(field) = rec.widget().map(|w| w.field) {
+            lw.read(Key::Field(field));
+            if appearance::stale(&lw.rec, id) {
+                return Err(changed(lw, page));
+            }
+        }
         gone.insert(id);
         placed.extend(
             drawn
@@ -110,6 +121,19 @@ fn flatten_page(lw: &mut Lower, page: PageId, which: FlattenSet) -> Result<usize
     }
     drop_annots(&mut lw.rec, page, |id, _| gone.contains(&id));
     Ok(gone.len())
+}
+
+/// Why a flatten of page `page` is refused where a widget it would draw
+/// needs its appearance made ([`appearance::stale`]): its source's is the
+/// old one, which would put the old value in the page, and a save changes
+/// no source, so it stays so until the saved file is opened again (M10
+/// slice 15 makes it first).
+fn changed(lw: &Lower, page: PageId) -> EditError {
+    let n = lw.rec.pos_of(page).expect("a page of the document's") + 1;
+    lw.invalid(format!(
+        "a field on page {n} changed since the file was opened, and a flatten can't draw it \
+         yet: save, and flatten the saved file"
+    ))
 }
 
 /// Whether `src`'s file is tagged: it has a structure tree, which what's

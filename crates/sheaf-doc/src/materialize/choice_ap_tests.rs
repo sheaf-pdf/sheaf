@@ -26,7 +26,7 @@ use crate::annot::AnnotId;
 use crate::content::Fallback;
 use crate::content::fixture::{fallback_subsets, subsets_hold};
 use crate::forms::appearance::tests::shows;
-use crate::forms::field::{Choice, flags};
+use crate::forms::field::{Choice, Value, flags};
 use crate::forms::fixture::{COMBO, Form, Rect, row};
 use crate::model::{Document, FieldNode, FieldProps, Terminal};
 use crate::prim::{Key, Val};
@@ -398,7 +398,9 @@ fn a_choice_in_two_fonts_writes_its_subset_and_a_refused_one_s_none() {
 /// A cluster neither font draws leaves its widget unmade, with no `/AP`
 /// and no subset: an editable combo box's own text, `unencodable`; a list
 /// box's option it would draw, `unencodable-option`. The warning says the
-/// kind, never the text.
+/// kind, never the text. The op refuses the combo box's text, so it's put
+/// as only a file gives one (`fx::put_value`); a list box's option no font
+/// draws doesn't refuse a choice of another.
 #[test]
 fn what_no_font_draws_leaves_a_choice_with_no_appearance() {
     let mut f = Form::new(1);
@@ -417,7 +419,10 @@ fn what_no_font_draws_leaves_a_choice_with_no_appearance() {
         ("l", l, "a", "unencodable-option"),
     ] {
         let mut d = open(&bytes, None);
-        fx::choose(&mut d, name, &[value]);
+        match kind {
+            "unencodable" => fx::put_value(&mut d, name, Some(Value::Text(value.into()))),
+            _ => fx::choose(&mut d, name, &[value]),
+        }
         let (out, said) = warned(|| rewrite(&d, Profile::default()));
         let pdf = lazy(&out.bytes, None);
         assert!(ap_dict(&pdf, widget).is_none(), "{name}: no /AP");
@@ -520,15 +525,16 @@ fn each_widget_of_a_choice_gets_its_form() {
 }
 
 /// An overlay of the page holds the save's form for a changed combo box,
-/// list box and one in two fonts, form for form (its box, matrix, content
-/// and font names), and no other; the page draws as its base does again
-/// once each value is put back.
+/// list box (multiple-select, two chosen) and one in two fonts, form for
+/// form (its box, matrix, content and font names), and no other; the page
+/// draws as its base does again once each value is put back.
 #[test]
 fn an_overlay_s_forms_are_the_save_s() {
     let mut f = Form::new(1);
     let c = choice(&mut f, "c", row(0), ABCD, true);
     f.fill(c, "a");
     let l = choice(&mut f, "l", tall(2), ABCD, false);
+    f.dict(l).set("Ff", flags::MULTI_SELECT as i64);
     let options = &[("a", "Alpha"), ("l", "\u{141}ukasz")];
     let two = choice(&mut f, "two", row(5), options, true);
     let bytes = table(&mut f);

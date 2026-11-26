@@ -6,12 +6,12 @@
 //! upright, the widget turned by `/MK /R 90` or not ([`Place`]).
 //!
 //! Ours ([`ours`]) is the case's file as it was before the change, opened,
-//! changed through the model and saved as a Rewrite: a check box's or
-//! radio button's state given (`tx::fixture::set_buttons`), a choice's
-//! value (`choose`), a push button's captions (`caption`), the puts no op
-//! makes until M10 slice 9. Its appearances are the save's own, made by
-//! pdf-forms; `/AS` is the model's, and `/V` stays the file's until slice
-//! 9 writes it. PDFium's ([`theirs`]) is the file with the state, value or
+//! changed and saved as a Rewrite: a check box's or radio button's state
+//! given (`tx::fixture::set_buttons`) and a choice's value (`choose`), by
+//! `SetFieldValues` as the user sets them, and a push button's captions
+//! (`caption`), a put no op makes. Its appearances are the save's own,
+//! made by pdf-forms; `/AS` is the model's, and `/V` stays the file's until
+//! M10 slice 9 writes it. PDFium's ([`theirs`]) is the file with the state, value or
 //! captions and no appearance, its widgets drawn once under PDFium's
 //! form-fill environment (`FPDF_FFLDraw`), whose load makes every
 //! appearance a widget lacks, every slot and state, as the family's oracle

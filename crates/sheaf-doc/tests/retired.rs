@@ -1067,6 +1067,10 @@ const RETIRED_M10: &[(&str, u8)] = &[
     // each ask: a field whose own dictionary is a widget beside its kids
     // is one object with it, not only a field of one widget.
     ("materialize::deps::merged_widget", 9),
+    // A test's press or value of a group's is `SetFieldValues`, lowered by
+    // the group's rules (`tx::fixture::press`, `set_buttons`): no put of a
+    // group's change by hand beside it.
+    ("tx::fixture::put_change", 9),
 ];
 
 /// Every name M11 retired, with the slice of `plan/m11-security/README.md` that retired

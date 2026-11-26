@@ -14,13 +14,16 @@ use sheaf_edit::{AnnotRef, FieldRef, FieldSet, FieldValue, Op};
 use super::stale_tests::{on, planned};
 use super::tests::opened;
 use super::*;
+use crate::content::fixture::{fallback_subsets, subsets_hold};
 use crate::effects::{Flags, RemovedKind, SigClass, judge};
 use crate::forms::appearance::{self, ChoiceShows, Look};
 use crate::forms::field::flags;
 use crate::forms::fixture::{
-    Button, Form, NO_TOGGLE_TO_OFF, RADIO, RADIOS_IN_UNISON, every_kind, row,
+    Button, COMBO, Form, NO_TOGGLE_TO_OFF, RADIO, RADIOS_IN_UNISON, every_kind, row,
 };
 use crate::forms::{FieldId, Value, buttons};
+use crate::materialize::How;
+use crate::materialize::tests::{add, insert};
 use crate::model::Document;
 
 /// `every_kind`'s fields, opened: on page 1 `form1[0].name[0]` (filled
@@ -851,4 +854,140 @@ fn a_display_is_drawn_and_judged_as_a_value_is() {
     )
     .unwrap();
     assert_eq!(drawn_text(&d, &combo), "Califórnia");
+}
+
+/// A form of one page whose text fields `a`, `b` and `x.y` are empty, and
+/// whose signature field `sig` signs locking as `action` says (`All`, or
+/// `Include` or `Exclude` the full names `fields`), by its FieldMDP
+/// reference and its `/Lock` alike; opened.
+fn locking(action: &str, fields: &[&str]) -> Document {
+    let mut f = Form::new(1);
+    f.text("a", 0, row(0));
+    f.text("b", 0, row(1));
+    let y = f.text("y", 0, row(2));
+    f.group("x", &[y]);
+    let sig = f.signature("sig", 0, row(3));
+    f.sign_locking(sig, action, fields, None);
+    opened(f.bytes(), "signed.pdf")
+}
+
+/// `ops` refused as locked, naming the field `field`, with nothing changed;
+/// a plugin is told it as `locked`.
+fn locked(d: &mut Document, ops: Vec<Op>, field: &str) {
+    let e = refused(d, ops);
+    assert_eq!(
+        e,
+        EditError::Locked {
+            op: "set-field-values",
+            field: field.into()
+        }
+    );
+    assert_eq!(
+        e.to_string(),
+        format!("set-field-values: “{field}” is locked by a signature")
+    );
+    let failure = sheaf_edit::Failure::from(&e);
+    assert_eq!(failure.kind, sheaf_edit::FailureKind::Locked);
+}
+
+/// `name` given the text `t`.
+fn typed(name: &str, t: &str) -> Op {
+    fill(vec![set(name, FieldValue::Text(t.into()))])
+}
+
+/// A field a signature's FieldMDP includes is `Locked`, from either list,
+/// and one it excludes is filled; `/Lock /All` locks every field of the
+/// file, a parent's kids too; a signed signature field is locked by its own
+/// signature, where an unsigned one is refused as no field to fill. The
+/// locks are the file's own: a field of another file inserted isn't one a
+/// signature of this file locks, though `/All` names every name.
+#[test]
+fn a_field_a_signature_locks_is_locked() {
+    let mut d = locking("Include", &["a", "x"]);
+    locked(&mut d, vec![typed("a", "Ann")], "a");
+    locked(&mut d, vec![typed("x.y", "Ann")], "x.y");
+    let calculated = Op::SetFieldValues {
+        values: vec![set("b", FieldValue::Text("Bo".into()))],
+        calculated: vec![set("a", FieldValue::Text("Ann".into()))],
+    };
+    locked(&mut d, vec![calculated], "a");
+    d.commit_ops(vec![typed("b", "Bo")], "fill").unwrap();
+    assert_eq!(value(&d, "b"), text("Bo"));
+
+    let mut d = locking("Exclude", &["a"]);
+    d.commit_ops(vec![typed("a", "Ann")], "fill").unwrap();
+    assert_eq!(value(&d, "a"), text("Ann"));
+    locked(&mut d, vec![typed("b", "Bo")], "b");
+    locked(&mut d, vec![typed("x.y", "Bo")], "x.y");
+
+    let mut d = locking("All", &[]);
+    for name in ["a", "b", "x.y"] {
+        locked(&mut d, vec![typed(name, "Ann")], name);
+    }
+    let signed = fill(vec![set("sig", FieldValue::Text("x".into()))]);
+    locked(&mut d, vec![signed], "sig");
+    let mut other = Form::new(1);
+    other.text("c", 0, row(0));
+    let other = add(&d, &other.bytes(), "other.pdf");
+    insert(&mut d, &other, 0);
+    d.commit_ops(vec![typed("c", "Cy")], "fill").unwrap();
+    assert_eq!(value(&d, "c"), text("Cy"));
+
+    // Not signed, it's no field to fill.
+    let mut d = every();
+    let sig = fill(vec![set(&full("sig[0]"), FieldValue::Text("x".into()))]);
+    invalid(&mut d, sig, "it's signed, not filled");
+}
+
+/// A value the field's font and the fallback both can't draw is refused,
+/// from either list and as a display too, its words naming the character,
+/// with nothing changed: CJK, an emoji, and a right-to-left script (Hebrew)
+/// alike. One the fallback draws (`Ł`, `ễ`) is filled, and its save draws
+/// it in the two fonts: the field's Helvetica, and one subset of the
+/// fallback holding its glyphs.
+#[test]
+fn a_value_no_font_draws_is_refused() {
+    let mut d = every();
+    let empty = full("empty[0]");
+    for (value, c) in [
+        ("Wang \u{738b}", "“\u{738b}” (U+738B)"),
+        ("\u{1f600}", "“\u{1f600}” (U+1F600)"),
+        ("\u{5e9}\u{5dc}\u{5d5}\u{5dd}", "“\u{5e9}” (U+05E9)"),
+    ] {
+        let why = format!("{c} can't be drawn in any font sheaf has, so “{empty}” can't show it");
+        invalid(&mut d, typed(&empty, value), &why);
+        let calculated = Op::SetFieldValues {
+            values: Vec::new(),
+            calculated: vec![set(&empty, FieldValue::Text(value.into()))],
+        };
+        invalid(&mut d, calculated, &why);
+        let shown = FieldSet {
+            display: Some(value.into()),
+            ..set(&empty, FieldValue::Text("12".into()))
+        };
+        invalid(&mut d, fill(vec![shown]), &why);
+    }
+    // An editable combo box's typed text.
+    let mut f = Form::new(1);
+    let open = f.choice("open", 0, row(0), &["CA"], true);
+    f.dict(open).set("Ff", COMBO | flags::EDIT as i64);
+    let mut d = opened(f.bytes(), "combo.pdf");
+    let why = "“\u{738b}” (U+738B) can't be drawn in any font sheaf has, so “open” can't show it";
+    invalid(&mut d, typed("open", "\u{738b}"), why);
+    d.commit_ops(vec![typed("open", "Trenton")], "typed")
+        .unwrap();
+    assert_eq!(value(&d, "open"), text("Trenton"));
+
+    for t in ["\u{141}ukasz", "Nguy\u{1ec5}n"] {
+        let mut d = every();
+        d.commit_ops(vec![typed(&empty, t)], "fill").unwrap();
+        assert_eq!(value(&d, &empty), text(t));
+        let bytes = How::Rewritten.write(&d);
+        let subsets = fallback_subsets(&bytes);
+        let [(_, codes)] = &subsets[..] else {
+            panic!("{t}: one subset of the fallback: {subsets:?}")
+        };
+        assert_eq!(codes.len(), 1, "{t}: one glyph past WinAnsi");
+        assert!(subsets_hold(&bytes) > 0, "{t}: shown in it");
+    }
 }

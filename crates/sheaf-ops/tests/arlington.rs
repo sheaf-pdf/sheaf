@@ -2140,7 +2140,7 @@ fn saves_of(
 /// normal appearance has no on state, a save of its own (M10 slice 8): the
 /// file copied from `from` to `path`, opened as a document of its own, so
 /// the other saves don't move, each such widget pressed once
-/// (`tx::fixture::press`, as M10 slice 9's lowering will press one), in
+/// (`tx::fixture::press`, by `SetFieldValues` as the user presses one), in
 /// page order, then saved as planned and checked, the save's line saying
 /// the strategy the plan chose (`toggles pressed, as planned, Append`).
 /// Their state changed, and their

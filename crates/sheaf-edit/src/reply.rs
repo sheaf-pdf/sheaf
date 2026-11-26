@@ -104,6 +104,8 @@ pub enum FailureKind {
     /// What the ops were based on changed since: another edit changed the
     /// same data.
     Conflict,
+    /// A field an op would change is signed, or locked by a signature.
+    Locked,
     /// The edits it adds to were undone.
     GroupEnded,
     /// History is damaged.
@@ -167,6 +169,15 @@ mod tests {
             "message": "delete-pages: page 9 of 3 isn't there",
         });
         round_trip(&failure, failure_json);
+        let locked = Failure {
+            kind: FailureKind::Locked,
+            message: "set-field-values: “sig.a” is locked by a signature".into(),
+        };
+        let locked_json = json!({
+            "kind": "locked",
+            "message": "set-field-values: “sig.a” is locked by a signature",
+        });
+        round_trip(&locked, locked_json);
     }
 
     #[test]

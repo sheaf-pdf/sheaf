@@ -14,10 +14,9 @@ use crate::content::Fallback;
 use crate::forms::field::{Choice, Value, flags};
 use crate::forms::fixture::{COMBO, Form, row};
 use crate::materialize::tests::open;
-use crate::model::{Document, FieldNode, Terminal};
+use crate::model::Document;
 use crate::pdf::gfx::UnencodableChar;
 use crate::pdf::{Object, dictionary, literal, text};
-use crate::prim::{Key, Val};
 use crate::tx::fixture as fx;
 
 /// A combo box (or, `combo` false, a list box) `name` at row `i` on page
@@ -69,19 +68,6 @@ fn choice_of(d: &Document, name: &str) -> ChoiceLook {
     }
 }
 
-/// The field named `name` of `d` given `value` as one version, whatever
-/// it is: what [`fx::choose`] puts, and what it doesn't (an array of one
-/// text, an empty array).
-fn put_value(d: &mut Document, name: &str, value: Option<Value>) {
-    let id = d.state().field_named(name).expect("the field");
-    let mut node = FieldNode::clone(d.state().field(id).expect("a field"));
-    let mut term = Terminal::clone(node.term.as_deref().expect("a terminal"));
-    term.value = value;
-    node.term = Some(Arc::new(term));
-    let val = Some(Val::Field(Arc::new(node)));
-    d.put_for_test(vec![(Key::Field(id), val)], "put");
-}
-
 /// `texts` as a value of several.
 fn items(texts: &[&str]) -> Value {
     Value::Items(texts.iter().map(|&t| Arc::from(t)).collect())
@@ -91,8 +77,8 @@ fn items(texts: &[&str]) -> Value {
 /// of a value: none as read; a combo box's value moved, and put back; a
 /// text and an array of that one text alike; no value and an empty array
 /// alike, an empty text not (it selects an option whose export value is
-/// empty); a list box's texts in another order; and a text field's fill
-/// moves no choice's.
+/// empty); a list box's texts in another order, which a choice of the same
+/// texts leaves as they are; and a text field's fill moves no choice's.
 #[test]
 fn a_choice_is_stale_where_its_value_s_texts_moved() {
     let mut f = Form::new(1);
@@ -122,10 +108,14 @@ fn a_choice_is_stale_where_its_value_s_texts_moved() {
         ("multi", Some(items(&["b", "a"])), [false, false, true]),
     ];
     for (name, value, want) in steps {
-        put_value(&mut d, name, value.clone());
+        fx::put_value(&mut d, name, value.clone());
         assert_eq!(now(&d), want, "{name} = {value:?}");
     }
+    // The op takes `[(a) (b)]` as the `[(b) (a)]` the field holds, and
+    // leaves it: put back as its file has it.
     fx::choose(&mut d, "multi", &["a", "b"]);
+    assert_eq!(now(&d), [false, false, true], "chosen alike, left");
+    fx::put_value(&mut d, "multi", Some(items(&["a", "b"])));
     fx::fill(&mut d, "city", "Camden");
     assert_eq!(now(&d), [false; 3], "put back, and a text field filled");
     fx::choose(&mut d, "list", &["c"]);
