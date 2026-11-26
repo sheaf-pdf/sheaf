@@ -420,6 +420,50 @@ fn a_widget_a_need_appearances_form_left_bare_is_realized_once_a_rewrite_makes_i
     }
 }
 
+/// Whether a state's fields differ from its file's is found once for a
+/// version and kept by its state, so the key of each page of a
+/// `/NeedAppearances` form with a bare widget doesn't walk the fields
+/// again: a state asked answers what it found whatever it's told after,
+/// and a version with a field set finds its own.
+#[test]
+fn whether_the_fields_differ_is_found_once_for_a_version() {
+    use crate::forms::fixture::row;
+    let mut f = Form::new(1);
+    f.text("other", 0, row(0));
+    let valued = f.text("valued", 0, row(1));
+    f.dict(valued).set("V", crate::pdf::text::string("Shown"));
+    let acroform = f.acroform;
+    f.dict(acroform).set("NeedAppearances", true);
+    let mut d = opened(f.bytes(), "kept.pdf");
+    let file = d.primary().id();
+    let asked = std::cell::Cell::new(0);
+    let find = |differ| {
+        asked.set(asked.get() + 1);
+        differ
+    };
+    let st = d.state().clone();
+    assert!(
+        !st.fields_differ(file, || find(false)),
+        "nothing asked it yet"
+    );
+    render_key(&st, d.page(0).unwrap(), &ViewInputs::screen()).unwrap();
+    assert!(!st.fields_differ(file, || find(true)), "kept");
+    assert!(
+        !st.clone().fields_differ(file, || find(true)),
+        "a clone's too"
+    );
+    assert_eq!(asked.get(), 1);
+    fx::fill(&mut d, "other", "Filled");
+    let filled = d.state();
+    assert!(crate::forms::rules::fills_appearances(d.primary(), filled));
+    assert!(filled.fields_differ(file, || find(false)), "its own, kept");
+    assert!(
+        !st.fields_differ(file, || find(true)),
+        "the version before's"
+    );
+    assert_eq!(asked.get(), 1);
+}
+
 /// An untouched page is viewed in its source's base engine at its base
 /// index, turned by its job; the edited pages of a group share its
 /// engine, each at its place among them in base order, a duplicate after

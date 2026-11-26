@@ -107,6 +107,10 @@ struct Indexes {
     names: im::OrdSet<(u64, FieldId)>,
     /// The hash each node is under in `names`.
     named: im::HashMap<FieldId, u64>,
+    /// Whether the fields differ from those of a file's form as read, and
+    /// the file ([`DocState::fields_differ`]), found the first time it's
+    /// asked: a field node set starts another.
+    differ: Arc<OnceLock<(BlobId, bool)>>,
     /// Headers' and footers' layouts' digests, one for every version
     /// derived from this one, which lay a page out alike from the same
     /// ([`Laid`]).
@@ -344,6 +348,7 @@ impl Builder {
         self.st.form = form;
         self.st.idx.names = im::OrdSet::new();
         self.st.idx.named = im::HashMap::new();
+        self.st.idx.differ = Arc::default();
         let tops: Vec<FieldId> = (self.st.fields.iter())
             .filter(|(_, node)| node.parent.is_none())
             .map(|(&id, _)| id)
@@ -479,6 +484,7 @@ impl DocState {
                     Some(node) => self.fields.insert(id, node.clone()),
                     None => self.fields.remove(&id),
                 };
+                self.idx.differ = Arc::default();
                 // Its name, and those of the nodes under it, change only
                 // with where it is and what it's called.
                 let renamed = match (&old, &new) {
@@ -799,6 +805,18 @@ impl DocState {
         let file = |def: &Arc<PageDef>| Some(def.base.src.id()) == opened.file;
         (self.generators.contains_key(&id) || opened.ids.contains(&id))
             && self.pages.get(&page).is_some_and(file)
+    }
+
+    /// Whether the fields differ from those of the form of `file` as read,
+    /// which `find` finds: kept for the file first asked about, until a
+    /// field node is set, so a caller that asks for every page of a
+    /// version (the realizer's key and predicate) walks the fields once.
+    pub(crate) fn fields_differ(&self, file: BlobId, find: impl FnOnce() -> bool) -> bool {
+        match self.idx.differ.get() {
+            Some(&(of, differ)) if of == file => differ,
+            Some(_) => find(),
+            None => self.idx.differ.get_or_init(|| (file, find())).1,
+        }
     }
 
     /// The file the document opened, whose form's `/DA` and `/Q` the

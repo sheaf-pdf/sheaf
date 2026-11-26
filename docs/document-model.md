@@ -4439,8 +4439,9 @@ appearance once a Rewrite of the state would make one
 the overlay carries that transform and makes it as the Rewrite does, so a
 fill on one page realizes every page with such a widget, and the render
 key feeds whether it's made. The predicate is
-O(the annotations on the page), and O(the fields) more on a page with
-such a widget; `emission_is_base` (test and fixture
+O(the annotations on the page); whether the form changed is found once
+for a version (O(the fields)) and kept by its state
+(`DocState::fields_differ`), for the key too; `emission_is_base` (test and fixture
 builds) checks it against the page's overlay compared with the base
 modulo placement (`/Parent`, `/Type`, `/Thumb`; boxes and `/Rotate` as
 effective values; resources against the page facts; annotations' `/P`,

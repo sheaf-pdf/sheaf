@@ -141,7 +141,9 @@ pub(crate) fn drops_xfa(src: &Source, target: &DocState) -> bool {
 
 /// Whether `target`'s fields differ from `base`'s, the form of `primary`
 /// as read: a node of another instance, a node gone, or a node with
-/// another name, value or number of widgets.
+/// another name, value or number of widgets. A walk of every field, once
+/// for a state ([`DocState::fields_differ`] keeps the answer until a field
+/// is set): the realizer asks it for each page it keys.
 fn form_differs(base: &FileForm, target: &DocState, primary: SourceId) -> bool {
     let own = FormInst {
         src: primary,
@@ -163,6 +165,11 @@ fn form_differs(base: &FileForm, target: &DocState, primary: SourceId) -> bool {
         *shown.entry(w.field).or_default() += 1;
     }
     target.fields().any(|(_, node)| {
+    target.fields_differ(primary, || walk_differs(base, target, primary))
+}
+
+/// [`form_differs`], found.
+fn walk_differs(base: &FileForm, target: &DocState, primary: SourceId) -> bool {
         let Some(r) = &node.src else {
             return true;
         };

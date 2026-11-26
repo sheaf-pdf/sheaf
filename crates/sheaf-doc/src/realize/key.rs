@@ -52,9 +52,11 @@ pub struct RenderKey(pub(super) u128);
 /// `st`. Made from the tables a page is drawn from, which the state gives
 /// out of all of them (§2's registry rule: `DocState::render_tables`).
 /// O(the annotations on the page) once its records' digests are worked
-/// out, which each record keeps; O(the fields) besides where a widget on
-/// it was left to the viewer by a `/NeedAppearances` form, whose
-/// appearance a Rewrite makes once any field differs from the file's.
+/// out, which each record keeps. Where a widget on it was left to the
+/// viewer by a `/NeedAppearances` form, whose appearance a save makes once
+/// any field differs from the file's, whether one does is the state's to
+/// keep (`DocState::fields_differ`): O(the fields) the first time a
+/// version is asked, and a lookup after.
 pub fn render_key(st: &DocState, page: PageId, inputs: &ViewInputs) -> Option<RenderKey> {
     let drawn = Drawn::of(st, page, inputs)?;
     let ViewInputs {
