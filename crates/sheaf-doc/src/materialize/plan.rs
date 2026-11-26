@@ -435,7 +435,8 @@ pub enum SaveTransform {
     /// the flag stays. Given to a Rewrite that changes the form alone
     /// ([`rules::plan`]), and applied by every emission that carries it to
     /// each such widget it writes: an Append after that Rewrite carries the
-    /// record's, so a widget in its scope isn't written bare again.
+    /// record's, so a widget in its scope isn't written bare again; the
+    /// realizer's overlay carries it whenever a Rewrite of its state would.
     ///
     /// [`appearance::missing`]: crate::forms::appearance::missing
     FillAppearances,

@@ -1094,7 +1094,16 @@ fn emit_overlay(
         .collect();
     let within = pages.iter().copied().collect();
     let closure = Closure::new(o.src.id(), Pages::Overlay { st, within });
-    let mut cx = Cx::new(st, &o.src, closure, &[]);
+    // The appearances a Rewrite of the state makes for the widgets its file
+    // left to the viewer, made here too: the realizer draws what a Rewrite
+    // writes (M10 slice 9). Save policy's other transforms change nothing a
+    // page draws.
+    let transforms: &[SaveTransform] =
+        match crate::forms::rules::overlay_fills_appearances(&o.src, st) {
+            true => &[SaveTransform::FillAppearances],
+            false => &[],
+        };
+    let mut cx = Cx::new(st, &o.src, closure, transforms);
     cx.overlay = Some(o);
     cx.srcs = srcs;
     cx.shown = shown;

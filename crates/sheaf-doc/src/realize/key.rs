@@ -52,7 +52,9 @@ pub struct RenderKey(pub(super) u128);
 /// `st`. Made from the tables a page is drawn from, which the state gives
 /// out of all of them (§2's registry rule: `DocState::render_tables`).
 /// O(the annotations on the page) once its records' digests are worked
-/// out, which each record keeps.
+/// out, which each record keeps; O(the fields) besides where a widget on
+/// it was left to the viewer by a `/NeedAppearances` form, whose
+/// appearance a Rewrite makes once any field differs from the file's.
 pub fn render_key(st: &DocState, page: PageId, inputs: &ViewInputs) -> Option<RenderKey> {
     let drawn = Drawn::of(st, page, inputs)?;
     let ViewInputs {
@@ -82,13 +84,25 @@ pub fn render_key(st: &DocState, page: PageId, inputs: &ViewInputs) -> Option<Re
     sum.feed(&drawn.def.digest());
     feed_boxes(&mut sum, drawn.geom);
     sum.feed(&drawn.annots.len());
+    let fills = std::cell::OnceCell::new();
     for a in &drawn.annots {
         sum.feed(&hidden.contains(&a.id))
             .feed(&dragging.contains(&a.id));
         match a.body {
             AnnotBody::Mark(m) => sum.feed(&0u8).feed(&**m),
             AnnotBody::Foreign(f) => sum.feed(&1u8).feed(&**f).feed(&(a.to == LinkTo::Nowhere)),
-            AnnotBody::Widget(w) => sum.feed(&2u8).feed(&**w).feed(&a.term.map(|(_, t)| t)),
+            AnnotBody::Widget(w) => {
+                // Whether its appearance is made as a Rewrite makes one its
+                // file left to the viewer, which turns on every field.
+                let made = crate::forms::appearance::missing(st, a.id)
+                    && *fills.get_or_init(|| {
+                        crate::forms::rules::overlay_fills_appearances(&drawn.def.base.src, st)
+                    });
+                sum.feed(&2u8)
+                    .feed(&**w)
+                    .feed(&a.term.map(|(_, t)| t))
+                    .feed(&made)
+            }
         };
     }
     sum.feed(&drawn.form.map(FormDoc::digest));
@@ -136,7 +150,10 @@ pub fn render_key(st: &DocState, page: PageId, inputs: &ViewInputs) -> Option<Re
 /// generator (one may come to be on it), the order when one on it reads
 /// where the page is or a link on it leads to a page, with what that page
 /// shows (whether it's still the link's), and the labels when one on it
-/// draws the page's, as far as the inputs draw them. Never its boxes or
+/// draws the page's, as far as the inputs draw them; every field, when a
+/// widget on it was left to the viewer by a `/NeedAppearances` form (a
+/// Rewrite makes its appearance once any field differs from the file's).
+/// Never its boxes or
 /// turn (§6.3). Under [`ViewInputs::content_only`], what it shows alone.
 pub fn render_reads(st: &DocState, page: PageId, inputs: &ViewInputs) -> Vec<Key> {
     let mut reads = vec![Key::Page(page)];
@@ -169,6 +186,22 @@ pub fn render_reads(st: &DocState, page: PageId, inputs: &ViewInputs) -> Vec<Key
     }
     if drawn.form.is_some() {
         reads.push(Key::Form);
+    }
+    // A widget its `/NeedAppearances` form left to the viewer is drawn as a
+    // Rewrite makes it once any field differs from the file's: every field
+    // is read.
+    let left = |a: &DrawnAnnot| {
+        a.term.is_some()
+            && !inputs.hidden.contains(&a.id)
+            && !inputs.dragging.contains(&a.id)
+            && crate::forms::appearance::missing(st, a.id)
+    };
+    if st.form().need_appearances && drawn.annots.iter().any(left) {
+        let others = st
+            .fields()
+            .map(|(id, _)| id)
+            .filter(|id| !terms.contains(id));
+        reads.extend(others.map(Key::Field));
     }
     // Every generator, not only those on the page now: one whose pages
     // come to take this one in draws on it. One added after the read has an

@@ -102,7 +102,9 @@
 //!   An Append that carries it, from the Rewrite whose record it's in,
 //!   makes those it writes (a pressed group's other buttons, a filled
 //!   field's other widgets), which it would otherwise write bare, as the
-//!   opened file has them, over the ones the Rewrite made.
+//!   opened file has them, over the ones the Rewrite made. An overlay
+//!   carries it whenever a Rewrite of its state would, and no other
+//!   transform: the realizer draws what the Rewrite writes.
 //! - **An overlay's form** is of the fields with a widget on its pages
 //!   ([`Plan::scoped`]): `/Fields` its roots among them, each node's
 //!   `/Kids` those of its nodes and its widgets that are, so PDFium loads

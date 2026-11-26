@@ -30,7 +30,11 @@
 //! writes one, `realize::overlay_appearances`), with no drawing, holds for
 //! each made widget a form equal to the save's in `/BBox`, `/Matrix`,
 //! decoded content and resource names, and none for an unmade one: one
-//! that differs fails.
+//! that differs fails. Where the form says `/NeedAppearances`, the save
+//! also makes the appearances its widgets were left without, as a Rewrite
+//! of a changed form does (M10 slice 9's `FillAppearances`), and the
+//! overlay makes them as the realizer draws what that Rewrite writes: each
+//! such form of a widget not filled is held alike in both.
 //!
 //! **The pixels:** each page with a made widget is drawn appearances only
 //! from the save and from PDFium's copy, at two pixels a point, and the two
@@ -66,12 +70,13 @@ use anyhow::Context as _;
 use sheaf_doc::forms::appearance::{self, DaFont, Look, Slot, TextLook};
 use sheaf_doc::forms::corpus::Corpus;
 use sheaf_doc::forms::fixture::{sample, try_append_revision};
+use sheaf_doc::forms::rules::fills_appearances;
 use sheaf_doc::forms::{Field, FieldId, FieldKind, FormClass, Value};
 use sheaf_doc::geom::{Geom, Rect};
 use sheaf_doc::materialize::key::Part;
 use sheaf_doc::materialize::record::ObjMap;
 use sheaf_doc::materialize::{
-    ObjKey, Profile, SaveInput, SavePlan, SaveTarget, Strategy, materialize,
+    ObjKey, Profile, SaveInput, SavePlan, SaveTarget, SaveTransform, Strategy, materialize,
 };
 use sheaf_doc::model::{FieldNode, Terminal};
 use sheaf_doc::pdf::content::{Res, ResBody};
@@ -152,6 +157,7 @@ const TOTALS: Totals = Totals {
     made: 228_842,
     two_fonts: 235,
     overlaid: 228_842,
+    left: 6,
     pages: 8434,
     compared: 227_812,
     off_page: 1030,
@@ -174,6 +180,11 @@ struct Totals {
     made: usize,
     two_fonts: usize,
     overlaid: usize,
+    /// The forms an overlay makes for widgets not filled that their
+    /// `/NeedAppearances` form left with no appearance, which a Rewrite of
+    /// the filled form makes too (M10 slice 9's `FillAppearances`), each
+    /// held alike in the overlay and the save.
+    left: usize,
     /// Pages drawn; the widgets compared with PDFium's on them, and those
     /// left out because their box shows nothing of the page.
     pages: usize,
@@ -525,6 +536,10 @@ struct Outcome {
     unencodable: BTreeMap<u32, usize>,
     /// Made widgets whose forms an overlay and the save hold alike.
     overlaid: usize,
+    /// Forms of widgets not filled that the save makes, as a Rewrite of
+    /// the filled form makes those its `/NeedAppearances` form left with
+    /// none, and an overlay holds alike ([`Totals::left`]).
+    left: usize,
     /// Made widgets compared by pixels, and those whose box shows no pixel
     /// of the page drawn.
     compared: usize,
@@ -1083,11 +1098,22 @@ fn fill_and_compare(
                 (None, Some(_)) => {}
             }
         }
-        for (aid, part) in overlay.keys() {
-            out.failed.push(format!(
-                "page {}: the overlay makes a form for {aid:?} ({part:?}), not filled",
-                index + 1
-            ));
+        for ((aid, part), over) in &overlay {
+            let saved = written(ObjKey::AnnotPart(*aid, *part))
+                .and_then(|n| saved_pdf.get_object(n).ok())
+                .and_then(|o| o.as_stream().cloned());
+            match saved {
+                Some(saved) if Form::of(over)? == Form::of(&saved)? => out.left += 1,
+                Some(_) => out.failed.push(format!(
+                    "page {}: the overlay's form for {aid:?} ({part:?}), not filled, isn't the \
+                     save's",
+                    index + 1
+                )),
+                None => out.failed.push(format!(
+                    "page {}: the overlay makes a form for {aid:?} ({part:?}), not filled",
+                    index + 1
+                )),
+            }
         }
     }
 
@@ -1100,8 +1126,10 @@ fn fill_and_compare(
 }
 
 /// `st`, a state of `d`'s, Rewritten as a save writes one: the primary's
-/// objects at their own numbers, encrypted as it is, nothing asked; and the
-/// save's record of where it wrote each key.
+/// objects at their own numbers, encrypted as it is, nothing asked, and
+/// the appearances made that a `/NeedAppearances` form left to the viewer,
+/// as a Rewrite of a changed form makes them (`FillAppearances`, M10 slice
+/// 9); and the save's record of where it wrote each key.
 fn saved_as_saves_are(
     d: &Document,
     st: &DocState,
@@ -1112,7 +1140,10 @@ fn saved_as_saves_are(
     let plan = SavePlan {
         strategy: Strategy::Rewrite { why: Vec::new() },
         asks: Vec::new(),
-        transforms: Vec::new(),
+        transforms: match fills_appearances(d.primary(), st) {
+            true => vec![SaveTransform::FillAppearances],
+            false => Vec::new(),
+        },
         notes: Vec::new(),
     };
     let target = SaveTarget {
@@ -1537,7 +1568,8 @@ fn every_text_field_is_drawn_as_pdfium_draws_it_or_its_difference_is_classed() {
     let mut rewritten_first: BTreeSet<&str> = BTreeSet::new();
     let (mut no_text, mut fields, mut filled, mut made, mut two_fonts) = (0, 0, 0, 0, 0);
     let mut unencodable: BTreeMap<u32, usize> = BTreeMap::new();
-    let (mut overlaid, mut compared, mut off_page, mut pages, mut rows) = (0, 0, 0, 0, 0);
+    let (mut overlaid, mut left, mut compared, mut off_page) = (0, 0, 0, 0);
+    let (mut pages, mut rows) = (0, 0);
     for (path, o) in paths.iter().zip(&outcomes) {
         if let Some(why) = &o.unfilled {
             eprintln!("unfilled\t{path}\t{why}");
@@ -1555,6 +1587,7 @@ fn every_text_field_is_drawn_as_pdfium_draws_it_or_its_difference_is_classed() {
         filled += o.filled;
         made += o.made;
         overlaid += o.overlaid;
+        left += o.left;
         compared += o.compared;
         off_page += o.off_page;
         pages += o.pages;
@@ -1605,8 +1638,8 @@ fn every_text_field_is_drawn_as_pdfium_draws_it_or_its_difference_is_classed() {
         unmade.values().sum::<usize>(),
     );
     eprintln!(
-        "tier-fields: {overlaid} made forms an overlay holds as the save does; {pages} pages \
-         drawn, {compared} widgets compared ({off_page} more show nothing of the page), {rows} \
+        "tier-fields: {overlaid} made forms an overlay holds as the save does, and {left} of \
+         widgets not filled that a Rewrite makes; {pages} pages drawn, {compared} widgets compared ({off_page} more show nothing of the page), {rows} \
          past {TOLERANCE} px, by class {classes:?}"
     );
     let ranges: Vec<String> = (unencodable.iter())
@@ -1629,6 +1662,7 @@ fn every_text_field_is_drawn_as_pdfium_draws_it_or_its_difference_is_classed() {
             made,
             two_fonts,
             overlaid,
+            left,
             pages,
             compared,
             off_page,

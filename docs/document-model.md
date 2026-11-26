@@ -2093,7 +2093,9 @@ slices' (M10 slices 10 to 13); today it's `sheaf edit`'s and the tests'.
     stays, as an appearance the file has may be the stale one the flag
     covered. An Append is given none, but one after such a Rewrite
     carries the record's transform and makes each such widget it writes,
-    which it would otherwise write bare over the ones the Rewrite made;
+    which it would otherwise write bare over the ones the Rewrite made.
+    The realizer's overlay makes them too, whenever a Rewrite of the
+    state would (The realizer);
   - XFA (`DropXfa`, the tooltips to `/TU`, after `Ask::XfaHoldsValues`),
     usage rights (`DropUr3`) and `/SigFlags` (`FixSigFlags`) as Saving
     has them; a signed or certified file through §9.3's asks, with Append
@@ -4428,8 +4430,14 @@ the overlay draws the appearance a save makes for it; see Text field
 appearances through pdf-forms), nor any widget whose field's value the
 model holds changed (`forms::value_changed`, M10 slice 9: the overlay
 writes the field with the model's `/V`, a radio group's on its other
-pages too). The predicate is
-O(the annotations on the page); `emission_is_base` (test and fixture
+pages too), nor any widget a `NeedAppearances` form left with no
+appearance once a Rewrite of the state would make one
+(`FillAppearances`: the form changed; `rules::overlay_fills_appearances`):
+the overlay carries that transform and makes it as the Rewrite does, so a
+fill on one page realizes every page with such a widget, and the render
+key feeds whether it's made. The predicate is
+O(the annotations on the page), and O(the fields) more on a page with
+such a widget; `emission_is_base` (test and fixture
 builds) checks it against the page's overlay compared with the base
 modulo placement (`/Parent`, `/Type`, `/Thumb`; boxes and `/Rotate` as
 effective values; resources against the page facts; annotations' `/P`,

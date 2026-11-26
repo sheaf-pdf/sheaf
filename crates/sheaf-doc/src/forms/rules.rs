@@ -20,7 +20,8 @@
 //! viewer that ignores the flag (PDFium's screen) would show nothing of;
 //! an Append makes only those of what it changed, and those an earlier
 //! such Rewrite made, which its record carries. A recovery sidecar applies
-//! the same transforms.
+//! the same transforms, and an overlay the realizer draws makes the
+//! appearances a Rewrite of its state would ([`overlay_fills_appearances`]).
 
 use std::collections::HashMap;
 
@@ -102,11 +103,32 @@ pub fn plan(
         }
     }
     let rewrite = matches!(strategy, Strategy::Rewrite { .. });
-    if rewrite && target.form().need_appearances && form_differs(src.form(), target, src.id()) {
+    if rewrite && fills_appearances(src, target) {
         out.push(SaveTransform::FillAppearances);
     }
     out.retain(|t| !done(t));
     out
+}
+
+/// Whether a Rewrite of `target` over `primary`, the primary file as read,
+/// makes the appearances the form's widgets were left without ([`plan`]'s
+/// `FillAppearances`): the form it writes says `/NeedAppearances` and its
+/// fields differ from the primary's.
+pub fn fills_appearances(primary: &Source, target: &DocState) -> bool {
+    target.form().need_appearances && form_differs(primary.form(), target, primary.id())
+}
+
+/// [`fills_appearances`] as an overlay of pages of `src`, a source of
+/// `target`, asks it, since the realizer draws what a Rewrite writes: over
+/// the primary (the file `target` opened; a state made in memory opened
+/// none, and `src` stands for it), as a save asks it; over any other
+/// source, whose widgets are of fields that came in, so that the fields
+/// differ from the primary's, whenever the form says `/NeedAppearances`.
+pub(crate) fn overlay_fills_appearances(src: &Source, target: &DocState) -> bool {
+    match target.opened_file() {
+        Some(primary) if primary != src.id() => target.form().need_appearances,
+        _ => fills_appearances(src, target),
+    }
 }
 
 /// Whether save policy drops the XFA copy of `src`, the primary file as

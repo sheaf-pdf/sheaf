@@ -10,8 +10,9 @@
 //! not its duplicate; a crop's comments, link and widget, and its content
 //! alone for OCR; sheaf's marks, renamed at open or not, left to the
 //! screen; watermarks and backgrounds not yet saved (slice 16); and fields
-//! whose own dictionary is a widget beside kid widgets, pressed or filled
-//! (M10 slice 9).
+//! whose own dictionary is a widget beside kid widgets, pressed or filled,
+//! and a widget a `/NeedAppearances` form left bare, which a Rewrite makes
+//! once a field is filled (M10 slice 9).
 //!
 //! Each realization is the engine's segments read one after another, the
 //! base's bytes and the section after them. Pages are drawn through the
@@ -1254,4 +1255,40 @@ fn fields_beside_their_kids_render_as_saved() {
     );
     let views_of = |i: usize| views.view(d.state(), d.page(i).unwrap(), &ViewInputs::plugin());
     assert_ne!(views_of(0).unwrap().engine, views_of(n - 1).unwrap().engine);
+}
+
+/// A valued text field on the second page whose `/NeedAppearances` form
+/// left its widget with no appearance: once a field on the first page is
+/// filled, a Rewrite makes that widget's appearance (M10 slice 9's
+/// `FillAppearances`), and both pages, realized, render as the Rewrite
+/// does, live and appearances only; as opened, the second page renders from
+/// the base, as the file is.
+#[test]
+fn a_need_appearances_form_s_bare_widget_renders_as_saved_once_a_field_is_filled() {
+    let views = views();
+    let mut f = Form::new(2);
+    f.text("other", 0, row(0));
+    let valued = f.text("valued", 1, row(0));
+    f.dict(valued).set("V", literal("Shown"));
+    let acroform = f.acroform;
+    f.dict(acroform).set("NeedAppearances", true);
+    let bytes = f.bytes();
+    let mut d = opened(bytes.clone(), "left.pdf", None);
+    let p1 = d.page(1).unwrap();
+    let view = views.view(d.state(), p1, &ViewInputs::plugin()).unwrap();
+    assert!(matches!(view.engine, EngineKey::Base(..)), "{view:?}");
+    renders_as_saved(&views, &d, p1, &bytes, 1);
+    fx::fill(&mut d, "other", "Filled");
+    let saved = saved(&d);
+    assert_ne!(
+        differing(&appearances(&bytes, None, 1), &appearances(&saved, None, 1)),
+        0,
+        "the Rewrite draws the widget the file left bare"
+    );
+    for i in 0..2 {
+        let page = d.page(i).unwrap();
+        let view = views.view(d.state(), page, &ViewInputs::plugin()).unwrap();
+        assert!(matches!(view.engine, EngineKey::Group(..)), "{i}: {view:?}");
+        renders_as_saved(&views, &d, page, &saved, i as u32);
+    }
 }

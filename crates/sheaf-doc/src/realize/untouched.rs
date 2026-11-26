@@ -30,7 +30,10 @@
 //! save does, on every page with a widget of it, a radio group's other
 //! pages too), no widget whose appearance a save makes anew ([`stale`],
 //! M10 slices 6 and 8: the overlay draws the appearance pdf-forms makes for
-//! it, the form a save writes) or whose button's state changed, and the
+//! it, the form a save writes) or whose button's state changed, none its
+//! file left to the viewer where a Rewrite of the state makes one
+//! (`SaveTransform::FillAppearances`, M10 slice 9: an overlay makes it as
+//! the Rewrite does, on every page with such a widget), and the
 //! form's own keys the overlay writes from the document's as its file has
 //! them. The render key feeds each drawn widget's terminal whole, its value
 //! among it, so a page whose field's value moves is drawn anew.
@@ -139,6 +142,9 @@ fn annots_kept(
     let (mut recorded, mut recorded_slots) = (HashSet::new(), HashSet::new());
     let (mut kept, mut kept_slots) = (HashSet::new(), HashSet::new());
     let mut form = false;
+    // Whether an overlay makes the appearances widgets were left without:
+    // the form's fields read once, at the first such widget.
+    let fills = std::cell::OnceCell::new();
     for &aid in st.annot_ids_on(page).into_iter().flatten() {
         let Some(rec) = st.annot(aid) else {
             continue;
@@ -208,6 +214,15 @@ fn annots_kept(
                 if value_moved
                     || crate::forms::appearance::stale(st, aid)
                     || crate::forms::appearance::state_changed(st, aid).is_some()
+                {
+                    return false;
+                }
+                // One its file left to the viewer, which a Rewrite of the
+                // state makes (`SaveTransform::FillAppearances`), and so
+                // the overlay.
+                if crate::forms::appearance::missing(st, aid)
+                    && *fills
+                        .get_or_init(|| crate::forms::rules::overlay_fills_appearances(src, st))
                 {
                     return false;
                 }

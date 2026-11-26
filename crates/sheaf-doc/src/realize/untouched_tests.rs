@@ -366,6 +366,60 @@ fn a_radio_group_pressed_on_one_page_touches_its_other_pages() {
     assert_eq!(render_key(d.state(), p1, &screen).unwrap(), was);
 }
 
+/// A valued text field on the second page whose `/NeedAppearances` form
+/// left its widget with no appearance: as opened, both pages are their
+/// base pages. Once a field on the first page is filled, a Rewrite of the
+/// state makes that widget's appearance (`SaveTransform::FillAppearances`),
+/// so the second page is realized too, its overlay making the widget's
+/// form (the model agreeing with the emission under every input), its key
+/// moving though nothing of its own did (its reads take in every field,
+/// opened or filled); the fill undone, it's its base page again, at its key as opened.
+/// The same form without the flag leaves the second page alone.
+#[test]
+fn a_widget_a_need_appearances_form_left_bare_is_realized_once_a_rewrite_makes_it() {
+    use crate::forms::fixture::row;
+    for flag in [true, false] {
+        let mut f = Form::new(2);
+        f.text("other", 0, row(0));
+        let valued = f.text("valued", 1, row(0));
+        f.dict(valued).set("V", crate::pdf::text::string("Shown"));
+        if flag {
+            let acroform = f.acroform;
+            f.dict(acroform).set("NeedAppearances", true);
+        }
+        let mut d = opened(f.bytes(), "left.pdf");
+        assert_eq!(
+            agree(d.state(), "left bare, opened"),
+            [true, true],
+            "{flag}"
+        );
+        let p1 = d.page(1).unwrap();
+        let screen = ViewInputs::screen();
+        let was = render_key(d.state(), p1, &screen).unwrap();
+        let st = d.state();
+        let other = st.field_named("other").unwrap();
+        let shown = st.field_named("valued").unwrap();
+        let aid = st.field(shown).unwrap().term.as_ref().unwrap().widgets[0];
+        let reads = render_reads(st, p1, &screen);
+        assert_eq!(reads.contains(&Key::Field(other)), flag, "{flag}");
+        fx::fill(&mut d, "other", "Filled");
+        let st = d.state();
+        assert_eq!(agree(st, "left bare, filled"), [false, !flag], "{flag}");
+        assert_eq!(render_key(st, p1, &screen).unwrap() != was, flag);
+        let made = overlay_appearances(st, p1, &screen).unwrap();
+        assert_eq!(made.iter().any(|(a, ..)| *a == aid), flag, "{flag}");
+        let reads = render_reads(st, p1, &screen);
+        assert_eq!(reads.contains(&Key::Field(other)), flag, "{flag}");
+        d.undo().unwrap();
+        assert_eq!(
+            agree(d.state(), "left bare, undone"),
+            [true, true],
+            "{flag}"
+        );
+        assert_eq!(render_key(d.state(), p1, &screen).unwrap(), was);
+    }
+}
+
 /// An untouched page is viewed in its source's base engine at its base
 /// index, turned by its job; the edited pages of a group share its
 /// engine, each at its place among them in base order, a duplicate after
