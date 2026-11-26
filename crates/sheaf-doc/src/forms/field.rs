@@ -120,6 +120,12 @@ pub fn value_changed(node: &FieldNode, term: &Terminal) -> bool {
 /// alike, a text and an array of it alike); a check box's or
 /// radio group's state, none and `Off` alike; any other kind's value as it
 /// is.
+///
+/// The one compare of the value a field holds with another: a save writes
+/// the model's, and makes its appearances, where it isn't alike its
+/// file's ([`value_changed`]), and lowering puts one where it isn't alike
+/// the one the field holds ([`set_alike`], which is this but for a
+/// choice's order).
 pub fn values_alike(kind: FieldKind, a: Option<&Value>, b: Option<&Value>) -> bool {
     fn state(v: Option<&Value>) -> Option<&Value> {
         match v {
@@ -132,6 +138,30 @@ pub fn values_alike(kind: FieldKind, a: Option<&Value>, b: Option<&Value>) -> bo
         FieldKind::Combo | FieldKind::List => choice_texts(a) == choice_texts(b),
         FieldKind::CheckBox | FieldKind::Radio => state(a) == state(b),
         FieldKind::PushButton | FieldKind::Signature | FieldKind::Unknown => a == b,
+    }
+}
+
+/// Whether setting a field of `kind` that holds `held` to `set` would
+/// leave what it holds, so that lowering puts nothing (`tx::fill`):
+/// [`values_alike`], and for a choice its texts as a set, whatever their
+/// order and each once. A choice selects the options its texts name,
+/// which no order changes, and an op's are in the options' order where
+/// the file's may be in any: an op that chose what the field holds would
+/// else put the same selection in another order, a value a save writes
+/// and calls replaced. So the field keeps its file's order, and
+/// [`values_alike`], which a save asks of the value kept, stays the
+/// stricter of the two: what this calls alike and that doesn't is never
+/// put.
+pub(crate) fn set_alike(kind: FieldKind, held: Option<&Value>, set: Option<&Value>) -> bool {
+    let texts = |v| {
+        let mut texts = choice_texts(v);
+        texts.sort_unstable();
+        texts.dedup();
+        texts
+    };
+    match kind {
+        FieldKind::Combo | FieldKind::List => texts(held) == texts(set),
+        _ => values_alike(kind, held, set),
     }
 }
 

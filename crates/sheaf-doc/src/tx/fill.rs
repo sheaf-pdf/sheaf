@@ -38,8 +38,9 @@
 //! a combo box's widgets show in its value's place, is put in
 //! [`Terminal::display`], composed, and dropped by a set that gives none;
 //! another kind's is refused. A set whose value means what the field's
-//! does (a text field's none and empty text alike, a choice's texts as a
-//! set, a group's none and `Off` alike, its widgets' states as they are)
+//! does ([`set_alike`]: the compare a save asks, `values_alike`, but a
+//! choice's texts as a set; a text field's none and empty text alike, a
+//! group's none and `Off` alike, its widgets' states as they are)
 //! and whose display is the field's puts nothing. A set refused refuses
 //! its op, which changes nothing (the transaction's rule). No refusal's
 //! words hold a value.
@@ -54,7 +55,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use super::resolve::{Set, SetValue};
 use super::{EditError, Lower};
 use crate::forms::appearance;
-use crate::forms::field::{Choice, FieldKind, Value, flags};
+use crate::forms::field::{Choice, FieldKind, Value, flags, set_alike};
 use crate::forms::{FieldId, group};
 use crate::model::{AnnotBody, AnnotRec, FieldNode, FormInst, Terminal, Widget};
 use crate::pdf::forms::Unmade;
@@ -113,10 +114,10 @@ fn set_field(lw: &mut Lower, field: FieldId, set: &Set, by: By) -> Result<(), Ed
             )));
         }
     };
-    let (value, alike): (Option<Value>, Alike) = match term.kind {
-        FieldKind::Text => (text(lw, &name, &term, &set.value, by)?, texts_alike),
-        FieldKind::Combo => (combo(lw, &name, &term, &set.value)?, choices_alike),
-        FieldKind::List => (list(lw, &name, &term, &set.value)?, choices_alike),
+    let value = match term.kind {
+        FieldKind::Text => text(lw, &name, &term, &set.value, by)?,
+        FieldKind::Combo => combo(lw, &name, &term, &set.value)?,
+        FieldKind::List => list(lw, &name, &term, &set.value)?,
         FieldKind::CheckBox | FieldKind::Radio => {
             return buttons(lw, field, &name, &term, &set.value);
         }
@@ -132,7 +133,7 @@ fn set_field(lw: &mut Lower, field: FieldId, set: &Set, by: By) -> Result<(), Ed
             return Err(lw.invalid(format!("{name} is of no kind of field sheaf can fill")));
         }
     };
-    if put(lw, field, &node, &term, value, display, alike) {
+    if put(lw, field, &node, &term, value, display) {
         drawn(lw, field, &name)?;
     }
     Ok(())
@@ -374,13 +375,7 @@ fn buttons(
             )));
         }
     };
-    let off = |v: Option<&Value>| match v {
-        None => true,
-        Some(Value::State(s)) => &**s == "Off",
-        _ => false,
-    };
-    let now = Some(&change.value);
-    if term.value.as_ref() != now && !(off(term.value.as_ref()) && off(now)) {
+    if !set_alike(term.kind, term.value.as_ref(), Some(&change.value)) {
         let node = FieldNode::clone(lw.rec.field(field).expect("the field"));
         let term = Terminal {
             value: Some(change.value.clone()),
@@ -403,38 +398,9 @@ fn buttons(
     Ok(())
 }
 
-/// Whether two values of a field mean the same, as its kind holds them.
-type Alike = fn(Option<&Value>, Option<&Value>) -> bool;
-
-/// A text field's: the same, or both empty (none, or empty text).
-fn texts_alike(a: Option<&Value>, b: Option<&Value>) -> bool {
-    let empty = |v: Option<&Value>| match v {
-        None => true,
-        Some(Value::Text(t)) => t.is_empty(),
-        _ => false,
-    };
-    a == b || (empty(a) && empty(b))
-}
-
-/// A choice's: the same, or the same texts, taken as a set (none and an
-/// empty array alike, a text and an array of it alike).
-fn choices_alike(a: Option<&Value>, b: Option<&Value>) -> bool {
-    let texts = |v: Option<&Value>| -> Option<Vec<Arc<str>>> {
-        let mut texts: Vec<Arc<str>> = match v {
-            None => Vec::new(),
-            Some(Value::Text(t)) => vec![t.clone()],
-            Some(Value::Items(items)) => items.to_vec(),
-            Some(_) => return None,
-        };
-        texts.sort_unstable();
-        texts.dedup();
-        Some(texts)
-    };
-    a == b || texts(a).is_some_and(|t| Some(t) == texts(b))
-}
-
 /// Field `field`'s terminal `term` given `value` and `display`, unless the
-/// value is `alike` the one it holds and the display the same: then
+/// value is alike the one it holds ([`set_alike`]) and the display the
+/// same: then
 /// nothing is put. A value alike stays as the field holds it. Whether it
 /// put one.
 fn put(
@@ -444,9 +410,8 @@ fn put(
     term: &Terminal,
     value: Option<Value>,
     display: Option<Arc<str>>,
-    alike: Alike,
 ) -> bool {
-    let kept = alike(term.value.as_ref(), value.as_ref());
+    let kept = set_alike(term.kind, term.value.as_ref(), value.as_ref());
     if kept && term.display == display {
         return false;
     }

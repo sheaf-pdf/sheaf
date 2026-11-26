@@ -2011,8 +2011,11 @@ slices' (M10 slices 10 to 13); today it's `sheaf edit`'s and the tests'.
     value and each widget whose `/AS` moves. A push button, a signature
     field and a field of no kind sheaf knows hold no value. A display is a
     text field's or a combo box's alone. A set whose value means what the
-    field's does (none and empty text alike, a choice's texts as a set, a
-    group's none and `Off`) and whose display is the field's puts nothing.
+    field's does (`forms::field::set_alike`: the compare a save asks,
+    `values_alike`, none and empty text alike and a group's none and
+    `Off`, but a choice's texts as a set, so a choice of what the field
+    holds keeps its file's order) and whose display is the field's puts
+    nothing.
   - **Drawn**: after the put, each widget whose appearance a save will
     make anew (`appearance::stale`) is made as the emitter makes it, in
     its `/DA` font and the fallback (`appearance::make_in`). A character
