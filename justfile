@@ -170,7 +170,19 @@ doctor:
     printf '  %-16s %s\n' "nightly" "$(rustup toolchain list | grep -c nightly) installed"
     have cargo-fuzz --version
     echo "Vendor:"
-    for d in vendor/pdfium vendor/ocr; do printf '  %-16s %s\n' "$d" "$( [ -e "$d" ] && echo present || echo 'MISSING (just fetch)')"; done
+    # Each PDFium library's build, by the VERSION the fetch keeps beside it.
+    want=$(sed -n 's/^default_build=//p' scripts/fetch-pdfium.sh)
+    found=
+    for v in vendor/pdfium/*/; do
+      [ -d "$v" ] || continue; found=1
+      build=$(sed -n 's/^BUILD=//p' "$v/VERSION" 2>/dev/null | tr -d '\r')
+      if [ -z "$build" ]; then said="no VERSION (an older fetch); sheaf binds chromium/$want: scripts/fetch-pdfium.sh"
+      elif [ "$build" = "$want" ]; then said="chromium/$build"
+      else said="chromium/$build, but sheaf binds chromium/$want: scripts/fetch-pdfium.sh"; fi
+      printf '  %-16s %s\n' "${v%/}" "$said"
+    done
+    [ -n "$found" ] || printf '  %-16s %s\n' vendor/pdfium 'MISSING (just fetch)'
+    printf '  %-16s %s\n' vendor/ocr "$( [ -e vendor/ocr ] && echo present || echo 'MISSING (just fetch)')"
     echo "Oracles (docs/oracles.md):"
     have qpdf --version; have pdftotext -v; have mutool -v; have tiffinfo; have java -version
     if [ -x "{{pdf_lint}}" ]; then printf '  %-16s %s\n' "pdf-lint" "$("{{pdf_lint}}" --version 2>/dev/null | head -1) ({{pdf_lint}})"

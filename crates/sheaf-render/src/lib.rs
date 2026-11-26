@@ -283,7 +283,10 @@ pub mod pdfium {
         Search::Dirs(dirs)
     }
 
-    /// Locate and bind libpdfium, in [`search`]'s order.
+    /// Locate and bind libpdfium, in [`search`]'s order. pdfium-render
+    /// binds the API of the one build its feature names (the workspace's
+    /// Cargo.toml) and refuses a library that lacks a function of it, so a
+    /// library that doesn't bind is most often another build's.
     fn bind() -> Result<Pdfium> {
         let exe_dir = std::env::current_exe()
             .ok()
@@ -306,7 +309,7 @@ pub mod pdfium {
                     .map(Pdfium::new)
                     .map_err(|e| {
                         anyhow::anyhow!(
-                            "$PDFIUM_LIB_DIR is {}, and {} doesn't bind ({e:?}); unset it to search vendor/ and the system",
+                            "$PDFIUM_LIB_DIR is {}, and {} doesn't bind ({e:?}): a library that doesn't bind isn't the PDFium build sheaf binds, which scripts/fetch-pdfium.sh fetches; unset it to search vendor/ and the system",
                             dir.display(),
                             lib.display()
                         )
@@ -324,7 +327,7 @@ pub mod pdfium {
         }
         Pdfium::bind_to_system_library().map(Pdfium::new).with_context(|| {
             format!(
-                "no libpdfium found (searched {dirs:?} and system); run scripts/fetch-pdfium.sh. last error: {last_err:?}"
+                "no libpdfium that binds (searched {dirs:?} and the system; a library that doesn't bind isn't the PDFium build sheaf binds): run scripts/fetch-pdfium.sh. Last error: {last_err:?}"
             )
         })
     }
