@@ -643,7 +643,9 @@ structures-dump out:
 # one a page (its size, a checksum of its characters with their boxes and
 # angles, one of its text, and one of its pixels 612 wide as the page
 # view draws them; on a file's first page also as the matrix path draws
-# it, and for a form as PDFium's flatten does). It asserts nothing: run it
+# it and as a stamp's picture is drawn, transparent, and for a form as
+# PDFium's flatten does: every place sheaf-render configures a render,
+# each a whole page, unturned). It asserts nothing: run it
 # before and after a move of PDFium's build or of pdfium-render, or a
 # change to how sheaf-render has PDFium draw, over the same corpus, and
 # `diff` the two files. One thread, the files in order, so two runs over

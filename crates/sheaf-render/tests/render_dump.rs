@@ -16,13 +16,21 @@
 //!   text, its length and checksum; and `px=`, the page [`WIDTH`] pixels
 //!   wide as the page view draws it ([`Draw::ALL`], BGRA), its size and a
 //!   checksum of its pixels.
-//! - **The other two ways sheaf-render has PDFium draw,** a column each
-//!   on a file's first page alone: `mx=`, the page drawn with [`MATRIX`],
-//!   which places it by a matrix and draws no widgets; and, for the forms
+//! - **The other three ways sheaf-render has PDFium draw,** a column
+//!   each on a file's first page alone: `mx=`, the page drawn with
+//!   [`MATRIX`], which places it by a matrix and draws no widgets; `tr=`,
+//!   the page as [`PdfiumEngine::render_transparent`] draws it (a stamp's
+//!   picture: RGBA, clear where nothing is drawn); and, for the forms
 //!   manifest's files, `ap=`, the page as
 //!   [`PdfiumEngine::render_appearances`] draws it (PDFium's flatten, then
 //!   a render, RGBA). The flatten changes the engine's document, so `ap=`
 //!   is taken last of its file.
+//!
+//! Those four are every place sheaf-render configures a render. What the
+//! dump doesn't vary within them: every draw is the whole page, unturned,
+//! [`WIDTH`] wide, and `px=` and `mx=` are BGRA. A tile, a turned page and
+//! the RGBA order of those two are held on made pages
+//! (`tests/pixel_format.rs`, `tests/pool.rs`), not over the corpus.
 //!
 //! One thread, the files in their paths' order: PDFium's caches are the
 //! process's, so what it draws can turn on what it drew before, and in one
@@ -38,7 +46,8 @@
 //! PNG, `<path>-<page>.<column>.png` (the path's `/`s `_`s), for the pages
 //! chosen one of two ways:
 //! - `SHEAF_RENDER_DUMP_AGAINST=<an earlier run's file>` ([`AGAINST`]):
-//!   each page whose `px=`, `mx=` or `ap=` isn't that file's, listed in
+//!   each page whose `px=`, `mx=`, `tr=` or `ap=` isn't that file's (a
+//!   column that file lacks counts as moved), listed in
 //!   `<dir>/pages.tsv`;
 //! - `SHEAF_RENDER_DUMP_PAGES=<a file of lines: path, tab, page>`
 //!   ([`PAGES`]): those pages, such as another run's `pages.tsv`.
@@ -57,7 +66,7 @@
 //!
 //! The test that isn't ignored holds the dump to what it says on a form
 //! made here: one color of its first page's content changed moves that
-//! page's `px=`, `mx=` and `ap=` and nothing else, a run against the
+//! page's `px=`, `mx=`, `tr=` and `ap=` and nothing else, a run against the
 //! other keeps that page's renders alone, and the compare finds them
 //! differing in that color's box. Needs libpdfium
 //! (`scripts/fetch-pdfium.sh`), like the app itself.
@@ -112,7 +121,7 @@ const MATRIX: Draw = Draw {
 
 /// The columns of a page's line that are renders, what a run keeping
 /// rasters chooses pages by.
-const RENDERS: [&str; 3] = ["px=", "mx=", "ap="];
+const RENDERS: [&str; 4] = ["px=", "mx=", "tr=", "ap="];
 
 /// Every file the dump reads, by path, and the set that picks it: what
 /// `tier-interp` reads (content_interp.rs's `picks`), every form, the
@@ -253,6 +262,8 @@ fn dump_file(path: &str, bytes: Arc<[u8]>, form: bool, mut keep: Option<&mut Kee
         if i == 0 {
             let mx = engine.render_with(page, job, PixelFormat::Bgra, MATRIX);
             columns.push(drawn("mx", mx, keep.is_some().then_some(&mut rasters)));
+            let tr = engine.render_transparent(page, WIDTH);
+            columns.push(drawn("tr", tr, keep.is_some().then_some(&mut rasters)));
             first = Some((columns, rasters));
             // Its place, filled once its line is whole.
             lines.push(String::new());
@@ -278,7 +289,7 @@ fn dump_file(path: &str, bytes: Arc<[u8]>, form: bool, mut keep: Option<&mut Kee
     lines
 }
 
-/// A page line's renders, its `px=`, `mx=` and `ap=` columns, tab apart.
+/// A page line's renders, its [`RENDERS`] columns, tab apart.
 fn renders(line: &str) -> String {
     let columns = line.split('\t').skip(3);
     let renders = columns.filter(|c| RENDERS.iter().any(|r| c.starts_with(r)));
@@ -688,7 +699,7 @@ fn a_color_of_the_content_moves_its_renders_and_nothing_else() {
     assert_eq!(
         named,
         [
-            "ap", "chars", "kind", "mx", "page", "path", "px", "size", "text"
+            "ap", "chars", "kind", "mx", "page", "path", "px", "size", "text", "tr"
         ],
         "{}",
         blue[1]
@@ -701,17 +712,20 @@ fn a_color_of_the_content_moves_its_renders_and_nothing_else() {
         .filter(|(name, value)| again.get(*name) != Some(value))
         .map(|(name, _)| name.as_str())
         .collect();
-    assert_eq!(moved, ["ap", "mx", "px"], "{}\n{}", blue[1], green[1]);
+    assert_eq!(moved, ["ap", "mx", "px", "tr"], "{}\n{}", blue[1], green[1]);
+    // Each column is a draw of its own: no two of a page are the same.
+    let draws: BTreeSet<&String> = (["px", "mx", "tr", "ap"].iter().map(|c| &first[*c])).collect();
+    assert_eq!(draws.len(), 4, "{}", blue[1]);
 
-    // The second page is the same, and has neither the matrix path's
-    // render nor the flatten's.
+    // The second page is the same, and has none of the first page's other
+    // three renders.
     assert_eq!(green[2], blue[2]);
     let second = columns(&blue[2]);
-    assert!(!second.contains_key("mx") && !second.contains_key("ap"));
+    assert!(["mx", "tr", "ap"].iter().all(|c| !second.contains_key(*c)));
     assert!(second.contains_key("px"), "{}", blue[2]);
 
     // A run against the blue one's file chooses the first page alone and
-    // keeps its three renders; one run by that run's list keeps them too;
+    // keeps its four renders; one run by that run's list keeps them too;
     // and the two sets differ in the blue box alone, every pixel of it
     // (72 to 272 across, 192 to 292 down), by all a channel can.
     let earlier = earlier_renders(&blue.join("\n"));
@@ -747,7 +761,18 @@ fn a_color_of_the_content_moves_its_renders_and_nothing_else() {
         box_of("made.pdf-1.ap.png"),
         box_of("made.pdf-1.mx.png"),
         box_of("made.pdf-1.px.png"),
-        "3 pairs: 0 the same, 3 differ; 0 in one directory alone".to_string(),
+        box_of("made.pdf-1.tr.png"),
+        "4 pairs: 0 the same, 4 differ; 0 in one directory alone".to_string(),
     ];
     assert_eq!(lines, expected);
+
+    // The transparent draw kept is clear where the page draws nothing,
+    // and the page view's is white there.
+    let corner = |name: &str| {
+        let file = dir.join("green").join(name);
+        let image = image::open(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+        image.to_rgba8().get_pixel(0, 0).0
+    };
+    assert_eq!(corner("made.pdf-1.tr.png")[3], 0);
+    assert_eq!(corner("made.pdf-1.px.png"), [255, 255, 255, 255]);
 }
