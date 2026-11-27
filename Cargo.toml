@@ -41,16 +41,17 @@ sheaf-image = { path = "crates/sheaf-image" }
 sheaf-cli = { path = "crates/sheaf-cli" }
 
 # GPUI comes from gpui-pre: Longbridge's weekly crates.io snapshot of Zed
-# main, its crates renamed gpui-pre-*. 0.3.11 is zed@f816e1f. The sources are
+# main, its crates renamed gpui-pre-*. 0.3.14 is zed@f126950. The sources are
 # Zed's at that commit plus a few packaging edits marked "Modified for
-# gpui-pre" (at 0.3.11: `$crate` paths in `actions!`, a gpui-kit path facade
+# gpui-pre" (at 0.3.14: `$crate` paths in `actions!`, a gpui-kit path facade
 # in the proc macros that does nothing unless the crate depends on gpui-kit,
 # vendored sources for gpui-pre-apple's build.rs, and gpui-pre-wgpu adapted
 # to crates.io's wgpu 30.0.1). Zed builds wgpu from git (cddb2f5, for
 # gfx-rs/wgpu#10230, a Vulkan panic on surface teardown, and #10348, WebGL
 # only) and gpui-pre can't publish that; a patch to that rev wouldn't build
 # gpui-pre-wgpu's adapted sources, so sheaf ships 30.0.1 without the fix, as
-# it shipped 29.0.4, until a 30.x release has it (`cargo update -p wgpu`).
+# it shipped 29.0.4, until a 30.x release has it (`cargo update -p wgpu`;
+# 30.0.2 of 2026-11-12 doesn't list it, and Cargo.lock stays at 30.0.1).
 # Cargo.lock holds icu_segmenter (GPUI's line breaking since 0.3.11) at
 # Zed's 2.3.0: 2.4.0 has other break data, so a `cargo update` that moves
 # it needs the same review. Since 0.3.11 GPUI's Metal shaders need macOS 12
@@ -58,8 +59,8 @@ sheaf-cli = { path = "crates/sheaf-cli" }
 # against Zed, so it lets gpui-pre do the snapshotting. gpui-pre doesn't
 # follow semver and breaking changes are routine: pin it exactly and bump it
 # deliberately, with a compatibility check (docs/building.md, "Updating GPUI").
-gpui = { package = "gpui-pre", version = "=0.3.11" }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["wayland", "x11"] }
+gpui = { package = "gpui-pre", version = "=0.3.14" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.14", features = ["wayland", "x11"] }
 
 # PDF engines. NOTE: the `pdfium` crate (newinnovations) is GPL-3 — do not use it.
 # pdfium-render binds the API of one PDFium build, chromium/8125, named by
@@ -138,10 +139,12 @@ pdf-semantics = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main"
 # Zed builds GPUI against these forks, but a published crate can't carry
 # patches (gpui-pre's crates ask for the crates.io releases), so they are
 # repeated here; keep them in step with Zed's on every bump. async-task is
-# in every build, async-process, calloop and khronos-egl in the Linux one;
+# in every build (since 0.3.13 upstream's main, for the waker identity fix
+# of smol-rs/async-task#108, where it was Zed's fork), async-process,
+# calloop and khronos-egl in the Linux one;
 # windows-capture builds only with GPUI's screen-capture feature (off).
 [patch.crates-io]
-async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
+async-task = { git = "https://github.com/smol-rs/async-task", rev = "41fd3359c75e221bd8b187a8ee361aa309c1714c" }
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
 calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
 khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }

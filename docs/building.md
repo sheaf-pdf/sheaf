@@ -228,7 +228,9 @@ deliberate review (once a milestone or so):
 5. Read the `Cargo.lock` diff. Besides the `gpui-pre-*` versions, expect
    only what Zed's `Cargo.toml` moved between the two revs (at 0.3.10, wgpu
    29 → 30 and taffy 0.13 → 0.15; at 0.3.11, `icu_segmenter` new and
-   `metal` gone) and what gpui-pre's published manifests resolve
+   `metal` gone; at 0.3.14, `lyon` and its tessellation crates gone for
+   `lyon_path` and `tiny-skia-path`, and Zed's `async-task` patch moved
+   from its fork to upstream's main) and what gpui-pre's published manifests resolve
    differently from Zed's build; explain anything else. Those differences
    come in three kinds:
    - crates gpui-pre takes from crates.io where Zed builds from git

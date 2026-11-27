@@ -524,14 +524,6 @@ struct PrepaintState {
     selection: Vec<PaintQuad>,
 }
 
-impl IntoElement for AreaElement {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for AreaElement {
     type RequestLayoutState = ();
     type PrepaintState = PrepaintState;
