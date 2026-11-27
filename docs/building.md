@@ -7,7 +7,7 @@ sudo apt install build-essential clang lld cmake pkg-config libfontconfig-dev \
   libglib2.0-dev libssl-dev libzstd-dev xdg-desktop-portal xdg-desktop-portal-gtk
 
 
-scripts/fetch-pdfium.sh          # prebuilt libpdfium → vendor/pdfium/<os>-<arch>/
+scripts/fetch-pdfium.sh          # PDFium chromium/8125 → vendor/pdfium/<os>-<arch>/
 scripts/fetch-ocr-data.sh        # Tesseract language data + PaddleOCR models → vendor/ocr/
                                  #   (--uvdoc adds the curled-page model scan cleanup can use)
 scripts/build-plugins.sh         # the bundled plugins (plugins/) → target/plugins/
@@ -16,6 +16,19 @@ cargo run -p sheaf-app           # the GPUI window
                                  #   sheaf unless SHEAF_SINGLE_INSTANCE=1; with
                                  #   none running, they become it)
 ```
+
+**PDFium is one build,** chromium/8125 from
+[pdfium-binaries](https://github.com/bblanchon/pdfium-binaries): the one
+whose API pdfium-render's feature binds (the workspace `Cargo.toml`), and
+a library that lacks any function of it doesn't bind. The fetch script
+checks each archive's sha256 before it unpacks it, keeps the build's
+`VERSION` beside the library, and puts each file in place by a rename, so
+a sheaf already running keeps the library it loaded. A pull that moves
+the build needs the script again: until then sheaf-render doesn't bind,
+and its error names the script. `just doctor` says which build each
+`vendor/pdfium/*/` holds, and sheaf-render's `pdfium_build` test holds
+the feature, the script and the fetched library to one build.
+`PDFIUM_LIB_DIR=<dir>` binds that directory's library and no other.
 
 **Standard operations** are in the `justfile` (`cargo install just`; `just`
 lists them):

@@ -4294,7 +4294,14 @@ groups, about 10 ms a group of 128.
   (`forms/safedocs/0163162.pdf` page 2, 419.5 × 595.3), and
   `render_appearances` sizes its render from the flattened page.
   pdfium-render 0.9.4's `PdfPage::flatten` reloads the page under a new
-  handle but leaves `boundaries()` on the closed one.
+  handle but leaves `boundaries()` on the closed one. Both still hold
+  under pdfium-render 0.9.6 and chromium/8125 (M18 slice 26): 0.9.6's
+  `page.rs` is 0.9.4's, 8125's `fpdf_flatten.cpp` still reads the
+  page's own boxes alone, and `an_inherited_box_survives_the_flatten`
+  fails without the boxes put back. The same flatten gives the form
+  XObject it draws the appearances into that box as its `/BBox`, so on a
+  page that inherits a box bigger than letter the appearances past
+  letter are clipped away, which putting the boxes back doesn't undo.
 
 The 7k fixtures and the planning scripts are in `bench/`
 (`bench/README.md`). The gate harness, `crates/sheaf-ops/tests/gate_7k.rs`,
