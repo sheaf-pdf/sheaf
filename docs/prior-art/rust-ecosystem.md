@@ -16,8 +16,8 @@ app's infrastructure), are in
 
 | Crate | What it is | Verdict |
 |---|---|---|
-| **gpui** (Zed) | The UI framework sheaf uses, at Zed commit `f816e1f` by way of gpui-pre | Stay on it. Since 2026-10-17, no patches against Zed and no fork: Zed takes little beyond bug fixes, so a patch would be ours to rebase forever. Send bug fixes upstream as PRs. |
-| **gpui-pre** | Longbridge's weekly crates.io snapshot of Zed's gpui: near-verbatim, its few packaging edits marked `Modified for gpui-pre` | **Adopted 2026-10-17**, pinned exactly (`=0.3.11`, zed@`f816e1f`). With no patches of our own, it does the snapshotting for us; we review and bump it deliberately. |
+| **gpui** (Zed) | The UI framework sheaf uses, at Zed commit `f126950` by way of gpui-pre | Stay on it. Since 2026-10-17, no patches against Zed and no fork: Zed takes little beyond bug fixes, so a patch would be ours to rebase forever. Send bug fixes upstream as PRs. |
+| **gpui-pre** | Longbridge's weekly crates.io snapshot of Zed's gpui: near-verbatim, its few packaging edits marked `Modified for gpui-pre` | **Adopted 2026-10-17**, pinned exactly (`=0.3.14`, zed@`f126950`). With no patches of our own, it does the snapshotting for us; we review and bump it deliberately. |
 | **gpui-ce** | Community fork moving away from Zed (Parley text system, animation) | Watch it. Re-check around 2027-04. |
 | **gpui-kit** (formerly gpui-component) | Longbridge's component library: 75+ components, AccessKit | **Don't adopt; borrow selectively.** Spike measured and documented in [../gpui-kit-eval.md](../gpui-kit-eval.md). |
 | **gpui-pdf** | A small PDF *viewer* component on hayro, split out of the Zorite app | **Don't adopt; borrow** `forms.rs` (MIT) when forms work starts. |
@@ -58,9 +58,9 @@ app's infrastructure), are in
 - Longbridge (huacnlee) publishes a **near-verbatim** snapshot of Zed main to
   crates.io about weekly, renamed `gpui-pre-*` (19 crates, one-to-one with
   Zed's). About 137k downloads in its first month.
-- Its edits to Zed's sources are marked `// Modified for gpui-pre`. At 0.3.11
-  there are four, the same as at 0.3.10, and every other source file
-  matches zed@`f816e1f`:
+- Its edits to Zed's sources are marked `// Modified for gpui-pre`. At 0.3.14
+  there are four, the same as at 0.3.10 and 0.3.11, and every other source
+  file of the crates sheaf builds matches zed@`f126950`:
   - `actions!` derives `$crate::Action` instead of `gpui::Action`.
   - Every proc-macro entry point in gpui-pre-macros passes its output through
     `gpui_pre_facade_paths::rewrite` ("Injected by gpui-kit's
@@ -83,7 +83,7 @@ app's infrastructure), are in
 - It can't carry patches. Its 0.3.9 release is exactly the Zed commit sheaf
   had pinned, which made the switch free.
 - **sheaf uses it since 2026-10-17** (`gpui = { package = "gpui-pre",
-  version = "=0.3.11" }` since 2026-11-06, 0.3.10 from 2026-10-27, 0.3.9
+  version = "=0.3.14" }` since 2026-11-27; 0.3.11 from 2026-11-06, 0.3.10 from 2026-10-27, 0.3.9
   before), because sheaf
   keeps no patches against Zed. It
   doesn't follow semver; bumping the exact pin is a deliberate review with a
@@ -104,6 +104,23 @@ app's infrastructure), are in
   lock holds at Zed's 2.3.0 (below). GPUI's Metal shaders now need macOS 12
   (Zed #65994). The rest: frame pacing and the animation clock, deferred
   window-close cleanup, Wayland activation requests, an arena soundness fix.
+- **The 0.3.14 bump** (2026-11-27; 281 Zed commits past 0.3.11, 50 of them
+  in the GPUI crates; 0.3.12, zed@`d2a4fb6`, and 0.3.13, zed@`125ca86`,
+  were skipped) needed one source change:
+  every `Element` now gets `IntoElement` from a blanket impl (Zed #64864),
+  so sheaf-ui's two hand-written impls went. The renderer was reworked
+  (Zed #66806 to #66812, #66898, #66902): primitives are clipped on the
+  CPU, opaque quads go front to back through a depth buffer, paths are
+  built with `lyon_path` and `tiny-skia-path` in place of lyon's
+  tessellator, and shadows use Levien's approximation (a shadow differs by
+  a level or two per channel). Zed's `async-task` patch now points at
+  upstream's main (smol-rs/async-task#108, a waker identity fix). The rest:
+  keystrokes matched before context predicates (same results), new windows
+  placed on the active window's display, subscriptions kept for entities a
+  reused cached view or a deferred draw reads, Wayland frame callbacks
+  timed from receipt, glyph mark offsets in the cosmic-text layout, an
+  empty content mask kept empty when snapped to device pixels, and on
+  Windows the clipboard's line endings normalized.
 - Switching to it is free at build time (measured in the gpui-kit spike: clean
   release build 210 s → 211 s, binary unchanged, startup unchanged).
 - The cost is the lock-in. Every crate built on gpui-pre (gpui-kit, gpui-pdf)
@@ -112,7 +129,7 @@ app's infrastructure), are in
   `gpui-pre-*` crates at that version and `[patch.crates-io]`-ing them, and
   redoing it on every upgrade.
 - Its published manifests take crates.io releases where Zed builds from git.
-  At 0.3.11 as at 0.3.10, each compared with the source at Zed's rev:
+  At 0.3.14 as at 0.3.10 and 0.3.11, each compared with the source at Zed's rev:
   - `zed-font-kit`: same source, but asks for `dirs` 5 where Zed's rev has
     6, which brings `dirs-sys` 0.4, `redox_users` 0.4 and a `windows-sys`
     0.48 tree into the lockfile. dirs' Linux code is the same in 5 and 6,
@@ -128,7 +145,8 @@ app's infrastructure), are in
     surface teardown ("Trying to destroy a SwapchainAcquireSemaphore that
     is still in use by a SurfaceTexture") that 29.0.4 and 30.0.1 both
     have; `cddb2f5` adds #10348, a WebGL resize fix sheaf doesn't need.
-    30.0.1 is still the newest release (2026-11-06). gpui-pre publishes
+    30.0.2 (2026-11-12) doesn't have #10230 either (it is under
+    "Unreleased" in wgpu's changelog), and sheaf's lock stays at 30.0.1. gpui-pre publishes
     against 30.0.1 and adapts gpui-pre-wgpu to it, so a patch to Zed's rev
     wouldn't build. **Not patched:** sheaf ships 30.0.1 without the fix, as
     it shipped 29.0.4. gpui-pre asks for `^30.0.1`, so a 30.x release with

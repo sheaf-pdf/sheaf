@@ -507,7 +507,7 @@ dependencies = [
 [[package]]
 name = "async-task"
 version = "4.7.1"
-source = "git+https://github.com/zed-industries/async-task.git?rev=015845a19fc31752c02367567d3b8900a406f9da#015845a19fc31752c02367567d3b8900a406f9da"
+source = "git+https://github.com/smol-rs/async-task?rev=41fd3359c75e221bd8b187a8ee361aa309c1714c#41fd3359c75e221bd8b187a8ee361aa309c1714c"
 
 [[package]]
 name = "async-trait"
@@ -2302,12 +2302,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ce81f49ae8a0482e4c55ea62ebbd7e5a686af544c00b9d090bba3ff9be97b3d"
 
 [[package]]
-name = "float_next_after"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bf7cc16383c4b8d58b9905a8509f02926ce3058053c056376248d958c9df1e8"
-
-[[package]]
 name = "flume"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2703,9 +2697,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre"
-version = "0.3.11"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9303c771abf2acff2a96d706f69d9a82088c4770173a07cce88f0002431d887d"
+checksum = "ab22c23c1304a0b3f34f64568f59a4ce2abbfab3727273a90c66b37924d31089"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -2734,7 +2728,7 @@ dependencies = [
  "itertools 0.14.0",
  "libc",
  "log",
- "lyon",
+ "lyon_path",
  "num_cpus",
  "objc2-core-foundation",
  "objc2-core-video",
@@ -2757,6 +2751,7 @@ dependencies = [
  "strum",
  "taffy",
  "thiserror 2.0.21",
+ "tiny-skia-path",
  "ttf-parser",
  "unicode-segmentation",
  "url",
@@ -2769,9 +2764,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre-apple"
-version = "0.3.11"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c0bea8ffa563d3a1ada533e148bb55be7fb873c178979e889a3d1204f8e1b91"
+checksum = "1f1a823038fb3da6b9661135f5f8a5d8954c6ab1bda0670185485a13291087aa"
 dependencies = [
  "anyhow",
  "async-task",
@@ -2809,9 +2804,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre-collections"
-version = "0.3.11"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06882d54d40681ae3b145af9ef8a4021c2bf9967cc0a9fcf0cc50f003bf3cdf3"
+checksum = "b18fcff56173d6930f2dce25e5b1243865809a362f2e2b7e25095cd0f101f9a1"
 dependencies = [
  "gpui-pre-util",
  "indexmap",
@@ -2820,9 +2815,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre-derive-refineable"
-version = "0.3.11"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3999591b50cfd74f1734baf97fe802cce5f282d60d85b908e3393d534fbd50fb"
+checksum = "bf8fc665c9a323de64cc96e1137830c840599622de0aa261c5e1fbf527dc0e95"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2831,9 +2826,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre-http-client"
-version = "0.3.11"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a00ff0e68341f52c5903182d7e2e2d7dc247d87b0d9947ce3564e453720347a0"
+checksum = "440eb71f2d746612f6527b08f9606b1688b39307b84b6a6dc9996f39ccd0a24d"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2849,9 +2844,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre-ios"
-version = "0.3.11"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "326382c3b3f004617ac0f61338594c00f053b08b7875f3486ea0f221e9b20a75"
+checksum = "d1b945651b37ab5e3a9d91073aa60c58f2dc7b8c8006655a1c1f1717e015e26d"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -2871,9 +2866,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre-linux"
-version = "0.3.11"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79cac5cbd3485c1e3db8eafd5dc69019188f5cb0a39846946af772efa386f624"
+checksum = "9515d52d8378c5dda95b3b2536d3d05ea2431bc25d1d8bb4cdeb32f21090f4a1"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -2916,9 +2911,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre-macos"
-version = "0.3.11"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7410cfdaa1fa55a414346cc492d18ce340e3a8b6d0ac3213b984ed690c82b92"
+checksum = "23eeb64494000782e17b0ae0ec2c402ba7d76e5918a6af4759e60094fc8d6dcf"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -2950,6 +2945,7 @@ dependencies = [
  "parking_lot",
  "raw-window-handle",
  "semver",
+ "serde_json",
  "smallvec",
  "strum",
  "uuid",
@@ -2957,9 +2953,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre-macros"
-version = "0.3.11"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee1c52959baa6834db3183e86affe70242ca90b4fc64ed2ae6dd689a799ce78e"
+checksum = "280f44b036dea7d3bcdb6bd89ab8dc3d8a568fa760c4e699d2aeecf8a9646efc"
 dependencies = [
  "heck 0.5.0",
  "proc-macro-crate",
@@ -2970,9 +2966,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre-platform"
-version = "0.3.11"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "175f55bd6a80ea3bb0cf44d9ba454a3312381d66e702b3b5e99f73a7ca1738ee"
+checksum = "86a2a4a341e905e5dfd6f128ff829509a4053f75e29aa34fa58537a0a3a03ed5"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -2986,18 +2982,18 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre-refineable"
-version = "0.3.11"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "097375d98fecafd6e00ec13c7711709cc6d827ccad385694ce9e2c2f570c02a5"
+checksum = "8a7ec93fa721adb2e500db837eccf752e96e463f9c370625a808b889f81ef929"
 dependencies = [
  "gpui-pre-derive-refineable",
 ]
 
 [[package]]
 name = "gpui-pre-scheduler"
-version = "0.3.11"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93c3c9f76341cdf03801699d68876915b42d5858e80c52a141ebfc350358147b"
+checksum = "0efd46985e7c1179a0a3f8c62db2fceceefb99e08cb1dd8d66cc80ca9db564dd"
 dependencies = [
  "async-task",
  "backtrace",
@@ -3012,9 +3008,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre-shared-string"
-version = "0.3.11"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "781aaf9a9c19e3367b94100c7b1a17283721766bc890909ce8aa34e8c5b1a99a"
+checksum = "8d53b8090312d9191fd6c237eb65a7f0f18deef537ba624aae31e8ec22840963"
 dependencies = [
  "schemars",
  "serde",
@@ -3023,9 +3019,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre-sum-tree"
-version = "0.3.11"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0cb18765472fb2c64b7e6374f9a36f512ce25b1ccb3662fff51788564107eb3"
+checksum = "df9e1b9875f0d1e73a51740ec5c29704a726e37677323b40573b5bcb2e82f319"
 dependencies = [
  "gpui-pre-ztracing",
  "heapless",
@@ -3035,9 +3031,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre-util"
-version = "0.3.11"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49036ad9887034f8d6652b65761ee1c1fdbd7d66be33a6088245fae54dc643e3"
+checksum = "27c41cd20c86d5bcc8e8c86efd075f1c3727b2b2f14c01e2d0f11d8bc11a5c0a"
 dependencies = [
  "anyhow",
  "log",
@@ -3046,9 +3042,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre-web"
-version = "0.3.11"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad51fcf6e251d45b092fd4a98a26325eb9cf6ad4e6228b0c6bc50672db9e0563"
+checksum = "4c07064ebec2ae4aad179c3255fe71a5b0f83b9a757d6c767ec7b9c290f4183d"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -3076,9 +3072,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre-wgpu"
-version = "0.3.11"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "211cf352de1a0b0c9bea3f105df5572ce1d2c899389b924a888e5af36b50f93d"
+checksum = "2bbfee2ae183cf4bf5b1ee3a73f2b8fd726f0b78861b0c950308f6e9d0a33f2c"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3088,6 +3084,7 @@ dependencies = [
  "gpui-pre-collections",
  "gpui-pre-util",
  "itertools 0.14.0",
+ "js-sys",
  "log",
  "parking_lot",
  "profiling",
@@ -3103,9 +3100,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre-windows"
-version = "0.3.11"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5141a3db59bab761a16ab19529fe4117a86e91922e8fc00af6dfc4829cb1744d"
+checksum = "8badbaa4129a88e4d2fdaa1615fc61b2a59d4ebb2ac36e5de51f75598f0dd992"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -3133,9 +3130,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre-ztracing"
-version = "0.3.11"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ac9274f4fb36ce6bf128f9b48032196a3120cb858503af33ced6c21366cf2f7"
+checksum = "aa2a81eaf17ae3c81b118d45ce173e25cd621062c111561b1957660d678d4d4c"
 dependencies = [
  "gpui-pre-ztracing-macro",
  "tracing",
@@ -3143,9 +3140,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre-ztracing-macro"
-version = "0.3.11"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99b18b06f5026b3d312488eacfdddbe78f82b4bf32bb2d2bc3186e31e552b797"
+checksum = "f0de0aaa67d6974e0983f6d4ded918b73547db6cb82b61ac2de88576a45b0e81"
 
 [[package]]
 name = "h2"
@@ -4128,26 +4125,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
-name = "lyon"
-version = "1.0.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd0578bdecb7d6d88987b8b2b1e3a4e2f81df9d0ece1078623324a567904e7b7"
-dependencies = [
- "lyon_algorithms",
- "lyon_tessellation",
-]
-
-[[package]]
-name = "lyon_algorithms"
-version = "1.0.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdfa8785f95e57914ddb35e3b59994aeba6f5e79e9cfd03da1c269f010f36009"
-dependencies = [
- "lyon_path",
- "num-traits",
-]
-
-[[package]]
 name = "lyon_geom"
 version = "1.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4165,17 +4142,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c463f9c428b7fc5ec885dcd39ce4aa61e29111d0e33483f6f98c74e89d8621e"
 dependencies = [
  "lyon_geom",
- "num-traits",
-]
-
-[[package]]
-name = "lyon_tessellation"
-version = "1.0.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43b8dcf906637ecef61b3c0740c7a4e7f27caeb31257cfac0cc579ce15be6005"
-dependencies = [
- "float_next_after",
- "lyon_path",
  "num-traits",
 ]
 
