@@ -122,15 +122,19 @@ const ROWS: &str = "SHEAF_FIELDS_ROWS";
 const MAKING_WIDTH: u32 = 16;
 
 /// Each class of rows past [`TOLERANCE`] ([`class`]), and how many widgets
-/// it holds over the whole corpus: 13,254 of the 227,812 compared
-/// ([`TOTALS`]).
+/// it holds over the whole corpus: 13,253 of the 227,812 compared
+/// ([`TOTALS`]), PDFium chromium/8125's appearances beside sheaf's.
 const CLASSES: &[(&str, usize)] = &[
     (FALLBACK, 4538),
-    (ALIKE, 2927),
+    // 2,927 under chromium/7881: four of those rows are RECODED's under
+    // 8125, which writes their space as 0xA0.
+    (ALIKE, 2923),
     (ALIKE_EDGE, 2145),
     (CJK, 1865),
     (ALIKE_BESIDE, 1100),
-    (TWO_FONTS, 233),
+    // 233 under chromium/7881: one of those widgets draws as PDFium's under
+    // 8125 (TWO_FONTS says which).
+    (TWO_FONTS, 232),
     (OWN_FONT, 131),
     (WIDGET_MAX_LEN, 91),
     (NAMELESS, 71),
@@ -138,6 +142,7 @@ const CLASSES: &[(&str, usize)] = &[
     (CLIP, 50),
     (BEVEL_CMYK, 14),
     (EURO, 9),
+    (RECODED, 4),
     (FEWER, 4),
     (BORDER_ARRAY, 4),
     (OTHER_FIELD, 3),
@@ -244,10 +249,16 @@ const TYPE_UP: &str = "type two levels up: PDFium makes none";
 /// fonts has no appearance of PDFium's to be held to (pdf-forms holds it
 /// so too): it's held by PDFium's text extraction of what sheaf writes
 /// (`fields.rs`).
-/// Two of the 235 drawn in two fonts draw as PDFium's: black text on a
-/// black `/MK /BG` (`forms/safedocs/0577838.pdf`), and a zero width space
-/// past an overflowing box's clip (`0970197.pdf`). Two rows drawn alike
-/// beside one of them are [`ALIKE_BESIDE`]'s, as that one differs.
+/// Three of the 235 drawn in two fonts draw as PDFium's: black text on a
+/// black `/MK /BG` (`forms/safedocs/0577838.pdf`), a zero width space
+/// past an overflowing box's clip (`0970197.pdf`), and, under chromium/8125,
+/// a line whose one character in the fallback font is past an overflowing
+/// box's clip (`0112654.pdf`'s 144 0 R). PDFium draws that character in a
+/// font of its own ([`OWN_FONT`]), which moves its line: 7881's
+/// ChromeSansMM set it 0.435 pt above sheaf's, 8125's Noto Sans Mono Bold
+/// sets it where sheaf's is (163 0 R beside it, still a row: 0.435 pt above
+/// under 7881, 0.005 pt below under 8125). Two rows drawn alike beside one
+/// of them are [`ALIKE_BESIDE`]'s, as that one differs.
 const TWO_FONTS: &str = "two fonts: PDFium draws in no font sheaf gives";
 /// A `/DA` font `/DR` lacks falls back to the standard 14 family its name
 /// gives; PDFium draws every such font in a Helvetica it adds (pdf-forms'
@@ -273,13 +284,16 @@ const CJK: &str = "CJK font: PDFium's font map";
 /// PDFium's font map draws characters of the value in a font of its own,
 /// which it takes for a charset other than the `/DA` font's:
 /// DroidSansFallback, a face of the machine's, for the quotes and dashes
-/// it counts as Chinese (‘ ’ “ ” – —); ChromeSansMM, its own, where the
-/// machine has no face of the charset, for Eastern European letters (Š š
-/// ž) and ƒ. Their heights move the lines after them; and where that font
-/// has no code for one (a bullet, in DroidSansFallback's GBK), PDFium
-/// writes its two UTF-16 bytes, which the font reads as two other
-/// characters (a space and a quote). pdf-forms draws them in the `/DA`'s
-/// font, which has them.
+/// it counts as Chinese (‘ ’ “ ” – —); for Eastern European letters (Š š
+/// ž) and ƒ, the font its form adds for their charset (`/_EE`, `/_CC`,
+/// `/_A1`): ChromeSansMM, its own, under chromium/7881, and under 8125 a
+/// face of the machine's, Noto Sans Mono Bold (`NotoSansMono,Bold`); and
+/// ChromeSansMM under both for a `/DR` font the machine lacks
+/// (`/ArialUnicodeMS_01`). Their heights move the lines after them; and
+/// where that font has no code for one (a bullet, in DroidSansFallback's
+/// GBK), PDFium writes its two UTF-16 bytes, which the font reads as two
+/// other characters (a space and a quote). pdf-forms draws them in the
+/// `/DA`'s font, which has them.
 const OWN_FONT: &str = "PDFium's own font for some characters";
 /// PDFium's appearance leaves out a character of the value that the font
 /// has a code for, which pdf-forms draws (a no-break space, at WinAnsi's
@@ -311,6 +325,14 @@ const ALIKE_BESIDE: &str = "alike within 0.001 pt, beside a widget that differs"
 /// pixel into a clip whole or not at all, so a clip's edge 0.00003 pt
 /// apart flips a row of pixels).
 const ALIKE_EDGE: &str = "alike within 0.001 pt, at the box's edge";
+/// Drawn alike but for a glyph's code ([`drawn::alike_but_codes`]): PDFium
+/// shows a character of the value by another of the font's codes, which the
+/// font reads as the same text. chromium/8125 writes the space of "Sample
+/// 123" as 0xA0 in `forms/safedocs/0289211.pdf`'s MyriadPro-Regular, a
+/// WinAnsi font that names both 0x20 and 0xA0 `space`, of one width, and
+/// whose `/ToUnicode` reads both as U+0020; 7881 wrote 0x20, and the rows
+/// were [`ALIKE`]'s, the same pixels apart.
+const RECODED: &str = "alike but a code: PDFium's other code for the character";
 /// Drawn alike within 0.001 pt, pixels inside the box differing: PDFium's
 /// own drawing of numbers pdf-forms writes to four places and PDFium as
 /// `f32`s (and of a comb's cells placed by `Tm` and by summed `Td`s), a
@@ -341,7 +363,7 @@ fn class(f: &Facts) -> Option<&'static str> {
     let alike = f.drawn == "alike";
     let moved = moved(&f.drawn);
     let painted = f.drawn.starts_with("paint") && f.drawn.ends_with(":color");
-    let own_font = ["DroidSansFallback", "ChromeSansMM"]
+    let own_font = ["DroidSansFallback", "ChromeSansMM", "NotoSansMono"]
         .iter()
         .any(|font| f.pdfium_tf.contains(font));
     Some(match () {
@@ -361,6 +383,7 @@ fn class(f: &Facts) -> Option<&'static str> {
         _ if alike && f.overlap_differs => ALIKE_BESIDE,
         _ if alike && f.edge_only => ALIKE_EDGE,
         _ if alike => ALIKE,
+        _ if f.recoded => RECODED,
         _ if f.drawn == "clip-cuts" => CLIP,
         _ => return None,
     })
@@ -412,6 +435,9 @@ struct Facts {
     /// Whether the two forms draw alike within a rounding
     /// ([`drawn::alike`]): `alike`, or the first thing that differs.
     drawn: String,
+    /// Where they don't, whether they would but for codes the font reads as
+    /// the same text ([`drawn::alike_but_codes`]).
+    recoded: bool,
     /// Whether the two forms draw alike but for their text
     /// ([`drawn::frame_alike`]: the box, the matrix and the paths painted):
     /// `alike`, or the first thing that differs; `-` where either isn't
@@ -459,7 +485,7 @@ impl std::fmt::Display for Facts {
              bg={} bc={} size={} ovf={} fallback={} ours.tf={} pdfium.tf={} chars={} ascii={} \
              euro={} drawn={} frame={} \
              nameless={} f={} overlaps={} overlap_differs={} text={} wmaxlen={} border_array={} \
-             ft_up={} auto={} edge_only={} levels={}",
+             ft_up={} auto={} edge_only={} levels={} recoded={}",
             self.font,
             self.kind,
             self.da,
@@ -499,6 +525,7 @@ impl std::fmt::Display for Facts {
             u8::from(self.auto),
             u8::from(self.edge_only),
             self.levels,
+            u8::from(self.recoded),
         )
     }
 }
@@ -1464,20 +1491,26 @@ fn facts_of(w: &Filled, saved: &Pdf, copy: &Pdf) -> Facts {
     let ours = (w.saved).and_then(|at| saved_ap(saved, at).ok().flatten());
     let theirs = pdfium.as_ref().and_then(|ap| ap.form.as_ref());
     let said = |alike: Result<(), String>| alike.err().unwrap_or_else(|| "alike".to_string());
-    let (alike, frame, text) = match (ours.and_then(|ap| ap.form), theirs) {
+    let (alike, frame, text, recoded) = match (ours.and_then(|ap| ap.form), theirs) {
         (Some(a), Some(b)) => match (drawn::drawn(saved, &a), drawn::drawn(copy, b)) {
-            (Ok(a), Ok(b)) => (
-                said(drawn::alike(&a, &b)),
-                said(drawn::frame_alike(&a, &b)),
-                text_vs(a.text(), b.text()),
-            ),
+            (Ok(a), Ok(b)) => {
+                let alike = drawn::alike(&a, &b);
+                let recoded = alike.is_err() && drawn::alike_but_codes(&a, &b).is_ok();
+                (
+                    said(alike),
+                    said(drawn::frame_alike(&a, &b)),
+                    text_vs(a.text(), b.text()),
+                    recoded,
+                )
+            }
             (Err(e), _) | (_, Err(e)) => (
                 format!("unread:{}", line(&e).replace(' ', "_")),
                 "-".into(),
                 "-".into(),
+                false,
             ),
         },
-        _ => ("none".to_string(), "-".to_string(), "-".to_string()),
+        _ => ("none".to_string(), "-".to_string(), "-".to_string(), false),
     };
     let pdfium_tf = match pdfium.as_ref().and_then(|ap| ap.form.as_ref()) {
         None => "none".to_string(),
@@ -1528,6 +1561,7 @@ fn facts_of(w: &Filled, saved: &Pdf, copy: &Pdf) -> Facts {
         ascii: w.look.text.is_ascii(),
         euro: w.look.text.contains('€'),
         drawn: alike,
+        recoded,
         frame,
         nameless: w.nameless,
         annot_flags: w.annot_flags,

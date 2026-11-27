@@ -1,10 +1,15 @@
 //! Documents open, size and draw from several threads at once, as the
 //! app's render worker does beside the threads that open an engine of
-//! their own (a print, an export, a scan for blank pages). pdfium-render's
-//! `thread_safe` lock leaves some calls out (one of them in every load),
-//! and PDFium parsing on two threads at once leaves its parser broken for
-//! the rest of the process: most loads failed with `FormatError` (M10
-//! slice 1's note). Fixed by holding one lock across every use of PDFium.
+//! their own (a print, an export, a scan for blank pages). PDFium parsing
+//! on two threads at once leaves its parser broken for the rest of the
+//! process: most loads failed with `FormatError` (M10 slice 1's note).
+//! pdfium-render 0.9.4's `thread_safe` lock left some calls out (one of
+//! them in every load); sheaf-render's own lock, held across every use of
+//! PDFium, fixed it. pdfium-render 0.9.6 locks every call. With
+//! sheaf-render's lock made to exclude nothing, this test failed every run
+//! under 0.9.4 and passed ten runs of ten under 0.9.6 (M18 slice 26),
+//! which shows no failure, not that none is left; the lock stays, and its
+//! note says why.
 //!
 //! The documents are forms built in code, and some of the forms in Greg's
 //! corpus when it's there (see `sheaf_doc::forms::corpus`).

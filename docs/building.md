@@ -7,7 +7,7 @@ sudo apt install build-essential clang lld cmake pkg-config libfontconfig-dev \
   libglib2.0-dev libssl-dev libzstd-dev xdg-desktop-portal xdg-desktop-portal-gtk
 
 
-scripts/fetch-pdfium.sh          # prebuilt libpdfium → vendor/pdfium/<os>-<arch>/
+scripts/fetch-pdfium.sh          # PDFium chromium/8125 → vendor/pdfium/<os>-<arch>/
 scripts/fetch-ocr-data.sh        # Tesseract language data + PaddleOCR models → vendor/ocr/
                                  #   (--uvdoc adds the curled-page model scan cleanup can use)
 scripts/build-plugins.sh         # the bundled plugins (plugins/) → target/plugins/
@@ -16,6 +16,30 @@ cargo run -p sheaf-app           # the GPUI window
                                  #   sheaf unless SHEAF_SINGLE_INSTANCE=1; with
                                  #   none running, they become it)
 ```
+
+**PDFium is one build,** chromium/8125 from
+[pdfium-binaries](https://github.com/bblanchon/pdfium-binaries): the one
+whose API pdfium-render's feature binds (the workspace `Cargo.toml`), and
+a library that lacks any function of it doesn't bind. The fetch script
+checks each archive's sha256 before it unpacks it, keeps the build's
+`VERSION` beside the library, and puts each file in place by a rename, so
+a sheaf already running keeps the library it loaded. A pull that moves
+the build needs the script again: until then sheaf-render refuses the
+library in `vendor/`, and its error names the file and the script.
+`just doctor` says which build each `vendor/pdfium/*/` holds, and
+sheaf-render's `pdfium_build` test holds the feature, the script and the
+fetched library to one build.
+
+sheaf-render looks for the library beside the executable (its `lib/`,
+then its own directory: a packaged sheaf), then in
+`vendor/pdfium/<os>-<arch>/` under the working directory and under the
+source tree. The first of those that holds a library decides: one that
+doesn't bind is an error, never passed over for another further on
+(`library_search` holds this). Only where none holds a library is the
+system's tried; nothing says which build that one is, so a build of
+sheaf run that way may draw otherwise, and the log's `PDFium: bound …`
+line (at `info`) names what was bound. `PDFIUM_LIB_DIR=<dir>` binds that
+directory's library and no other.
 
 **Standard operations** are in the `justfile` (`cargo install just`; `just`
 lists them):
@@ -65,6 +89,13 @@ lists them):
   run before and after a change to what reads page or name trees, text
   strings or XMP, or a move of the PDF layer's pin, and `diff` the two
   files.
+- `just render-dump <file>` writes what PDFium gives of every page the
+  content interpreter's tiers read, through sheaf-render's engine (its
+  size, a checksum of its characters with their boxes, one of its text,
+  and one of its pixels as the page view draws it, and on a file's first
+  page as the matrix path and PDFium's flatten draw it, a line a page):
+  run before and after a move of PDFium's build or of pdfium-render, and
+  `diff` the two files.
 - `just tier-pages` sets the page table beside PDFium over the scans,
   signatures and conformance suites and the pool sample: each file PDFium
   opens opens as a source, with PDFium's count of pages, each at

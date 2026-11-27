@@ -38,6 +38,8 @@ struct Drew {
     /// Helvetica where a resource is missing.
     font: String,
     code: u32,
+    /// The text its font reads its code as, if any.
+    text: Option<String>,
     /// Its width in the font, a thousandth of the size.
     width: f32,
     origin: [f32; 2],
@@ -387,6 +389,7 @@ pub fn drawn(pdf: &Pdf, form: &Stream) -> anyhow::Result<Drawn> {
                         drawn.glyphs.push(Drew {
                             font: font.clone(),
                             code: g.code,
+                            text: text.map(|t| t.into_owned()),
                             width,
                             origin: [g.origin.x, g.origin.y],
                             size: show.size,
@@ -483,6 +486,25 @@ pub fn frame_alike(ours: &Drawn, theirs: &Drawn) -> Result<(), String> {
 /// same clips, or where `theirs` writes none, one of `ours` that cuts no
 /// glyph's box. Else the first thing that differs.
 pub fn alike(ours: &Drawn, theirs: &Drawn) -> Result<(), String> {
+    alike_by(ours, theirs, |a, b| a.code == b.code)
+}
+
+/// Whether `ours` and `theirs` draw alike as [`alike`] asks, but that a
+/// glyph's code may differ where the font reads both codes as the same text:
+/// the same character shown by another of the font's codes (its width, font
+/// and the rest still asked). Else the first thing that differs so.
+pub fn alike_but_codes(ours: &Drawn, theirs: &Drawn) -> Result<(), String> {
+    alike_by(ours, theirs, |a, b| {
+        a.code == b.code || (a.text.is_some() && a.text == b.text)
+    })
+}
+
+/// [`alike`], with two glyphs' codes the same where `same_code` says.
+fn alike_by(
+    ours: &Drawn,
+    theirs: &Drawn,
+    same_code: impl Fn(&Drew, &Drew) -> bool,
+) -> Result<(), String> {
     if !numbers_alike(&ours.bbox, &theirs.bbox) {
         return Err("bbox".into());
     }
@@ -498,7 +520,7 @@ pub fn alike(ours: &Drawn, theirs: &Drawn) -> Result<(), String> {
     }
     for (i, (a, b)) in ours.glyphs.iter().zip(&theirs.glyphs).enumerate() {
         let what = match () {
-            _ if a.code != b.code => "code",
+            _ if !same_code(a, b) => "code",
             _ if a.font != b.font => "font",
             _ if !near(a.width, b.width) => "width",
             _ if a.mode != b.mode => "mode",

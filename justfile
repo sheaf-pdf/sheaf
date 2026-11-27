@@ -170,7 +170,19 @@ doctor:
     printf '  %-16s %s\n' "nightly" "$(rustup toolchain list | grep -c nightly) installed"
     have cargo-fuzz --version
     echo "Vendor:"
-    for d in vendor/pdfium vendor/ocr; do printf '  %-16s %s\n' "$d" "$( [ -e "$d" ] && echo present || echo 'MISSING (just fetch)')"; done
+    # Each PDFium library's build, by the VERSION the fetch keeps beside it.
+    want=$(sed -n 's/^default_build=//p' scripts/fetch-pdfium.sh)
+    found=
+    for v in vendor/pdfium/*/; do
+      [ -d "$v" ] || continue; found=1
+      build=$(sed -n 's/^BUILD=//p' "$v/VERSION" 2>/dev/null | tr -d '\r')
+      if [ -z "$build" ]; then said="no VERSION (an older fetch); sheaf binds chromium/$want: scripts/fetch-pdfium.sh"
+      elif [ "$build" = "$want" ]; then said="chromium/$build"
+      else said="chromium/$build, but sheaf binds chromium/$want: scripts/fetch-pdfium.sh"; fi
+      printf '  %-16s %s\n' "${v%/}" "$said"
+    done
+    [ -n "$found" ] || printf '  %-16s %s\n' vendor/pdfium 'MISSING (just fetch)'
+    printf '  %-16s %s\n' vendor/ocr "$( [ -e vendor/ocr ] && echo present || echo 'MISSING (just fetch)')"
     echo "Oracles (docs/oracles.md):"
     have qpdf --version; have pdftotext -v; have mutool -v; have tiffinfo; have java -version
     if [ -x "{{pdf_lint}}" ]; then printf '  %-16s %s\n' "pdf-lint" "$("{{pdf_lint}}" --version 2>/dev/null | head -1) ({{pdf_lint}})"
@@ -624,6 +636,33 @@ fields-dump out:
 [group('corpus')]
 structures-dump out:
     SHEAF_STRUCTURES_DUMP="{{ absolute_path(out) }}" scripts/test-capped.sh cargo test -p sheaf-doc --release --lib -- --ignored --nocapture --exact source::dump::structures_dump
+
+# What PDFium gives of every page of the files tier-interp reads, through
+# sheaf-render's engine, written to `out`, numbers and checksums only: a
+# line a file (how PDFium opened it, its page count, its form's type) and
+# one a page (its size, a checksum of its characters with their boxes and
+# angles, one of its text, and one of its pixels 612 wide as the page
+# view draws them; on a file's first page also as the matrix path draws
+# it and as a stamp's picture is drawn, transparent, and for a form as
+# PDFium's flatten does: every place sheaf-render configures a render,
+# each a whole page, unturned). It asserts nothing: run it
+# before and after a move of PDFium's build or of pdfium-render, or a
+# change to how sheaf-render has PDFium draw, over the same corpus, and
+# `diff` the two files. One thread, the files in order, so two runs over
+# the same code and library write the same file; the log names the
+# library the process mapped and its SHA-256.
+# SHEAF_RENDER_DUMP_ONLY=<corpus paths, comma-separated> narrows it and
+# prints its lines. In a whole run SHEAF_RENDER_DUMP_RASTERS=<dir> keeps
+# as PNG the renders of each page that differs from
+# SHEAF_RENDER_DUMP_AGAINST=<an earlier run's file>, or of each page
+# SHEAF_RENDER_DUMP_PAGES=<lines of path, tab, page> lists, and the
+# test's other half sets two such directories side by side
+# (crates/sheaf-render/tests/render_dump.rs says how). In release, about
+# 25 minutes.
+[doc("What PDFium gives of every corpus page, a line a page, written to a file: diff two runs across a move of PDFium's build")]
+[group('corpus')]
+render-dump out:
+    SHEAF_RENDER_DUMP="{{ absolute_path(out) }}" scripts/test-capped.sh cargo test -p sheaf-render --release --test render_dump -- --ignored --nocapture --exact render_dump
 
 # ----- Gates ---------------------------------------------------------------
 

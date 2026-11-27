@@ -142,7 +142,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map};
 use std::ops::ControlFlow;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
@@ -164,19 +164,18 @@ use sheaf_doc::store::{BlobKind, Src, Store};
 /// thousandth of a point, where both compute in `f32`.
 const EPSILON: f32 = 1e-3;
 
+/// PDFium, bound once from the directory `$PDFIUM_LIB_DIR` names, as
+/// sheaf-render reads it, else from this source tree's `vendor/`.
 fn pdfium() -> MutexGuard<'static, Pdfium> {
     static PDFIUM: OnceLock<Mutex<Pdfium>> = OnceLock::new();
     let bound = PDFIUM.get_or_init(|| {
-        let dir = std::env::var_os("PDFIUM_LIB_DIR").map_or_else(
-            || {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
-                    "../../vendor/pdfium/{}-{}",
-                    std::env::consts::OS,
-                    std::env::consts::ARCH
-                ))
-            },
-            PathBuf::from,
-        );
+        let dir = sheaf_render::pdfium::lib_dir().unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+                "../../vendor/pdfium/{}-{}",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ))
+        });
         Mutex::new(Pdfium::new(
             Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(&dir))
                 .expect("libpdfium (scripts/fetch-pdfium.sh)"),

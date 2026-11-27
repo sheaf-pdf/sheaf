@@ -1814,12 +1814,15 @@ below): from `sheaf edit` today, and in the app from the filling slices
   fills every corpus form's text fields: 220,981 fields and their
   229,351 widgets, 228,842 made (235 of them in two fonts, the field's
   and sheaf's fallback font for what it can't draw), each overlay's form
-  the save's, and each made one drawn beside PDFium's. The 13,254
-  widgets that differ by a pixel are each in one of 17 classes held by
-  count: 6,172 draw alike within 0.001 pt and differ by PDFium's
+  the save's, and each made one drawn beside PDFium's. The 13,253
+  widgets that differ by a pixel (under PDFium chromium/8125; 7881 made
+  it 13,254) are each in one of 18 classes held by
+  count: 6,168 draw alike within 0.001 pt and differ by PDFium's
   rasterizing alone, 4,538 are a missing font's fallback by name, 1,865
-  PDFium's font map for CJK fonts, 233 are drawn in two fonts (PDFium
-  draws in no font sheaf gives), and the rest pdf-forms' other stated
+  PDFium's font map for CJK fonts, 232 are drawn in two fonts (PDFium
+  draws in no font sheaf gives), 4 are alike but for a code (8125 writes
+  a space as 0xA0, which the font reads as the same character), and the
+  rest pdf-forms' other stated
   differences and readings PDFium makes otherwise (a kid widget's own
   `/MaxLen`, a field with no name). Twelve widgets are left unmade, a
   character of their own values in no font sheaf has (a control
@@ -4294,7 +4297,14 @@ groups, about 10 ms a group of 128.
   (`forms/safedocs/0163162.pdf` page 2, 419.5 × 595.3), and
   `render_appearances` sizes its render from the flattened page.
   pdfium-render 0.9.4's `PdfPage::flatten` reloads the page under a new
-  handle but leaves `boundaries()` on the closed one.
+  handle but leaves `boundaries()` on the closed one. Both still hold
+  under pdfium-render 0.9.6 and chromium/8125 (M18 slice 26): 0.9.6's
+  `page.rs` is 0.9.4's, 8125's `fpdf_flatten.cpp` still reads the
+  page's own boxes alone, and `an_inherited_box_survives_the_flatten`
+  fails without the boxes put back. The same flatten gives the form
+  XObject it draws the appearances into that box as its `/BBox`, so on a
+  page that inherits a box bigger than letter the appearances past
+  letter are clipped away, which putting the boxes back doesn't undo.
 
 The 7k fixtures and the planning scripts are in `bench/`
 (`bench/README.md`). The gate harness, `crates/sheaf-ops/tests/gate_7k.rs`,

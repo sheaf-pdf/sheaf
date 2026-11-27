@@ -62,7 +62,15 @@ gpui = { package = "gpui-pre", version = "=0.3.11" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["wayland", "x11"] }
 
 # PDF engines. NOTE: the `pdfium` crate (newinnovations) is GPL-3 — do not use it.
-pdfium-render = "0.9.4"
+# pdfium-render binds the API of one PDFium build, chromium/8125, named by
+# its feature, and refuses a library that lacks a function of it.
+# scripts/fetch-pdfium.sh fetches that build, and
+# crates/sheaf-render/tests/pdfium_build.rs holds the feature, the script
+# and the fetched library to one number. Pinned exactly: `pdfium_latest`,
+# which other crates may name, is a newer build in a later 0.9.x, and Cargo
+# gives every crate one pdfium-render with their features joined.
+# `thread_safe` makes the bindings Send + Sync.
+pdfium-render = { version = "=0.9.6", default-features = false, features = ["pdfium_8125", "thread_safe"] }
 # One Flate backend across the workspace (D4, B26): zlib-rs.
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 

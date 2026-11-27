@@ -209,7 +209,9 @@ pub mod pdfium {
     use super::*;
     use parking_lot::{FairMutex, FairMutexGuard};
     use pdfium_render::prelude::*;
+    use std::ffi::OsString;
     use std::mem::ManuallyDrop;
+    use std::path::Path;
     use std::sync::OnceLock;
 
     #[cfg(test)]
@@ -218,19 +220,30 @@ pub mod pdfium {
     mod encrypted;
     #[cfg(test)]
     mod frames;
+    #[cfg(test)]
+    mod search_order;
 
     /// Held across every use of PDFium, from a load to the document's
     /// drop: a call into an engine, such as one page of a walk over the
-    /// whole document's page sizes. pdfium-render's `thread_safe` feature isn't
-    /// enough: 185 of the 467 functions it binds (0.9.4) take no lock,
-    /// among them `FPDFDOC_InitFormFillEnvironment` (every load makes it)
-    /// and the page size, text and bitmap calls. PDFium's parser keeps
-    /// its depth in a process global
-    /// (`CPDF_SyntaxParser::s_CurrentRecursionDepth`) that each object
-    /// parse saves, adds one to and puts back, so parses on two threads
-    /// at once leave it too high. Once it nears its limit (64), objects
-    /// stop parsing, and every load after fails with `FormatError`, from
-    /// any thread (M10 slice 1's note).
+    /// whole document's page sizes. PDFium's parser keeps its depth in a
+    /// process global (`CPDF_SyntaxParser::s_CurrentRecursionDepth`) that
+    /// each object parse saves, adds one to and puts back, so parses on
+    /// two threads at once leave it too high. Once it nears its limit
+    /// (64), objects stop parsing, and every load after fails with
+    /// `FormatError`, from any thread (M10 slice 1's note).
+    ///
+    /// pdfium-render's `thread_safe` feature takes a lock of its own
+    /// around each call. In 0.9.4 that left 185 of the 467 functions it
+    /// bound unlocked, among them `FPDFDOC_InitFormFillEnvironment` (every
+    /// load makes it) and the page size, text and bitmap calls, and with
+    /// this lock made to exclude nothing `tests/threads.rs` failed every
+    /// run, under the 7881 library and the 8125 one (about 270 of its 288
+    /// uses, most with `FormatError`). 0.9.6 locks all 478, and with this
+    /// lock excluding nothing the same test passed ten runs of ten (M18
+    /// slice 26): that shows no failure, not that none is left. This lock
+    /// stays: it is fair where pdfium-render's (std's mutex) isn't, and it
+    /// is held across the many calls of one engine call, where
+    /// pdfium-render's is held for one.
     ///
     /// Fair: a thread that unlocks and locks again at once, as a walk or
     /// a search does, goes behind the threads already waiting. (With
@@ -242,47 +255,117 @@ pub mod pdfium {
         LOCK.lock()
     }
 
-    /// Locate and bind libpdfium. Search order: `$PDFIUM_LIB_DIR`, next to
-    /// the executable (and its `lib/`, how packaged builds ship it),
-    /// `vendor/pdfium/<os>-<arch>/` relative to the cwd (and to this
-    /// source tree, for `cargo test` run from a crate directory), then the
-    /// system library.
-    fn bind() -> Result<Pdfium> {
-        let mut dirs: Vec<PathBuf> = Vec::new();
-        if let Ok(d) = std::env::var("PDFIUM_LIB_DIR") {
-            dirs.push(d.into());
+    /// `$PDFIUM_LIB_DIR`, where it is set and not empty: the one directory
+    /// sheaf-render then takes libpdfium from ([`Search::Only`]). A test
+    /// that binds PDFium itself reads the variable here, so that it has
+    /// one reading.
+    pub fn lib_dir() -> Option<PathBuf> {
+        chosen(std::env::var_os("PDFIUM_LIB_DIR"))
+    }
+
+    /// The directory `$PDFIUM_LIB_DIR`'s value `var` names: set but empty
+    /// is unset.
+    fn chosen(var: Option<OsString>) -> Option<PathBuf> {
+        var.filter(|dir| !dir.is_empty()).map(PathBuf::from)
+    }
+
+    /// Where [`bind`] looks for libpdfium.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Search {
+        /// `$PDFIUM_LIB_DIR` is set: that directory's library or none, so
+        /// a run meant for one library (a comparison under another build)
+        /// never runs under a different one unsaid.
+        Only(PathBuf),
+        /// Each directory in turn, then the system's library.
+        Dirs(Vec<PathBuf>),
+    }
+
+    /// The search order, from what [`bind`] reads of the process:
+    /// `lib_dir` is [`lib_dir`]'s, `exe_dir` the executable's directory,
+    /// `vendored` `vendor/pdfium/<os>-<arch>` and `source_root` this
+    /// source tree's root. With no `lib_dir`, it is the executable's
+    /// `lib/` (how packaged builds ship it) and its own directory, then
+    /// `vendored` from the cwd and from the source tree (for `cargo test`
+    /// run from a crate directory), then the system.
+    fn search(
+        lib_dir: Option<PathBuf>,
+        exe_dir: Option<&Path>,
+        vendored: &Path,
+        source_root: &Path,
+    ) -> Search {
+        if let Some(dir) = lib_dir {
+            return Search::Only(dir);
         }
-        if let Some(exe_dir) = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        {
+        let mut dirs = Vec::new();
+        if let Some(exe_dir) = exe_dir {
             dirs.push(exe_dir.join("lib"));
-            dirs.push(exe_dir);
+            dirs.push(exe_dir.to_path_buf());
         }
-        let vendored = format!(
+        dirs.push(vendored.to_path_buf());
+        dirs.push(source_root.join(vendored));
+        Search::Dirs(dirs)
+    }
+
+    /// Locate and bind libpdfium, in [`search`]'s order. pdfium-render
+    /// binds the API of the one build its feature names (the workspace's
+    /// Cargo.toml) and refuses a library that lacks a function of it, so a
+    /// library that doesn't bind is most often another build's.
+    ///
+    /// The first directory that holds a library decides: it binds, or
+    /// nothing does. Only a directory with no library is passed over, so
+    /// a library fetched for another build is an error that names it,
+    /// never a run under whichever library comes next. The system's is
+    /// tried where no directory holds one; no file says which build that
+    /// is, so the log names what was bound.
+    fn bind() -> Result<Pdfium> {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_path_buf));
+        let vendored = PathBuf::from(format!(
             "vendor/pdfium/{}-{}",
             std::env::consts::OS,
             std::env::consts::ARCH
-        );
-        dirs.push(vendored.clone().into());
-        dirs.push(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../..")
-                .join(vendored),
-        );
+        ));
+        let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let dirs = match search(lib_dir(), exe_dir.as_deref(), &vendored, &source_root) {
+            Search::Only(dir) => {
+                let lib = Pdfium::pdfium_platform_library_name_at_path(&dir);
+                return Pdfium::bind_to_library(&lib)
+                    .map(Pdfium::new)
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "$PDFIUM_LIB_DIR is {}, and {} doesn't bind ({e:?}): a library that doesn't bind isn't the PDFium build sheaf binds, which scripts/fetch-pdfium.sh fetches; unset it to search vendor/ and the system",
+                            dir.display(),
+                            lib.display()
+                        )
+                    });
+            }
+            Search::Dirs(dirs) => dirs,
+        };
 
-        let mut last_err = None;
-        for d in &dirs {
-            match Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(d)) {
-                Ok(b) => return Ok(Pdfium::new(b)),
-                Err(e) => last_err = Some(e),
+        for dir in &dirs {
+            let lib = Pdfium::pdfium_platform_library_name_at_path(dir);
+            match Pdfium::bind_to_library(&lib) {
+                Ok(bindings) => {
+                    log::info!("PDFium: bound {}", lib.display());
+                    return Ok(Pdfium::new(bindings));
+                }
+                // No library there (nor a link to a missing one): the
+                // next place.
+                Err(_) if lib.symlink_metadata().is_err() => {}
+                Err(e) => anyhow::bail!(
+                    "{} doesn't bind ({e:?}): a library that doesn't bind isn't the PDFium build sheaf binds, which scripts/fetch-pdfium.sh fetches; it isn't passed over for a library elsewhere",
+                    lib.display()
+                ),
             }
         }
-        Pdfium::bind_to_system_library().map(Pdfium::new).with_context(|| {
+        let bindings = Pdfium::bind_to_system_library().with_context(|| {
             format!(
-                "no libpdfium found (searched {dirs:?} and system); run scripts/fetch-pdfium.sh. last error: {last_err:?}"
+                "no libpdfium in {dirs:?}, and the system's doesn't bind: run scripts/fetch-pdfium.sh"
             )
-        })
+        })?;
+        log::info!("PDFium: bound the system's library, none being in {dirs:?}");
+        Ok(Pdfium::new(bindings))
     }
 
     /// The process-wide PDFium instance. PDFium itself is a global library
@@ -528,13 +611,17 @@ pub mod pdfium {
     }
 
     /// Page `page` of `doc` with the appearances a viewer shows drawn into
-    /// it (see [`render_appearances`]), in the box it showed before. The
-    /// flatten writes `/MediaBox` and `/CropBox` from the page's own keys
-    /// alone, so a page that inherits them comes out Letter (M10.5 slice
-    /// 2): the box PDFium showed, its inherited keys read, is put back. And
-    /// pdfium-render 0.9.4's flatten loads the page again under a new
-    /// handle but leaves its boxes on the one it closed, so the page is
-    /// loaded afresh before any box is touched.
+    /// it (see [`render_appearances`]), in the box it showed before.
+    /// PDFium's flatten (`FPDFPage_Flatten`) writes `/MediaBox` and
+    /// `/CropBox` from the page's own keys alone, Letter where it has none,
+    /// so a page that inherits them comes out Letter (M10.5 slice 2): the
+    /// box PDFium showed, its inherited keys read, is put back. chromium/8125
+    /// still does: its `fpdf_flatten.cpp` reads the boxes so, and
+    /// `an_inherited_box_survives_the_flatten` fails without the two
+    /// `set_*` lines below (M18 slice 26). And pdfium-render's flatten
+    /// (0.9.6, as 0.9.4: its `page.rs` is the same file) loads the page
+    /// again under a new handle but leaves its boxes on the one it closed,
+    /// so the page is loaded afresh before any box is touched.
     fn flattened<'a>(doc: &PdfDocument<'a>, page: PageIndex) -> Result<PdfPage<'a>> {
         let mut p = doc.pages().get(page.0 as i32)?;
         let visible = p.boundaries().bounding()?.bounds;
