@@ -24,11 +24,22 @@ a library that lacks any function of it doesn't bind. The fetch script
 checks each archive's sha256 before it unpacks it, keeps the build's
 `VERSION` beside the library, and puts each file in place by a rename, so
 a sheaf already running keeps the library it loaded. A pull that moves
-the build needs the script again: until then sheaf-render doesn't bind,
-and its error names the script. `just doctor` says which build each
-`vendor/pdfium/*/` holds, and sheaf-render's `pdfium_build` test holds
-the feature, the script and the fetched library to one build.
-`PDFIUM_LIB_DIR=<dir>` binds that directory's library and no other.
+the build needs the script again: until then sheaf-render refuses the
+library in `vendor/`, and its error names the file and the script.
+`just doctor` says which build each `vendor/pdfium/*/` holds, and
+sheaf-render's `pdfium_build` test holds the feature, the script and the
+fetched library to one build.
+
+sheaf-render looks for the library beside the executable (its `lib/`,
+then its own directory: a packaged sheaf), then in
+`vendor/pdfium/<os>-<arch>/` under the working directory and under the
+source tree. The first of those that holds a library decides: one that
+doesn't bind is an error, never passed over for another further on
+(`library_search` holds this). Only where none holds a library is the
+system's tried; nothing says which build that one is, so a build of
+sheaf run that way may draw otherwise, and the log's `PDFium: bound …`
+line (at `info`) names what was bound. `PDFIUM_LIB_DIR=<dir>` binds that
+directory's library and no other.
 
 **Standard operations** are in the `justfile` (`cargo install just`; `just`
 lists them):

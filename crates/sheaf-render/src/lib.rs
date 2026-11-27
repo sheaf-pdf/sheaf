@@ -255,6 +255,20 @@ pub mod pdfium {
         LOCK.lock()
     }
 
+    /// `$PDFIUM_LIB_DIR`, where it is set and not empty: the one directory
+    /// sheaf-render then takes libpdfium from ([`Search::Only`]). A test
+    /// that binds PDFium itself reads the variable here, so that it has
+    /// one reading.
+    pub fn lib_dir() -> Option<PathBuf> {
+        chosen(std::env::var_os("PDFIUM_LIB_DIR"))
+    }
+
+    /// The directory `$PDFIUM_LIB_DIR`'s value `var` names: set but empty
+    /// is unset.
+    fn chosen(var: Option<OsString>) -> Option<PathBuf> {
+        var.filter(|dir| !dir.is_empty()).map(PathBuf::from)
+    }
+
     /// Where [`bind`] looks for libpdfium.
     #[derive(Debug, PartialEq, Eq)]
     enum Search {
@@ -267,20 +281,20 @@ pub mod pdfium {
     }
 
     /// The search order, from what [`bind`] reads of the process:
-    /// `lib_dir` is `$PDFIUM_LIB_DIR` (set but empty is unset), `exe_dir`
-    /// the executable's directory, `vendored` `vendor/pdfium/<os>-<arch>`
-    /// and `source_root` this source tree's root. Unset, it is the
-    /// executable's `lib/` (how packaged builds ship it) and its own
-    /// directory, then `vendored` from the cwd and from the source tree
-    /// (for `cargo test` run from a crate directory), then the system.
+    /// `lib_dir` is [`lib_dir`]'s, `exe_dir` the executable's directory,
+    /// `vendored` `vendor/pdfium/<os>-<arch>` and `source_root` this
+    /// source tree's root. With no `lib_dir`, it is the executable's
+    /// `lib/` (how packaged builds ship it) and its own directory, then
+    /// `vendored` from the cwd and from the source tree (for `cargo test`
+    /// run from a crate directory), then the system.
     fn search(
-        lib_dir: Option<OsString>,
+        lib_dir: Option<PathBuf>,
         exe_dir: Option<&Path>,
         vendored: &Path,
         source_root: &Path,
     ) -> Search {
-        if let Some(dir) = lib_dir.filter(|d| !d.is_empty()) {
-            return Search::Only(dir.into());
+        if let Some(dir) = lib_dir {
+            return Search::Only(dir);
         }
         let mut dirs = Vec::new();
         if let Some(exe_dir) = exe_dir {
@@ -296,6 +310,13 @@ pub mod pdfium {
     /// binds the API of the one build its feature names (the workspace's
     /// Cargo.toml) and refuses a library that lacks a function of it, so a
     /// library that doesn't bind is most often another build's.
+    ///
+    /// The first directory that holds a library decides: it binds, or
+    /// nothing does. Only a directory with no library is passed over, so
+    /// a library fetched for another build is an error that names it,
+    /// never a run under whichever library comes next. The system's is
+    /// tried where no directory holds one; no file says which build that
+    /// is, so the log names what was bound.
     fn bind() -> Result<Pdfium> {
         let exe_dir = std::env::current_exe()
             .ok()
@@ -306,12 +327,7 @@ pub mod pdfium {
             std::env::consts::ARCH
         ));
         let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let dirs = match search(
-            std::env::var_os("PDFIUM_LIB_DIR"),
-            exe_dir.as_deref(),
-            &vendored,
-            &source_root,
-        ) {
+        let dirs = match search(lib_dir(), exe_dir.as_deref(), &vendored, &source_root) {
             Search::Only(dir) => {
                 let lib = Pdfium::pdfium_platform_library_name_at_path(&dir);
                 return Pdfium::bind_to_library(&lib)
@@ -327,18 +343,29 @@ pub mod pdfium {
             Search::Dirs(dirs) => dirs,
         };
 
-        let mut last_err = None;
-        for d in &dirs {
-            match Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(d)) {
-                Ok(b) => return Ok(Pdfium::new(b)),
-                Err(e) => last_err = Some(e),
+        for dir in &dirs {
+            let lib = Pdfium::pdfium_platform_library_name_at_path(dir);
+            match Pdfium::bind_to_library(&lib) {
+                Ok(bindings) => {
+                    log::info!("PDFium: bound {}", lib.display());
+                    return Ok(Pdfium::new(bindings));
+                }
+                // No library there (nor a link to a missing one): the
+                // next place.
+                Err(_) if lib.symlink_metadata().is_err() => {}
+                Err(e) => anyhow::bail!(
+                    "{} doesn't bind ({e:?}): a library that doesn't bind isn't the PDFium build sheaf binds, which scripts/fetch-pdfium.sh fetches; it isn't passed over for a library elsewhere",
+                    lib.display()
+                ),
             }
         }
-        Pdfium::bind_to_system_library().map(Pdfium::new).with_context(|| {
+        let bindings = Pdfium::bind_to_system_library().with_context(|| {
             format!(
-                "no libpdfium that binds (searched {dirs:?} and the system; a library that doesn't bind isn't the PDFium build sheaf binds): run scripts/fetch-pdfium.sh. Last error: {last_err:?}"
+                "no libpdfium in {dirs:?}, and the system's doesn't bind: run scripts/fetch-pdfium.sh"
             )
-        })
+        })?;
+        log::info!("PDFium: bound the system's library, none being in {dirs:?}");
+        Ok(Pdfium::new(bindings))
     }
 
     /// The process-wide PDFium instance. PDFium itself is a global library

@@ -26,7 +26,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -71,17 +71,16 @@ impl Kinds {
     }
 }
 
+/// PDFium, bound from the directory `$PDFIUM_LIB_DIR` names, as
+/// sheaf-render reads it, else from this source tree's `vendor/`.
 fn pdfium() -> Pdfium {
-    let dir = std::env::var_os("PDFIUM_LIB_DIR").map_or_else(
-        || {
-            Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
-                "../../vendor/pdfium/{}-{}",
-                std::env::consts::OS,
-                std::env::consts::ARCH
-            ))
-        },
-        PathBuf::from,
-    );
+    let dir = sheaf_render::pdfium::lib_dir().unwrap_or_else(|| {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../vendor/pdfium/{}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ))
+    });
     Pdfium::new(
         Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(&dir))
             .expect("libpdfium (scripts/fetch-pdfium.sh)"),

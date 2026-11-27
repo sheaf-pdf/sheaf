@@ -9,8 +9,9 @@
 //! every system CI runs this on, passing is also the proof that the
 //! fetched library binds.
 //!
-//! With `$PDFIUM_LIB_DIR` set, a library chosen on purpose, the library
-//! there is bound and the binding and the script are held alone.
+//! With `$PDFIUM_LIB_DIR` set (as sheaf-render reads it,
+//! [`sheaf_render::pdfium::lib_dir`]), a library chosen on purpose, the
+//! library there is bound and the binding and the script are held alone.
 
 use std::path::{Path, PathBuf};
 
@@ -65,8 +66,8 @@ fn binding_build(version: PdfiumApiVersion) -> u32 {
 #[test]
 fn the_binding_the_script_and_the_fetched_library_are_one_build() {
     let script = script_build();
-    let (dir, chosen) = match std::env::var_os("PDFIUM_LIB_DIR").filter(|d| !d.is_empty()) {
-        Some(dir) => (PathBuf::from(dir), true),
+    let (dir, chosen) = match sheaf_render::pdfium::lib_dir() {
+        Some(dir) => (dir, true),
         None => (
             root().join(format!(
                 "vendor/pdfium/{}-{}",
